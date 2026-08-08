@@ -8,15 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
 import type {
-  Config,
-  ToolRegistry,
   AgentEventEmitter,
-  AgentToolCallEvent,
-  AgentToolResultEvent,
-  AgentApprovalRequestEvent,
-  AgentStreamTextEvent,
-  ToolEditConfirmationDetails,
-  ToolInfoConfirmationDetails,
+  type Config,
+  type ToolRegistry,
+  type AgentToolCallEvent,
+  type AgentToolResultEvent,
+  type AgentApprovalRequestEvent,
+  type AgentStreamTextEvent,
+  type ToolEditConfirmationDetails,
+  type ToolInfoConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentEventType,
@@ -261,10 +261,49 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
-      // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit progress update to parent on TOOL_CALL event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const event = createToolCallEvent({
+        name: 'read_file',
+        callId: 'call-123',
+        args: { path: 'test.ts' },
+        description: 'Reading file',
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining('read_file'),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
+          }),
+        }),
+      );
     });
 
     it('should not emit when aborted', async () => {
@@ -352,10 +391,9 @@ describe('SubAgentTracker', () => {
       });
     });
 
-    it('should emit plan update for TodoWriteTool results', async () => {
+    it('does not promote a subagent TodoWrite as the session plan', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 
-      // Store args via tool call
       eventEmitter.emit(
         AgentEventType.TOOL_CALL,
         createToolCallEvent({
@@ -367,7 +405,6 @@ describe('SubAgentTracker', () => {
         }),
       );
 
-      // Emit result with todo_list display
       const resultEvent = createToolResultEvent({
         name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
@@ -380,14 +417,12 @@ describe('SubAgentTracker', () => {
 
       eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
-      await vi.waitFor(() => {
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'Task 1', priority: 'medium', status: 'completed' },
-          ],
-        });
-      });
+      // emitResult is fire-and-forget; flush the microtask queue before
+      // asserting so a regression that re-enables plan emission is caught.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sendUpdateSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sessionUpdate: 'plan' }),
+      );
     });
 
     it('should clean up state after result', async () => {
@@ -472,6 +507,54 @@ describe('SubAgentTracker', () => {
             // consumers (e.g. the Agent prompt) get the same identity the
             // primary path in Session.ts provides.
             _meta: expect.objectContaining({ toolName: 'edit_file' }),
+          }),
+        }),
+      );
+    });
+
+    it('should emit progress update to parent on TOOL_WAITING_APPROVAL Event', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-edit',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'parent-call-123',
+          status: 'in_progress',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: expect.stringContaining(
+                  'Waiting for permission: edit_file',
+                ),
+              },
+            },
+          ],
+          _meta: expect.objectContaining({
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+            subagentProgress: true,
+            provenance: 'subagent',
           }),
         }),
       );
