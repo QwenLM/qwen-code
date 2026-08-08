@@ -1479,7 +1479,8 @@ const EN: Messages = {
   'local.lsp': 'Show LSP server status',
   'local.remember': 'Save a durable memory to the memory system',
   'local.summary': 'Generate a project summary file',
-  'local.workflows': 'List active and completed workflow runs',
+  'local.workflows':
+    'List workflow runs or cooperatively pause/resume a live run',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -1672,7 +1673,17 @@ const EN: Messages = {
     `Enabling extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
-    'Enter a GitHub, Git, or npm extension source.',
+    'Enter a GitHub, Git, or npm source, or upload an Extension archive.',
+  'extensions.manage.sourceTab': 'Source',
+  'extensions.manage.archiveTab': 'Archive',
+  'extensions.manage.archiveSelect': 'Select a .zip or .tar.gz archive.',
+  'extensions.manage.archiveSelected': (v) =>
+    `Selected archive: ${v?.name ?? 'extension archive'}`,
+  'extensions.manage.archiveTooLarge':
+    'Extension archives must be 10 MB or smaller.',
+  'extensions.manage.archiveEmpty': 'The selected Extension archive is empty.',
+  'extensions.manage.archiveInvalid':
+    'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installTitle': 'Add Extension',
@@ -4215,7 +4226,7 @@ const ZH: Messages = {
   'local.lsp': '显示 LSP 服务器状态',
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
-  'local.workflows': '列出进行中和已完成的工作流运行',
+  'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
@@ -4391,7 +4402,17 @@ const ZH: Messages = {
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
   'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.install': '安装',
-  'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
+  'extensions.manage.installDescription':
+    '输入 GitHub、Git 或 npm 扩展来源，或上传 Extension 压缩包。',
+  'extensions.manage.sourceTab': '来源',
+  'extensions.manage.archiveTab': '压缩包',
+  'extensions.manage.archiveSelect': '选择 .zip 或 .tar.gz 压缩包。',
+  'extensions.manage.archiveSelected': (v) =>
+    `已选择压缩包：${v?.name ?? 'Extension 压缩包'}`,
+  'extensions.manage.archiveTooLarge': 'Extension 压缩包不能超过 10 MB。',
+  'extensions.manage.archiveEmpty': '所选 Extension 压缩包为空。',
+  'extensions.manage.archiveInvalid':
+    '请选择文件名有效且不超过 255 字节的 .zip 或 .tar.gz Extension 压缩包。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installTitle': '添加扩展',

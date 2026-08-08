@@ -400,19 +400,6 @@ export interface ChatRecord {
   };
 }
 
-/**
- * Stored payload for user-prompt records whose model-bound parts were
- * augmented by a UserPromptSubmit hook. `message` keeps the exact
- * model-bound Content (resume must replay what the model actually saw);
- * this payload preserves the user-authored projection for UI/resume
- * display. Hook-injected text stays recoverable from the tagged part in
- * `message.parts` via `isUserPromptSubmitContextPartText`.
- */
-export interface UserPromptRecordPayload {
-  /** Pre-injection projection of the user's own prompt text. */
-  displayText?: string;
-}
-
 export interface NotificationRecordPayload {
   displayText: string;
   backgroundTask?: {
@@ -421,6 +408,16 @@ export interface NotificationRecordPayload {
     kind: 'agent' | 'monitor' | 'shell';
     toolUseId?: string;
   };
+}
+
+export interface UserPromptRecordPayload {
+  /**
+   * TUI submittedPrompt projection when available; otherwise the expanded
+   * pre-hook prompt.
+   */
+  displayText: string;
+  /** Sanitized hook context duplicated from the tagged model-bound part. */
+  hookContext: string;
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -1390,11 +1387,13 @@ export class ChatRecordingService {
    * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object as used with the API
+   * @param goalContext Goal identity and turn that own this message
+   * @param promptPayload User-authored display text and hook-context provenance
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
-    payload?: UserPromptRecordPayload,
+    promptPayload?: UserPromptRecordPayload,
   ): void {
     try {
       this.turnParentUuids.push(this.lastRecordUuid);
@@ -1402,7 +1401,7 @@ export class ChatRecordingService {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
-        ...(payload ? { systemPayload: payload } : {}),
+        ...(promptPayload ? { systemPayload: promptPayload } : {}),
       };
       this.appendRecord(record);
     } catch (error) {

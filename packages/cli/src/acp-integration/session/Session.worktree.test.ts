@@ -161,6 +161,9 @@ describe('Session.pendingWorktreeNotice', () => {
       // these registries; provide no-op stubs so construction succeeds.
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
       }),
       getMonitorRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),

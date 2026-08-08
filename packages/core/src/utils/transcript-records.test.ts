@@ -7,6 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   prepareTranscriptRecords,
+  projectUserTranscriptForDisplay,
+  wrapUserPromptSubmitContext,
   type TranscriptRecordPreparationError,
 } from './transcript-records.js';
 
@@ -236,5 +238,113 @@ describe('prepareTranscriptRecords', () => {
         code: 'leaf_not_found',
       }),
     );
+  });
+});
+
+describe('projectUserTranscriptForDisplay', () => {
+  it('uses display metadata even when the display text is empty', () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'data' },
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            imagePart,
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+        systemPayload: { displayText: '', hookContext: 'hook context' },
+      }),
+    ).toEqual({ displayText: '', parts: [imagePart] });
+  });
+
+  it('uses released single-field display metadata when the final tag proves provenance', () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'data' },
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            imagePart,
+            { text: 'expanded model prompt' },
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+        systemPayload: { displayText: 'raw @file prompt' },
+      }),
+    ).toEqual({ displayText: 'raw @file prompt', parts: [imagePart] });
+  });
+
+  it('does not treat notification display labels as user prompt metadata', () => {
+    const modelPart = { text: 'notification model text' };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [modelPart] },
+        systemPayload: { displayText: 'Background agent completed' },
+      }),
+    ).toEqual({ displayText: undefined, parts: [modelPart] });
+  });
+
+  it('removes only a complete final tag-only context part', () => {
+    const userPart = { text: 'user text' };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            userPart,
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+      }),
+    ).toEqual({ displayText: undefined, parts: [userPart] });
+  });
+
+  it('treats non-object system payloads as absent metadata', () => {
+    const userPart = { text: 'user text' };
+    const taggedPart = {
+      text: wrapUserPromptSubmitContext('hook context'),
+    };
+
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [userPart, taggedPart] },
+        systemPayload: null,
+      }),
+    ).toEqual({ displayText: undefined, parts: [userPart] });
+  });
+
+  it('preserves legacy bare context and user-authored tag-like text', () => {
+    const legacyParts = [{ text: 'user text' }, { text: 'bare hook context' }];
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: legacyParts },
+      }),
+    ).toEqual({ displayText: undefined, parts: legacyParts });
+
+    const userAuthoredTag = {
+      text: wrapUserPromptSubmitContext('user-authored text'),
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [userAuthoredTag] },
+      }),
+    ).toEqual({ displayText: undefined, parts: [userAuthoredTag] });
+  });
+
+  it('does not trust bare displayText without a final context tag', () => {
+    const taggedPart = {
+      text: '<qwen:user-prompt-submit-context>user-authored text</qwen:user-prompt-submit-context>',
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [{ text: 'user text' }, taggedPart] },
+        systemPayload: { displayText: 'notification label' },
+      }),
+    ).toEqual({
+      displayText: undefined,
+      parts: [{ text: 'user text' }, taggedPart],
+    });
   });
 });
