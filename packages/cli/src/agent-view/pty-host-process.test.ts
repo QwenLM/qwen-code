@@ -286,6 +286,75 @@ describe('Agent View PTY host process server', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'rejects listening on a socket path owned by a live server',
+    async () => {
+      const socketPath = shortSocketPath();
+      const first = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      servers.push(first);
+      await first.listen();
+
+      const second = createAgentViewPtyHostServer(fakeHost(), socketPath);
+
+      await expect(second.listen()).rejects.toThrow('already in use');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'replaces a stale socket file when listening',
+    async () => {
+      const socketPath = shortSocketPath();
+      await fs.mkdir(path.dirname(socketPath), { recursive: true });
+      await fs.writeFile(socketPath, '');
+      const server = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      servers.push(server);
+
+      await expect(server.listen()).resolves.toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not unlink a socket path taken over by another live server',
+    async () => {
+      const socketPath = shortSocketPath();
+      const replacement = net.createServer((socket) => {
+        socket.on('error', () => {});
+      });
+      await listenServer(replacement, socketPath);
+      try {
+        const displaced = createAgentViewPtyHostServer(fakeHost(), socketPath);
+
+        await displaced.close();
+
+        await expect(fs.stat(socketPath)).resolves.toBeDefined();
+        await expect(connectOnce(socketPath)).resolves.toBe(true);
+      } finally {
+        replacement.close();
+        await removeTestSocket(socketPath);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a symlinked socket parent directory',
+    async () => {
+      const realDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qah-real-'));
+      const linkDir = path.join(
+        os.tmpdir(),
+        `qah-link-${process.pid}-${Date.now()}`,
+      );
+      await fs.symlink(realDir, linkDir);
+      const socketPath = path.join(linkDir, 'pty.sock');
+      const server = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      try {
+        await expect(server.listen()).rejects.toThrow('must not be a symlink');
+      } finally {
+        await fs.rm(linkDir, { force: true });
+        await fs.rm(realDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('handles shutdown requests', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -500,6 +569,8 @@ describe('Agent View PTY host process server', () => {
         connectAgentViewPtyHostProcess(
           createLaunch('session-oversized-response'),
           socketPath,
+          undefined,
+          { readyRetries: 3, requestTimeoutMs: 5000 },
         ),
       ).rejects.toThrow('Agent View PTY host response line is too large.');
     } finally {
@@ -886,9 +957,21 @@ async function createStatusServer(
 }
 
 async function waitForClose(socket: net.Socket): Promise<void> {
+  if (socket.destroyed) return;
   await new Promise<void>((resolve) => {
     socket.once('close', () => resolve());
     socket.once('error', () => resolve());
+  });
+}
+
+async function connectOnce(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => resolve(false));
   });
 }
 

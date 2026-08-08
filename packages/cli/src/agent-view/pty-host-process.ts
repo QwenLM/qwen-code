@@ -25,7 +25,8 @@ import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
 export const INTERNAL_AGENT_VIEW_PTY_HOST_ARG =
   '--internal-agent-view-pty-host';
 
-const HOST_READY_RETRIES = 300;
+// Wall budget ≈ 15 s once per-probe request timeouts are counted.
+const HOST_READY_RETRIES = 50;
 const CONNECT_HOST_READY_RETRIES = 10;
 const HOST_READY_DELAY_MS = 50;
 const HOST_READY_REQUEST_TIMEOUT_MS = 250;
@@ -115,16 +116,25 @@ export async function launchAgentViewPtyHostProcess(
   });
 }
 
+export interface AgentViewPtyHostConnectOptions {
+  readyRetries?: number;
+  requestTimeoutMs?: number;
+}
+
 export async function connectAgentViewPtyHostProcess(
   launch: AgentViewLaunchFile,
   socketPath: string,
   authToken?: string,
+  options: AgentViewPtyHostConnectOptions = {},
 ): Promise<AgentViewPtyHostHandle> {
   const status = await waitForPtyHost(
     socketPath,
-    CONNECT_HOST_READY_RETRIES,
+    options.readyRetries ?? CONNECT_HOST_READY_RETRIES,
     authToken,
-    { requestTimeoutMs: HOST_READY_REQUEST_TIMEOUT_MS },
+    {
+      requestTimeoutMs:
+        options.requestTimeoutMs ?? HOST_READY_REQUEST_TIMEOUT_MS,
+    },
   );
   return createRemotePtyHostHandle({
     socketPath,
@@ -541,6 +551,7 @@ export function createAgentViewPtyHostServer(
         server.once('error', reject);
         server.listen(socketPath, () => {
           server.off('error', reject);
+          server.on('error', () => {});
           if (isWindowsPipePath(socketPath)) {
             resolve();
             return;
@@ -561,7 +572,7 @@ export function createAgentViewPtyHostServer(
         }
         server.close((error) => (error ? reject(error) : resolve()));
       });
-      await removeSocketPath(socketPath);
+      await removeOwnedSocketPath(socketPath);
     },
   };
 }
@@ -757,7 +768,11 @@ async function waitForPtyHost(
   authToken?: string,
   options: { requestTimeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ pid: number; workerPid: number }> {
-  const deadlineMs = Date.now() + retries * HOST_READY_DELAY_MS;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+  // Model the deadline as a wall-clock budget covering each probe's delay
+  // and request timeout, so slow probes cannot silently exhaust retries.
+  const deadlineMs =
+    Date.now() + retries * (HOST_READY_DELAY_MS + requestTimeoutMs);
   for (let attempt = 0; attempt < retries; attempt++) {
     if (options.signal?.aborted || Date.now() >= deadlineMs) break;
     try {
@@ -766,7 +781,7 @@ async function waitForPtyHost(
         authToken,
         'status',
         undefined,
-        options.requestTimeoutMs,
+        requestTimeoutMs,
       );
       if (isRecord(result) && Number.isInteger(result['workerPid'])) {
         return {
@@ -884,11 +899,26 @@ async function prepareSocketPath(socketPath: string): Promise<void> {
   const socketDir = path.dirname(socketPath);
   await fs.mkdir(socketDir, { recursive: true, mode: 0o700 });
   await ensurePrivateSocketDirectory(socketDir);
+  if (!(await socketPathExists(socketPath))) return;
+  // Fail closed instead of unlinking a live socket: the listening host is
+  // detached and untracked, so replacing it would orphan it irrecoverably.
+  if (await canConnect(socketPath)) {
+    const error = new Error(
+      `Agent View PTY host socket is already in use: ${socketPath}`,
+    ) as NodeJS.ErrnoException;
+    error.code = 'EADDRINUSE';
+    throw error;
+  }
   await removeSocketPath(socketPath);
 }
 
 async function ensurePrivateSocketDirectory(socketDir: string): Promise<void> {
-  const stat = await fs.stat(socketDir);
+  // lstat (not stat) so a planted symlink at the predictable fallback
+  // location cannot redirect the ownership check, chmod, or socket bind.
+  const stat = await fs.lstat(socketDir);
+  if (stat.isSymbolicLink()) {
+    throw new Error('Agent View PTY host socket parent must not be a symlink.');
+  }
   if (!stat.isDirectory()) {
     throw new Error('Agent View PTY host socket parent is not a directory.');
   }
@@ -909,6 +939,44 @@ async function removeSocketPath(socketPath: string): Promise<void> {
       throw error;
     }
   }
+}
+
+async function removeOwnedSocketPath(socketPath: string): Promise<void> {
+  if (isWindowsPipePath(socketPath)) return;
+  if (!(await socketPathExists(socketPath))) return;
+  // A live listener means a replacement host took over the path while this
+  // server was shutting down; unlinking would orphan its socket.
+  if (await canConnect(socketPath)) return;
+  await removeSocketPath(socketPath);
+}
+
+async function socketPathExists(socketPath: string): Promise<boolean> {
+  try {
+    await fs.lstat(socketPath);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function canConnect(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    function finish(result: boolean) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    }
+
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    const timeout = setTimeout(() => finish(false), 250);
+  });
 }
 
 function positiveIntegerParam(
