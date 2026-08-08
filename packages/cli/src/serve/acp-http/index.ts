@@ -14,6 +14,7 @@ import {
   RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
   Storage,
 } from '@qwen-code/qwen-code-core';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -105,7 +106,8 @@ function isActiveDrainCorrelation(
       ? (message.params as { sessionId?: unknown })
       : undefined;
   return (
-    typeof params?.sessionId === 'string' && conn.ownsSession(params.sessionId)
+    typeof params?.sessionId === 'string' &&
+    conn.ownsSession(normalizeSessionIdForLookup(params.sessionId))
   );
 }
 
@@ -1086,7 +1088,10 @@ export function mountAcpHttp(
       res.status(404).json({ error: 'Unknown Acp-Connection-Id' });
       return;
     }
-    const sessionId = headerOf(req, ACP_SESSION_HEADER);
+    const rawSessionId = headerOf(req, ACP_SESSION_HEADER);
+    const sessionId = rawSessionId
+      ? normalizeSessionIdForLookup(rawSessionId)
+      : undefined;
 
     if (!sessionId) {
       // Connection-scoped stream. onClose logs the disconnect so a
@@ -2256,9 +2261,13 @@ export function mountAcpHttp(
             message.params &&
             typeof message.params === 'object'
           ) {
-            const sid = (message.params as Record<string, unknown>)[
+            const rawSid = (message.params as Record<string, unknown>)[
               'sessionId'
             ];
+            const sid =
+              typeof rawSid === 'string'
+                ? normalizeSessionIdForLookup(rawSid)
+                : rawSid;
             if (typeof sid === 'string' && conn.ownsSession(sid)) {
               const binding = conn.sessions.get(sid);
               if (

@@ -10,6 +10,7 @@ import {
   SessionNotFoundError,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
+import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
 
 export interface RequestedSessionIdTarget {
@@ -218,7 +219,8 @@ export function createRequestedSessionIdAdmission({
   };
 
   return {
-    async reserveCreate(sessionId, target) {
+    async reserveCreate(rawSessionId, target) {
+      const sessionId = normalizeSessionIdForLookup(rawSessionId);
       const live = liveOwners(sessionId)[0];
       if (live) throw conflict(sessionId, 'live', live.workspaceCwd);
       if (pending.has(sessionId)) throw conflict(sessionId, 'pending');
@@ -276,7 +278,8 @@ export function createRequestedSessionIdAdmission({
       }
     },
 
-    reserveRestore(sessionId, target) {
+    reserveRestore(rawSessionId, target) {
+      const sessionId = normalizeSessionIdForLookup(rawSessionId);
       const foreignLive = liveOwners(sessionId).find(
         (owner) => owner.bridge !== target.bridge,
       );

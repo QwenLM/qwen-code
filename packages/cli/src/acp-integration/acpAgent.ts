@@ -181,7 +181,10 @@ import {
   SettingScope,
 } from '../config/settings.js';
 import { loadSettingsCached } from '../config/settings-cache.js';
-import { parseCallerSuppliedSessionId } from '../config/session-id.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
@@ -4802,14 +4805,15 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const sessionSource = getSessionSource(params);
-    const liveSession = this.sessions.get(params.sessionId);
+    const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = loadSettingsCached(params.cwd);
       const liveConfig = liveSession.getConfig();
       await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
       return this.withLiveSessionRestore(
-        params.sessionId,
+        sessionId,
         liveSession,
         async (config, sessionData) => {
           const response: LoadSessionResponse = {
@@ -4835,7 +4839,7 @@ class QwenAgent implements Agent {
               )
             : { records: visibleRecords, hasMore: false };
           const replay = await collectHistoryReplayUpdates({
-            sessionId: params.sessionId,
+            sessionId,
             config,
             records: replayPage.records,
             gaps: sessionData.historyGaps,
@@ -4878,9 +4882,7 @@ class QwenAgent implements Agent {
         },
       );
     }
-    const releaseStartingSessionId = this.reserveStartingSessionId(
-      params.sessionId,
-    );
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
     try {
       // Load per-request settings only after reserving a non-live id. The check
       // must resolve `advanced.runtimeOutputDir` from this request's cwd.
@@ -4890,11 +4892,11 @@ class QwenAgent implements Agent {
         params.cwd,
         async () => {
           const sessionService = new SessionService(params.cwd);
-          return sessionService.sessionExists(params.sessionId);
+          return sessionService.sessionExists(sessionId);
         },
       );
       if (!exists) {
-        throw RequestError.resourceNotFound(`session:${params.sessionId}`);
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
       }
       // Adopt into the "latest loaded" cache only once the session is
       // confirmed — a failed probe for a stale id must not repoint
@@ -4910,7 +4912,7 @@ class QwenAgent implements Agent {
         params.mcpServers ?? [],
         settings,
         sessionSource,
-        params.sessionId,
+        sessionId,
         true,
       );
       const sessionData = config.getResumedSessionData();
@@ -4943,7 +4945,7 @@ class QwenAgent implements Agent {
                 );
                 const replayUsage = createReplayCumulativeUsage();
                 const replay = await collectHistoryReplayUpdates({
-                  sessionId: params.sessionId,
+                  sessionId,
                   config,
                   records: replayPage.records,
                   gaps: sessionData?.historyGaps,
@@ -5020,14 +5022,15 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const sessionSource = getSessionSource(params);
-    const liveSession = this.sessions.get(params.sessionId);
+    const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = loadSettingsCached(params.cwd);
       const liveConfig = liveSession.getConfig();
       await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
       return this.withLiveSessionRestore(
-        params.sessionId,
+        sessionId,
         liveSession,
         async (config, sessionData) =>
           ({
@@ -5040,9 +5043,7 @@ class QwenAgent implements Agent {
           }) as ResumeSessionResponse,
       );
     }
-    const releaseStartingSessionId = this.reserveStartingSessionId(
-      params.sessionId,
-    );
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
     try {
       // Same per-request settings discipline as `loadSession`.
       const settings = loadSettingsCached(params.cwd);
@@ -5051,11 +5052,11 @@ class QwenAgent implements Agent {
         params.cwd,
         async () => {
           const sessionService = new SessionService(params.cwd);
-          return sessionService.sessionExists(params.sessionId);
+          return sessionService.sessionExists(sessionId);
         },
       );
       if (!exists) {
-        throw RequestError.resourceNotFound(`session:${params.sessionId}`);
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
       }
       this.settings = settings;
 
@@ -5064,7 +5065,7 @@ class QwenAgent implements Agent {
         params.mcpServers ?? [],
         settings,
         sessionSource,
-        params.sessionId,
+        sessionId,
         true,
       );
       try {
@@ -5250,33 +5251,36 @@ class QwenAgent implements Agent {
   async setSessionMode(
     params: SetSessionModeRequest,
   ): Promise<SetSessionModeResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode(params);
+    return session.setMode({ ...params, sessionId });
   }
 
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel(params);
+    return await session.setModel({ ...params, sessionId });
   }
 
   async setSessionConfigOption(
     params: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
-    const { sessionId, configId, value } = params;
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const { configId, value } = params;
 
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -5317,11 +5321,12 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
-    const sanitizedParams = { ...params };
+    const sanitizedParams = { ...params, sessionId };
     const meta =
       params._meta && typeof params._meta === 'object'
         ? { ...params._meta }
@@ -5374,10 +5379,10 @@ class QwenAgent implements Agent {
         settleCall = resolve;
       }),
     };
-    let calls = this.activePromptCalls.get(params.sessionId);
+    let calls = this.activePromptCalls.get(sessionId);
     if (!calls) {
       calls = new Set();
-      this.activePromptCalls.set(params.sessionId, calls);
+      this.activePromptCalls.set(sessionId, calls);
     }
     calls.add(call);
     try {
@@ -5390,7 +5395,7 @@ class QwenAgent implements Agent {
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
-        this.activePromptCalls.delete(params.sessionId);
+        this.activePromptCalls.delete(sessionId);
       }
       settleCall();
       // Order a fresh snapshot ahead of this response on the same stream. The
@@ -5403,9 +5408,10 @@ class QwenAgent implements Agent {
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
     try {
       await session.cancelPendingPrompt();
@@ -7684,6 +7690,14 @@ class QwenAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     try {
+      const rawSessionId = params['sessionId'];
+      const normalizedParams =
+        typeof rawSessionId === 'string'
+          ? {
+              ...params,
+              sessionId: normalizeSessionIdForLookup(rawSessionId),
+            }
+          : params;
       if (
         method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
         this.privateParentState !== 'trusted'
@@ -7693,7 +7707,7 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
-      return await this.extMethodInternal(method, params);
+      return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
       if (writerError) {

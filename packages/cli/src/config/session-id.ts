@@ -21,6 +21,16 @@ export function isValidSessionId(value: string): boolean {
   return INTERNAL_SESSION_ID_REGEX.test(value);
 }
 
+/**
+ * Canonicalize caller-visible UUIDs without changing internal or legacy IDs.
+ * Internal Arena agent IDs and legacy IDs preserve their existing spelling.
+ */
+export function normalizeSessionIdForLookup(value: string): string {
+  return CALLER_SUPPLIED_SESSION_ID_REGEX.test(value)
+    ? value.toLowerCase()
+    : value;
+}
+
 export function parseCallerSuppliedSessionId(
   value: unknown,
 ): CallerSuppliedSessionIdParseResult {
@@ -31,5 +41,5 @@ export function parseCallerSuppliedSessionId(
   ) {
     return { kind: 'invalid' };
   }
-  return { kind: 'valid', sessionId: value.toLowerCase() };
+  return { kind: 'valid', sessionId: normalizeSessionIdForLookup(value) };
 }
