@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <title>Local Control</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: 'Avenir Next', 'Segoe UI', sans-serif;
+        background: #090d15;
+        color: #f4f7fb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        min-width: 420px;
+        min-height: 100vh;
+        margin: 0;
+        background:
+          radial-gradient(circle at 10% 0%, #4338ca55, transparent 24rem),
+          linear-gradient(145deg, #0d1320, #080b12);
+      }
+      main {
+        display: grid;
+        min-height: 100vh;
+        padding: 22px;
+      }
+      .card {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        padding: 22px;
+        border: 1px solid #ffffff16;
+        border-radius: 22px;
+        background: #111827e8;
+        box-shadow: 0 24px 80px #0007;
+      }
+      header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 25px;
+        letter-spacing: -0.035em;
+      }
+      p {
+        margin: 7px 0 0;
+        color: #9aa6b8;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .badge {
+        flex: none;
+        padding: 6px 10px;
+        border-radius: 999px;
+        color: #b7c1cf;
+        background: #ffffff0d;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .badge.on {
+        color: #8ef0d2;
+        background: #16a37a25;
+      }
+      #inactive,
+      #active {
+        display: grid;
+        gap: 12px;
+      }
+      .qr {
+        display: grid;
+        place-items: center;
+        min-height: 246px;
+        border-radius: 18px;
+        background: #ffffff;
+      }
+      .qr svg {
+        width: 220px;
+        height: 220px;
+      }
+      .url {
+        padding: 11px 12px;
+        border-radius: 10px;
+        color: #cbd5e1;
+        background: #03071299;
+        font:
+          11px/1.5 ui-monospace,
+          'SFMono-Regular',
+          Consolas,
+          monospace;
+        overflow-wrap: anywhere;
+      }
+      .notice {
+        padding: 12px 14px;
+        border: 1px solid #f59e0b33;
+        border-radius: 12px;
+        color: #f8d48b;
+        background: #f59e0b12;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .error {
+        color: #ff9c91;
+        font:
+          12px/1.5 ui-monospace,
+          monospace;
+        white-space: pre-wrap;
+      }
+      button {
+        width: 100%;
+        appearance: none;
+        border: 0;
+        border-radius: 12px;
+        padding: 13px 16px;
+        color: white;
+        background: #6d5dfc;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button.stop {
+        color: #fecaca;
+        background: #7f1d1d88;
+      }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.6;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card" aria-live="polite">
+        <header>
+          <div>
+            <h1>Local Control</h1>
+            <p>Continue the same Qwen Code session from your phone.</p>
+          </div>
+          <span id="badge" class="badge">Off</span>
+        </header>
+
+        <section id="inactive">
+          <p>
+            Turn this on, then scan the QR code from a phone on the same Wi-Fi.
+            LAN access is closed until you explicitly enable it.
+          </p>
+          <div class="notice">
+            Local Control uses unencrypted HTTP. Enable it only on a private,
+            trusted Wi-Fi network.
+          </div>
+        </section>
+
+        <section id="active" hidden>
+          <div id="qr" class="qr" aria-label="Local Control QR code"></div>
+          <div id="url" class="url"></div>
+          <div id="sleep" class="notice"></div>
+          <div class="notice">
+            Traffic is unencrypted. Keep this window open only on a private,
+            trusted Wi-Fi network.
+          </div>
+          <p>Closing this window turns Local Control off.</p>
+        </section>
+
+        <div id="error" class="error" hidden></div>
+        <button id="toggle">Turn on Local Control</button>
+      </section>
+    </main>
+    <script src="./local-control.js"></script>
+  </body>
+</html>
