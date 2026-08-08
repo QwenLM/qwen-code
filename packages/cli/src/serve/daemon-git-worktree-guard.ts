@@ -9,7 +9,7 @@ import path from 'node:path';
 import { parse } from 'shell-quote';
 import {
   isWithinRoot,
-  realpathNearestExisting,
+  realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS } from '@qwen-code/acp-bridge/externalToolGuard';
@@ -24,21 +24,21 @@ import type {
 // execute programs configured by the target repository on the managed
 // (non-tty) output path. `diff`/`log`/`show`/`blame` are excluded: `--output`
 // writes files and textconv drivers run commands from target-repository
-// config.
+// config. `grep` takes the same `--textconv` path, and `status` refreshes
+// the target index and runs the target repository's core.fsmonitor, so
+// neither is read-only here.
 const RELOCATED_READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'cat-file',
   'describe',
-  'grep',
   'ls-files',
   'rev-parse',
-  'status',
 ]);
 
-// Git global options whose next argv entry is consumed as a value (mirrors
-// core shell.ts GIT_GLOBAL_FLAGS_TAKES_VALUE).
+// Git global options whose next argv entry is consumed as a value.
+// `--exec-path` and `--list-cmds` are deliberately absent: real git only
+// accepts their `=<value>` form (a bare `--exec-path` prints and exits), so
+// modelling them as value-taking would swallow the token that follows them.
 const GIT_GLOBAL_OPTIONS_WITH_VALUES = new Set([
-  '--exec-path',
-  '--list-cmds',
   '--namespace',
   '--super-prefix',
 ]);
@@ -123,12 +123,17 @@ const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command outside the session working directory: ';
+const UNDECIDABLE_PAYLOAD_DENIAL =
+  'Daemon shell guard denied a shell command whose payload could not be resolved before execution.';
+const UNRECOGNIZED_PROGRAM_DENIAL =
+  'Daemon shell guard denied a shell command that may run a relocated Git command through an unrecognized program.';
+const PROMPTLESS_PROVIDER_DENIAL =
+  'Managed external tool guard cannot consult an external provider without an active prompt binding.';
 
 const MAX_PAYLOAD_RECURSION_DEPTH = 3;
 
 interface TrustedDaemonToolGuardRequest
   extends ExternalToolGuardPrepareRequest {
-  readonly workspaceCwd: string;
   readonly effectiveCwd: string;
 }
 
@@ -307,6 +312,30 @@ function hasGitRelocationMarker(tokens: GuardToken[]): boolean {
   });
 }
 
+// A static token scan cannot prove what an unrecognized program executes.
+// When the run still references git and carries a relocation marker —
+// possibly inside a quoted payload such as `su -c 'git -C ...'` — fail
+// closed instead of letting the program word short-circuit the analysis.
+const GIT_WORD_PATTERN = /\bgit\b/;
+const TEXT_RELOCATION_MARKER_PATTERN =
+  /(^|\s)(-C|--git-dir=?|--work-tree=?)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)=/;
+
+function runMayConcealRelocatedGit(
+  run: GuardToken[],
+  state: PrefixState,
+  context: GuardEvaluationContext,
+): boolean {
+  if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return false;
+  return (
+    hasGitRelocationMarker(run) ||
+    run.some((token) => TEXT_RELOCATION_MARKER_PATTERN.test(token.text)) ||
+    state.relocations.length > 0 ||
+    state.unresolved ||
+    context.ambientRelocations.length > 0 ||
+    context.ambientUnresolved
+  );
+}
+
 function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
   const key = leadingEnvAssignmentKey(token.text);
   if (key === null) return;
@@ -477,34 +506,58 @@ function consumeTimeoutWrapper(run: GuardToken[], start: number): number {
   return index;
 }
 
-function shellWrapperPayload(
-  run: GuardToken[],
-  payloadToken: GuardToken | undefined,
-): string | undefined {
-  if (payloadToken === undefined || payloadToken.dynamic) return undefined;
-  return payloadToken.text;
-}
+type ShellWrapperScan =
+  | { kind: 'none' }
+  | { kind: 'static'; payload: string }
+  | { kind: 'dynamic' };
 
 function consumeShellWrapper(
   run: GuardToken[],
   start: number,
-): string | undefined {
+): ShellWrapperScan {
   let index = start + 1;
   while (index < run.length) {
     const token = run[index]!;
-    if (token.text === '-c' || shellBundleRequestsCommand(token.text)) {
-      return shellWrapperPayload(run, run[index + 1]);
+    if (token.text === '-c') {
+      const payloadToken = run[index + 1];
+      if (payloadToken === undefined) {
+        // `sh -c` with no payload executes nothing.
+        return { kind: 'static', payload: '' };
+      }
+      if (payloadToken.dynamic) return { kind: 'dynamic' };
+      return { kind: 'static', payload: payloadToken.text };
     }
-    if (token.dynamic) return undefined;
+    if (token.dynamic) {
+      // `bash -c$CMD`: the payload is fused into this token and unresolved.
+      return shellBundleRequestsCommand(token.text)
+        ? { kind: 'dynamic' }
+        : { kind: 'none' };
+    }
+    if (shellBundleRequestsCommand(token.text)) {
+      const fusedPayload = token.text.slice(token.text.indexOf('c') + 1);
+      if (fusedPayload.length > 0) {
+        // `bash -c'cmd'`: the payload is fused into the flag token after
+        // the `c`, not the next argv entry.
+        return { kind: 'static', payload: fusedPayload };
+      }
+      // `bash -lc 'cmd'`: `c` ends the bundle, so the payload is the next
+      // argv entry after all.
+      const payloadToken = run[index + 1];
+      if (payloadToken === undefined) {
+        return { kind: 'static', payload: '' };
+      }
+      if (payloadToken.dynamic) return { kind: 'dynamic' };
+      return { kind: 'static', payload: payloadToken.text };
+    }
     if (token.text.startsWith('+')) {
       index++;
       continue;
     }
-    if (!token.text.startsWith('-')) return undefined;
-    if (token.text === '--') return undefined;
+    if (!token.text.startsWith('-')) return { kind: 'none' };
+    if (token.text === '--') return { kind: 'none' };
     index += SHELL_WRAPPER_VALUE_FLAGS.has(token.text) ? 2 : 1;
   }
-  return undefined;
+  return { kind: 'none' };
 }
 
 type RunAnalysis =
@@ -521,15 +574,39 @@ type RunAnalysis =
       target?: GuardToken;
     }
   | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
+  | { kind: 'undecidable' }
   | { kind: 'other'; state: PrefixState };
+
+// Shell keywords that can lead a split segment without changing what
+// executes: `if true; then git ...` arrives as a `then git ...` segment
+// because the split happens on `;`/`&&`. Skipping them keeps the real
+// program under analysis; bare terminators (`fi`, `done`, ...) leave an
+// empty run that classifies as safe.
+const LEADING_SHELL_KEYWORDS = new Set([
+  '{',
+  '}',
+  '!',
+  'if',
+  'then',
+  'else',
+  'elif',
+  'fi',
+  'for',
+  'do',
+  'done',
+  'while',
+  'until',
+  'in',
+  'case',
+  'esac',
+  'time',
+  'coproc',
+]);
 
 function analyzeRun(run: GuardToken[]): RunAnalysis {
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
-  while (
-    index < run.length &&
-    (run[index]!.text === '{' || run[index]!.text === '!')
-  ) {
+  while (index < run.length && LEADING_SHELL_KEYWORDS.has(run[index]!.text)) {
     index++;
   }
   while (index < run.length) {
@@ -572,7 +649,7 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     if (program === 'eval') {
       const payloadTokens = run.slice(index + 1);
       if (payloadTokens.some((payloadToken) => payloadToken.dynamic)) {
-        return { kind: 'dynamic-program', rest: payloadTokens, state };
+        return { kind: 'undecidable' };
       }
       return {
         kind: 'payload',
@@ -584,9 +661,15 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
       };
     }
     if (SHELL_WRAPPER_PROGRAMS.has(program)) {
-      const payload = consumeShellWrapper(run, index);
-      if (payload === undefined) return { kind: 'other', state };
-      return { kind: 'payload', payload, state, propagatesCwd: false };
+      const scan = consumeShellWrapper(run, index);
+      if (scan.kind === 'none') return { kind: 'other', state };
+      if (scan.kind === 'dynamic') return { kind: 'undecidable' };
+      return {
+        kind: 'payload',
+        payload: scan.payload,
+        state,
+        propagatesCwd: false,
+      };
     }
     if (program === 'nohup' || program === 'exec') {
       index++;
@@ -801,12 +884,10 @@ async function evaluateGitInvocation(
   entryCwd: string | undefined,
   context: GuardEvaluationContext,
 ): Promise<GuardDenial | undefined> {
-  if (
-    RELOCATED_READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand ?? '') &&
-    !invocation.hasOutputFlag
-  ) {
-    return undefined;
-  }
+  // Command-executing `-c` config and unresolvable relocations are checked
+  // BEFORE the read-only allowance: `git status` still runs the target
+  // repository's core.fsmonitor, so a read-only subcommand does not make an
+  // undecidable invocation safe.
   if (
     invocation.unresolved ||
     invocation.dangerousConfig ||
@@ -814,6 +895,12 @@ async function evaluateGitInvocation(
     context.ambientUnresolved
   ) {
     return denyDynamicRelocation();
+  }
+  if (
+    RELOCATED_READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand ?? '') &&
+    !invocation.hasOutputFlag
+  ) {
+    return undefined;
   }
 
   const cwdRelocations: GitEnvRelocation[] = [];
@@ -882,7 +969,7 @@ async function evaluateGitInvocation(
   }
 
   for (const { target, kind } of checkedTargets) {
-    const canonicalTarget = realpathNearestExisting(target);
+    const canonicalTarget = await realpathNearestExistingAsync(target);
     let repositoryTarget: string;
     if (kind === 'git-dir') {
       try {
@@ -902,7 +989,7 @@ async function evaluateGitInvocation(
         return denyTarget(UNRESOLVED_TARGET_DENIAL_PREFIX, canonicalTarget);
       }
     }
-    repositoryTarget = realpathNearestExisting(repositoryTarget);
+    repositoryTarget = await realpathNearestExistingAsync(repositoryTarget);
     if (!isWithinRoot(repositoryTarget, context.canonicalEffectiveCwd)) {
       return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, repositoryTarget);
     }
@@ -917,11 +1004,12 @@ interface CommandEvaluation {
 
 async function evaluateCommandWithCwd(
   command: string,
+  startCwd: string | undefined,
   entryCwd: string | undefined,
   context: GuardEvaluationContext,
   depth: number,
 ): Promise<CommandEvaluation> {
-  let trackedCwd = entryCwd;
+  let trackedCwd = startCwd;
   for (const segment of splitCommands(command)) {
     const runs = tokenizeSegment(segment);
     if (runs === null) {
@@ -972,9 +1060,13 @@ async function evaluateCommandWithCwd(
             ambientUnresolved:
               context.ambientUnresolved || analysis.state.unresolved,
           };
+          // The payload keeps the outermost run's entry cwd as its
+          // containment basis: re-basing it to the tracked cwd would let a
+          // preceding `cd` disappear inside the wrapper.
           const nested = await evaluateCommandWithCwd(
             analysis.payload,
             trackedCwd,
+            entryCwd,
             ambient,
             depth + 1,
           );
@@ -1010,7 +1102,21 @@ async function evaluateCommandWithCwd(
           }
           break;
         }
+        case 'undecidable':
+          return {
+            denial: { allowed: false, reason: UNDECIDABLE_PAYLOAD_DENIAL },
+            cwdAfter: trackedCwd,
+          };
         case 'other':
+          if (runMayConcealRelocatedGit(run, analysis.state, context)) {
+            return {
+              denial: {
+                allowed: false,
+                reason: UNRECOGNIZED_PROGRAM_DENIAL,
+              },
+              cwdAfter: trackedCwd,
+            };
+          }
           break;
         default: {
           const exhaustive: never = analysis;
@@ -1030,15 +1136,26 @@ async function evaluateBuiltInGuard(
   const command = request.arguments['command'];
   if (typeof command !== 'string') return { allowed: true };
 
+  const canonicalEffectiveCwd = await realpathNearestExistingAsync(
+    request.effectiveCwd,
+  );
+
+  // A model-supplied `directory` becomes the containment basis, so it must
+  // itself stay inside the effective working directory before it is trusted.
+  let startDirectory = canonicalEffectiveCwd;
   const startDirectoryValue = request.arguments['directory'];
-  const startDirectory =
-    typeof startDirectoryValue === 'string'
-      ? startDirectoryValue
-      : request.effectiveCwd;
-  const canonicalEffectiveCwd = realpathNearestExisting(request.effectiveCwd);
+  if (typeof startDirectoryValue === 'string') {
+    startDirectory = await realpathNearestExistingAsync(
+      path.resolve(request.effectiveCwd, startDirectoryValue),
+    );
+    if (!isWithinRoot(startDirectory, canonicalEffectiveCwd)) {
+      return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, startDirectory);
+    }
+  }
 
   const { denial } = await evaluateCommandWithCwd(
     command,
+    startDirectory,
     startDirectory,
     {
       canonicalEffectiveCwd,
@@ -1055,14 +1172,16 @@ export function createDaemonToolGuard(
 ): ExternalToolGuardHandler {
   return async (request) => {
     const trusted = request as TrustedDaemonToolGuardRequest;
-    if (
-      typeof trusted.workspaceCwd !== 'string' ||
-      typeof trusted.effectiveCwd !== 'string'
-    ) {
+    if (typeof trusted.effectiveCwd !== 'string') {
       throw new Error('Daemon tool guard requires trusted workspace context.');
     }
     const builtInDecision = await evaluateBuiltInGuard(trusted);
     if (!builtInDecision.allowed || !externalGuard) return builtInDecision;
+    if (trusted.promptId === undefined) {
+      // Context-less shell checks carry only the built-in policy; the
+      // external provider is contracted to a live prompt.
+      return { allowed: false, reason: PROMPTLESS_PROVIDER_DENIAL };
+    }
     if (EXTERNAL_GUARD_UNSUPPORTED_TOOLS.has(request.toolName)) {
       return {
         allowed: false,

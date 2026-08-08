@@ -135,6 +135,7 @@ import type {
   ChannelDeliveryHostResult,
   ExternalToolGuardHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import { createDaemonToolGuard } from './daemon-git-worktree-guard.js';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -2799,11 +2800,6 @@ async function runQwenServeImpl(
       'qwen serve: required external tool guard handshake succeeded.',
     );
   }
-  // Dynamic-imported (not at module scope) so the guard's core helper
-  // imports stay out of the serve fast-path bundle closure.
-  const { createDaemonToolGuard } = await import(
-    './daemon-git-worktree-guard.js'
-  );
   const daemonToolGuardHandler = createDaemonToolGuard(
     externalToolGuardHandler,
   );

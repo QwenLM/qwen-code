@@ -14,8 +14,7 @@ import type { ExternalToolGuardPrepareRequest } from '@qwen-code/acp-bridge/brid
 import { createDaemonToolGuard } from './daemon-git-worktree-guard.js';
 
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), 'daemon-guard-'));
-const workspaceCwd = path.join(temporaryRoot, 'workspace');
-const effectiveCwd = path.join(workspaceCwd, 'worktree');
+const effectiveCwd = path.join(temporaryRoot, 'workspace', 'worktree');
 const insideNested = path.join(effectiveCwd, 'nested');
 const outsideRepo = path.join(temporaryRoot, 'outside', 'repo');
 mkdirSync(path.join(outsideRepo, '.git'), { recursive: true });
@@ -31,7 +30,6 @@ function request(
     toolCallId: 'call-1',
     toolName: 'run_shell_command',
     arguments: { command, ...extraArguments },
-    workspaceCwd,
     effectiveCwd,
   } as ExternalToolGuardPrepareRequest;
 }
@@ -49,6 +47,10 @@ describe('createDaemonToolGuard', () => {
     () => `git --git-dir ${path.join(outsideRepo, '.git')} commit -m x`,
     () => `git --namespace foo -C ${outsideRepo} reset --hard`,
     () => `git --super-prefix=foo --work-tree=${outsideRepo} clean -fd`,
+    // `grep` runs the target repo's diff.<driver>.textconv programs and
+    // `status` refreshes the target index + runs its core.fsmonitor.
+    () => `git -C ${outsideRepo} grep --textconv pattern`,
+    () => `git -C ${outsideRepo} status --porcelain`,
   ])('denies relocated mutating Git command %#', async (buildCommand) => {
     const guard = createDaemonToolGuard();
 
@@ -62,7 +64,7 @@ describe('createDaemonToolGuard', () => {
     const guard = createDaemonToolGuard();
 
     await expect(
-      guard(request(`git -C ${outsideRepo} status --short`)),
+      guard(request(`git -C ${outsideRepo} rev-parse HEAD`)),
     ).resolves.toEqual({ allowed: true });
   });
 
@@ -234,6 +236,129 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  it.each([
+    () => `if true; then git -C ${outsideRepo} reset --hard; fi`,
+    () => `if true; then cd ${outsideRepo} && git reset --hard; fi`,
+    () => `for i in 1; do git -C ${outsideRepo} reset --hard; done`,
+    () => `while true; do git -C ${outsideRepo} reset --hard; break; done`,
+    () => `until false; do git -C ${outsideRepo} reset --hard; done`,
+    () =>
+      `if false; then pwd; elif true; then git -C ${outsideRepo} reset --hard; fi`,
+    () => `time git -C ${outsideRepo} reset --hard`,
+    () => `coproc git -C ${outsideRepo} reset --hard`,
+  ])(
+    'denies relocated mutations hidden behind shell keywords %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.each([
+    () => `sh -c "$(echo git -C ${outsideRepo} reset --hard)"`,
+    () => 'bash -c "$CMD"',
+    () => `eval "$(echo git -C ${outsideRepo} reset --hard)"`,
+  ])('fails closed on undecidable shell payloads %#', async (buildCommand) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('could not be resolved'),
+    });
+  });
+
+  it.each([
+    () => `bash -c'git -C ${outsideRepo} reset --hard'`,
+    () => `bash -lc'git -C ${outsideRepo} reset --hard'`,
+  ])(
+    'denies relocated mutations fused into the -c flag token %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.each([
+    () => `cd ${outsideRepo} && sh -c 'git reset --hard'`,
+    () => `cd ${outsideRepo} && bash -c 'git clean -fd'`,
+    () => `cd ${outsideRepo} && eval 'git reset --hard'`,
+    () => `cd ${outsideRepo}; sh -c 'git reset --hard'`,
+    () => `cd ${outsideRepo} && sh -c 'cd nested && git reset --hard'`,
+  ])(
+    'keeps the entry cwd as the containment basis inside shell wrappers %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('still allows wrapper payloads that stay inside the entry cwd', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(request(`cd ${effectiveCwd} && sh -c 'git reset --hard'`)),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it.each([
+    () => `git -c core.fsmonitor=/tmp/evil.sh -C ${outsideRepo} status`,
+    () => `git -c alias.x='!evil' -C ${outsideRepo} status`,
+  ])(
+    'inspects command-executing -c config even for read-only subcommands %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('dynamic repository location'),
+      });
+    },
+  );
+
+  it.each([
+    () => `git --exec-path -C ${outsideRepo} reset --hard`,
+    () => `git --list-cmds -C ${outsideRepo} reset --hard`,
+  ])(
+    'does not let --exec-path/--list-cmds swallow the relocation token %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('denies a model-supplied directory outside the effective working directory', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(request('git reset --hard', { directory: outsideRepo })),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining(outsideRepo),
+    });
+    await expect(
+      guard(
+        request('git reset --hard', {
+          directory: path.relative(effectiveCwd, outsideRepo),
+        }),
+      ),
+    ).resolves.toMatchObject({ allowed: false });
+    await expect(
+      guard(request('git reset --hard', { directory: insideNested })),
+    ).resolves.toEqual({ allowed: true });
+  });
+
   it('keeps subshell cwd shifts from leaking into later commands', async () => {
     const guard = createDaemonToolGuard();
 
@@ -374,7 +499,6 @@ it -C ${outsideRepo} reset --hard`,
     await expect(
       guard({
         ...request('git -C linked-outside/missing reset --hard'),
-        workspaceCwd: localEffectiveCwd,
         effectiveCwd: localEffectiveCwd,
       }),
     ).resolves.toMatchObject({ allowed: false });
@@ -394,18 +518,31 @@ it -C ${outsideRepo} reset --hard`,
   });
 
   it('follows gitfile redirects before the containment check', async () => {
-    const gitfilePath = path.join(insideNested, '.git');
-    await writeFile(gitfilePath, `gitdir: ${path.join(outsideRepo, '.git')}\n`);
+    // Per-test fixture: the redirect file persists for the rest of the run
+    // and would change how later tests resolve targets under a shared basis.
+    const localEffectiveCwd = path.join(temporaryRoot, 'gitfile-cwd');
+    const localNested = path.join(localEffectiveCwd, 'nested');
+    await mkdir(localNested, { recursive: true });
+    await writeFile(
+      path.join(localNested, '.git'),
+      `gitdir: ${path.join(outsideRepo, '.git')}\n`,
+    );
+    const localRequest = (
+      command: string,
+    ): ExternalToolGuardPrepareRequest => ({
+      ...request(command),
+      effectiveCwd: localEffectiveCwd,
+    });
 
     const guard = createDaemonToolGuard();
     await expect(
-      guard(request('git --git-dir=nested/.git branch -D topic')),
+      guard(localRequest('git --git-dir=nested/.git branch -D topic')),
     ).resolves.toMatchObject({
       allowed: false,
       reason: expect.stringContaining(outsideRepo),
     });
     await expect(
-      guard(request(`GIT_DIR=nested/.git sh -c 'git reset --hard'`)),
+      guard(localRequest(`GIT_DIR=nested/.git sh -c 'git reset --hard'`)),
     ).resolves.toMatchObject({
       allowed: false,
       reason: expect.stringContaining(outsideRepo),
@@ -413,13 +550,23 @@ it -C ${outsideRepo} reset --hard`,
   });
 
   it('canonicalizes a symlink named .git before stripping the basename', async () => {
-    const linkDir = path.join(insideNested, 'd');
-    await mkdir(linkDir, { recursive: true });
-    await symlink(path.join(outsideRepo, '.git'), path.join(linkDir, '.git'));
+    const localEffectiveCwd = path.join(temporaryRoot, 'symgit-cwd');
+    const localNestedD = path.join(localEffectiveCwd, 'nested', 'd');
+    await mkdir(localNestedD, { recursive: true });
+    await symlink(
+      path.join(outsideRepo, '.git'),
+      path.join(localNestedD, '.git'),
+    );
+    const localRequest = (
+      command: string,
+    ): ExternalToolGuardPrepareRequest => ({
+      ...request(command),
+      effectiveCwd: localEffectiveCwd,
+    });
 
     const guard = createDaemonToolGuard();
     await expect(
-      guard(request('git --git-dir=nested/d/.git branch -D topic')),
+      guard(localRequest('git --git-dir=nested/d/.git branch -D topic')),
     ).resolves.toMatchObject({
       allowed: false,
       reason: expect.stringContaining(outsideRepo),
@@ -494,20 +641,50 @@ it -C ${outsideRepo} reset --hard`,
     expect(controlReason).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
   });
 
-  it('allows dynamic relocations for read-only subcommands', async () => {
+  it('denies dynamic relocations even for read-only subcommands', async () => {
     const guard = createDaemonToolGuard();
 
+    // `status` would run the target repository's core.fsmonitor, so the
+    // unresolved/dangerous-config check precedes the read-only allowance.
     await expect(
-      guard(request('git -C "$OTHER_WORKTREE" status')),
-    ).resolves.toEqual({ allowed: true });
+      guard(request('git -C "$OTHER_WORKTREE" rev-parse')),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('dynamic repository location'),
+    });
   });
 
-  it('does not treat a Git command passed as an argument as executable', async () => {
+  it.each([
+    () => `echo git -C ${outsideRepo} reset --hard`,
+    () => `nice git -C ${outsideRepo} reset --hard`,
+    () => `nice -n 5 git -C ${outsideRepo} reset --hard`,
+    () => `stdbuf -o0 git -C ${outsideRepo} reset --hard`,
+    () => `setsid git -C ${outsideRepo} reset --hard`,
+    () => `flock /tmp/daemon-guard-lock git -C ${outsideRepo} reset --hard`,
+    () => `xargs -I{} git -C ${outsideRepo} reset --hard`,
+    () => `su -c 'git -C ${outsideRepo} reset --hard'`,
+    () => `find . -exec git -C ${outsideRepo} reset --hard ;`,
+  ])(
+    'fails closed when an unrecognized program may run a relocated Git command %#',
+    async (buildCommand) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(buildCommand()))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unrecognized program'),
+      });
+    },
+  );
+
+  it('allows commands that mention Git without a relocation marker', async () => {
     const guard = createDaemonToolGuard();
 
-    await expect(
-      guard(request(`echo git -C ${outsideRepo} reset --hard`)),
-    ).resolves.toEqual({ allowed: true });
+    await expect(guard(request(`echo 'git status'`))).resolves.toEqual({
+      allowed: true,
+    });
+    await expect(guard(request(`grep -rn 'git reset' src`))).resolves.toEqual({
+      allowed: true,
+    });
   });
 
   it('short-circuits the external provider after a built-in denial', async () => {
@@ -588,16 +765,46 @@ it -C ${outsideRepo} reset --hard`,
     );
   });
 
-  it.each(['workspaceCwd', 'effectiveCwd'])(
-    'fails closed without trusted daemon workspace context (%s)',
-    async (field) => {
-      const guard = createDaemonToolGuard();
-      const call = request('pwd') as unknown as Record<string, unknown>;
-      delete call[field];
+  it('fails closed without the trusted effective working directory', async () => {
+    const guard = createDaemonToolGuard();
+    const call = request('pwd') as unknown as Record<string, unknown>;
+    delete call['effectiveCwd'];
 
-      await expect(
-        guard(call as unknown as ExternalToolGuardPrepareRequest),
-      ).rejects.toThrow('trusted workspace context');
-    },
-  );
+    await expect(
+      guard(call as unknown as ExternalToolGuardPrepareRequest),
+    ).rejects.toThrow('trusted workspace context');
+  });
+
+  it('applies the built-in policy to prompt-less shell checks', async () => {
+    const guard = createDaemonToolGuard();
+
+    const allowed = request('pwd') as unknown as Record<string, unknown>;
+    delete allowed['promptId'];
+    await expect(
+      guard(allowed as unknown as ExternalToolGuardPrepareRequest),
+    ).resolves.toEqual({ allowed: true });
+
+    const denied = request(
+      `git -C ${outsideRepo} reset --hard`,
+    ) as unknown as Record<string, unknown>;
+    delete denied['promptId'];
+    await expect(
+      guard(denied as unknown as ExternalToolGuardPrepareRequest),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('refuses to consult the external provider without a prompt binding', async () => {
+    const externalGuard = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createDaemonToolGuard(externalGuard);
+    const call = request('pwd') as unknown as Record<string, unknown>;
+    delete call['promptId'];
+
+    await expect(
+      guard(call as unknown as ExternalToolGuardPrepareRequest),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining('without an active prompt binding'),
+    });
+    expect(externalGuard).not.toHaveBeenCalled();
+  });
 });

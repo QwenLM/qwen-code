@@ -2814,9 +2814,20 @@ export function createManagedExternalToolGuard(
       return { allowed: true };
     }
     const invocation = context.invocationContext;
-    if (!invocation) {
+    if (!invocation && options.externalProviderAttached) {
       throw new Error(
         'Managed external tool guard requires a runtime invocation context.',
+      );
+    }
+    // Subagent reasoning loops, cron turns, background notifications, and
+    // resumed background agents run without an invocation context by design.
+    // Under the built-in policy alone the daemon only needs the session
+    // identity, so fall back to the scheduler-owned session id and skip the
+    // prompt binding instead of denying every shell call those paths make.
+    const sessionId = invocation?.sessionId ?? context.sessionId;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error(
+        'Managed external tool guard requires a session identity.',
       );
     }
     if (context.signal.aborted) {
@@ -2839,8 +2850,8 @@ export function createManagedExternalToolGuard(
         connection.extMethod(
           SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
           {
-            sessionId: invocation.sessionId,
-            promptId: invocation.promptId,
+            sessionId,
+            ...(invocation ? { promptId: invocation.promptId } : {}),
             toolCallId: context.callId,
             toolName: context.toolName,
             arguments: context.args,

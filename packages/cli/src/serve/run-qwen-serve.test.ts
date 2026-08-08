@@ -3569,7 +3569,6 @@ describe('runQwenServe runtime startup failures', () => {
           arguments: {
             command: `git -C ${path.join(os.tmpdir(), 'outside-repo')} reset --hard`,
           },
-          workspaceCwd: tmpDir,
           effectiveCwd: tmpDir,
         }),
       ).resolves.toMatchObject({ allowed: false });

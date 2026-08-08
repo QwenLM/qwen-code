@@ -18367,6 +18367,50 @@ describe('createManagedExternalToolGuard', () => {
     });
   });
 
+  it('routes context-less shell calls with the scheduler session identity', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+        sessionId: 'session-9',
+      }),
+    ).resolves.toEqual({ allowed: true });
+
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-9',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'pwd' },
+      },
+    );
+  });
+
+  it('fails closed when neither invocation context nor session id exists', async () => {
+    const extMethod = vi.fn();
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow('requires a session identity');
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
   it('fails closed without a managed invocation context', async () => {
     const extMethod = vi.fn();
     const guard = createManagedExternalToolGuard(

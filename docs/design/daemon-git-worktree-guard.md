@@ -15,10 +15,11 @@ The guard applies only to model tool execution through the managed daemon ACP
 path. It does not change CLI or TUI shell validation, Git safety classification,
 permission rules, confirmation behavior, or direct user shell execution.
 
-The daemon enables its managed tool guard for every ACP child. The host owns the
-bound workspace and adds it to the validated guard request before applying the
-built-in policy. An optional external tool guard remains an additional policy
-and receives the same request only after the built-in policy allows it.
+The daemon enables its managed tool guard for every ACP child. The host owns
+the session's effective working directory and adds it to the validated guard
+request before applying the built-in policy. An optional external tool guard
+remains an additional policy and receives the same request only after the
+built-in policy allows it.
 
 ## Policy
 
@@ -39,17 +40,26 @@ changed by literal forms of:
 Wrapper prefixes are unwrapped before Git detection: leading env assignments,
 `command`, `env` (with its value-taking flags), `sudo` (with its value-taking
 flags), `nohup`, `exec`, `timeout <duration>`, `sh|bash|dash|zsh|ksh -c`
-payloads (analyzed recursively), `eval` payloads (analyzed recursively, with
-cwd changes propagated because `eval` runs in the current shell),
-path-qualified Git binaries by basename, and leading `{`/`!` shell syntax.
-A segment whose program token cannot be classified (shell expansions) fails
-closed when the segment also carries a Git relocation marker or a recorded
-relocation.
+payloads (analyzed recursively, keeping the outermost run's entry cwd as the
+containment basis so a preceding `cd` cannot disappear inside the wrapper),
+`eval` payloads (analyzed recursively, with cwd changes propagated because
+`eval` runs in the current shell), path-qualified Git binaries by basename,
+and leading shell keywords and reserved words (`{`, `}`, `!`, `if`, `then`,
+`else`, `elif`, `fi`, `for`, `do`, `done`, `while`, `until`, `in`, `case`,
+`esac`, `time`, `coproc`), which can lead a split segment without changing
+what executes. A segment whose program token cannot be classified fails
+closed when the segment still references Git and carries a relocation marker
+(token-level or inside a quoted payload), a recorded relocation, or an
+unresolved prefix. A `-c` payload that is dynamic (`sh -c "$CMD"`) or fused
+into the flag token (`bash -c'cmd'`, read from the same token) is analyzed
+after extraction; an undecidable payload is denied rather than allowed.
 
 Relative targets resolve from the command's effective starting directory:
 `arguments.directory` when present, otherwise the session's current effective
-working directory. The bridge supplies both that current directory and the
-immutable bound workspace from trusted session state. The current effective
+working directory. A model-supplied `directory` is itself canonicalized and
+checked against the effective working directory before it is trusted as the
+containment basis. The bridge supplies the current directory from trusted
+session state. The current effective
 working directory is the allowed execution boundary so a session moved through
 the controlled daemon `/cd` flow can operate in its selected worktree without
 being mistaken for an escape from the original storage owner. Git applies `-C`
@@ -65,17 +75,20 @@ hold:
 2. its Git subcommand is mutating or cannot be classified as read-only.
 
 Relocated commands whose subcommand is in a small verified read-only set
-(`status`, `rev-parse`, `ls-files`, `grep`, `describe`, `cat-file`) remain
-allowed. `diff`, `log`, `show`, and `blame` are excluded from that set:
-`--output` writes files, and textconv-style drivers execute programs
-configured by the target repository. Any `--output` flag demotes an
-invocation. Commands with no recognized relocation retain existing behavior.
+(`rev-parse`, `ls-files`, `describe`, `cat-file`) remain allowed. `diff`,
+`log`, `show`, and `blame` are excluded from that set: `--output` writes
+files, and textconv-style drivers execute programs configured by the target
+repository. `grep` takes the same `--textconv` path, and `status` refreshes
+the target index and runs the target repository's `core.fsmonitor`, so
+neither is read-only here. Any `--output` flag demotes an invocation. Commands with no recognized relocation retain existing behavior.
 Dynamic relocation targets (`$` expansions, backticks, leading `~`, globs)
 and command-executing `-c`/`--config-env` assignments (`alias.*`,
 `core.editor`, `core.pager`, `credential.helper`, `filter.*`, `difftool.*`,
-`mergetool.*`, `core.fsmonitor`, or values starting with `!`) are denied for
-mutating or unknown subcommands because the daemon cannot prove that the
-target remains inside the effective working directory.
+`mergetool.*`, `core.fsmonitor`, or values starting with `!`) are denied
+regardless of the subcommand — the check runs before the read-only allowance
+because even `status` executes a target-repo-configured `core.fsmonitor` —
+because the daemon cannot prove that the target remains inside the effective
+working directory.
 
 `--git-dir` is evaluated by the repository git operates on, with
 canonicalization before basename handling: a target whose canonical form ends
@@ -87,8 +100,8 @@ linked worktree checkout. Unresolvable indirections fail closed.
 ## Failure semantics
 
 Malformed managed guard requests, stale session or prompt ownership, missing
-trusted workspace context, policy exceptions, and malformed external-provider
-responses fail closed before execution. Unparseable commands, dangling
+trusted effective working directory, policy exceptions, and malformed
+external-provider responses fail closed before execution. Unparseable commands, dangling
 relocation options, relocation targets that do not fully exist at decision
 time (a missing target can still become an outward symlink before git runs),
 and unreadable Git indirections are denied for mutating or unclassifiable
@@ -101,11 +114,26 @@ built-in policy needs it. The child-side v1 restrictions (`/fork` and
 agent-backed workspace memory remember/dream) key on the external provider
 being attached, not on the plumbing's mere presence: under the built-in guard
 alone, hidden-agent tool calls traverse the same managed guard and are
-inspected by the same daemon-side policy. Without a provider the child also
-resolves every non-shell tool call locally (the built-in policy allows them
-structurally) instead of paying a child-daemon-child round trip per call;
-`run_shell_command` always makes the round trip. With a provider attached
-every call still makes it.
+inspected by the same daemon-side policy. Subagent reasoning loops, cron
+turns, background notifications, and resumed background agents run without an
+invocation context by design; their shell calls fall back to the
+scheduler-owned session identity and are validated by session ownership
+alone, because the built-in policy needs the effective working directory,
+not a live prompt. Consulting the external provider always requires a prompt
+binding, so a prompt-less request with a provider attached fails closed.
+Without a provider the child also resolves every non-shell tool call locally
+(the built-in policy allows them structurally) instead of paying a
+child-daemon-child round trip per call; `run_shell_command` always makes the
+round trip. With a provider attached every prompt-bound call still makes it.
+
+## Limitations
+
+The guard is a containment control against mis-targeted Git invocations
+expressed in the literal forms above. It is not a sandbox against a
+prompt-injected agent: script-file contents are not read, variable values are
+not tracked across commands, and program words outside the unwrapped set are
+handled by failing closed on Git-shaped runs rather than by modelling their
+execution semantics.
 
 ## Non-goals
 
