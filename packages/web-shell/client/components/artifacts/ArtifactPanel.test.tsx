@@ -1,41 +1,96 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
+  DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonScheduledTask,
+  DaemonSessionActions,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
+import type { TurnOutputScheduledTask } from './TurnOutputs';
 
-const { mockActions, mockWorkspaceActions } = vi.hoisted(() => ({
-  mockActions: {
-    cancelTask: vi.fn(),
-    getTasks: vi.fn(),
-  },
-  mockWorkspaceActions: {
-    readFileBytes: vi.fn(),
-    stat: vi.fn(),
-  },
-}));
+const {
+  mockActions,
+  mockWorkspace,
+  mockWorkspaceActions,
+  mockSecondaryWorkspaceActions,
+} = vi.hoisted(() => {
+  const mockSecondaryWorkspaceActions = {
+    readWorkspaceFile: vi.fn(),
+    readWorkspaceFileBytes: vi.fn(),
+    fileStat: vi.fn(),
+  };
+  return {
+    mockActions: {
+      cancelTask: vi.fn(),
+      getTasks: vi.fn(),
+    },
+    mockWorkspaceActions: {
+      readFileBytes: vi.fn(),
+      readWorkspaceFile: vi.fn(),
+      stat: vi.fn(),
+      listScheduledTasks: vi.fn(),
+      updateScheduledTask: vi.fn(),
+      deleteScheduledTask: vi.fn(),
+    },
+    mockSecondaryWorkspaceActions,
+    mockWorkspace: {
+      capabilities: {
+        workspaceCwd: '/primary',
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary-id',
+            cwd: '/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+      client: {
+        workspaceByCwd: vi.fn(() => mockSecondaryWorkspaceActions),
+      },
+    },
+  };
+});
 
 vi.mock(
   '@qwen-code/webui/daemon-react-sdk',
   async (importOriginal: () => Promise<Record<string, unknown>>) => ({
     ...(await importOriginal()),
     useActions: () => mockActions,
+    useWorkspace: () => mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
 
 const { ArtifactPanel } = await import('./ArtifactPanel');
+const { useArtifactWorkspaceTarget } = await import(
+  './useArtifactWorkspaceTarget'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+let latestArtifactWorkspaceTarget: ArtifactWorkspaceTarget | undefined;
+
+function ArtifactWorkspaceTargetProbe({ revision }: { revision: number }) {
+  latestArtifactWorkspaceTarget = useArtifactWorkspaceTarget('/secondary');
+  return <span data-revision={revision} />;
+}
 
 function monitorPanel(
   task: DaemonSessionMonitorTaskStatus,
@@ -91,6 +146,148 @@ function shellPanel(task: DaemonSessionShellTaskStatus) {
   );
 }
 
+function codeReviewArtifact(
+  patch: Partial<DaemonSessionArtifact> = {},
+): DaemonSessionArtifact {
+  return {
+    id: 'review-artifact',
+    kind: 'other',
+    storage: 'workspace',
+    source: 'tool',
+    status: 'available',
+    title: 'Code review result',
+    workspacePath: '.qwen/reviews/review.json',
+    metadata: { artifactType: 'code_review', schemaVersion: 1 },
+    retention: 'ephemeral',
+    clientRetained: false,
+    createdAt: '2026-08-03T00:00:00.000Z',
+    updatedAt: '2026-08-03T00:00:00.000Z',
+    ...patch,
+  };
+}
+
+const validCodeReviewDocument = JSON.stringify({
+  schemaVersion: 1,
+  target: 'local',
+  effort: 'high',
+  verdict: {
+    event: 'APPROVE',
+    verdictLine: 'Verdict: Approve',
+    baseEvent: 'APPROVE',
+    cappedBy: [],
+    downgraded: false,
+    downgradedFrom: null,
+  },
+  findings: [],
+  counts: {
+    total: 0,
+    bySeverity: {
+      Critical: 0,
+      Suggestion: 0,
+      'Nice to have': 0,
+    },
+    byConfidence: { high: 0, low: 0 },
+    held: 0,
+  },
+  outcomesRecorded: false,
+  markdownReportPath: '.qwen/reviews/review.md',
+});
+
+function artifactPanel(
+  artifact: DaemonSessionArtifact,
+  owner: { workspaceCwd: string; workspaceId: string } | null = {
+    workspaceCwd: '/primary',
+    workspaceId: 'primary-id',
+  },
+) {
+  return (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[artifact]}
+        tabs={[
+          {
+            id: 'artifact:review-artifact',
+            kind: 'artifact',
+            title: artifact.title,
+            artifactId: artifact.id,
+            ...(owner ?? {}),
+          },
+        ]}
+        activeTabId="artifact:review-artifact"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+}
+
+const secondaryScheduledTask: DaemonScheduledTask = {
+  id: 'cron-secondary',
+  name: 'Secondary task',
+  cron: '0 9 * * *',
+  prompt: 'secondary only',
+  recurring: true,
+  enabled: true,
+  createdAt: 1_700_000_000_000,
+  lastFiredAt: null,
+  nextRunAt: null,
+  sessionId: null,
+  runs: [],
+};
+
+function scheduledTaskPanel(
+  options: {
+    workspaceCwd?: string;
+    workspaceId?: string;
+    task?: Partial<TurnOutputScheduledTask>;
+  } = {},
+) {
+  const workspaceCwd = options.workspaceCwd ?? '/secondary';
+  const workspaceId = Object.hasOwn(options, 'workspaceId')
+    ? options.workspaceId
+    : 'secondary-id';
+  const taskPatch = options.task ?? {};
+  const task: TurnOutputScheduledTask = {
+    id: 'cron-secondary',
+    toolCallId: 'cron-call',
+    title: 'Secondary task',
+    cron: '0 9 * * *',
+    prompt: 'secondary only',
+    recurring: true,
+    durable: true,
+    workspaceId,
+    ...taskPatch,
+  };
+  return (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          {
+            id: 'scheduled-task:secondary:cron-call',
+            kind: 'scheduled_task',
+            title: 'Scheduled Tasks',
+            workspaceCwd,
+            workspaceId,
+            task,
+          },
+        ]}
+        activeTabId="scheduled-task:secondary:cron-call"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+}
+
 afterEach(() => {
   for (const { root, container } of mounted) {
     act(() => root.unmount());
@@ -100,7 +297,186 @@ afterEach(() => {
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
   mockWorkspaceActions.readFileBytes.mockReset();
+  mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
+  mockWorkspaceActions.listScheduledTasks.mockReset();
+  mockWorkspaceActions.updateScheduledTask.mockReset();
+  mockWorkspaceActions.deleteScheduledTask.mockReset();
+  mockSecondaryWorkspaceActions.readWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
+  mockSecondaryWorkspaceActions.fileStat.mockReset();
+  mockWorkspace.client.workspaceByCwd.mockClear();
+  latestArtifactWorkspaceTarget = undefined;
+  mockWorkspace.capabilities = {
+    workspaceCwd: '/primary',
+    workspaces: [
+      {
+        id: 'primary-id',
+        cwd: '/primary',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary-id',
+        cwd: '/secondary',
+        primary: false,
+        trusted: true,
+      },
+    ],
+  };
+});
+
+describe('artifact workspace authority', () => {
+  it('keeps an in-flight read across an equivalent capabilities refresh', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const initialActions = latestArtifactWorkspaceTarget?.actions;
+    const read = initialActions?.readWorkspaceFile('report.json');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces.map((entry) => ({
+        ...entry,
+      })),
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+
+    expect(latestArtifactWorkspaceTarget?.actions).toBe(initialActions);
+    resolveRead?.({ content: 'still-owned', truncated: false });
+    await expect(read).resolves.toEqual({
+      content: 'still-owned',
+      truncated: false,
+    });
+  });
+
+  it('does not revive an old read after the same owner is removed and re-added', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const initialActions = latestArtifactWorkspaceTarget?.actions;
+    const read = initialActions?.readWorkspaceFile('report.json');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [mockWorkspace.capabilities.workspaces[0]!],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+    expect(latestArtifactWorkspaceTarget).toBeUndefined();
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        mockWorkspace.capabilities.workspaces[0]!,
+        {
+          id: 'secondary-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={2} />));
+    expect(latestArtifactWorkspaceTarget).toBeDefined();
+    expect(latestArtifactWorkspaceTarget?.actions).not.toBe(initialActions);
+
+    resolveRead?.({ content: 'stale-secret', truncated: false });
+    await expect(read).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+  });
+
+  it('revokes every pending file read when its owner is removed', async () => {
+    let resolveText:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    let resolveBytes:
+      | ((file: {
+          contentBase64: string;
+          offset: number;
+          returnedBytes: number;
+          sizeBytes: number;
+        }) => void)
+      | undefined;
+    let resolveStat:
+      | ((stat: { sizeBytes: number; modifiedMs: number }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveText = resolve;
+      }),
+    );
+    mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReturnValue(
+      new Promise((resolve) => {
+        resolveBytes = resolve;
+      }),
+    );
+    mockSecondaryWorkspaceActions.fileStat.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStat = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const actions = latestArtifactWorkspaceTarget?.actions;
+    expect(actions).toBeDefined();
+    const textRead = actions?.readWorkspaceFile('report.txt');
+    const bytesRead = actions?.readFileBytes('report.bin', {
+      offset: 0,
+      maxBytes: 1024,
+    });
+    const statRead = actions?.stat('report.bin');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [mockWorkspace.capabilities.workspaces[0]!],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+
+    resolveText?.({ content: 'stale-text', truncated: false });
+    resolveBytes?.({
+      contentBase64: btoa('stale-bytes'),
+      offset: 0,
+      returnedBytes: 11,
+      sizeBytes: 11,
+    });
+    resolveStat?.({ sizeBytes: 11, modifiedMs: 1 });
+    await expect(textRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(bytesRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(statRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+  });
 });
 
 function openAddMenu(container: HTMLElement) {
@@ -114,6 +490,581 @@ function openAddMenu(container: HTMLElement) {
   });
   return add;
 }
+
+async function flush() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe('ArtifactPanel code review artifacts', () => {
+  it('fails closed when an artifact tab has no workspace owner', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'PRIMARY_WORKSPACE_SECRET',
+      truncated: false,
+    });
+    const artifact = codeReviewArtifact({ metadata: {} });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(artifact, null)));
+    await flush();
+
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
+  });
+
+  it('fails closed when a file tab has no workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'file:missing-owner',
+                kind: 'file',
+                title: 'Missing owner',
+                workspacePath: 'secret.txt',
+                workspaceCwd: '/unknown',
+                workspaceId: 'missing-id',
+              },
+            ]}
+            activeTabId="file:missing-owner"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'This workspace may have been removed',
+    );
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+  });
+
+  it('dispatches an available workspace artifact to the dedicated renderer', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: validCodeReviewDocument,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(codeReviewArtifact())));
+    await flush();
+
+    expect(container.textContent).toContain('Authoritative verdict');
+    expect(container.textContent).toContain('Verdict: Approve');
+    expect(container.querySelector('.cm-editor')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      '.qwen/reviews/review.json',
+    );
+  });
+
+  it('loads an artifact under StrictMode effect replay', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: validCodeReviewDocument,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <StrictMode>{artifactPanel(codeReviewArtifact())}</StrictMode>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('Authoritative verdict');
+    expect(container.textContent).not.toContain(
+      'Workspace artifact owner is no longer available',
+    );
+  });
+
+  it.each(['changed', 'missing'] as const)(
+    'does not render a %s artifact as authoritative',
+    async (status) => {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+
+      act(() => root.render(artifactPanel(codeReviewArtifact({ status }))));
+      await flush();
+
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        status,
+      );
+      expect(container.textContent).not.toContain('Authoritative verdict');
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires code review artifacts to use workspace storage', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel(
+          codeReviewArtifact({
+            storage: 'external_url',
+            workspacePath: undefined,
+          }),
+        ),
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'workspace files',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('still sends an ordinary JSON artifact to the generic editor', async () => {
+    // The regression the early `return` in the dispatch can cause: an
+    // artifact WITHOUT the code_review metadata must keep reaching the
+    // generic file preview, not the dedicated renderer.
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: '{}',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(codeReviewArtifact({ metadata: {} }))));
+    await flush();
+
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+    expect(container.textContent).not.toContain('Authoritative verdict');
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      '.qwen/reviews/review.json',
+    );
+  });
+
+  it('discards a pending read when its workspace owner is replaced', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const artifact = codeReviewArtifact({ metadata: {} });
+    const owner = {
+      workspaceCwd: '/secondary',
+      workspaceId: 'secondary-id',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(artifact, owner)));
+    await flush();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/secondary',
+    );
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        mockWorkspace.capabilities.workspaces[0]!,
+        {
+          id: 'secondary-replacement-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    act(() => root.render(artifactPanel(artifact, owner)));
+    await flush();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'removed',
+    );
+
+    await act(async () => {
+      resolveRead?.({ content: 'REMOVED_WORKSPACE_SECRET', truncated: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('REMOVED_WORKSPACE_SECRET');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('ArtifactPanel scheduled-task ownership', () => {
+  it('loads a durable task through its secondary workspace route', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'secondary-id',
+    );
+  });
+
+  it('updates and deletes only through the task workspace id', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      { enabled: false },
+      'secondary-id',
+    );
+
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      'secondary-id',
+    );
+  });
+
+  it('fails closed for a durable task whose workspace owner is unavailable', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/unknown',
+          workspaceId: 'missing-id',
+          task: { workspaceId: 'missing-id' },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'This workspace may have been removed',
+    );
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('shows a session-scoped task snapshot without a workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/unknown',
+          workspaceId: 'missing-id',
+          task: {
+            id: 'session-task',
+            durable: false,
+            prompt: 'local session snapshot',
+            workspaceId: 'missing-id',
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('session-scoped scheduled task');
+    expect(container.textContent).toContain('local session snapshot');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy single-workspace scheduled-task routes unqualified', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/primary',
+          workspaceId: undefined,
+          task: { workspaceId: undefined },
+        }),
+      ),
+    );
+    await flush();
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      undefined,
+    );
+
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      { enabled: false },
+      undefined,
+    );
+
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      undefined,
+    );
+  });
+
+  it.each(['save', 'toggle', 'delete'] as const)(
+    'settles a pending reload after a %s mutation',
+    async (mutation) => {
+      let resolveReload: ((tasks: DaemonScheduledTask[]) => void) | undefined;
+      mockWorkspaceActions.listScheduledTasks
+        .mockResolvedValueOnce([secondaryScheduledTask])
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveReload = resolve;
+          }),
+        );
+      const updatedTask = {
+        ...secondaryScheduledTask,
+        name: `${mutation} result`,
+        enabled: false,
+      };
+      mockWorkspaceActions.updateScheduledTask.mockResolvedValue(updatedTask);
+      mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+
+      act(() => root.render(scheduledTaskPanel()));
+      await flush();
+      act(() =>
+        root.render(
+          scheduledTaskPanel({ task: { prompt: `reload ${mutation}` } }),
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain('Loading…');
+
+      if (mutation === 'save') {
+        const edit = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Edit',
+        );
+        act(() => edit?.click());
+        const save = Array.from(document.body.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Save',
+        );
+        await act(async () => {
+          save?.click();
+          await Promise.resolve();
+        });
+        expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+          'cron-secondary',
+          expect.objectContaining({ prompt: expect.any(String) }),
+          'secondary-id',
+        );
+      } else if (mutation === 'toggle') {
+        const disable = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Disable',
+        );
+        await act(async () => {
+          disable?.click();
+          await Promise.resolve();
+        });
+      } else {
+        const openDelete = Array.from(
+          container.querySelectorAll('button'),
+        ).find((button) => button.textContent?.trim() === 'Delete');
+        act(() => openDelete?.click());
+        const confirmDelete = Array.from(
+          document.body.querySelectorAll('button'),
+        )
+          .filter((button) => button.textContent?.trim() === 'Delete')
+          .at(-1);
+        await act(async () => {
+          confirmDelete?.click();
+          await Promise.resolve();
+        });
+      }
+
+      await act(async () => {
+        resolveReload?.([secondaryScheduledTask]);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain('Loading…');
+      if (mutation === 'delete') {
+        expect(container.textContent).toContain('has been deleted');
+      } else {
+        expect(container.textContent).toContain(`${mutation} result`);
+      }
+    },
+  );
+
+  it('discards a pending mutation when the task scope changes', async () => {
+    const replacementTask: DaemonScheduledTask = {
+      ...secondaryScheduledTask,
+      id: 'cron-replacement',
+      name: 'Replacement task',
+      prompt: 'replacement only',
+    };
+    let resolveStaleMutation: ((task: DaemonScheduledTask) => void) | undefined;
+    mockWorkspaceActions.listScheduledTasks
+      .mockResolvedValueOnce([secondaryScheduledTask])
+      .mockResolvedValueOnce([replacementTask]);
+    mockWorkspaceActions.updateScheduledTask.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStaleMutation = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    act(() => disable?.click());
+    await flush();
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: replacementTask.id,
+            title: replacementTask.name ?? replacementTask.prompt,
+            prompt: replacementTask.prompt,
+          },
+        }),
+      ),
+    );
+    await flush();
+    expect(container.textContent).toContain('Replacement task');
+
+    await act(async () => {
+      resolveStaleMutation?.({
+        ...secondaryScheduledTask,
+        name: 'Stale mutation result',
+        enabled: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('Stale mutation result');
+    expect(container.textContent).toContain('Replacement task');
+
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValueOnce({
+      ...replacementTask,
+      enabled: false,
+    });
+    const replacementDisable = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.trim() === 'Disable');
+    await act(async () => {
+      replacementDisable?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenLastCalledWith(
+      'cron-replacement',
+      { enabled: false },
+      'secondary-id',
+    );
+  });
+});
 
 describe('ArtifactPanel add menu', () => {
   it('keeps the disabled review action on the empty page and hides the add button', () => {
@@ -145,7 +1096,7 @@ describe('ArtifactPanel add menu', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.includes('Review'));
+    ).find((button) => button.textContent?.includes('Changes'));
     expect(review?.disabled).toBe(true);
     expect(review?.textContent).toContain('View recent file changes');
     expect(container.textContent).not.toContain('⌘');
@@ -378,7 +1329,7 @@ describe('ArtifactPanel add menu', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="right-panel-empty-actions"] button',
       ),
-    ).find((button) => button.textContent?.includes('Review'));
+    ).find((button) => button.textContent?.includes('Changes'));
     expect(review?.disabled).toBe(false);
     act(() => review?.click());
     expect(onOpenLatestReview).toHaveBeenCalledOnce();
@@ -395,7 +1346,15 @@ describe('ArtifactPanel add menu', () => {
         <I18nProvider language="en">
           <ArtifactPanel
             artifacts={[]}
-            tabs={[{ id: 'review', kind: 'review', title: 'Review' }]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
             activeTabId="review"
             reviewChanges={[]}
             selectedReviewPath={null}
@@ -435,6 +1394,8 @@ describe('ArtifactPanel add menu', () => {
                 kind: 'artifact',
                 title: 'Report',
                 artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="artifact"
@@ -462,7 +1423,7 @@ describe('ArtifactPanel add menu', () => {
 
     openAddMenu(container);
     const menuText = document.body.querySelector('[role="menu"]')?.textContent;
-    expect(menuText).toContain('Review');
+    expect(menuText).toContain('Changes');
     expect(menuText).toContain('New side task');
     expect(menuText).not.toContain('Existing side task');
   });
@@ -500,6 +1461,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -568,6 +1531,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -627,6 +1592,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"

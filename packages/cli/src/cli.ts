@@ -9,6 +9,7 @@ import {
   chmodSync,
   constants,
   existsSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -354,6 +355,7 @@ export async function runCliEntry(
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
   if (managedUpdateVersion) {
     delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     const { installManagedNpmUpdate } = await import(
       './utils/managed-npm-update.js'
     );
@@ -363,6 +365,13 @@ export async function runCliEntry(
 
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
+  if (route !== 'serve') {
+    // This credential belongs only to `qwen serve`. Scrub it before any other
+    // subcommand handler can start a child process during yargs parsing. The
+    // serve route keeps it until either the fast path or full serve handler
+    // has captured it into daemon-local options.
+    delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
+  }
 
   if (route === 'version') {
     await printBootstrapVersion();
@@ -541,9 +550,17 @@ export async function runCliEntryPoint(
   }
 }
 
-if (
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+let isMain = false;
+if (process.argv[1] !== undefined) {
+  try {
+    const argvRealHref = pathToFileURL(realpathSync(process.argv[1])).href;
+    const argvHref = pathToFileURL(process.argv[1]).href;
+    isMain = import.meta.url === argvHref || import.meta.url === argvRealHref;
+  } catch {
+    isMain = import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+}
+
+if (isMain) {
   void runCliEntryPoint();
 }

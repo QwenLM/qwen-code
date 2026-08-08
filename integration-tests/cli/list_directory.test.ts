@@ -12,7 +12,6 @@ import {
   TestRig,
 } from '../test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 describe('list_directory', () => {
@@ -25,17 +24,6 @@ describe('list_directory', () => {
     await rig.setup('should be able to list a directory');
     rig.createFile('file1.txt', 'file 1 content');
     rig.mkdir('subdir');
-    rig.sync();
-
-    await rig.poll(
-      () => {
-        const file1Path = join(rig.testDir!, 'file1.txt');
-        const subdirPath = join(rig.testDir!, 'subdir');
-        return existsSync(file1Path) && existsSync(subdirPath);
-      },
-      1000,
-      50,
-    );
 
     const noProxy = IS_CONTAINER_SANDBOX
       ? CONTAINER_SANDBOX_NO_PROXY

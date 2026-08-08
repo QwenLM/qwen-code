@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.21.2",
+  "version": "0.21.7",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.7"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
@@ -48,12 +48,12 @@
     "@qwen-code/audio-capture": "file:../audio-capture",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
-    "@qwen-code/channel-wecom": "file:../channels/wecom",
-    "@qwen-code/channel-qqbot": "file:../channels/qqbot",
+    "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/channel-gitlab": "file:../channels/gitlab",
-    "@qwen-code/channel-feishu": "file:../channels/feishu",
+    "@qwen-code/channel-qqbot": "file:../channels/qqbot",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
+    "@qwen-code/channel-wecom": "file:../channels/wecom",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/sdk": "file:../sdk-typescript",
@@ -75,8 +75,8 @@
     "jsonc-parser": "^3.3.1",
     "lowlight": "^3.3.0",
     "p-limit": "^7.3.0",
-    "proper-lockfile": "^4.1.2",
     "prompts": "^2.4.2",
+    "proper-lockfile": "^4.1.2",
     "react": "^19.2.4",
     "read-package-up": "^11.0.0",
     "shell-quote": "^1.9.0",
@@ -88,8 +88,9 @@
     "undici": "^7.28.0",
     "wrap-ansi": "^10.0.0",
     "ws": "^8.18.0",
-    "yauzl": "^2.10.0",
+    "yaml": "^2.8.1",
     "yargs": "^17.7.2",
+    "yauzl": "^2.10.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

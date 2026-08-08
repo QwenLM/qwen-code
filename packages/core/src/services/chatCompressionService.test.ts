@@ -19,10 +19,16 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type {
+  BaseLlmClient,
+  GenerateTextOptions,
+} from '../core/baseLlmClient.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import * as slimmingModule from './compactionInputSlimming.js';
+import { logChatCompression } from '../telemetry/loggers.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -2149,6 +2155,781 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
     );
+  });
+});
+
+describe('ChatCompressionService.compress cache sharing', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const mainSystemInstruction = 'main system instruction';
+  const tools = [
+    {
+      functionDeclarations: [{ name: 'read_file', description: 'Read a file' }],
+    },
+  ];
+
+  function makeHistory(length = 4): Content[] {
+    return Array.from({ length }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'model',
+      parts: [{ text: `message-${index}` }],
+    }));
+  }
+
+  function makeMediaHistory(): Content[] {
+    return [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+          {
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: 'pdf-bytes',
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'media received' }] },
+    ];
+  }
+
+  function makeFixture(options?: {
+    history?: Content[];
+    authType?: AuthType;
+    baseUrl?: string;
+    compactionModel?: string;
+    enableCacheControl?: boolean;
+    contextWindowSize?: number | null;
+    lastPromptTokenCount?: number;
+    lastPromptTokenCountIsEstimated?: boolean;
+    lastOutputTokenCount?: number;
+  }): {
+    chat: GeminiChat;
+    config: Config;
+    generateText: ReturnType<typeof vi.fn>;
+  } {
+    const history = options?.history ?? makeHistory();
+    const getHistory = vi.fn().mockReturnValue(history);
+    const generateText = vi.fn().mockResolvedValue({
+      text: '<state_snapshot>shared summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 170_500,
+        cachedContentTokenCount: 160_000,
+      },
+      hadToolCall: false,
+    });
+    const baseLlmClient = { generateText } as unknown as BaseLlmClient;
+    const chat = {
+      getHistory,
+      getHistoryShallow: getHistory,
+      getGenerationConfig: vi.fn().mockReturnValue({
+        systemInstruction: mainSystemInstruction,
+        tools,
+        thinkingConfig: { includeThoughts: true },
+      }),
+      getLastPromptTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCount ?? 180_000),
+      isLastPromptTokenCountEstimated: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCountIsEstimated ?? false),
+      getLastOutputTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastOutputTokenCount ?? 0),
+    } as unknown as GeminiChat;
+    const config = {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'test-model',
+        authType: options?.authType ?? AuthType.USE_ANTHROPIC,
+        baseUrl: options?.baseUrl,
+        ...(options?.contextWindowSize === null
+          ? {}
+          : { contextWindowSize: options?.contextWindowSize ?? 220_000 }),
+        enableCacheControl: options?.enableCacheControl ?? true,
+      }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getCompactionModel: vi.fn().mockReturnValue(options?.compactionModel),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    return { chat, config, generateText };
+  }
+
+  it('preserves the main system, tools, and complete history before the compression directive', async () => {
+    const history = makeHistory(42);
+    const { chat, config, generateText } = makeFixture({ history });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'Keep the exact command output.',
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+    expect(request.systemInstruction).toBe(mainSystemInstruction);
+    expect(request.promptCacheSharing).toBe(true);
+    expect(request.config?.tools).toBe(tools);
+    expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
+    expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
+      COMPACT_MAX_OUTPUT_TOKENS - 1,
+    );
+    expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(request.contents).toHaveLength(43);
+    expect(request.contents.at(-1)?.parts?.[0]?.text).toContain(
+      'Keep the exact command output.',
+    );
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
+  });
+
+  it('preserves per-request tool overrides used by subagent turns', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const requestTools = [
+      {
+        functionDeclarations: [
+          { name: 'subagent_tool', description: 'Subagent-only tool' },
+        ],
+      },
+    ];
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      requestGenerationConfig: { tools: requestTools },
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      config?: { tools?: unknown };
+    };
+    expect(request.config?.tools).toBe(requestTools);
+  });
+
+  it('attempts cache sharing with media still in the history', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({ history });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+    };
+    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(JSON.stringify(request.contents)).toContain('image-bytes');
+    expect(JSON.stringify(request.contents)).toContain('pdf-bytes');
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(slimSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
+    'uses cache sharing for DashScope through %s',
+    async (authType) => {
+      const { chat, config, generateText } = makeFixture({ authType });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([AuthType.USE_GEMINI, AuthType.USE_VERTEX_AI])(
+    'uses cache sharing for Google GenAI through %s',
+    async (authType) => {
+      const { chat, config, generateText } = makeFixture({ authType });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as {
+        config?: { thinkingConfig?: { includeThoughts?: boolean } };
+      };
+      expect(request.config?.thinkingConfig?.includeThoughts).toBe(false);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps implicit Google cache sharing enabled when explicit cache control is disabled', async () => {
+    const { chat, config, generateText } = makeFixture({
+      authType: AuthType.USE_GEMINI,
+      enableCacheControl: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'https://api.openai.com/v1',
+    'https://api.deepseek.com/v1',
+    'https://proxy.example/v1',
+  ])(
+    'uses cache sharing for OpenAI-compatible endpoint %s',
+    async (baseUrl) => {
+      const { chat, config, generateText } = makeFixture({
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+      });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+      expect(request.promptCacheSharing).toBe(true);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('appends a pending tool result after the cached history and before the directive', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'read the file' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'read_file',
+              args: { path: 'README.md' },
+            },
+          },
+        ],
+      },
+    ];
+    const pendingUserMessage: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'contents' },
+          },
+        },
+      ],
+    };
+    const { chat, config, generateText } = makeFixture({ history });
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      trigger: 'auto',
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      pendingUserMessage,
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+    };
+    expect(request.contents.slice(0, -1)).toEqual([
+      ...history,
+      pendingUserMessage,
+    ]);
+  });
+
+  it('preserves non-visible system and tool tokens in the post-compression count', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(40_000) }] },
+      { role: 'model', parts: [{ text: 'y'.repeat(40_000) }] },
+    ];
+    const { chat, config } = makeFixture({ history });
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCountIsEstimated).toBe(true);
+    expect(result.info.newTokenCount).toBeGreaterThan(100_000);
+  });
+
+  it('accepts a complete shared summary when thinking reaches the output cap', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'x'.repeat(40_000) }] },
+      { role: 'model', parts: [{ text: 'y'.repeat(40_000) }] },
+    ];
+    const { chat, config, generateText } = makeFixture({ history });
+    generateText.mockResolvedValue({
+      text: '<analysis>long reasoning</analysis><state_snapshot>complete summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: COMPACT_MAX_OUTPUT_TOKENS,
+        totalTokenCount: 190_000,
+        cachedContentTokenCount: 160_000,
+      },
+      hadToolCall: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.newHistory).not.toBeNull();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'tool call',
+      response: {
+        text: '<state_snapshot>shared summary</state_snapshot>',
+        usage: {},
+        hadToolCall: true,
+      },
+    },
+    {
+      name: 'malformed snapshot',
+      response: { text: 'plain summary', usage: {}, hadToolCall: false },
+    },
+    {
+      name: 'empty snapshot',
+      response: {
+        text: '<state_snapshot></state_snapshot>',
+        usage: {},
+        hadToolCall: false,
+      },
+    },
+    {
+      name: 'whitespace-only snapshot',
+      response: {
+        text: '<state_snapshot> </state_snapshot>',
+        usage: {},
+        hadToolCall: false,
+      },
+    },
+  ])(
+    'falls back once when the shared response contains a $name',
+    async ({ response }) => {
+      const { chat, config, generateText } = makeFixture();
+      generateText.mockResolvedValue(response);
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>cold summary</state_snapshot>',
+          usage: {
+            promptTokenCount: 170_000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 170_500,
+          },
+        } as never);
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: true,
+          cache_sharing_used: false,
+        }),
+      );
+    },
+  );
+
+  it('does not fall back after cancellation', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const controller = new AbortController();
+    controller.abort(new DOMException('Aborted', 'AbortError'));
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await expect(
+      new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('Aborted');
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back when cancellation lands with an unusable shared response', async () => {
+    const { chat, config, generateText } = makeFixture();
+    const controller = new AbortController();
+    generateText.mockImplementation(async () => {
+      controller.abort();
+      return { text: 'plain summary', usage: {}, hadToolCall: false };
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await expect(
+      new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back once when the cache-sharing request fails', async () => {
+    const { chat, config, generateText } = makeFixture();
+    generateText.mockRejectedValue(new Error('provider failed'));
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('slims media only after the cache-sharing request fails', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({ history });
+    generateText.mockRejectedValue(new Error('provider failed'));
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(slimSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+      { text: '[image: image/png]' },
+      { text: '[document: application/pdf]' },
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'provider prompt count',
+      originalTokenCount: 179_999,
+      precomputedEffectiveTokens: undefined,
+    },
+    {
+      name: 'hard-tier effective count',
+      originalTokenCount: 160_000,
+      precomputedEffectiveTokens: 180_001,
+    },
+  ])(
+    'skips a shared request when the $name cannot fit its output reserve',
+    async ({ originalTokenCount, precomputedEffectiveTokens }) => {
+      const history = makeMediaHistory();
+      const { chat, config, generateText } = makeFixture({
+        history,
+        contextWindowSize: 200_000,
+      });
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>cold summary</state_snapshot>',
+          usage: {
+            promptTokenCount: 170_000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 170_500,
+          },
+        } as never);
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount,
+        precomputedEffectiveTokens,
+      });
+
+      expect(generateText).not.toHaveBeenCalled();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+        { text: '[image: image/png]' },
+        { text: '[document: application/pdf]' },
+      ]);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: false,
+          cache_sharing_used: false,
+        }),
+      );
+    },
+  );
+
+  it('uses the default context window when the provider omits its size', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: null,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 150_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
+  });
+
+  it('includes the previous model output in the shared-request window check', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not add previous output to an all-inclusive prompt count', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips cache sharing when the chat has no provider token-count anchor', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 0,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 0,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips cache sharing when the token-count anchor is estimate-derived', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 180_000,
+      lastPromptTokenCountIsEstimated: true,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      name: 'a distinct compaction model',
+      options: { compactionModel: 'compact-model' },
+    },
+    {
+      name: 'disabled cache control',
+      options: { enableCacheControl: false },
+    },
+  ])('keeps $name on the cold path', async ({ options }) => {
+    const { chat, config, generateText } = makeFixture(options);
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
   });
 });
 

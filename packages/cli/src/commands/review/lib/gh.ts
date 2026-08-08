@@ -104,6 +104,26 @@ export function getGhHost(): string | undefined {
 }
 
 /**
+ * The effective GitHub host for a command invocation: an explicit `--host`
+ * flag wins, else an operator-exported GH_HOST, else `undefined` — the
+ * caller applies its own default (`gh`'s github.com, or the matcher's
+ * comparison host). Every call site that needs the effective host as a
+ * value — the matcher and the two write-side authorisation gates —
+ * resolves through this one helper so they cannot disagree; routing
+ * sites go through `setGhHost` and inherit an operator-exported GH_HOST
+ * via the child env.
+ *
+ * `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
+ * `??`, being non-nullish) must read as "no host", not as a host named ""
+ * that fails every comparison.
+ */
+export function resolveGhHost(
+  flagHost: string | undefined,
+): string | undefined {
+  return flagHost ?? (process.env['GH_HOST']?.trim() || undefined);
+}
+
+/**
  * Environment for `gh` child processes. `undefined` means "inherit the
  * parent env untouched"; with a host set, the inherited env is extended
  * with GH_HOST, which `gh` honours on every command.
@@ -127,12 +147,24 @@ export function gh(...args: string[]): string {
 }
 
 /**
+ * Run `gh` with `input` on its stdin, WITH the same transient-error retry as
+ * `gh()` — for callers whose input-carrying writes are idempotent
+ * (publish-assets: content-hashed PUTs, a ref create whose duplicate is
+ * caught). Non-idempotent writes use `ghWithInput` below.
+ */
+export function ghWithInputRetried(input: string, ...args: string[]): string {
+  return execGhWithRetry(args, { input });
+}
+
+/**
  * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
  *
- * Unlike `gh()`, this does NOT retry on transient errors: the only caller
- * (`submit.ts`) POSTs a review, which is not idempotent — a retry after a
- * proxy-level 502/503 could duplicate the review if GitHub already processed
- * the original request.
+ * Unlike `gh()`, this does NOT retry on transient errors: `submit.ts` POSTs
+ * a review, which is not idempotent — a retry after a proxy-level 502/503
+ * could duplicate the review if GitHub already processed the original
+ * request. A caller whose input-carrying write IS idempotent (publish-assets:
+ * content-hashed PUTs, a ref create whose duplicate is caught) uses
+ * `ghWithInputRetried` above, which shares `gh()`'s transient-error retry.
  *
  * Exists so a caller can send bytes it already holds in memory instead of a
  * pathname `gh` would re-open. Passing `--input <file>` re-reads the file at

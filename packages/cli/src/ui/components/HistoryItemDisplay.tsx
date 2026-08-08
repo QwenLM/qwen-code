@@ -63,6 +63,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   measureElementPosition,
@@ -126,7 +127,10 @@ const ClickableThinkMessage: React.FC<{
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
-  const clickable = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
+  const mouseTrackingEnabled = useMouseTrackingEnabled();
+  const clickable =
+    useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
+    mouseTrackingEnabled;
   const isActive = !isPending;
 
   useMouseEvents(
@@ -296,6 +300,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           )}
           <AssistantMessage
             text={itemForDisplay.text}
+            images={itemForDisplay.images}
+            omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
               availableTerminalHeightGemini ?? availableTerminalHeight
@@ -308,6 +314,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'gemini_content' && (
         <AssistantMessageContent
           text={itemForDisplay.text}
+          images={itemForDisplay.images}
+          omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight

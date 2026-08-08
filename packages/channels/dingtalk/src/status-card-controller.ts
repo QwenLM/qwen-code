@@ -11,8 +11,11 @@ import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const FLUSH_INTERVAL_MS = 500;
-const CONTENT_LIMIT = 20_000;
-const TRUNCATION_MARKER = '[Earlier output truncated]\n';
+const STATUS_REFRESH_INTERVAL_MS = 1_000;
+const BREAKER_PROBE_INTERVAL_MS = 30_000;
+const MAX_CONSECUTIVE_STATUS_FAILURES = 3;
+export const CONTENT_LIMIT = 20_000;
+export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
 type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
 
@@ -29,11 +32,13 @@ interface StatusRecord {
   ready: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
+  consecutiveStatusFailures: number;
   stopClaimed: boolean;
   forbiddenActors: Set<string>;
   lastWriteAt: number;
   pendingSnapshot?: string;
   flushTimer?: ReturnType<typeof setTimeout>;
+  statusTimer?: ReturnType<typeof setTimeout>;
   inFlight?: Promise<void>;
   writeChain: Promise<void>;
 }
@@ -60,26 +65,72 @@ export class StatusCardController {
 
   constructor(private readonly options: StatusCardControllerOptions) {}
 
-  append(
+  ensure(
     segment: ChannelOutputSegmentContext,
     target: { chatId: string; isGroup: boolean },
-    chunk: string,
   ): void {
-    if (!chunk || this.terminalSegmentIds.has(segment.segmentId)) return;
-    let record = this.recordsBySegment.get(segment.segmentId);
+    if (this.terminalSegmentIds.has(segment.segmentId)) return;
+    if (!this.recordsBySegment.has(segment.segmentId)) {
+      this.createRecord(segment, target);
+    }
+  }
+
+  replace(
+    segment: ChannelOutputSegmentContext,
+    target: { chatId: string; isGroup: boolean },
+    content: string,
+  ): void {
+    if (this.terminalSegmentIds.has(segment.segmentId)) return;
+    const record = this.recordsBySegment.get(segment.segmentId);
     if (!record) {
-      record = this.createRecord(segment, target);
+      this.createRecord(segment, target, content);
+      return;
     }
     if (record.terminal) return;
-    record.content = boundContent(record.content + chunk);
+    record.content = boundContent(content);
     if (record.streamFailed) return;
     record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
     this.scheduleFlush(record);
   }
 
+  /**
+   * Whether a created, still-running status card is displaying content for
+   * this segment. Awaits the in-flight creation so a boundary decision made
+   * while creation is pending does not race it. A latched stream failure
+   * means the card can never show further content, so it is not live.
+   */
+  async isCardLive(segmentId: string): Promise<boolean> {
+    const record = this.recordsBySegment.get(segmentId);
+    if (!record || record.terminal || record.streamFailed) return false;
+    return record.ready;
+  }
+
+  /**
+   * Drain any pending snapshot so callers can treat the card's current
+   * content as delivered. Returns false when there is no live record, the
+   * card never became ready, or the stream failed during the drain, so the
+   * caller can fall back instead of claiming delivery.
+   */
+  async flushPending(segmentId: string): Promise<boolean> {
+    const record = this.recordsBySegment.get(segmentId);
+    if (!record || record.terminal) return false;
+    if (!(await record.ready)) return false;
+    while (!record.terminal && !record.streamFailed) {
+      if (record.flushTimer) {
+        clearTimeout(record.flushTimer);
+        record.flushTimer = undefined;
+      }
+      this.flush(record);
+      await record.writeChain;
+      if (record.pendingSnapshot === undefined) break;
+    }
+    return !record.terminal && !record.streamFailed;
+  }
+
   private createRecord(
     segment: ChannelOutputSegmentContext,
     target: { chatId: string; isGroup: boolean },
+    initialContent = '',
   ): StatusRecord {
     const outTrackId = `qwen-status-${randomUUID()}`;
     const record: StatusRecord = {
@@ -89,12 +140,13 @@ export class StatusCardController {
       ownerId: segment.owner.id,
       target,
       outTrackId,
-      content: '',
+      content: boundContent(initialContent),
       startedAt: Date.now(),
       lastStatusSecond: 0,
       ready: Promise.resolve(false),
       terminal: false,
       streamFailed: false,
+      consecutiveStatusFailures: 0,
       stopClaimed: false,
       forbiddenActors: new Set(),
       lastWriteAt: Date.now(),
@@ -107,11 +159,24 @@ export class StatusCardController {
     segmentIds.add(record.segmentId);
     this.segmentIdsByRun.set(record.runId, segmentIds);
     record.ready = this.create(record, target);
+    void record.ready.then((ready) => {
+      if (ready) this.scheduleStatusRefresh(record);
+    });
     return record;
   }
 
-  complete(segmentId: string, text: string): Promise<boolean> {
-    return this.finalize(segmentId, boundContent(text), 'Completed', false);
+  complete(
+    segmentId: string,
+    text: string,
+    retainedContent?: (content: string) => string,
+  ): Promise<boolean> {
+    return this.finalize(
+      segmentId,
+      boundContent(text),
+      'Completed',
+      false,
+      retainedContent,
+    );
   }
 
   fail(segmentId: string, error: string): void {
@@ -171,12 +236,13 @@ export class StatusCardController {
     target: { chatId: string; isGroup: boolean },
   ): Promise<boolean> {
     try {
+      const initialContent = sanitizeStreamingImageMarkers(record.content);
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
         outTrackId: record.outTrackId,
         target,
         cardParamMap: {
-          content: '',
+          content: initialContent,
           flowStatus: 2,
           statusLine: this.statusLine(record, 'Running').text,
           hasAction: 'true',
@@ -186,7 +252,7 @@ export class StatusCardController {
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
-        content: '',
+        content: initialContent,
         finalize: false,
       });
       return true;
@@ -243,6 +309,10 @@ export class StatusCardController {
       .catch((error) => {
         record.streamFailed = true;
         record.pendingSnapshot = undefined;
+        if (record.statusTimer) {
+          clearTimeout(record.statusTimer);
+          record.statusTimer = undefined;
+        }
         this.options.onError?.('status card streaming', error);
       });
     const tracked = write.finally(() => {
@@ -261,6 +331,7 @@ export class StatusCardController {
     content: string,
     state: Exclude<StatusState, 'Running'>,
     isError: boolean,
+    retainedContent?: (content: string) => string,
   ): Promise<boolean> {
     const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
@@ -273,12 +344,17 @@ export class StatusCardController {
     }
     if (record.flushTimer) clearTimeout(record.flushTimer);
     record.flushTimer = undefined;
+    if (record.statusTimer) clearTimeout(record.statusTimer);
+    record.statusTimer = undefined;
     record.pendingSnapshot = undefined;
     try {
       if (!(await record.ready)) return false;
       await record.writeChain;
+      const retained =
+        content ||
+        (retainedContent ? retainedContent(record.content) : record.content);
       const finalContent = boundContent(
-        sanitizeStreamingImageMarkers(content || record.content),
+        sanitizeStreamingImageMarkers(retained),
       );
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
@@ -340,7 +416,7 @@ export class StatusCardController {
   }
 
   private async updateRunningStatus(record: StatusRecord): Promise<void> {
-    if (record.terminal) return;
+    if (record.terminal || record.streamFailed) return;
     const status = this.statusLine(record, 'Running');
     if (status.second === record.lastStatusSecond) return;
     try {
@@ -349,8 +425,45 @@ export class StatusCardController {
         cardParamMap: { statusLine: status.text },
       });
       record.lastStatusSecond = status.second;
+      record.consecutiveStatusFailures = 0;
+      // A success revives the per-second chain even when only a low-frequency
+      // breaker probe is scheduled.
+      if (record.statusTimer) {
+        clearTimeout(record.statusTimer);
+        record.statusTimer = undefined;
+      }
+      this.scheduleStatusRefresh(record);
     } catch (error) {
+      record.consecutiveStatusFailures++;
       this.options.onError?.('status card metadata', error);
     }
+  }
+
+  private scheduleStatusRefresh(
+    record: StatusRecord,
+    intervalMs = STATUS_REFRESH_INTERVAL_MS,
+  ): void {
+    if (record.terminal || record.streamFailed || record.statusTimer) return;
+    const elapsed = Math.max(0, Date.now() - record.startedAt);
+    const delay = Math.max(50, intervalMs - (elapsed % intervalMs));
+    record.statusTimer = setTimeout(() => {
+      record.statusTimer = undefined;
+      if (record.terminal || record.streamFailed) return;
+      const refresh = record.writeChain.then(() =>
+        this.updateRunningStatus(record),
+      );
+      record.writeChain = refresh;
+      void refresh.finally(() => {
+        if (
+          record.consecutiveStatusFailures >= MAX_CONSECUTIVE_STATUS_FAILURES
+        ) {
+          // An idle card cannot revive through a flush once the breaker
+          // trips, so keep a low-frequency probe instead of stopping forever.
+          this.scheduleStatusRefresh(record, BREAKER_PROBE_INTERVAL_MS);
+          return;
+        }
+        this.scheduleStatusRefresh(record);
+      });
+    }, delay);
   }
 }

@@ -13,6 +13,7 @@ import {
   Logger,
   uiTelemetryService,
   type Config,
+  type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
@@ -29,6 +30,7 @@ import {
 import {
   type CommandContext,
   CommandKind,
+  type GoalCommandOperation,
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
@@ -59,6 +61,7 @@ function getSkillCommandName(command: SlashCommand): string {
  * - 'submit_prompt': Submits content to the model (supports all modes)
  * - 'message': Returns a single message (supports non-interactive JSON/text only)
  * - 'stream_messages': Streams multiple messages (supports ACP only)
+ * - 'goal_control': Returns the canonical Goal control result
  * - 'unsupported': Command cannot be executed in this mode
  * - 'no_command': No command was found or executed
  */
@@ -69,6 +72,7 @@ export type NonInteractiveSlashCommandResult =
       outputHistoryItems?: HistoryItemWithoutId[];
       /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
       modelOverride?: string;
+      refreshContextFilesOnWrite?: boolean;
     }
   | {
       type: 'message';
@@ -83,6 +87,11 @@ export type NonInteractiveSlashCommandResult =
         void,
         unknown
       >;
+    }
+  | {
+      type: 'goal_control';
+      operation: GoalCommandOperation;
+      response: GoalStateResponse;
     }
   | {
       type: 'unsupported';
@@ -100,6 +109,7 @@ export type NonInteractiveSlashCommandResult =
  * - submit_prompt: Submits content to the model (all modes)
  * - message: Returns a single message (non-interactive JSON/text only)
  * - stream_messages: Streams multiple messages (ACP only)
+ * - goal_control: Returns a canonical Goal control result
  *
  * All other result types are converted to 'unsupported'.
  *
@@ -118,6 +128,9 @@ function handleCommandResult(
         ...(result.modelOverride
           ? { modelOverride: result.modelOverride }
           : {}),
+        ...(result.refreshContextFilesOnWrite
+          ? { refreshContextFilesOnWrite: true }
+          : {}),
         ...(outputHistoryItems?.length ? { outputHistoryItems } : {}),
       };
 
@@ -133,6 +146,13 @@ function handleCommandResult(
       return {
         type: 'stream_messages',
         messages: result.messages,
+      };
+
+    case 'goal_control':
+      return {
+        type: 'goal_control',
+        operation: result.operation,
+        response: result.response,
       };
 
     /**
@@ -185,13 +205,6 @@ function handleCommandResult(
         reason:
           'Action confirmation is not supported in non-interactive mode. Commands requiring confirmation cannot be executed.',
         originalType: 'confirm_action',
-      };
-
-    case 'goal_control':
-      return {
-        type: 'unsupported',
-        reason: 'Goal control is not supported in non-interactive mode yet.',
-        originalType: 'goal_control',
       };
 
     default: {
@@ -415,6 +428,7 @@ export const handleSlashCommand = async (
   if (stackedResult.skills.length >= 2) {
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
+    let refreshContextFilesOnWrite = false;
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
     const successfulSkillCommands: SlashCommand[] = [];
 
@@ -434,6 +448,9 @@ export const handleSlashCommand = async (
       if (skillResult?.type === 'submit_prompt') {
         combinedContent.push(skillResult.content);
         firstModelOverride ??= skillResult.modelOverride;
+        refreshContextFilesOnWrite ||= Boolean(
+          skillResult.refreshContextFilesOnWrite,
+        );
         if (skillResult.onComplete) {
           onCompleteCallbacks.push(skillResult.onComplete);
         }
@@ -473,6 +490,9 @@ export const handleSlashCommand = async (
       type: 'submit_prompt',
       content: hookResult.content,
       ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+      ...(refreshContextFilesOnWrite
+        ? { refreshContextFilesOnWrite: true }
+        : {}),
       ...(onCompleteCallbacks.length
         ? {
             onComplete: async () => {

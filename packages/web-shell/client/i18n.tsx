@@ -416,6 +416,88 @@ const EN: Messages = {
   'voice.noSpeechRetry': 'No speech detected — click to retry',
   'voice.startDictation': 'Start voice dictation',
   'voice.error': 'Voice error',
+  'live.title': 'Live Voice',
+  'live.open': 'Open Live Voice',
+  'live.manage': 'Manage active Live Voice',
+  'live.readyDescription':
+    'Qwen Live Host and every required permission are ready.',
+  'live.setupDescription':
+    'Install Qwen Live Host and complete every permission before Live Voice can start.',
+  'live.noFallback':
+    'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
+  'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'settings.liveShortcut.capture': 'Press shortcut',
+  'settings.liveShortcut.clear': 'Clear',
+  'settings.liveShortcut.off': 'Off',
+  'settings.liveSetup.title': 'Qwen Live',
+  'settings.liveSetup.experimental': 'Experimental',
+  'settings.liveSetup.description':
+    'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.enable': 'Enable Qwen Live',
+  'settings.liveSetup.apiKey': 'DashScope Realtime API key',
+  'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
+  'settings.liveSetup.apiKeyReplace': 'Enter a new key to replace it',
+  'settings.liveSetup.configured': 'Configured',
+  'settings.liveSetup.notConfigured': 'Required',
+  'settings.liveSetup.save': 'Save',
+  'settings.liveSetup.removeKey': 'Remove key',
+  'settings.liveSetup.shortcut': 'Global shortcut',
+  'settings.liveSetup.host': 'Qwen Live Host',
+  'settings.liveSetup.openHost': 'Open Host',
+  'settings.liveSetup.retry': 'Retry',
+  'settings.liveSetup.permission.microphone': 'Microphone',
+  'settings.liveSetup.permission.accessibility': 'Accessibility',
+  'settings.liveSetup.permission.screenRecording': 'Screen recording',
+  'settings.liveSetup.permissionHint':
+    'Complete any pending permission prompts in Qwen Live Host. Live stays unavailable until every permission is ready.',
+  'settings.liveSetup.requirement.ready': 'Ready',
+  'settings.liveSetup.requirement.missing': 'Missing',
+  'settings.liveSetup.requirement.denied': 'Not allowed',
+  'settings.liveSetup.requirement.unavailable': 'Unavailable',
+  'settings.liveSetup.requirement.checking': 'Checking',
+  'settings.liveSetup.install.missing': 'Waiting to install',
+  'settings.liveSetup.install.checking': 'Checking installation…',
+  'settings.liveSetup.install.downloading': 'Downloading signed Host…',
+  'settings.liveSetup.install.verifying': 'Verifying signature and checksum…',
+  'settings.liveSetup.install.installing': 'Installing…',
+  'settings.liveSetup.install.launching': 'Opening Host…',
+  'settings.liveSetup.install.installed': 'Installed',
+  'settings.liveSetup.install.error': 'Setup needs attention',
+  'settings.liveSetup.confirmTitle': 'Enable experimental Qwen Live?',
+  'settings.liveSetup.confirmDescription':
+    'Qwen Code will download, verify, install, and open the signed Qwen Live Host app. macOS will then ask you to grant Microphone, Accessibility, and Screen Recording access.',
+  'settings.liveSetup.cancel': 'Cancel',
+  'settings.liveSetup.confirm': 'Enable and install',
+  'live.refresh': 'Refresh status',
+  'live.startOrResume': 'Start or resume',
+  'live.newConversation': 'New conversation',
+  'live.stop': 'Stop Live',
+  'live.muteInput': 'Mute microphone',
+  'live.unmuteInput': 'Unmute microphone',
+  'live.muteOutput': 'Mute speaker',
+  'live.unmuteOutput': 'Unmute speaker',
+  'live.state.unavailable': 'Voice chat unavailable',
+  'live.state.idle': 'Ready for voice chat',
+  'live.state.starting': 'Starting voice chat…',
+  'live.state.listening': 'Listening',
+  'live.state.thinking': 'Thinking',
+  'live.state.speaking': 'Speaking',
+  'live.state.stopping': 'Stopping…',
+  'live.state.error': 'Voice chat stopped',
+  'live.requirement.host': 'Qwen Live Host',
+  'live.requirement.microphone': 'Microphone',
+  'live.requirement.accessibility': 'Accessibility',
+  'live.requirement.screenRecording': 'Screen Recording',
+  'live.requirement.audioInput': 'Audio input',
+  'live.requirement.audioOutput': 'Audio output',
+  'live.requirement.globalShortcut': 'Global shortcut',
+  'live.requirement.appshot': 'Appshot',
+  'live.requirement.provider': 'Realtime provider',
+  'live.requirementState.ready': 'Ready',
+  'live.requirementState.missing': 'Missing',
+  'live.requirementState.denied': 'Not allowed',
+  'live.requirementState.unavailable': 'Unavailable',
+  'live.requirementState.checking': 'Checking',
   'resume.failedToLoad': 'Failed to load sessions',
   'toast.dismiss': 'Dismiss notification',
   'toast.dismissShort': 'Dismiss',
@@ -619,6 +701,8 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedUntilProviderUsage':
+    'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
@@ -893,6 +977,7 @@ const EN: Messages = {
   'history.capacityReached':
     'History display limit reached. Earlier messages remain saved.',
   'history.paginationError': 'Earlier history could not be loaded.',
+  'history.retry': 'Retry',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
   'editor.connectionDisconnected':
@@ -1046,8 +1131,43 @@ const EN: Messages = {
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
   'turnOutputs.viewChanges': 'View changes',
-  'turnOutputs.review': 'Review',
+  // Key keeps its historical `review` name; the label moved to "Changes" when
+  // the code-review result view (`codeReview.*`) took over the word.
+  'turnOutputs.review': 'Changes',
   'turnOutputs.reviewLatest': 'View recent file changes',
+  'codeReview.authoritativeVerdict': 'Authoritative verdict',
+  'codeReview.targetEffort': (v) =>
+    `Target: ${v?.target ?? ''} · Effort: ${v?.effort ?? ''}`,
+  'codeReview.openReport': 'Open Markdown report',
+  'codeReview.loadingReport': 'Loading Markdown report...',
+  'codeReview.back': 'Back to review',
+  'codeReview.reviewCounts': 'Review counts',
+  'codeReview.total': 'Total',
+  'codeReview.confidence': (v) => `${v?.value ?? ''} confidence`,
+  'codeReview.held': 'Held',
+  'codeReview.heldByMeasurement': 'Held back from Critical by measurement',
+  'codeReview.caps': 'Caps',
+  'codeReview.none': 'None',
+  'codeReview.severity': 'Severity',
+  'codeReview.confidenceLabel': 'Confidence',
+  'codeReview.all': 'All',
+  'codeReview.noMatches': 'No findings match these filters.',
+  'codeReview.source': (v) => `Source: ${v?.value ?? ''}`,
+  'codeReview.failureScenario': 'Failure scenario',
+  'codeReview.suggestedFix': 'Suggested fix',
+  'codeReview.outcome': 'Outcome',
+  'codeReview.locations': 'Locations',
+  'codeReview.evidence': 'Evidence',
+  'codeReview.notLinked': 'not linked',
+  'codeReview.loadErrorTitle': 'Unable to display code review',
+  'codeReview.loading': 'Loading code review...',
+  'codeReview.artifactTruncated':
+    'Code review artifact is truncated and cannot be validated.',
+  'codeReview.reportTruncated': 'Markdown report is truncated.',
+  'codeReview.unavailable': (v) =>
+    `This code review is no longer authoritative because its artifact status is ${v?.status ?? 'unknown'}. Regenerate the review to view it.`,
+  'codeReview.workspaceRequired':
+    'Code review artifacts must be readable workspace files.',
   'sideTask.title': 'Side task',
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
@@ -1071,6 +1191,7 @@ const EN: Messages = {
   'sidebar.newWorktreeTask': 'New worktree task',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.live': 'Live',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
@@ -1352,7 +1473,8 @@ const EN: Messages = {
   'local.lsp': 'Show LSP server status',
   'local.remember': 'Save a durable memory to the memory system',
   'local.summary': 'Generate a project summary file',
-  'local.workflows': 'List active and completed workflow runs',
+  'local.workflows':
+    'List workflow runs or cooperatively pause/resume a live run',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -1545,7 +1667,17 @@ const EN: Messages = {
     `Enabling extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
-    'Enter a GitHub, Git, or npm extension source.',
+    'Enter a GitHub, Git, or npm source, or upload an Extension archive.',
+  'extensions.manage.sourceTab': 'Source',
+  'extensions.manage.archiveTab': 'Archive',
+  'extensions.manage.archiveSelect': 'Select a .zip or .tar.gz archive.',
+  'extensions.manage.archiveSelected': (v) =>
+    `Selected archive: ${v?.name ?? 'extension archive'}`,
+  'extensions.manage.archiveTooLarge':
+    'Extension archives must be 10 MB or smaller.',
+  'extensions.manage.archiveEmpty': 'The selected Extension archive is empty.',
+  'extensions.manage.archiveInvalid':
+    'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installTitle': 'Add Extension',
@@ -1900,16 +2032,20 @@ const EN: Messages = {
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
   'mode.label.plan': 'Plan',
+  'mode.label.planReview': 'Plan & Review',
   'mode.label.default': 'Ask Approval',
   'mode.label.auto-edit': 'Auto Edit',
   'mode.label.auto': 'Classifier Approval',
   'mode.label.yolo': 'Full Access',
   'mode.listLabel.plan': 'Plan (plan)',
+  'mode.listLabel.planReview': 'Plan & Review (plan)',
   'mode.listLabel.default': 'Ask Approval (default)',
   'mode.listLabel.auto-edit': 'Auto Edit (auto-edit)',
   'mode.listLabel.auto': 'Classifier Approval (auto)',
   'mode.listLabel.yolo': 'Full Access (yolo)',
   'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
+  'mode.desc.planReview':
+    'Use Plan mode and review its workflow when one is available',
   'mode.desc.default':
     'Ask before running commands, editing files, or accessing external resources',
   'mode.desc.auto-edit':
@@ -2406,7 +2542,7 @@ const EN: Messages = {
   'channels.loadError.title': 'Channels could not be loaded',
   'channels.empty.title': 'No supported channels configured',
   'channels.empty.description':
-    'Configure DingTalk, WeCom, or Feishu to receive messages in this workspace.',
+    'Configure DingTalk, WeCom, Feishu, GitHub, or GitLab to receive messages in this workspace.',
   'channels.runtimeError': 'Channel runtime error',
   'channels.action.back': 'Back',
   'channels.action.start': 'Start',
@@ -2442,6 +2578,66 @@ const EN: Messages = {
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
+  'channels.editor.field.github.token': 'Personal Access Token',
+  'channels.editor.field.github.token.description':
+    'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+  'channels.editor.field.github.useLocalGh':
+    'Use local GitHub CLI authentication',
+  'channels.editor.field.github.useLocalGh.description':
+    'Explicitly reuse the daemon host’s account-wide gh login when no token is configured',
+  'channels.editor.field.github.baseUrl': 'API Base URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+  'channels.editor.field.github.groupPolicy': 'Group Policy',
+  'channels.editor.field.github.groupPolicy.description':
+    'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
+  'channels.editor.field.github.senderPolicy': 'Sender Policy',
+  'channels.editor.field.github.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public repos',
+  'channels.editor.field.github.allowedUsers':
+    'Allowed Users (comma-separated)',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.github.reasonFilter': 'Reason Filter',
+  'channels.editor.field.github.reasonFilter.description':
+    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
+  'channels.editor.field.gitlab.token': 'Personal Access Token',
+  'channels.editor.field.gitlab.token.description':
+    'PAT with "read_api" + "api" scopes',
+  'channels.editor.field.gitlab.baseUrl': 'Instance URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
+  'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
+  'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    'Use "Allowlist" with allowed users on public projects',
+  'channels.editor.field.gitlab.allowedUsers':
+    'Allowed Users (comma-separated)',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab usernames, used by Allowlist and Pairing policies',
+  'channels.editor.field.gitlab.action_prompt_template': 'Action Templates',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    'Only actions with a template are processed; others are skipped. Template variables: %project%, %project_url%, %author%, %target_type%, %iid%, %title%, %description%, %todo_id%. Use %% for a literal %. Example for "mentioned": Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    'Mentioned — @bot in a comment or description',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    'Directly Addressed — comment starts with @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    'Assigned — bot assigned to an issue or MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    'Review Requested — bot requested as MR reviewer',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    'Approval Required — MR needs bot approval',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    "Marked — someone stars bot's comment/issue/MR",
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    'Build Failed — CI/CD pipeline fails on bot branch/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    'Unmergeable — MR becomes unmergeable (conflicts)',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    'Merge Train Removed — MR removed from merge train',
   'channels.editor.secret.environment': 'Stored in environment',
   'channels.editor.secret.stored': 'Stored securely',
   'channels.editor.secret.preserve': 'Keep',
@@ -2455,7 +2651,11 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+    'Match the shared code before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+  'channels.editor.pairing.subject.group': (v) =>
+    `Group: ${v?.name ?? 'Unknown'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `Requested by ${v?.sender ?? 'Unknown'}`,
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
   'channels.editor.pairing.approveFor': (v) =>
@@ -2474,7 +2674,7 @@ const EN: Messages = {
     'Pending requests will appear here after this Channel is saved in pairing mode.',
   'channels.editor.pairing.approvals.title': 'Pairing approvals',
   'channels.editor.pairing.approvals.description':
-    'Sender IDs approved through pairing for this Channel.',
+    'User and group IDs approved through pairing for this Channel.',
   'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
   'channels.editor.pairing.approvals.revoke': 'Revoke',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
@@ -2487,7 +2687,7 @@ const EN: Messages = {
     'Pairing approvals are temporarily unavailable. Try again.',
   'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
   'channels.editor.pairing.approvals.empty.description':
-    'Approved sender IDs will appear here.',
+    'Approved user and group IDs will appear here.',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -2501,10 +2701,16 @@ const EN: Messages = {
     'Anyone who can reach the bot can start a conversation.',
   'channels.editor.validation.required': (v) =>
     `${v?.label ?? 'This field'} is required.`,
+  'channels.editor.validation.credential':
+    'Enter a token or enable local GitHub CLI authentication.',
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
+  'channels.editor.validation.invalidOption':
+    "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
+  'channels.editor.validation.outOfRange': (v) =>
+    `Enter a number greater than ${v?.min ?? 0}.`,
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -3013,6 +3219,87 @@ const ZH: Messages = {
   'voice.noSpeechRetry': '未检测到语音 — 点击重试',
   'voice.startDictation': '开始语音输入',
   'voice.error': '语音错误',
+  'live.title': '实时语音',
+  'live.open': '打开实时语音',
+  'live.manage': '管理正在进行的实时语音',
+  'live.readyDescription': 'Qwen Live Host 和所有必需权限均已就绪。',
+  'live.setupDescription':
+    '安装 Qwen Live Host 并完成全部授权后，才能使用实时语音。',
+  'live.noFallback':
+    '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
+  'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'settings.liveShortcut.capture': '请按下快捷键',
+  'settings.liveShortcut.clear': '清除',
+  'settings.liveShortcut.off': '关闭',
+  'settings.liveSetup.title': 'Qwen Live',
+  'settings.liveSetup.experimental': '实验性',
+  'settings.liveSetup.description':
+    '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.enable': '启用 Qwen Live',
+  'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
+  'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
+  'settings.liveSetup.apiKeyReplace': '输入新 Key 以替换当前配置',
+  'settings.liveSetup.configured': '已配置',
+  'settings.liveSetup.notConfigured': '必填',
+  'settings.liveSetup.save': '保存',
+  'settings.liveSetup.removeKey': '移除 Key',
+  'settings.liveSetup.shortcut': '全局快捷键',
+  'settings.liveSetup.host': 'Qwen Live Host',
+  'settings.liveSetup.openHost': '打开 Host',
+  'settings.liveSetup.retry': '重试',
+  'settings.liveSetup.permission.microphone': '麦克风',
+  'settings.liveSetup.permission.accessibility': '辅助功能',
+  'settings.liveSetup.permission.screenRecording': '屏幕录制',
+  'settings.liveSetup.permissionHint':
+    '请在 Qwen Live Host 中完成尚未授权的项目；全部权限就绪前 Live 不可使用。',
+  'settings.liveSetup.requirement.ready': '已就绪',
+  'settings.liveSetup.requirement.missing': '缺失',
+  'settings.liveSetup.requirement.denied': '未授权',
+  'settings.liveSetup.requirement.unavailable': '不可用',
+  'settings.liveSetup.requirement.checking': '检查中',
+  'settings.liveSetup.install.missing': '等待安装',
+  'settings.liveSetup.install.checking': '正在检查安装…',
+  'settings.liveSetup.install.downloading': '正在下载已签名 Host…',
+  'settings.liveSetup.install.verifying': '正在校验签名和校验和…',
+  'settings.liveSetup.install.installing': '正在安装…',
+  'settings.liveSetup.install.launching': '正在打开 Host…',
+  'settings.liveSetup.install.installed': '已安装',
+  'settings.liveSetup.install.error': '安装需要处理',
+  'settings.liveSetup.confirmTitle': '启用实验性 Qwen Live？',
+  'settings.liveSetup.confirmDescription':
+    'Qwen Code 将自动下载、校验、安装并打开已签名的 Qwen Live Host。之后 macOS 会要求授予麦克风、辅助功能和屏幕录制权限。',
+  'settings.liveSetup.cancel': '取消',
+  'settings.liveSetup.confirm': '启用并安装',
+  'live.refresh': '刷新状态',
+  'live.startOrResume': '开始或继续',
+  'live.newConversation': '新建对话',
+  'live.stop': '停止实时语音',
+  'live.muteInput': '麦克风静音',
+  'live.unmuteInput': '取消麦克风静音',
+  'live.muteOutput': '扬声器静音',
+  'live.unmuteOutput': '取消扬声器静音',
+  'live.state.unavailable': '实时语音不可用',
+  'live.state.idle': '可以开始语音对话',
+  'live.state.starting': '正在开始语音对话…',
+  'live.state.listening': '正在聆听',
+  'live.state.thinking': '思考中',
+  'live.state.speaking': '正在回答',
+  'live.state.stopping': '正在停止…',
+  'live.state.error': '语音对话已停止',
+  'live.requirement.host': 'Qwen Live Host',
+  'live.requirement.microphone': '麦克风',
+  'live.requirement.accessibility': '辅助功能',
+  'live.requirement.screenRecording': '屏幕录制',
+  'live.requirement.audioInput': '音频输入',
+  'live.requirement.audioOutput': '音频输出',
+  'live.requirement.globalShortcut': '全局快捷键',
+  'live.requirement.appshot': 'Appshot',
+  'live.requirement.provider': 'Realtime 模型服务',
+  'live.requirementState.ready': '已就绪',
+  'live.requirementState.missing': '未安装',
+  'live.requirementState.denied': '未授权',
+  'live.requirementState.unavailable': '不可用',
+  'live.requirementState.checking': '检查中',
   'resume.failedToLoad': '加载会话失败',
   'toast.dismiss': '关闭通知',
   'toast.dismissShort': '关闭',
@@ -3197,6 +3484,8 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedUntilProviderUsage':
+    'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
@@ -3460,6 +3749,7 @@ const ZH: Messages = {
   'history.loadingEarlier': '正在加载更早消息…',
   'history.capacityReached': '已达到历史显示上限，更早消息仍保存在会话中。',
   'history.paginationError': '无法加载更早的历史记录。',
+  'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
@@ -3605,8 +3895,41 @@ const ZH: Messages = {
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'turnOutputs.viewChanges': '查看更改',
-  'turnOutputs.review': '审核',
+  // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
+  // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
+  'turnOutputs.review': '文件更改',
   'turnOutputs.reviewLatest': '查看最近文件修改',
+  'codeReview.authoritativeVerdict': '权威裁决',
+  'codeReview.targetEffort': (v) =>
+    `目标：${v?.target ?? ''} · 强度：${v?.effort ?? ''}`,
+  'codeReview.openReport': '打开 Markdown 报告',
+  'codeReview.loadingReport': '正在加载 Markdown 报告…',
+  'codeReview.back': '返回审查结果',
+  'codeReview.reviewCounts': '审查计数',
+  'codeReview.total': '总计',
+  'codeReview.confidence': (v) => `${v?.value ?? ''} 置信度`,
+  'codeReview.held': '暂缓',
+  'codeReview.heldByMeasurement': '经基线测量暂缓，未保留 Critical',
+  'codeReview.caps': '裁决上限',
+  'codeReview.none': '无',
+  'codeReview.severity': '严重级别',
+  'codeReview.confidenceLabel': '置信度',
+  'codeReview.all': '全部',
+  'codeReview.noMatches': '没有符合当前筛选条件的发现。',
+  'codeReview.source': (v) => `来源：${v?.value ?? ''}`,
+  'codeReview.failureScenario': '失败场景',
+  'codeReview.suggestedFix': '建议修复',
+  'codeReview.outcome': '处理结果',
+  'codeReview.locations': '位置',
+  'codeReview.evidence': '证据',
+  'codeReview.notLinked': '未链接',
+  'codeReview.loadErrorTitle': '无法显示代码审查结果',
+  'codeReview.loading': '正在加载代码审查结果…',
+  'codeReview.artifactTruncated': '代码审查制品已截断，无法验证。',
+  'codeReview.reportTruncated': 'Markdown 报告已截断。',
+  'codeReview.unavailable': (v) =>
+    `此代码审查已不再具备权威性，制品状态为 ${v?.status ?? 'unknown'}。请重新生成审查结果。`,
+  'codeReview.workspaceRequired': '代码审查制品必须是可读取的工作区文件。',
   'sideTask.title': '侧边任务',
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
@@ -3630,6 +3953,7 @@ const ZH: Messages = {
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.live': 'Live',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -3891,7 +4215,7 @@ const ZH: Messages = {
   'local.lsp': '显示 LSP 服务器状态',
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
-  'local.workflows': '列出进行中和已完成的工作流运行',
+  'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
@@ -4067,7 +4391,17 @@ const ZH: Messages = {
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
   'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.install': '安装',
-  'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
+  'extensions.manage.installDescription':
+    '输入 GitHub、Git 或 npm 扩展来源，或上传 Extension 压缩包。',
+  'extensions.manage.sourceTab': '来源',
+  'extensions.manage.archiveTab': '压缩包',
+  'extensions.manage.archiveSelect': '选择 .zip 或 .tar.gz 压缩包。',
+  'extensions.manage.archiveSelected': (v) =>
+    `已选择压缩包：${v?.name ?? 'Extension 压缩包'}`,
+  'extensions.manage.archiveTooLarge': 'Extension 压缩包不能超过 10 MB。',
+  'extensions.manage.archiveEmpty': '所选 Extension 压缩包为空。',
+  'extensions.manage.archiveInvalid':
+    '请选择文件名有效且不超过 255 字节的 .zip 或 .tar.gz Extension 压缩包。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installTitle': '添加扩展',
@@ -4393,16 +4727,19 @@ const ZH: Messages = {
   'mode.name.auto': 'auto',
   'mode.name.yolo': 'yolo',
   'mode.label.plan': '计划',
+  'mode.label.planReview': '计划并审阅',
   'mode.label.default': '请求批准',
   'mode.label.auto-edit': '自动编辑',
   'mode.label.auto': '智能审批',
   'mode.label.yolo': '完全访问权限',
   'mode.listLabel.plan': '计划（plan）',
+  'mode.listLabel.planReview': '计划并审阅（plan）',
   'mode.listLabel.default': '请求批准（default）',
   'mode.listLabel.auto-edit': '自动编辑（auto-edit）',
   'mode.listLabel.auto': '智能审批（auto）',
   'mode.listLabel.yolo': '完全访问权限（yolo）',
   'mode.desc.plan': '仅分析，不修改文件或执行命令',
+  'mode.desc.planReview': '使用 Plan 模式，并在 Workflow 可用时进行审阅',
   'mode.desc.default': '执行命令、编辑文件或访问外部资源前请求确认',
   'mode.desc.auto-edit': '自动批准文件编辑，命令执行等敏感操作仍会询问',
   'mode.desc.auto': '自动评估工具风险，安全操作直接执行，风险操作再确认',
@@ -4866,7 +5203,7 @@ const ZH: Messages = {
   'channels.loadError.title': '无法加载频道',
   'channels.empty.title': '尚未配置支持的频道',
   'channels.empty.description':
-    '配置钉钉、企业微信或飞书，让当前工作区接收消息。',
+    '配置钉钉、企业微信、飞书、GitHub 或 GitLab，让当前工作区接收消息。',
   'channels.runtimeError': '频道运行时错误',
   'channels.action.back': '返回',
   'channels.action.start': '启动',
@@ -4901,6 +5238,63 @@ const ZH: Messages = {
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
   'channels.editor.field.feishu.clientId': 'App ID',
   'channels.editor.field.feishu.clientSecret': 'App Secret',
+  'channels.editor.field.github.token': '个人访问令牌',
+  'channels.editor.field.github.token.description':
+    '可选。填写具有 "notifications" 权限的经典 PAT；优先于本地 gh 认证',
+  'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
+  'channels.editor.field.github.useLocalGh.description':
+    '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
+  'channels.editor.field.github.baseUrl': 'API 基础 URL',
+  'channels.editor.field.github.baseUrl.description':
+    'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
+  'channels.editor.field.github.groupPolicy': '群组策略',
+  'channels.editor.field.github.groupPolicy.description':
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
+  'channels.editor.field.github.senderPolicy': '发送者策略',
+  'channels.editor.field.github.senderPolicy.description':
+    '公开仓库建议使用 "Allowlist" 并指定允许的用户',
+  'channels.editor.field.github.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.github.allowedUsers.description':
+    'GitHub 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.github.reasonFilter': '通知原因过滤',
+  'channels.editor.field.github.reasonFilter.description':
+    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
+  'channels.editor.field.gitlab.token': '个人访问令牌',
+  'channels.editor.field.gitlab.token.description':
+    '需要 "read_api" + "api" 权限的 PAT',
+  'channels.editor.field.gitlab.baseUrl': '实例 URL',
+  'channels.editor.field.gitlab.baseUrl.description':
+    '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
+  'channels.editor.field.gitlab.groupPolicy': '群组策略',
+  'channels.editor.field.gitlab.groupPolicy.description':
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
+  'channels.editor.field.gitlab.senderPolicy': '发送者策略',
+  'channels.editor.field.gitlab.senderPolicy.description':
+    '公开项目建议使用 "Allowlist" 并指定允许的用户',
+  'channels.editor.field.gitlab.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.gitlab.allowedUsers.description':
+    'GitLab 用户名，用于 Allowlist 和 Pairing 策略',
+  'channels.editor.field.gitlab.action_prompt_template': '动作模板',
+  'channels.editor.field.gitlab.action_prompt_template.description':
+    '仅配置了模板的动作会被处理，其余跳过。模板变量：%project%、%project_url%、%author%、%target_type%、%iid%、%title%、%description%、%todo_id%。用 %% 表示字面 %。示例（mentioned）：Project: %project% | Author: %author% | Title: %title%',
+  'channels.editor.field.gitlab.action_prompt_template.option.mentioned':
+    '被提及 — 评论或描述中 @bot',
+  'channels.editor.field.gitlab.action_prompt_template.option.directly_addressed':
+    '直接对话 — 评论以 @bot 开头',
+  'channels.editor.field.gitlab.action_prompt_template.option.assigned':
+    '被指派 — bot 被指派到 issue 或 MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.review_requested':
+    '请求审查 — bot 被请求为 MR 审查者',
+  'channels.editor.field.gitlab.action_prompt_template.option.approval_required':
+    '需要批准 — MR 需要 bot 批准',
+  'channels.editor.field.gitlab.action_prompt_template.option.marked':
+    '被标记 — 有人星标 bot 的评论/issue/MR',
+  'channels.editor.field.gitlab.action_prompt_template.option.build_failed':
+    '构建失败 — CI/CD 流水线在 bot 分支/MR 上失败',
+  'channels.editor.field.gitlab.action_prompt_template.option.unmergeable':
+    '不可合并 — MR 变为不可合并（冲突）',
+  'channels.editor.field.gitlab.action_prompt_template.option.merge_train_removed':
+    '合并队列移除 — MR 从合并队列中移除',
   'channels.editor.secret.environment': '已保存在环境变量中',
   'channels.editor.secret.stored': '已安全保存',
   'channels.editor.secret.preserve': '保留',
@@ -4913,7 +5307,11 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+    '批准前，请核对收到的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+  'channels.editor.pairing.subject.group': (v) =>
+    `群聊：${v?.name ?? '未知群聊'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `由 ${v?.sender ?? '未知用户'} 发起`,
   'channels.editor.pairing.refresh': '刷新配对请求',
   'channels.editor.pairing.approve': '批准',
   'channels.editor.pairing.approveFor': (v) =>
@@ -4929,21 +5327,21 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
-  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.title': '已配对对象',
   'channels.editor.pairing.approvals.description':
-    '通过配对获得此频道访问权限的用户 ID。',
-  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+    '通过配对获得此频道访问权限的用户和群聊 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对对象',
   'channels.editor.pairing.approvals.revoke': '撤销',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
     `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
   'channels.editor.pairing.approvals.revoked': (v) =>
     `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
-  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.error': '未能更新已配对对象',
   'channels.editor.pairing.approvals.unavailable':
-    '暂时无法获取已配对用户，请重试。',
-  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+    '暂时无法获取已配对对象，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对对象',
   'channels.editor.pairing.approvals.empty.description':
-    '批准配对请求后，用户 ID 会显示在这里。',
+    '批准配对请求后，用户或群聊 ID 会显示在这里。',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -4957,9 +5355,14 @@ const ZH: Messages = {
     '所有能够访问机器人的用户均可直接开始对话。',
   'channels.editor.validation.required': (v) =>
     `${v?.label ?? '此字段'}为必填项。`,
+  'channels.editor.validation.credential':
+    '请输入令牌，或开启本地 GitHub CLI 认证。',
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
+  'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
+  'channels.editor.validation.outOfRange': (v) =>
+    `请输入大于 ${v?.min ?? 0} 的数字。`,
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',
@@ -5101,6 +5504,9 @@ const ZH: Messages = {
   'settings.label.experimental.enableCronTools': '启用 Cron/Loop 工具',
   'settings.description.experimental.enableCronTools':
     '启用会话内 cron/loop 工具（实验性）。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_ENABLE_CRON=1 环境变量启用。',
+  'settings.label.experimental.sessionWorkflow': 'Session Workflow 计划并审阅',
+  'settings.description.experimental.sessionWorkflow':
+    '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
     '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',

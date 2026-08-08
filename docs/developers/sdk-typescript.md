@@ -157,6 +157,11 @@ const detail = await q.getContextUsage(true);
 await q.close();
 ```
 
+`interrupt()` cancels only the active turn. For a multi-turn query created with
+an async iterable prompt, the query and its input stream remain open, so later
+messages from the iterable are processed normally. Use `close()` or abort the
+configured `AbortController` when you want to end the entire session.
+
 ## Permission Modes
 
 The SDK supports different permission modes for controlling tool execution:

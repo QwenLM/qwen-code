@@ -992,6 +992,14 @@ export default {
     'Zusammenfassung wird bereits generiert, warten Sie auf Abschluss der vorherigen Anfrage',
   'No conversation found to summarize.':
     'Kein Gespräch zum Zusammenfassen gefunden.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Der Zusammenfassungspfad existiert bereits und ist keine generierte Zusammenfassung: {{path}}',
+  'Summary path must be within the project root.':
+    'Der Zusammenfassungspfad muss sich im Projektstammverzeichnis befinden.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Der Zusammenfassungspfad verweist auf ein vorhandenes Verzeichnis: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Der Zusammenfassungspfad endet mit einem Trennzeichen, ist aber eine vorhandene Datei: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Fehler beim Generieren der Projektkontextzusammenfassung: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1524,7 +1532,16 @@ export default {
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',
+  Pausing: 'Wird pausiert',
   Paused: 'Pausiert',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Das Pausieren ist kooperativ; laufende Arbeiten werden möglicherweise abgeschlossen, bevor der Workflow pausiert ist. Ein Agentenaufruf, der auf eine Tool-Genehmigung wartet, hält den Lauf in diesem Zustand und zählt weiter gegen das Aktive-Zeit-Limit, bis die Genehmigung beantwortet wird.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausiert: Es werden keine neuen Agenten gestartet; Skriptcode zwischen Agentenaufrufen läuft weiter. Drücke p, um fortzufahren. /clear, /branch und ein Sitzungswechsel beenden pausierte Läufe.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pausieren/Fortsetzen wurde abgelehnt; der Workflow-Status hat sich geändert. Versuche es erneut.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tipp: Verwende `/workflows p <runId>` oder Hintergrundaufgaben + p, um einen Lauf kooperativ zu pausieren/fortzusetzen; mit `/workflows <runId>` siehst du Details.',
   Completed: 'Abgeschlossen',
   Failed: 'Fehlgeschlagen',
   Stopped: 'Gestoppt',

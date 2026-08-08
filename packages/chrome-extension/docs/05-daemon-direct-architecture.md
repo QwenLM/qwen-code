@@ -1,94 +1,52 @@
 # Daemon-Direct Architecture (issue #5626)
 
-Revival of the Chrome extension on the `qwen serve` daemon, dropping Native
-Messaging. This doc is the concrete implementation spec for the two phases.
+Current Chrome extension architecture on the `qwen serve` daemon, without
+Native Messaging.
 
 ```
-┌─ Chrome extension (pure web client) ──────────────┐
-│  Side panel (React, @qwen-code/webui)             │
-│    DaemonSessionProvider ── chat over HTTP+SSE ───┼──┐
-│  Service worker                                   │  │
-│    browser-tools MCP server (over WS) ────────────┼─┐│
-│  Content scripts (DOM / a11y / network capture)   │ ││
-└───────────────────────────────────────────────────┘ ││
-                                                       ▼▼
-                        qwen serve daemon (localhost:4170, loopback auth-free)
+Chrome side panel ── iframe/HTTP ────────────────▶ qwen serve Web Shell
+Chrome service worker ── CDP frames over /acp ──▶ qwen serve /cdp tunnel
+Chrome active tab ◀──── chrome.debugger ──────────┘
+External MCP adapter ── stdio MCP + /cdp WS ─────▶ qwen serve
 ```
 
-## Phase 1 — chat (no daemon changes)
+## Side panel chat
 
-The side panel is a daemon client. `@qwen-code/webui`'s `DaemonSessionProvider`
-({ baseUrl, token? }) handles connect / session-create / SSE / reconnect /
-heartbeat. Loopback ⇒ `token` omitted, `workspaceCwd` omitted (daemon uses its
-bound workspace).
+The side panel probes the daemon and frames the Web Shell after the daemon
+advertises `allow_origin`. The Web Shell owns sessions, streaming, permissions,
+and reconnect behavior; the extension does not duplicate that React UI.
 
 - `src/daemon/config.ts` — `{ baseUrl, token? }`, default `http://127.0.0.1:4170`,
   overridable via `chrome.storage.local`.
 - `src/daemon/discovery.ts` — `GET /health` probe; gate the chat on reachability,
   otherwise show a "run `qwen serve`" hint.
-- Side panel renders transcript/streaming/permissions from the webui daemon hooks,
-  reusing the existing presentational components + `ChromePlatformProvider`.
+- `public/sidepanel.js` — probes `/health` and `/capabilities`, frames the Web
+  Shell, forwards its optional bearer token, and reports browser automation
+  readiness without blocking chat.
 
-The native-messaging transport (`background/native-connection.ts`,
-`native-message-handler.ts`, `native-messaging.ts` wiring) is dropped; the
-browser-tool executors, catalog, router, network tools, and content scripts are
-kept for Phase 2.
+The extension has no content script or extension-local browser tool catalog.
+Page inspection and automation are provided through the CDP tunnel when an
+external adapter is configured.
 
-## Phase 2 — browser tools (reverse channel; touches the daemon contract)
+## Browser automation
 
-A browser extension cannot be a listening MCP server. The agent runs inside the
-daemon and must reach tools that execute in the extension. The mechanism already
-exists in the codebase for **SDK-embedded MCP servers**, but only over the SDK's
-subprocess `Query` control plane — NOT over the daemon's WS. Phase 2 makes the
-daemon WS carry the same `mcp_message` frames.
+The service worker registers as `qwen-cdp-bridge` on `/acp`. The daemon's `/cdp`
+endpoint translates an external adapter's browser-level CDP connection into
+`cdp_*` frames, and the extension forwards page-domain commands to the active
+tab through `chrome.debugger`.
 
-### Existing template (reuse the pattern, not the wire)
+`qwen serve --allow-origin chrome-extension://<id>` enables the side panel and
+CDP tunnel. Browser tools additionally require a separately installed stdio MCP
+adapter:
 
-- `core/src/tools/sdk-control-client-transport.ts` — `SdkControlClientTransport`:
-  the agent's MCP **client** side. Routes JSON-RPC via a
-  `sendMcpMessage(serverName, msg) => Promise<msg>` callback instead of stdio.
-  Selected when `isSdkMcpServerConfig(config)` (see `mcp-client.ts:1663`),
-  threaded through `createTransport(..., sendSdkMcpMessage)`.
-- `sdk-typescript/src/daemon-mcp/SdkControlServerTransport.ts` — the **server**
-  side: an MCP `Server` connected to a transport whose `send()` → `sendToQuery()`
-  and inbound `handleMessage()` → `onmessage`.
-
-Data flow to reproduce over the daemon WS:
-
-```
-agent MCP client → SdkControlClientTransport.send
-  → daemon: sendMcpMessage('chrome-tools', jsonrpc)
-  → WS frame {type:'mcp_message', server:'chrome-tools', payload: jsonrpc, id}
-  → extension: MCP Server.handleMessage(jsonrpc) → tool executor (chrome.*)
-  → extension: WS frame {type:'mcp_message', id, payload: jsonrpc-result}
-  → daemon: resolve sendMcpMessage promise → agent gets the tool result
+```bash
+QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
+qwen serve --allow-origin chrome-extension://<id>
 ```
 
-### Daemon side (new — `packages/cli/src/serve`, public-contract surface)
-
-1. WS message types on the serve transport: `mcp_register` (client advertises a
-   server name + tool catalog), `mcp_message` (bidirectional JSON-RPC with an
-   `id` for request/response correlation), `mcp_unregister`.
-2. On `mcp_register`, register a runtime **SDK-type** MCP server for the session
-   (reuse `addRuntimeMcpServer` + `isSdkMcpServerConfig`), wiring its
-   `sendSdkMcpMessage` callback to push `mcp_message` frames down this client's WS
-   and await the correlated response.
-3. Tear down on WS close / `mcp_unregister`.
-4. Gate behind a capability flag (`caps.features` += `client_mcp_over_ws`) until
-   the contract is settled — this is the open question raised in #5626.
-
-### Extension side (reuses existing executors)
-
-- `src/background/browser-tools-server.ts` (new): build an MCP `Server`
-  (`@modelcontextprotocol/sdk`) whose `tools/list` = the kept `tool-catalog.ts`
-  and `tools/call` dispatches via the existing `tool-router.ts` →
-  `browser-tool-executors.ts` / `browser-network-tools.ts`, formatting with
-  `mcp-tool-result.ts`. Connect it to a transport that sends/receives
-  `mcp_message` over the DaemonClient WS; register on connect.
-- MVP catalog (~6 tools, read-first): `chrome_read_page`, `chrome_screenshot`,
-  `chrome_console`, `chrome_navigate`, `chrome_click_element`, `chrome_fill_or_select`.
-  Write/navigate tools gated behind per-tool consent (security: browser origin
-  defaults to read-only).
+The main Qwen Code package deliberately does not bundle that adapter. Clients
+must distinguish `cdp_tunnel_over_ws` from `browser_automation_mcp` in the serve
+capability list.
 
 ## Daemon lifecycle (issue #5626 Q3)
 

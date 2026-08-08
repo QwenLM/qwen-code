@@ -13,6 +13,12 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+// Type-only, so it is erased before the serve fast-path bundle closure check
+// ever sees it. Reused only for the child-heap knob: `memoryPressureMode`
+// happens to share the same two values today but is an independent switch, and
+// aliasing them would couple whichever one gains `enforce` first to the other.
+import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import type {
   AuthType,
   InputModalities,
@@ -68,6 +74,11 @@ export interface ServeOptions {
    * above single-user usage, well below the design's N≈50 cliff where
    * per-session RSS (~30–50 MB) and FD pressure start to bite. Set to
    * `0` or `Infinity` to disable.
+   *
+   * This is a fairness and FD lever rather than a memory lever. Sessions
+   * multiplex onto their workspace's single ACP child, so per-session RSS is
+   * spent inside that child's heap, which nothing currently bounds beyond
+   * V8's own ceiling.
    */
   maxSessions?: number;
   /**
@@ -219,6 +230,61 @@ export interface ServeOptions {
    */
   mcpPoolActive?: boolean;
   /**
+   * Total memory budget in MB for the whole daemon process tree — the root
+   * plus every `qwen --acp` child it spawns. When unset, derived as half of
+   * the cgroup-constrained or host memory.
+   *
+   * Observed and reported only. No child is sized from it and no spawn is
+   * refused on its basis: `childHeapMode: 'observe'` models a partition of it
+   * and publishes the model, but there is no mode that applies one. Sizing
+   * children arrives with the peak old-space measurement that can tell an
+   * operator beforehand whether their workload fits the partition.
+   */
+  memoryBudgetMb?: number;
+  /**
+   * Whether the daemon derives and acts on a memory-pressure level.
+   *
+   * `observe` (default) reports the level alongside the raw figures and raises
+   * a status issue when it leaves `normal`. `off` still reports the figures —
+   * the point of this phase is to gather data, including from deployments that
+   * do not want the signal acting on them yet — but raises no issue, so the
+   * daemon's overall `status` rollup is unchanged.
+   *
+   * There is deliberately no `enforce`: nothing here remediates, and a value a
+   * caller can pass but never use is a dead switch. It arrives with the
+   * enforcement.
+   */
+  memoryPressureMode?: 'off' | 'observe';
+  /**
+   * Whether the daemon models a per-child heap partition of the budget.
+   *
+   * `observe` (default) computes the partition and counts the spawns it would
+   * have refused; nothing is applied. There is no `enforce` yet — applying it
+   * needs a way to tell an operator in advance whether their workload fits
+   * the ceiling, and `refusals` cannot answer that: it counts admission
+   * pressure, while children still run on the far larger host-derived
+   * ceiling. `off` models nothing.
+   */
+  childHeapMode?: ChildHeapMode;
+  /**
+   * Resolved at boot by `runQwenServe`. Not an operator input, and not
+   * consumed by any spawn path — it is reported under `limits.memory` on
+   * `GET /daemon/status` so the daemon's memory denominator is observable
+   * before a child-capacity policy is designed against it.
+   */
+  daemonMemoryBudget?: DaemonMemoryBudget;
+  /**
+   * Required external pre-execution policy for managed ACP tools. Omitted
+   * means fully off. The token remains daemon-local and is never forwarded to
+   * the ACP child or any executor environment.
+   */
+  externalToolGuard?: {
+    mode: 'required';
+    endpoint: string;
+    token: string;
+    timeoutMs?: number;
+  };
+  /**
    * Cross-origin allowlist for browser webui
    * deployments.
    */
@@ -350,6 +416,7 @@ export interface CapabilitiesEnvelope {
     primary: boolean;
     trusted: boolean;
     removable?: boolean;
+    kind?: 'live';
   }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;

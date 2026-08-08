@@ -76,13 +76,22 @@ jobs:
         github.event.inputs.tmux_pr != ''))
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner.
+    # use the persistent ECS runner. The job IS the write-permission check, so
+    # it cannot route on its own output; downstream jobs (triage, tmux, verify)
+    # route on what it finds instead.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
+      # Real write-permission check on the PR AUTHOR (collaborator-permission
+      # API, not the coarse author_association), computed only on
+      # pull_request_target events; empty on every other event. Consumed by
+      # the triage job's runner routing so a maintainer's fork PR uses the
+      # ECS pool while a read-only collaborator's or org member's fork PR
+      # stays on ephemeral hosted runners.
+      author_can_write: '${{ steps.perm.outputs.author_can_write }}'
       # /verify trust level: 'trusted' when the PR author has write,
       # 'external' when they do not. Both run on the persistent ECS pool
       # (maintainer decision, 2026-07-29: the pool is network-isolated and
@@ -124,6 +133,7 @@ jobs:
           # issues; compare against null rather than truthiness so the shell
           # receives a plain true/false.
           IS_PR: '${{ github.event.issue.pull_request != null }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           set -euo pipefail
           IS_VERIFY=false
@@ -141,6 +151,18 @@ jobs:
             # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            # Runner-routing input for the triage job: the REAL author write
+            # check (author_association admits org members and read-only
+            # collaborators). Fail OPEN on purpose — unlike the deny gates
+            # below, this selects a runner pool, not a decision: an API
+            # hiccup merely routes the triage to a hosted runner, it must
+            # never skip or fail the triage itself.
+            if [ -n "$PR_AUTHOR" ] &&
+               author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
+              case "$author_perm" in
+                admin|maintain|write) echo "author_can_write=true" >> "$GITHUB_OUTPUT" ;;
+              esac
+            fi
             exit 0
           fi
           case "$EVENT_NAME" in
@@ -387,13 +409,19 @@ jobs:
     # (.qwen/skills/triage/SKILL.md Rules), the `settings` deny rules block the
     # direct interpreter/build/network invocations, and the routing below keeps
     # foreign code off the persistent pool.
-    # Runner routing: the persistent ECS pool is reserved for events whose
-    # payload carries no foreign code — issue triage and same-repo PR events.
-    # Fork PRs, and comment/dispatch-triggered reruns (which may target fork
-    # PRs), go to ephemeral hosted runners so a steered agent cannot persist
-    # anything across runs. Forks of this repo fall back to ubuntu-latest as
-    # before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing: the persistent ECS pool serves events whose payload
+    # carries no foreign code — issue triage and same-repo PR events — plus
+    # fork PRs whose author REALLY has write access, per the collaborator-
+    # permission lookup the authorize job already performs (the coarse
+    # author_association would admit org members and read-only collaborators
+    # to this secret-bearing agent; the pool is network-isolated, but a
+    # write-access author is the trust bar for reusing it). authorize is
+    # skipped on the issues/dispatch paths, so the explicit `issues` clause
+    # must stay; there its output is ''. PRs by other fork authors, and
+    # comment/dispatch-triggered reruns (which may target fork PRs), go to
+    # ephemeral hosted runners so a steered agent cannot persist anything
+    # across runs. Forks of this repo fall back to ubuntu-latest as before.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -512,10 +540,13 @@ jobs:
       # The agent runs as one long step, but its output streams live to the
       # Actions log. Post a status comment up front carrying that run link so a
       # maintainer can watch progress instead of waiting silently until the
-      # first stage comment lands; "Finalize triage status comment" flips it to
-      # a terminal state at the end. Upsert by marker so a re-run reuses the one
-      # comment (no clutter). Best-effort: never fail the job over a status post.
+      # first stage comment lands. Upsert by marker so a re-run reuses the one
+      # comment (no clutter), and export the comment id: "Finalize triage
+      # status comment" PATCHes exactly that id to flip it to a terminal state,
+      # so the two steps cannot disagree about which comment this run owns.
+      # Best-effort: never fail the job over a status post.
       - name: 'Post triage status comment'
+        id: 'status'
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
@@ -539,16 +570,24 @@ jobs:
                 jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
             )" || EXISTING_ID=''
+            COMMENT_ID=''
             if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
+              if gh api --method PATCH \
                 "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
+                -f body="$BODY" >/dev/null; then
+                COMMENT_ID="$EXISTING_ID"
+              else
                 echo "::warning::Failed to update triage status comment; continuing." >&2
+              fi
             else
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
+              COMMENT_ID="$(
+                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                  -f body="$BODY" --jq '.id'
+              )" || COMMENT_ID=''
+              [ -n "$COMMENT_ID" ] ||
                 echo "::warning::Failed to post triage status comment; continuing." >&2
             fi
+            echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Inject model name into triage signature'
@@ -574,9 +613,21 @@ jobs:
           ESCAPED=$(printf '%s' "$OPENAI_MODEL" | sed -e 's/[&/\]/\\&/g')
           sed -i "s/qwen3\.7-max/${ESCAPED}/g" "$TARGET"
 
+      - name: 'Ensure qwen CLI'
+        id: 'ensure_qwen'
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            echo "qwen already installed:"
+          else
+            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+          fi
+          qwen --version
+          echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
+
       - name: 'Run Qwen Triage'
         id: 'triage'
-        uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
+        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
@@ -589,6 +640,12 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # Pin the action's unconditional global reinstall to the version
+          # this job already runs. Left at `latest`, the action installs with
+          # --prefer-offline and resolves the dist-tag from the runner's
+          # persistent npm cache, which lags npm publishes and has downgraded
+          # the shared ECS box back to a stale release.
+          qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'
           # The input name is `settings` — this action version has no
           # `settings_json` input. The old `settings_json:` block was silently
           # dropped ("Unexpected input(s) 'settings_json'" in the run log), so
@@ -904,47 +961,54 @@ jobs:
       # Flip the early status comment to a terminal state so a lingering
       # "running" line doesn't outlive the run. Neutral wording — the verdict
       # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. Same marker → edits the one comment, no second
-      # post. Best-effort, on both success and failure.
+      # and keeps the run link. PATCHes exactly the comment id the claim step
+      # exported. An empty id means this run never ended up owning a comment:
+      # a cancel landing before the claim posted, or a transient failure of the
+      # claim's write (both the fresh-POST and PATCH arms export an empty id on
+      # failure). Either way nothing is flipped and a previous run's terminal
+      # wording stays untouched. A failed claim therefore leaves no lifecycle
+      # breadcrumb even when the comments API recovers during the minutes-long
+      # agent run — accepted: the verdict still lands in the stage comments,
+      # and a list-then-POST recovery here would reintroduce exactly the
+      # selection this coupling removes. Best-effort, on success, failure, AND
+      # cancellation: always() (not success() || failure()) because
+      # cancellation — cancel-in-progress superseding this run on a newer push
+      # or comment, job timeout, or manual cancel — would skip this step and
+      # leave the comment claiming the run is still in progress — the verify
+      # lane has publish-verify to catch that case, this lane only has us.
       - name: 'Finalize triage status comment'
-        if: "(success() || failure()) && steps.resolve.outputs.number != ''"
+        if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
+          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+          JOB_STATUS: '${{ job.status }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage lifecycle -->'
-          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
-          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
-            echo "::warning::Cannot resolve bot identity; skipping final status comment upsert."
+          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
+            echo "This run claimed no status comment; nothing to finalize." >&2
           else
-            if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
+            # A step success is not a green job: 'Check triage response' exits
+            # 1 on an empty summary while steps.triage.outcome stays 'success',
+            # and a later step can still fail. Only a non-failed job may claim
+            # "finished".
+            if [ "${TRIAGE_OUTCOME:-}" = 'success' ] && [ "${JOB_STATUS:-}" != 'failure' ]; then
               EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
               ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
+              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
+              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
             else
               EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
-              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
+              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
             fi
-            printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
-            EXISTING_ID="$(
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
-            )" || EXISTING_ID=''
-            if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to finalize triage status comment; continuing." >&2
-            else
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to post final triage status comment; continuing." >&2
-            fi
+            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
           fi
 
   # On-demand real-user testing: a write-permission user comments
@@ -1135,7 +1199,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
-          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'npm-ci-'
 
       - name: 'Report npm cache hit'
@@ -1721,10 +1785,24 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours. Same bound as publish-verify.
     timeout-minutes: 10
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (base-repo YAML events),
+    # so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
       - name: 'Download tmux results'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
         with:
@@ -2587,7 +2665,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
-          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'npm-ci-'
 
       - name: 'Report npm cache hit'
@@ -3382,10 +3460,24 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (base-repo YAML events),
+    # so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
+
       - name: 'Download verify results'
         id: 'download'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0

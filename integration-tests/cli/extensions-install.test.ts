@@ -21,7 +21,7 @@ const extensionUpdate = `{
 
 test('installs a local extension, verifies a command, and updates it', async () => {
   const rig = new TestRig();
-  rig.setup('extension install test');
+  await rig.setup('extension install test');
   const testServerPath = join(rig.testDir!, 'qwen-extension.json');
   writeFileSync(testServerPath, extension);
   try {
