@@ -311,6 +311,72 @@ describe('auto-memory relevant recall', () => {
     );
   });
 
+  it('bounds long mixed queries while retaining their actual text edges', () => {
+    const codePoints = Array.from({ length: 100 }, (_, index) =>
+      String.fromCodePoint(0x4e00 + index),
+    );
+    const asciiTokens = Array.from(
+      { length: 100 },
+      (_, index) => `token${String(index).padStart(3, '0')}`,
+    );
+    const selected = selectRelevantAutoMemoryDocuments(
+      `${codePoints.join('')} ${asciiTokens.join(' ')}`,
+      [
+        memoryDoc(
+          'query-start.md',
+          'reference',
+          codePoints.slice(0, 2).join(''),
+          '',
+          '',
+        ),
+        memoryDoc(
+          'query-middle.md',
+          'reference',
+          codePoints.slice(49, 51).join(''),
+          '',
+          '',
+        ),
+        memoryDoc('query-end.md', 'reference', asciiTokens.at(-1)!, '', ''),
+      ],
+    );
+
+    expect(selected.map((doc) => doc.filename)).toEqual([
+      'query-start.md',
+      'query-end.md',
+    ]);
+  });
+
+  it('refreshes repeated tokens near the query tail', () => {
+    const tokens = Array.from(
+      { length: 65 },
+      (_, index) => `token${String(index).padStart(3, '0')}`,
+    );
+    const selected = selectRelevantAutoMemoryDocuments(
+      [...tokens.slice(0, 64), tokens[32], tokens[64]].join(' '),
+      [
+        memoryDoc('repeated.md', 'reference', tokens[32], '', ''),
+        memoryDoc('stale.md', 'reference', tokens[33], '', ''),
+        memoryDoc('last.md', 'reference', tokens[64], '', ''),
+      ],
+    ).map((doc) => doc.filename);
+
+    expect(selected).toContain('repeated.md');
+    expect(selected).toContain('last.md');
+    expect(selected).not.toContain('stale.md');
+  });
+
+  it('does not score body text outside the surfaced prompt window', () => {
+    const doc = memoryDoc(
+      'late-body.md',
+      'reference',
+      'General notes',
+      '',
+      `${'x'.repeat(1_200)}late marker`,
+    );
+
+    expect(selectRelevantAutoMemoryDocuments('late marker', [doc])).toEqual([]);
+  });
+
   it('formats selected documents as a prompt block', () => {
     const prompt = buildRelevantAutoMemoryPrompt([docs[0], docs[2]]);
 

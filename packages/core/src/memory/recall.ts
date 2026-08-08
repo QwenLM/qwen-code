@@ -18,6 +18,7 @@ import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 
 const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
+const MAX_HEURISTIC_QUERY_TOKENS = 64;
 const debugLogger = createDebugLogger('AUTO_MEMORY_RECALL');
 
 const ACTIVE_TOOL_USAGE_MEMORY_MARKERS = [
@@ -62,9 +63,8 @@ const TYPE_KEYWORDS: Record<string, string[]> = {
   reference: ['reference', 'dashboard', 'ticket', 'docs', 'doc', 'link'],
 };
 
-const ASCII_TOKEN = /[a-z0-9]{3,}/gu;
-const CJK_RUN =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Hangul}]+/gu;
+const RECALL_TOKEN_RUN =
+  /[a-z0-9]{3,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Hangul}]+/gu;
 
 function normalizeRecallText(text: string): string {
   return text.normalize('NFKC').toLowerCase();
@@ -72,16 +72,40 @@ function normalizeRecallText(text: string): string {
 
 function tokenize(text: string): string[] {
   const normalized = normalizeRecallText(text);
-  const tokens = new Set(normalized.match(ASCII_TOKEN) ?? []);
+  const edgeSize = MAX_HEURISTIC_QUERY_TOKENS / 2;
+  const headTokens = new Set<string>();
+  const tailTokens = new Set<string>();
+  const addToken = (token: string) => {
+    if (headTokens.has(token)) return;
+    if (tailTokens.delete(token)) {
+      tailTokens.add(token);
+      return;
+    }
+    if (headTokens.size < edgeSize) {
+      headTokens.add(token);
+      return;
+    }
+    tailTokens.add(token);
+    if (tailTokens.size > edgeSize) {
+      const oldest = tailTokens.values().next();
+      if (!oldest.done) tailTokens.delete(oldest.value);
+    }
+  };
 
-  for (const run of normalized.match(CJK_RUN) ?? []) {
-    const codePoints = Array.from(run);
-    for (let index = 0; index < codePoints.length - 1; index += 1) {
-      tokens.add(codePoints[index] + codePoints[index + 1]);
+  for (const match of normalized.matchAll(RECALL_TOKEN_RUN)) {
+    const run = match[0];
+    if (run.charCodeAt(0) <= 0x7f) {
+      addToken(run);
+    } else {
+      let previous = '';
+      for (const codePoint of run) {
+        if (previous) addToken(previous + codePoint);
+        previous = codePoint;
+      }
     }
   }
 
-  return Array.from(tokens);
+  return [...headTokens, ...tailTokens];
 }
 
 function normalizeBody(body: string): string {
@@ -150,7 +174,9 @@ function scoreDocument(
 ): number {
   const title = normalizeRecallText(doc.title);
   const description = normalizeRecallText(doc.description);
-  const body = normalizeRecallText(normalizeBody(doc.body));
+  const body = normalizeRecallText(
+    normalizeBody(doc.body).slice(0, MAX_DOC_BODY_CHARS),
+  );
 
   let lexicalScore = 0;
   for (const token of queryTokens) {

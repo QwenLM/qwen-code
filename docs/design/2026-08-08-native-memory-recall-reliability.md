@@ -34,6 +34,8 @@ Improve only the existing failure fallback:
 - generate Unicode code-point bigrams for Han, Hiragana, Katakana, and Hangul
   runs;
 - ignore isolated CJK characters;
+- bound fallback query tokens while retaining tokens from both ends;
+- score only the body window that can be surfaced in the prompt;
 - require a title, description, or body lexical match before applying a type
   boost;
 - weight title and description matches above body-only matches.
@@ -56,5 +58,6 @@ Improve only the existing failure fallback:
 - Slow recall is released by the fixed-budget timer before the initial request.
 - A labeled set covers Chinese, English, Japanese, Korean, mixed text,
   NFKC normalization, body-only matches, and no-result queries.
+- Long CJK queries keep bounded scoring work and preserve both query ends.
 - Existing active-tool noise filtering and model-selector fallback behavior
   remain unchanged.
