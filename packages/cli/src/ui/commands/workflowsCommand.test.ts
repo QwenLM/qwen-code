@@ -11,7 +11,13 @@ import path from 'node:path';
 import { workflowsCommand } from './workflowsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
+import {
+  Storage,
+  writeWorkflowManifest,
+  type Config,
+  type WorkflowTask,
+  type WorkflowSnapshot,
+} from '@qwen-code/qwen-code-core';
 
 function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
   return {
@@ -562,6 +568,51 @@ describe('workflowsCommand', () => {
       } as unknown as Parameters<typeof createMockCommandContext>[0]);
     }
 
+    async function ctxWithManifest(
+      run: Partial<WorkflowTask>,
+      journal: {
+        integrity: 'complete' | 'failed';
+        error?: string;
+      } = { integrity: 'complete' },
+    ): Promise<CommandContext> {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-manifest-cli-'));
+      tmpDirs.push(root);
+      const storage = new Storage(root, path.join(root, 'runtime'));
+      const config = {
+        storage,
+        getWorkflowRunRegistry: () => ({
+          list: listMock,
+          get: getMock,
+          pause: pauseMock,
+          resume: resumeMock,
+        }),
+      };
+      await writeWorkflowManifest(
+        config as unknown as Config,
+        entry({
+          runId: 'wf_deadbeef',
+          status: 'running',
+          script: 'return 1;',
+          ...run,
+        }),
+        {
+          args: null,
+          journal: {
+            version: 1,
+            keyVersion: 'v2',
+            byteLength: 0,
+            sha256:
+              'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+            ...journal,
+          },
+        },
+      );
+      return createMockCommandContext({
+        services: { config },
+        executionMode: 'interactive',
+      } as unknown as Parameters<typeof createMockCommandContext>[0]);
+    }
+
     afterEach(async () => {
       await Promise.all(
         tmpDirs
@@ -584,6 +635,23 @@ describe('workflowsCommand', () => {
       expect(result.content).toContain('wf_persisted');
       expect(result.content).toContain('oldrun');
     });
+
+    it.runIf(process.platform !== 'win32')(
+      'does not render a control-character legacy filename',
+      async () => {
+        listMock.mockReturnValue([]);
+        const ctx = await ctxWithSnapshots([
+          { runId: 'wf_bad\nCONTROL_SENTINEL' },
+        ]);
+        const result = await workflowsCommand.action!(ctx, '');
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'info',
+          content: 'No workflow runs recorded yet.',
+        });
+        expect(JSON.stringify(result)).not.toContain('CONTROL_SENTINEL');
+      },
+    );
 
     it('live registry entry shadows a same-runId snapshot (no duplicate row)', async () => {
       listMock.mockReturnValue([
@@ -667,6 +735,76 @@ describe('workflowsCommand', () => {
         messageType: 'error',
         content: 'Unknown live workflow runId: wf_ghost',
       });
+    });
+
+    it('classifies an orphaned active manifest as interrupted and recoverable', async () => {
+      listMock.mockReturnValue([]);
+      const ctx = await ctxWithManifest({
+        runId: 'wf_deadbeef',
+        status: 'paused',
+      });
+
+      const result = await workflowsCommand.action!(ctx, '');
+      if (!result || result.type !== 'message') throw new Error('no result');
+      expect(result.content).toContain('Workflow runs (1 total · 0 active)');
+      expect(result.content).toContain('wf_deadbeef');
+      expect(result.content).toContain('interrupted');
+      expect(result.content).toContain('recoverable');
+    });
+
+    it('shows a durable recovery failure reason in detail', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithManifest(
+        { runId: 'wf_badc0de', status: 'running' },
+        { integrity: 'failed', error: 'disk write failed' },
+      );
+
+      const result = await workflowsCommand.action!(ctx, 'wf_badc0de');
+      if (!result || result.type !== 'message') throw new Error('no result');
+      expect(result.content).toContain('status      : interrupted');
+      expect(result.content).toContain('recovery    : not recoverable');
+      expect(result.content).toContain('reason      : disk write failed');
+    });
+
+    // The reason string is content another process wrote, not a runId, so
+    // the legacy-filename guard never sees it. Both the listing row (which
+    // slices to 80 chars, keeping any ESC) and the detail view render it.
+    it('strips terminal control bytes from a durable recovery reason', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithManifest(
+        { runId: 'wf_badc0de', status: 'running' },
+        {
+          integrity: 'failed',
+          error: '\u001b]0;pwned\u0007disk write failed',
+        },
+      );
+
+      const listing = await workflowsCommand.action!(ctx, '');
+      const detail = await workflowsCommand.action!(ctx, 'wf_badc0de');
+      if (!listing || listing.type !== 'message') throw new Error('no result');
+      if (!detail || detail.type !== 'message') throw new Error('no result');
+
+      expect(listing.content).not.toContain('\u001b');
+      expect(detail.content).not.toContain('\u001b');
+      expect(detail.content).toContain('disk write failed');
+    });
+
+    it('never routes pause or resume to an interrupted persisted run', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithManifest({
+        runId: 'wf_deadbeef',
+        status: 'paused',
+      });
+
+      const result = await workflowsCommand.action!(ctx, 'p wf_deadbeef');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Workflow wf_deadbeef is interrupted and has no live owner; it cannot be paused or resumed.',
+      });
+      expect(pauseMock).not.toHaveBeenCalled();
+      expect(resumeMock).not.toHaveBeenCalled();
     });
   });
 });

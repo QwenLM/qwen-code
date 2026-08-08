@@ -13,6 +13,7 @@ import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
 import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import { writeWorkflowManifest } from '../../agents/workflow-snapshot.js';
 import { Storage } from '../../config/storage.js';
 
 function fakeConfig(): Config {
@@ -163,11 +164,32 @@ describe('WorkflowTool', () => {
   it('does not register when cancellation arrives during background preflight', async () => {
     const registry = new WorkflowRunRegistry();
     registry.setCompletionCallback(vi.fn());
+    const projectDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-preflight-test-'),
+    );
+    const storage = new Storage(projectDir, path.join(projectDir, 'runtime'));
     const config = {
-      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      storage,
       isInteractive: () => true,
       getWorkflowRunRegistry: () => registry,
     } as unknown as Config;
+    const runId = 'wf_1234abcd';
+    const seed = new WorkflowRunRegistry().register({
+      runId,
+      meta: null,
+      status: 'running',
+      startTime: Date.now(),
+      outputFile: '',
+      abortController: new AbortController(),
+      script: 'return 1',
+    });
+    const journal = new WorkflowJournal(
+      storage.getWorkflowRunJournalPath(runId),
+    );
+    await writeWorkflowManifest(config, seed, {
+      args: undefined,
+      journal: await journal.flush(),
+    });
     const caller = new AbortController();
     const dispatch = vi.fn(async () => 'unused');
     const load = vi
@@ -181,7 +203,7 @@ describe('WorkflowTool', () => {
       const result = await new WorkflowTool(config, { dispatch })
         .build({
           script: 'return 1',
-          resumeFromRunId: 'wf_1234abcd',
+          resumeFromRunId: runId,
           run_in_background: true,
         })
         .execute(caller.signal);
@@ -194,6 +216,7 @@ describe('WorkflowTool', () => {
       expect(dispatch).not.toHaveBeenCalled();
     } finally {
       load.mockRestore();
+      await fs.rm(projectDir, { recursive: true, force: true });
     }
   });
 
@@ -241,7 +264,7 @@ describe('WorkflowTool', () => {
     expect(updateOutput).not.toHaveBeenCalled();
   });
 
-  it('run_in_background=false preserves the foreground ToolResult byte-for-byte', async () => {
+  it('run_in_background=false preserves the foreground ToolResult shape', async () => {
     const run = async (runInBackground: false | undefined) => {
       const registry = new WorkflowRunRegistry();
       const config = {
@@ -250,7 +273,6 @@ describe('WorkflowTool', () => {
       } as unknown as Config;
       const params = {
         script: `phase('one'); return { answer: 42 };`,
-        resumeFromRunId: 'wf_1234abcd',
         ...(runInBackground === undefined
           ? {}
           : { run_in_background: runInBackground }),
@@ -260,7 +282,14 @@ describe('WorkflowTool', () => {
         .execute(new AbortController().signal);
     };
 
-    await expect(run(false)).resolves.toEqual(await run(undefined));
+    const explicit = await run(false);
+    const omitted = await run(undefined);
+    expect(explicit.llmContent).toEqual(omitted.llmContent);
+    const normalizeRunId = (value: unknown) =>
+      String(JSON.stringify(value)).replace(/wf_[0-9a-f]+/g, 'wf_RUN_ID');
+    expect(normalizeRunId(explicit.returnDisplay)).toBe(
+      normalizeRunId(omitted.returnDisplay),
+    );
   });
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {

@@ -8,16 +8,22 @@ import { randomBytes } from 'node:crypto';
 import type { Config } from '../../config/config.js';
 import { logWorkflowRun } from '../../telemetry/loggers.js';
 import { WorkflowRunEvent } from '../../telemetry/types.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
 import {
+  isActiveWorkflowStatus,
   isTerminalWorkflowStatus,
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
-import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
+import {
+  readWorkflowManifest,
+  writeWorkflowManifest,
+  writeWorkflowSnapshot,
+} from '../workflow-snapshot.js';
 import {
   createProductionDispatch,
   resolveConcurrencyLimit,
@@ -29,7 +35,11 @@ import {
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
-import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
+import {
+  WorkflowJournal,
+  type JournalCheckpoint,
+  type JournalReplay,
+} from './workflow-journal.js';
 import { resolveSavedWorkflowScript } from './workflow-saved.js';
 
 export interface WorkflowRunnerOptions {
@@ -43,6 +53,8 @@ export interface WorkflowRunnerOptions {
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
 }
+
+const debugLogger = createDebugLogger('WORKFLOW_RUNNER');
 
 export type WorkflowRunSettlement =
   | { ok: true; outcome: WorkflowRunOutcome }
@@ -93,13 +105,39 @@ export class WorkflowRunner {
     const scriptPath = loaded?.scriptPath ?? options.scriptPath;
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
+    const registry = config.getWorkflowRunRegistry?.();
     const storage = config.storage;
     const journal = storage
       ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
       : undefined;
-    const resumeReplay: JournalReplay | undefined = options.resumeFromRunId
-      ? await journal?.load()
-      : undefined;
+    let resumeReplay: JournalReplay | undefined;
+    if (options.resumeFromRunId && journal) {
+      const manifest = await readWorkflowManifest(config, runId);
+      if (!manifest.canResume) {
+        throw new Error(
+          manifest.resumeBlockedReason ??
+            `Workflow run ${runId} is not recoverable.`,
+        );
+      }
+      if (!isActiveWorkflowStatus(manifest.status)) {
+        throw new Error(
+          `Workflow run ${runId} is ${manifest.status}; terminal runs must be rerun instead of resumed.`,
+        );
+      }
+      if (manifest.script !== script) {
+        throw new Error(
+          `Workflow run ${runId} script does not match its durable manifest.`,
+        );
+      }
+      if (serializedArgs(options.args) !== JSON.stringify(manifest.args)) {
+        throw new Error(
+          `Workflow run ${runId} args do not match its durable manifest.`,
+        );
+      }
+      resumeReplay = await journal.load(manifest.journal);
+    } else if (options.resumeFromRunId && !registry?.get(runId)) {
+      throw new Error('Workflow storage is required to resume a run.');
+    }
     if (runInBackground && options.signal.aborted) {
       throw new Error('Background workflow start was cancelled.');
     }
@@ -107,7 +145,6 @@ export class WorkflowRunner {
     const controller = runInBackground
       ? createAbortController()
       : createChildAbortController(options.signal);
-    const registry = config.getWorkflowRunRegistry?.();
     const dispatch =
       options.dispatch ??
       createProductionDispatch(
@@ -145,6 +182,66 @@ export class WorkflowRunner {
         // UI refresh failures must not affect workflow execution.
       }
     };
+
+    const persistManifest = async (
+      status: WorkflowTask['status'],
+      checkpoint: JournalCheckpoint,
+      source: WorkflowTask | undefined = entry,
+    ): Promise<void> => {
+      if (!source) return;
+      await writeWorkflowManifest(config, source, {
+        args: options.args,
+        journal: checkpoint,
+        status,
+      });
+    };
+
+    const persistManifestBestEffort = async (
+      status: WorkflowTask['status'],
+      checkpoint: JournalCheckpoint,
+      source: WorkflowTask | undefined = entry,
+    ): Promise<void> => {
+      try {
+        await persistManifest(status, checkpoint, source);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to persist workflow manifest for ${runId}: ${extractErrorMessage(error)}`,
+        );
+      }
+    };
+
+    if (entry && journal) {
+      let initialCheckpoint: JournalCheckpoint;
+      try {
+        initialCheckpoint = await journal.flush();
+        assertCompleteCheckpoint(initialCheckpoint, 'initial');
+        await persistManifest('running', initialCheckpoint);
+      } catch (error) {
+        const message = `Failed to persist initial workflow checkpoint: ${extractErrorMessage(error)}`;
+        registry?.fail(runId, message, Date.now());
+        controller.abort();
+        throw new Error(message);
+      }
+      // A background run's controller is deliberately not linked to the
+      // caller's signal, so nothing re-reads that signal after the
+      // pre-start check. The persist above is the only await between the
+      // two, and an fsync is long enough to swallow an Esc: without this
+      // the run registers, dispatches agents, and reports "started in
+      // background" for something the user just cancelled. The manifest
+      // that persist just wrote says 'running' + resumable, so it has to
+      // be settled here too or the run reads as recoverable forever.
+      if (runInBackground && options.signal.aborted) {
+        const endTime = Date.now();
+        registry?.cancel(runId, endTime);
+        controller.abort();
+        await persistManifestBestEffort(
+          'cancelled',
+          initialCheckpoint,
+          freezeWorkflowTask({ ...entry, status: 'cancelled', endTime }),
+        );
+        throw new Error('Background workflow start was cancelled.');
+      }
+    }
     const emitter: WorkflowOrchestratorEmitter = {
       phaseStarted: (title) => {
         registry?.onPhaseStarted(runId, title);
@@ -168,11 +265,28 @@ export class WorkflowRunner {
       },
     };
 
+    let fatalPersistenceError: string | undefined;
     const scheduler = new WorkflowDispatchScheduler(
       resolveConcurrencyLimit(),
       controller.signal,
       ({ state }) => registry?.onDispatchStateChange(runId, state),
+      journal
+        ? async () => {
+            try {
+              const checkpoint = await journal.flush();
+              assertCompleteCheckpoint(checkpoint, 'pause');
+              await persistManifest('paused', checkpoint);
+            } catch (error) {
+              fatalPersistenceError = `Failed to persist workflow pause checkpoint: ${extractErrorMessage(error)}`;
+              registry?.fail(runId, fatalPersistenceError, Date.now());
+              controller.abort();
+              throw error;
+            }
+          }
+        : undefined,
     );
+
+    let terminalCheckpoint: JournalCheckpoint | undefined;
 
     const handle: WorkflowRunHandle = new WorkflowRunHandle(
       runId,
@@ -217,22 +331,81 @@ export class WorkflowRunner {
                   : (entry.error ?? 'Workflow run failed.'),
             };
           }
-          registry?.complete(runId, outcome.result, Date.now());
+          terminalCheckpoint = await journal?.flush();
+          if (entry && isTerminalWorkflowStatus(entry.status)) {
+            return {
+              ok: false,
+              message:
+                entry.status === 'cancelled'
+                  ? 'Workflow run cancelled.'
+                  : (entry.error ?? 'Workflow run failed.'),
+            };
+          }
+          const endTime = Date.now();
+          if (entry && terminalCheckpoint) {
+            const completedEntry = freezeWorkflowTask({
+              ...entry,
+              status: 'completed',
+              endTime,
+              result: outcome.result,
+            });
+            try {
+              await persistManifest(
+                'completed',
+                terminalCheckpoint,
+                completedEntry,
+              );
+            } catch (error) {
+              fatalPersistenceError = `Failed to persist workflow terminal checkpoint: ${extractErrorMessage(error)}`;
+              throw new Error(fatalPersistenceError);
+            }
+          }
+          if (entry && isTerminalWorkflowStatus(entry.status)) {
+            return {
+              ok: false,
+              message:
+                entry.status === 'cancelled'
+                  ? 'Workflow run cancelled.'
+                  : (entry.error ?? 'Workflow run failed.'),
+            };
+          }
+          registry?.complete(runId, outcome.result, endTime);
           return { ok: true, outcome };
         } catch (error) {
           const details =
             error instanceof WorkflowExecutionError ? error : undefined;
-          const message = extractErrorMessage(error);
+          const message = fatalPersistenceError ?? extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
           if (details?.logs) registry?.setRecentLogs(runId, details.logs);
-          if (
+          try {
+            terminalCheckpoint = await journal?.flush();
+          } catch (flushError) {
+            debugLogger.warn(
+              `Failed to flush workflow terminal journal for ${runId}: ${extractErrorMessage(flushError)}`,
+            );
+          }
+          const cancelled =
             callerWasAbortedBeforeStart ||
             (!runInBackground && options.signal.aborted) ||
-            entry?.status === 'cancelled'
-          ) {
-            registry?.cancel(runId, Date.now());
+            entry?.status === 'cancelled';
+          const endTime = Date.now();
+          if (entry && terminalCheckpoint) {
+            const failedEntry = freezeWorkflowTask({
+              ...entry,
+              status: cancelled ? 'cancelled' : 'failed',
+              endTime,
+              ...(cancelled ? {} : { error: message }),
+            });
+            await persistManifestBestEffort(
+              failedEntry.status,
+              terminalCheckpoint,
+              failedEntry,
+            );
+          }
+          if (cancelled) {
+            registry?.cancel(runId, endTime);
           } else {
-            registry?.fail(runId, message, Date.now());
+            registry?.fail(runId, message, endTime);
           }
           return { ok: false, message, details };
         } finally {
@@ -244,15 +417,36 @@ export class WorkflowRunner {
             // dispatches keep draining (mutating the live entry) across
             // the snapshot write's awaits, and a post-await read made
             // the snapshot and telemetry disagree with each other.
+            const settledEntry = freezeWorkflowTask(entry);
             const telemetryEvent = new WorkflowRunEvent({
-              status: entry.status,
-              agents_dispatched: entry.agentsDispatched,
-              agents_completed: entry.agentsCompleted,
-              phase_count: entry.phases.length,
-              tokens_spent: entry.tokensSpent,
-              duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
+              status: settledEntry.status,
+              agents_dispatched: settledEntry.agentsDispatched,
+              agents_completed: settledEntry.agentsCompleted,
+              phase_count: settledEntry.phases.length,
+              tokens_spent: settledEntry.tokensSpent,
+              duration_ms:
+                (settledEntry.endTime ?? settledEntry.startTime) -
+                settledEntry.startTime,
             });
-            await writeWorkflowSnapshot(config, entry);
+            const snapshotWrite = writeWorkflowSnapshot(config, settledEntry);
+            let checkpoint = terminalCheckpoint;
+            if (!checkpoint && journal) {
+              try {
+                checkpoint = await journal.flush();
+              } catch (flushError) {
+                debugLogger.warn(
+                  `Failed to flush terminal workflow journal for ${runId}: ${extractErrorMessage(flushError)}`,
+                );
+              }
+            }
+            if (checkpoint) {
+              await persistManifestBestEffort(
+                settledEntry.status,
+                checkpoint,
+                settledEntry,
+              );
+            }
+            await snapshotWrite;
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {
@@ -280,4 +474,32 @@ function extractErrorMessage(error: unknown): string {
     return String(message);
   }
   return String(error);
+}
+
+function serializedArgs(args: unknown): string | undefined {
+  try {
+    return JSON.stringify(args ?? null);
+  } catch {
+    return undefined;
+  }
+}
+
+function assertCompleteCheckpoint(
+  checkpoint: JournalCheckpoint,
+  transition: 'initial' | 'pause',
+): void {
+  if (checkpoint.integrity === 'complete') return;
+  throw new Error(
+    `${transition} workflow journal checkpoint failed${checkpoint.error ? `: ${checkpoint.error}` : ''}`,
+  );
+}
+
+function freezeWorkflowTask(task: WorkflowTask): WorkflowTask {
+  return {
+    ...task,
+    phases: [...task.phases],
+    recentLogs: [...task.recentLogs],
+    perPhaseTokens: new Map(task.perPhaseTokens),
+    pendingApprovals: [],
+  };
 }
