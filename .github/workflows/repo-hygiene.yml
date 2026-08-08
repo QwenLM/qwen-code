@@ -842,8 +842,18 @@ jobs:
 
           # Label requested by issue #7383. Non-fatal: never create labels,
           # and a repo without it should not fail the run.
-          gh pr edit "${PR_URL}" --add-label 'autofix/repo-hygiene' \
-            || echo '⚠️  Could not add label autofix/repo-hygiene (missing in this repo?)'
+          # REST, not `gh pr edit`: its GraphQL lookup errors on this repo's
+          # Projects (classic), so the label was never applied and the fallback
+          # message blamed a missing label that exists. The existence probe is
+          # real work here: unlike `gh pr edit`, the REST add would CREATE a
+          # missing label, which this step promises never to do.
+          if gh api "repos/${GITHUB_REPOSITORY}/labels/autofix%2Frepo-hygiene" > /dev/null 2>&1; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_URL##*/}/labels" \
+              -f 'labels[]=autofix/repo-hygiene' > /dev/null \
+              || echo '⚠️  Could not add label autofix/repo-hygiene'
+          else
+            echo '⚠️  Label autofix/repo-hygiene does not exist in this repo; skipping'
+          fi
 
           if [[ -s "${WORKDIR}/report-only.md" ]]; then
             {

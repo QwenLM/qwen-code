@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -69,8 +70,20 @@ describe('pr-self-report-label', () => {
     const calls = existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '';
     rmSync(dir, { recursive: true, force: true });
     return {
-      added: /add-label/.test(calls),
-      removed: /remove-label/.test(calls),
+      // Label mutations are REST — `gh pr edit`'s GraphQL lookup requests
+      // repository.pullRequest.projectCards and errors on this repository's
+      // Projects (classic), so it exits 1 before mutating (43 straight CI
+      // failures of the add/remove arms, 2026-08-04..08). The full method +
+      // path is asserted, including the %2F: the label is a PATH SEGMENT in
+      // the DELETE and contains a slash, so an unencoded call 404s.
+      added:
+        /api -X POST repos\/o\/r\/issues\/1\/labels -f labels\[\]=review\/self-reported/.test(
+          calls,
+        ),
+      removed:
+        /api -X DELETE repos\/o\/r\/issues\/1\/labels\/review%2Fself-reported/.test(
+          calls,
+        ),
       labelCreated: /label create/.test(calls),
       out: out.trim(),
     };
@@ -128,5 +141,31 @@ describe('pr-self-report-label', () => {
     // pull_request_target hardening: the author/number/label reach the script
     // only through env, so a crafted title or body cannot inject shell.
     expect(runBlock).not.toMatch(/\$\{\{/);
+  });
+});
+
+describe('gh pr edit label mutations are banned repo-wide', () => {
+  // `gh pr edit` cannot mutate anything on this repository: its GraphQL
+  // lookup requests repository.pullRequest.projectCards, and with Projects
+  // (classic) attached GitHub returns the deprecation as an error, so the
+  // command exits 1 before applying the change. Three workflows carried
+  // label mutations through it and every such arm failed silently-green
+  // (the runs only passed when there was nothing to do) or warned with a
+  // misdiagnosis. Labels go through the REST issues/labels endpoints, which
+  // never touch that query.
+  it('no workflow mutates labels through gh pr edit', () => {
+    const dir = '.github/workflows';
+    const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+    expect(files.length).toBeGreaterThan(0);
+    const offenders = [];
+    for (const file of files) {
+      const text = readFileSync(join(dir, file), 'utf8');
+      for (const [i, line] of text.split('\n').entries()) {
+        if (/gh pr edit .*(--add-label|--remove-label)/.test(line)) {
+          offenders.push(`${file}:${i + 1}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
