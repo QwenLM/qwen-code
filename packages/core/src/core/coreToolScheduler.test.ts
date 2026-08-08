@@ -15365,12 +15365,26 @@ describe('Fire hook functions integration', () => {
       it('treats a read-only shell command as safe and a mutating one as unsafe', () => {
         expect(
           isToolCallConcurrencySafe('shell', Kind.Execute, {
-            command: 'git status',
+            command: 'ls',
           }),
         ).toBe(true);
         expect(
           isToolCallConcurrencySafe('shell', Kind.Execute, {
             command: 'rm -rf build',
+          }),
+        ).toBe(false);
+      });
+
+      it('uses the shell directory for git config checks and fails closed without one', () => {
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'git status',
+            directory: os.tmpdir(),
+          }),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe('shell', Kind.Execute, {
+            command: 'git status',
           }),
         ).toBe(false);
       });
@@ -15735,7 +15749,7 @@ describe('Fire hook functions integration', () => {
         {
           callId: '1',
           name: 'run_shell_command',
-          args: { command: 'git log' },
+          args: { command: 'git log', directory: os.tmpdir() },
           isClientInitiated: false,
           prompt_id: 'p1',
         },

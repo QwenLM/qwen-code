@@ -1267,10 +1267,14 @@ export function isToolCallConcurrencySafe(
   // one) because partitioning runs synchronously. It is deliberately more
   // conservative than the AST version used for permission decisions.
   if (kind === Kind.Execute) {
-    const command = (args as { command?: string } | undefined)?.command;
+    const { command, directory } =
+      (args as { command?: string; directory?: string } | undefined) ?? {};
     if (typeof command !== 'string') return false;
     try {
-      return isShellCommandReadOnly(command);
+      return isShellCommandReadOnly(
+        command,
+        directory ? { cwd: directory } : { unknownDir: true },
+      );
     } catch {
       return false; // fail-closed
     }

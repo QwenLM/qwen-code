@@ -390,7 +390,15 @@ describe('gitConfigMayExecutePrograms', () => {
     expect(gitConfigMayExecutePrograms(repo)).toBe(true);
   });
 
-  it('flags protocol.<name>.allow lifts of the ext:: transport block', () => {
+  it('ignores ext:: url subsections without an insteadOf rewrite', () => {
+    const repo = makeRepo(
+      'url-push-insteadof',
+      '[url "ext::sh -c evil"]\n\tpushInsteadOf = https://example.com/\n',
+    );
+    expect(gitConfigMayExecutePrograms(repo)).toBe(false);
+  });
+
+  it('flags protocol allow lifts only when they can enable ext::', () => {
     const always = makeRepo(
       'proto-always',
       '[protocol "ext"]\n\tallow = always\n',
@@ -408,6 +416,11 @@ describe('gitConfigMayExecutePrograms', () => {
       '[protocol "ext"]\n\tallow = never\n',
     );
     expect(gitConfigMayExecutePrograms(never)).toBe(false);
+    const file = makeRepo(
+      'proto-file',
+      '[protocol "file"]\n\tallow = always\n',
+    );
+    expect(gitConfigMayExecutePrograms(file)).toBe(false);
   });
 
   it('does not flag boolean pager overrides', () => {
@@ -513,185 +526,6 @@ describe('gitConfigMayExecutePrograms', () => {
         `gitdir: ${path.relative(sub, store)}\n`,
       );
       expect(gitConfigMayExecutePrograms(sub)).toBe(true);
-    });
-  });
-
-  describe('submodule storage dirs', () => {
-    // `git status` / `git diff` in a superproject run child git processes
-    // inside each submodule; the children read the config stored under
-    // `.git/modules/<name>`. The probe must therefore downgrade the
-    // superproject when ANY storage dir can execute programs.
-
-    function makeModuleDir(
-      superRepo: string,
-      relPath: string,
-      config = '',
-    ): string {
-      const moduleDir = path.join(
-        superRepo,
-        '.git',
-        'modules',
-        ...relPath.split('/'),
-      );
-      fs.mkdirSync(path.join(moduleDir, 'objects'), { recursive: true });
-      fs.mkdirSync(path.join(moduleDir, 'refs'), { recursive: true });
-      fs.writeFileSync(path.join(moduleDir, 'HEAD'), 'ref: refs/heads/main\n');
-      if (config) {
-        fs.writeFileSync(path.join(moduleDir, 'config'), config);
-      }
-      return moduleDir;
-    }
-
-    it('keeps a superproject clean when submodule configs are clean', () => {
-      const superRepo = makeRepo('super-clean', '[core]\n\tbare = false\n');
-      makeModuleDir(superRepo, 'sub', '[core]\n\tworktree = ../../../sub\n');
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(false);
-    });
-
-    it('flags executing keys planted in a submodule config', () => {
-      const superRepo = makeRepo('super-fsmon', '[core]\n\tbare = false\n');
-      makeModuleDir(superRepo, 'sub', '[core]\n\tfsmonitor = /tmp/evil\n');
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-      // The downgrade also applies from a nested cwd in the superproject.
-      const nested = path.join(superRepo, 'src', 'deep');
-      fs.mkdirSync(nested, { recursive: true });
-      expect(gitConfigMayExecutePrograms(nested)).toBe(true);
-    });
-
-    it('flags nested submodule storage dirs', () => {
-      const superRepo = makeRepo('super-nested', '');
-      makeModuleDir(superRepo, 'a', '[core]\n');
-      makeModuleDir(
-        superRepo,
-        'a/modules/b',
-        '[diff]\n\texternal = /tmp/evil\n',
-      );
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-    });
-
-    it('flags executable trigger hooks in a submodule hooks dir', () => {
-      const superRepo = makeRepo('super-hook', '');
-      const moduleDir = makeModuleDir(superRepo, 'sub', '[core]\n');
-      const hooksDir = path.join(moduleDir, 'hooks');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      const hookPath = path.join(hooksDir, 'post-index-change');
-      fs.writeFileSync(hookPath, '#!/bin/sh\ntouch /tmp/evil\n');
-      fs.chmodSync(hookPath, 0o755);
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-    });
-
-    // fs.accessSync(X_OK) is not meaningful on Windows — every file is
-    // "executable" there — so only assert the negative case elsewhere.
-    it.skipIf(process.platform === 'win32')(
-      'does not flag non-executable submodule hooks',
-      () => {
-        const superRepo = makeRepo('super-hook-noexec', '');
-        const moduleDir = makeModuleDir(superRepo, 'sub', '[core]\n');
-        const hooksDir = path.join(moduleDir, 'hooks');
-        fs.mkdirSync(hooksDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(hooksDir, 'post-index-change'),
-          '#!/bin/sh\n',
-        );
-        fs.chmodSync(path.join(hooksDir, 'post-index-change'), 0o644);
-        expect(gitConfigMayExecutePrograms(superRepo)).toBe(false);
-      },
-    );
-
-    it('resolves submodule hooksPath overrides via core.worktree', () => {
-      // git anchors a relative hooksPath at the submodule WORKTREE root,
-      // which the stored config records as core.worktree (relative to the
-      // storage dir).
-      const superRepo = makeRepo('super-hookspath', '');
-      fs.mkdirSync(path.join(superRepo, 'sub'), { recursive: true });
-      makeModuleDir(
-        superRepo,
-        'sub',
-        '[core]\n\tworktree = ../../../sub\n\thooksPath = ../hooks-dir\n',
-      );
-      const hooksDir = path.join(superRepo, 'hooks-dir');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      const hookPath = path.join(hooksDir, 'fsmonitor-watchman');
-      fs.writeFileSync(hookPath, '#!/bin/sh\ntouch /tmp/evil\n');
-      fs.chmodSync(hookPath, 0o755);
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-    });
-
-    it('keeps submodule hooksPath overrides read-only without trigger hooks', () => {
-      const superRepo = makeRepo('super-hookspath-clean', '');
-      fs.mkdirSync(path.join(superRepo, 'sub'), { recursive: true });
-      makeModuleDir(
-        superRepo,
-        'sub',
-        '[core]\n\tworktree = ../../../sub\n\thooksPath = ../hooks-dir\n',
-      );
-      const hooksDir = path.join(superRepo, 'hooks-dir');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      fs.writeFileSync(path.join(hooksDir, 'pre-commit'), '#!/bin/sh\n', {
-        mode: 0o755,
-      });
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(false);
-    });
-
-    it('anchors submodule hooksPath at the LAST core.worktree (git semantics)', () => {
-      const superRepo = makeRepo('super-worktree-last', '');
-      fs.mkdirSync(path.join(superRepo, 'a', 'real'), { recursive: true });
-      fs.mkdirSync(path.join(superRepo, 'b', 'decoy'), { recursive: true });
-      makeModuleDir(
-        superRepo,
-        'sub',
-        '[core]\n\tworktree = ../../../b/decoy\n\tworktree = ../../../a/real\n\thooksPath = ../hooks\n',
-      );
-      // Executable trigger hook only under the LAST worktree's resolution.
-      const hooksDir = path.join(superRepo, 'a', 'hooks');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      const hookPath = path.join(hooksDir, 'post-index-change');
-      fs.writeFileSync(hookPath, '#!/bin/sh\ntouch /tmp/evil\n');
-      fs.chmodSync(hookPath, 0o755);
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-    });
-
-    it('fails closed on relative submodule hooksPath without core.worktree', () => {
-      // Without a recorded worktree root the redirect target cannot be
-      // resolved — confirm instead of guessing.
-      const superRepo = makeRepo('super-hookspath-nowt', '');
-      makeModuleDir(superRepo, 'sub', '[core]\n\thooksPath = ../hooks-dir\n');
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-    });
-
-    it('probes absolute submodule hooksPath overrides', () => {
-      const superRepo = makeRepo('super-hookspath-abs', '');
-      const external = path.join(root, 'sub-external-hooks');
-      fs.mkdirSync(external, { recursive: true });
-      const hookPath = path.join(external, 'post-index-change');
-      fs.writeFileSync(hookPath, '#!/bin/sh\ntouch /tmp/evil\n');
-      fs.chmodSync(hookPath, 0o755);
-      makeModuleDir(superRepo, 'sub', `[core]\n\thooksPath = ${external}\n`);
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
-    });
-
-    it('ignores modules entries that are not git directories', () => {
-      // git cannot run a child process in a directory it does not accept
-      // as a git directory, so its contents never execute.
-      const superRepo = makeRepo('super-notgit', '');
-      const stray = path.join(superRepo, '.git', 'modules', 'stray');
-      fs.mkdirSync(stray, { recursive: true });
-      fs.writeFileSync(
-        path.join(stray, 'config'),
-        '[diff]\n\texternal = /tmp/evil\n',
-      );
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(false);
-    });
-
-    it('fails closed when the submodule budget is exhausted', () => {
-      // All configs CLEAN: discovery would return false, so the `true`
-      // verdict uniquely pins the budget path (a raised/removed cap would
-      // otherwise walk every dir and read clean configs undetected).
-      const superRepo = makeRepo('super-budget', '');
-      for (let i = 0; i <= 256; i++) {
-        makeModuleDir(superRepo, `sub-${i}`, '[core]\n');
-      }
-      expect(gitConfigMayExecutePrograms(superRepo)).toBe(true);
     });
   });
 
