@@ -1933,6 +1933,10 @@ export function App({
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
     DaemonWorkspaceGitStatus | undefined
   >(undefined);
+  const [gitStatusRefreshRevision, setGitStatusRefreshRevision] = useState(0);
+  const handleGitBranchChanged = useCallback(() => {
+    setGitStatusRefreshRevision((revision) => revision + 1);
+  }, []);
 
   useEffect(() => {
     if (!workspace.capabilities || !selectedWorkspaceCwd) return;
@@ -2119,6 +2123,7 @@ export function App({
   }, [
     activeWorkspaceCwd,
     connection.gitBranch,
+    gitStatusRefreshRevision,
     workspace.client,
     sessionWorktree,
   ]);
@@ -10239,8 +10244,10 @@ export function App({
                           gitBranch={activeGitBranch}
                           gitWorktree={Boolean(sessionWorktree)}
                           gitCwd={sessionWorktree?.path}
+                          gitWorkspaceCwd={activeWorkspaceCwd}
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                          onGitBranchChanged={handleGitBranchChanged}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd

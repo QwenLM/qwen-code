@@ -91,6 +91,7 @@ type ChatEditorTestProps = {
   }) => void;
   gitBranch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
+  onGitBranchChanged?: () => void;
   onOpenGitDiff?: () => void;
   visibleToolbarActions?: string[];
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
@@ -6868,6 +6869,45 @@ describe('App session callbacks', () => {
       expect(workspaceGit).toHaveBeenCalledWith({ cwd: undefined });
       expect(workspaceGit).toHaveBeenCalledWith({ wait: true });
     });
+  });
+
+  it('refetches the composer git status when the editor reports a branch change', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // Let the initial fast + wait:true fetches settle.
+    await vi.waitFor(() => {
+      expect(workspaceGit).toHaveBeenCalledWith({ wait: true });
+    });
+    const callsBefore = workspaceGit.mock.calls.length;
+
+    // The editor fires onGitBranchChanged after an existing-branch checkout;
+    // with no live session there is no connection.gitBranch change or
+    // git_status_changed push, so the revision dep is the only refresh path.
+    const onGitBranchChanged =
+      testState.latestChatEditorProps?.onGitBranchChanged;
+    expect(onGitBranchChanged).toBeDefined();
+    act(() => {
+      onGitBranchChanged?.();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(workspaceGit.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    expect(workspaceGit).toHaveBeenCalledWith({ cwd: undefined });
   });
 
   it('mirrors connection.gitStatus into the composer git chip', async () => {

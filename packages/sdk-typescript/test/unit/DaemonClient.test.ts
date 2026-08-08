@@ -1024,6 +1024,33 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('appends diff mode and ref to bound and qualified diff URLs', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceGitDiff({ mode: 'staged' });
+      await client.workspaceGitDiffFile('a.ts', undefined, {
+        mode: 'commit',
+        ref: 'abc1234',
+      });
+      const ws = client.workspaceByCwd('/work/main');
+      await ws.workspaceGitDiff('/worktree', {
+        mode: 'branch',
+        ref: 'origin/topic',
+      });
+      await ws.workspaceGitDiffFile('a.ts', undefined, '/worktree', {
+        mode: 'unstaged',
+      });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspace/git/diff?mode=staged',
+        'http://daemon/workspace/git/diff/file?path=a.ts&mode=commit&ref=abc1234',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff?cwd=%2Fworktree&mode=branch&ref=origin%2Ftopic',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=a.ts&cwd=%2Fworktree&mode=unstaged',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,

@@ -9,6 +9,8 @@ import {
   fetchGitDiff,
   fetchGitDiffHunksForFile,
   type GitDiffFileHunks,
+  type GitDiffMode,
+  type GitDiffOptions,
   type GitDiffResult,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -26,16 +28,15 @@ import { applyReadHeaders } from './workspace-file-read.js';
 
 // NOTE: unlike the file-read routes, the single-file diff route does NOT resolve
 // the `?path` through the workspace filesystem factory. A diff path can name a
-// file that was deleted in the working tree (still present in HEAD, so it must
-// still diff), which the factory's `'read'` intent rejects with ENOENT. Instead
-// the path is contained by three layers: (1) the qualified route requires a
-// trusted workspace; (2) `fetchGitDiffHunksForFile` normalizes the path to a
-// git-root-relative form and rejects absolute paths, drive letters, and `..`
-// traversal; (3) git itself only diffs inside the repository, the untracked
-// synthesis reads with `O_NOFOLLOW`, and it only runs for paths git confirms as
-// untracked (`ls-files --others` never lists files reached through a symlinked
-// directory). The route is read-only, so this is adequate without realpath
-// resolution.
+// file that was deleted relative to the selected comparison base, which the
+// factory's `'read'` intent rejects with ENOENT. Instead the path is contained
+// by three layers: (1) the qualified route requires a trusted workspace; (2)
+// `fetchGitDiffHunksForFile` normalizes the path to a git-root-relative form and
+// rejects absolute paths, drive letters, and `..` traversal; (3) git itself only
+// diffs inside the repository, the untracked synthesis reads with `O_NOFOLLOW`,
+// and it only runs for paths git confirms as untracked (`ls-files --others`
+// never lists files reached through a symlinked directory). The route is
+// read-only, so this is adequate without realpath resolution.
 
 function buildDiffList(
   workspaceCwd: string,
@@ -102,16 +103,21 @@ function buildFileHunks(
 }
 
 async function handleDiffList(
+  req: Request,
   res: Response,
   workspaceCwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
   assertGenerationOpen?: () => void,
 ): Promise<void> {
+  const options = parseDiffOptions(req, res);
+  if (options === null) return;
   try {
     assertGenerationOpen?.();
     applyReadHeaders(res);
-    const result = await fetchGitDiff(workspaceCwd);
+    const result = options
+      ? await fetchGitDiff(workspaceCwd, options)
+      : await fetchGitDiff(workspaceCwd);
     assertGenerationOpen?.();
     res.status(200).json(buildDiffList(workspaceCwd, result));
   } catch (err) {
@@ -144,22 +150,66 @@ async function handleDiffFile(
     typeof queryOldPath === 'string' && queryOldPath.length > 0
       ? queryOldPath
       : undefined;
+  const options = parseDiffOptions(req, res);
+  if (options === null) return;
   try {
     assertGenerationOpen?.();
     // Apply the read headers before the await (as handleDiffList does) so the
     // no-store/nosniff headers are also present on the error response if the
     // fetch throws.
     applyReadHeaders(res);
-    const result = await fetchGitDiffHunksForFile(
-      workspaceCwd,
-      queryPath,
-      oldPath,
-    );
+    const result = options
+      ? await fetchGitDiffHunksForFile(
+          workspaceCwd,
+          queryPath,
+          oldPath,
+          options,
+        )
+      : await fetchGitDiffHunksForFile(workspaceCwd, queryPath, oldPath);
     assertGenerationOpen?.();
     res.status(200).json(buildFileHunks(workspaceCwd, queryPath, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
   }
+}
+
+const DIFF_MODES = new Set<GitDiffMode>([
+  'uncommitted',
+  'unstaged',
+  'staged',
+  'commit',
+  'branch',
+]);
+
+function parseDiffOptions(
+  req: Request,
+  res: Response,
+): GitDiffOptions | undefined | null {
+  const rawMode = req.query['mode'];
+  const rawRef = req.query['ref'];
+  if (rawMode === undefined && rawRef === undefined) return undefined;
+  if (typeof rawMode !== 'string' || !DIFF_MODES.has(rawMode as GitDiffMode)) {
+    sendDiffParseError(res, 'invalid diff mode');
+    return null;
+  }
+  const mode = rawMode as GitDiffMode;
+  if (mode === 'commit' || mode === 'branch') {
+    if (typeof rawRef !== 'string' || rawRef.trim().length === 0) {
+      sendDiffParseError(res, 'ref query parameter is required for this mode');
+      return null;
+    }
+    return { mode, ref: rawRef.trim() };
+  }
+  if (rawRef !== undefined) {
+    sendDiffParseError(res, 'ref is only supported for commit or branch mode');
+    return null;
+  }
+  return { mode };
+}
+
+function sendDiffParseError(res: Response, error: string): void {
+  applyReadHeaders(res);
+  res.status(400).json({ errorKind: 'parse_error', error, status: 400 });
 }
 
 export function registerWorkspaceGitDiffRoutes(
@@ -171,12 +221,13 @@ export function registerWorkspaceGitDiffRoutes(
     captureGenerationAssertion?: () => (() => void) | undefined;
   },
 ): void {
-  app.get('/workspace/git/diff', (_req, res) => {
+  app.get('/workspace/git/diff', (req, res) => {
     if (deps.isWorkspaceTrusted?.() === false) {
       sendUntrustedWorkspaceResponse(res);
       return;
     }
     void handleDiffList(
+      req,
       res,
       deps.boundWorkspace,
       deps.sendBridgeError,
@@ -221,6 +272,7 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     void handleDiffList(
+      req,
       res,
       resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,

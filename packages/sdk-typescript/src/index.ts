@@ -117,6 +117,8 @@ export {
   type DaemonWorkspaceUpdate,
   type DaemonWorkspaceGitStatus,
   type DaemonGitOperation,
+  type DaemonGitDiffMode,
+  type DaemonWorkspaceGitDiffOptions,
   type DaemonWorkspaceGitDiff,
   type DaemonWorkspaceGitDiffFile,
   type DaemonWorkspaceGitDiffHunks,

@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -17,6 +18,7 @@ import {
   fetchGitLog,
   fetchGitCommitDetail,
   getGitWorkingTreeStatus,
+  type GitDiffMode,
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
   MAX_LINES_PER_FILE,
@@ -401,6 +403,276 @@ describe('fetchGitDiff', () => {
     expect(result!.perFileStats.size).toBe(0);
   });
 
+  it('separates unstaged and staged changes', async () => {
+    await fs.writeFile(path.join(repo, 'staged.txt'), 'base\n');
+    await fs.writeFile(path.join(repo, 'both.txt'), 'base\n');
+    await fs.writeFile(path.join(repo, 'unstaged.txt'), 'base\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+
+    await fs.writeFile(path.join(repo, 'staged.txt'), 'staged\n');
+    await fs.writeFile(path.join(repo, 'both.txt'), 'index\n');
+    await git(repo, 'add', 'staged.txt', 'both.txt');
+    await fs.writeFile(path.join(repo, 'both.txt'), 'working\n');
+    await fs.writeFile(path.join(repo, 'unstaged.txt'), 'working\n');
+    await fs.writeFile(path.join(repo, 'untracked.txt'), 'new\n');
+
+    const unstaged = await fetchGitDiff(repo, { mode: 'unstaged' });
+    expect([...unstaged!.perFileStats.keys()].sort()).toEqual([
+      'both.txt',
+      'unstaged.txt',
+      'untracked.txt',
+    ]);
+
+    const staged = await fetchGitDiff(repo, { mode: 'staged' });
+    expect([...staged!.perFileStats.keys()].sort()).toEqual([
+      'both.txt',
+      'staged.txt',
+    ]);
+    const unstagedHunks = await fetchGitDiffHunksForFile(
+      repo,
+      'both.txt',
+      undefined,
+      { mode: 'unstaged' },
+    );
+    expect(unstagedHunks!.hunks.flatMap((h) => h.lines)).toEqual([
+      '-index',
+      '+working',
+    ]);
+    expect(
+      await fetchGitDiffHunksForFile(repo, 'unstaged.txt', undefined, {
+        mode: 'staged',
+      }),
+    ).toBeNull();
+  });
+
+  it('shows staged files before the first commit', async () => {
+    await fs.writeFile(path.join(repo, 'first.txt'), 'first\n');
+    await git(repo, 'add', 'first.txt');
+
+    const staged = await fetchGitDiff(repo, { mode: 'staged' });
+    expect(staged?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+    });
+    expect([...staged!.perFileStats.keys()]).toEqual(['first.txt']);
+  });
+
+  it('compares a selected commit with its parent, including a root commit', async () => {
+    await fs.writeFile(path.join(repo, 'root.txt'), 'root\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'root');
+    const rootSha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+
+    await fs.writeFile(path.join(repo, 'second.txt'), 'second\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+    const secondSha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+    await fs.writeFile(path.join(repo, 'untracked.txt'), 'working tree only\n');
+
+    const root = await fetchGitDiff(repo, { mode: 'commit', ref: rootSha });
+    expect([...root!.perFileStats.keys()]).toEqual(['root.txt']);
+    const second = await fetchGitDiff(repo, {
+      mode: 'commit',
+      ref: secondSha,
+    });
+    expect([...second!.perFileStats.keys()]).toEqual(['second.txt']);
+    expect(second?.perFileStats.has('untracked.txt')).toBe(false);
+    expect(
+      await fetchGitDiffHunksForFile(repo, 'second.txt', undefined, {
+        mode: 'commit',
+        ref: secondSha,
+      }),
+    ).toMatchObject({ hunks: [{ lines: ['+second'] }] });
+    expect(
+      await fetchGitDiffHunksForFile(repo, 'untracked.txt', undefined, {
+        mode: 'commit',
+        ref: secondSha,
+      }),
+    ).toBeNull();
+  });
+
+  it('compares a selected branch tip with the current working tree', async () => {
+    await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'branch', 'baseline');
+
+    await fs.writeFile(path.join(repo, 'committed.txt'), 'committed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'current');
+    await fs.writeFile(path.join(repo, 'untracked.txt'), 'working\n');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect([...result!.perFileStats.keys()].sort()).toEqual([
+      'committed.txt',
+      'untracked.txt',
+    ]);
+    expect(
+      await fetchGitDiff(repo, { mode: 'branch', ref: '--not-a-ref' }),
+    ).toBeNull();
+  });
+
+  it('shows a worktree file colliding with a baseline path as modified, not deleted', async () => {
+    // The baseline tracks collision.txt while the worktree holds an UNTRACKED
+    // collision.txt: `git diff <baseline>` proxies the worktree through the
+    // index and reports a phantom deletion. The branch-mode contract is
+    // worktree-vs-baseline, so the file must render as one modified row
+    // diffing the baseline blob against the local content.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'collision.txt'), 'baseline\n');
+    await git(repo, 'add', 'collision.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed edited\n');
+    await fs.writeFile(path.join(repo, 'collision.txt'), 'local untracked\n');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats).toEqual({
+      filesCount: 2,
+      linesAdded: 2,
+      linesRemoved: 2,
+    });
+    const collision = result?.perFileStats.get('collision.txt');
+    expect(collision).toMatchObject({ added: 1, removed: 1, isBinary: false });
+    expect(collision?.isDeleted).toBeUndefined();
+    expect(collision?.isUntracked).toBeUndefined();
+    expect(result?.perFileStats.has('seed.txt')).toBe(true);
+    const hunks = await fetchGitDiffHunksForFile(
+      repo,
+      'collision.txt',
+      undefined,
+      { mode: 'branch', ref: 'baseline' },
+    );
+    const lines = hunks?.hunks.flatMap((h) => h.lines);
+    expect(lines).toContain('-baseline');
+    expect(lines).toContain('+local untracked');
+  });
+
+  it('synthesizes an all-added hunk for a branch-mode untracked file absent from the baseline', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'there.txt'), 'baseline file\n');
+    await git(repo, 'add', 'there.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'new.txt'), 'new file content\n');
+
+    const hunks = await fetchGitDiffHunksForFile(repo, 'new.txt', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks?.truncated).toBe(false);
+    expect(hunks?.hunks).toEqual([
+      {
+        oldStart: 0,
+        oldLines: 0,
+        newStart: 1,
+        newLines: 1,
+        lines: ['+new file content'],
+      },
+    ]);
+  });
+
+  it('rejects unknown diff modes even when the ref resolves', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+
+    const mode = 'garbage' as GitDiffMode;
+    expect(await fetchGitDiff(repo, { mode, ref: 'HEAD' })).toBeNull();
+    expect(
+      await fetchGitDiffHunksForFile(repo, 'seed.txt', undefined, {
+        mode,
+        ref: 'HEAD',
+      }),
+    ).toBeNull();
+  });
+
+  it('does not treat a shallow boundary commit as a root commit', async () => {
+    await fs.writeFile(path.join(repo, 'first.txt'), 'first\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'first');
+    await fs.writeFile(path.join(repo, 'second.txt'), 'second\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+
+    const cloneRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-gitdiff-shallow-'),
+    );
+    const shallow = path.join(cloneRoot, 'repo');
+    try {
+      await execFileAsync(
+        'git',
+        ['clone', '-q', '--depth=1', pathToFileURL(repo).href, shallow],
+        { cwd: cloneRoot },
+      );
+      expect(
+        await fetchGitDiff(shallow, { mode: 'commit', ref: 'HEAD' }),
+      ).toBeNull();
+    } finally {
+      await fs.rm(cloneRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null instead of rejecting for NUL-bearing refs and paths', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+
+    await expect(
+      fetchGitDiff(repo, { mode: 'commit', ref: '\0invalid' }),
+    ).resolves.toBeNull();
+    await expect(
+      fetchGitDiffHunksForFile(repo, 'bad\0path', undefined, {
+        mode: 'branch',
+        ref: 'HEAD',
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('compares a merge commit with its first parent', async () => {
+    await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'branch', 'side');
+
+    await fs.writeFile(path.join(repo, 'main.txt'), 'main\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'main');
+    await git(repo, 'switch', '-q', 'side');
+    await fs.writeFile(path.join(repo, 'side.txt'), 'side\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'side');
+    await git(repo, 'switch', '-q', 'main');
+    await git(repo, 'merge', '--no-ff', '-q', '-m', 'merge', 'side');
+    const mergeSha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'commit',
+      ref: mergeSha,
+    });
+    expect([...result!.perFileStats.keys()]).toEqual(['side.txt']);
+  });
+
   it('returns null during a transient merge state', async () => {
     await fs.writeFile(path.join(repo, 'a.txt'), 'hello\n');
     await git(repo, 'add', '.');
@@ -412,6 +684,36 @@ describe('fetchGitDiff', () => {
     );
     expect(await fetchGitDiff(repo)).toBeNull();
     expect((await fetchGitDiffHunks(repo)).size).toBe(0);
+    // Branch mode reads the worktree, so it stays gated too.
+    expect(
+      await fetchGitDiff(repo, { mode: 'branch', ref: 'main' }),
+    ).toBeNull();
+  });
+
+  it('keeps commit comparisons available during a transient merge state', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'hello\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'init');
+    await fs.writeFile(path.join(repo, 'b.txt'), 'world\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second');
+    const sha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+    // Fake a merge in progress; commit mode compares two immutable commits,
+    // so it must stay available — inspecting what a commit brought in is most
+    // useful exactly while resolving the incoming changes.
+    await fs.writeFile(
+      path.join(repo, '.git', 'MERGE_HEAD'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    const result = await fetchGitDiff(repo, { mode: 'commit', ref: sha });
+    expect([...result!.perFileStats.keys()]).toEqual(['b.txt']);
+    const hunks = await fetchGitDiffHunksForFile(repo, 'b.txt', undefined, {
+      mode: 'commit',
+      ref: sha,
+    });
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('+world');
   });
 });
 
