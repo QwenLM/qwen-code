@@ -10,6 +10,7 @@ import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Copy, Check } from 'lucide-react'
 import { cn } from '../../lib/utils'
+import { usePlatform } from '../../context/PlatformContext'
 
 export interface CopyButtonProps {
   /** Content to copy to clipboard */
@@ -26,16 +27,21 @@ export function CopyButton({ content, title, className }: CopyButtonProps) {
   const { t } = useTranslation()
   const resolvedTitle = title ?? t('common.copy')
   const [copied, setCopied] = useState(false)
+  const { onCopyToClipboard } = usePlatform()
 
   const handleCopy = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(content)
+      if (onCopyToClipboard) {
+        await onCopyToClipboard(content)
+      } else {
+        await navigator.clipboard.writeText(content)
+      }
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch (err) {
       console.error('Failed to copy:', err)
     }
-  }, [content])
+  }, [content, onCopyToClipboard])
 
   return (
     <button

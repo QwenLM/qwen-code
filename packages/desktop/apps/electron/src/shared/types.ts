@@ -517,6 +517,7 @@ export interface ElectronAPI {
 
   // System
   getVersions(): { node: string; chrome: string; electron: string };
+  copyToClipboard(text: string): Promise<void>;
   /** Returns the renderer host environment without going through RPC. */
   getRuntimeEnvironment(): 'electron' | 'web';
   getHomeDir(): Promise<string>;
