@@ -129,6 +129,7 @@ import {
   type DaemonWorkspaceServiceDeps,
 } from './workspace-service/index.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
+import { registerCdpStatusRoute } from './routes/cdp-status.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -1745,6 +1746,14 @@ export function createServeApp(
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     languageCodes,
+  });
+
+  // Issue #8737: shared Chrome bridge probe for non-daemon Qwen Code processes
+  // (reroutes their chrome-devtools MCP to the daemon `/cdp` tunnel when a
+  // multi-client extension bridge is live). Inert JSON when the tunnel is off.
+  registerCdpStatusRoute(app, {
+    registry: cdpTunnelRegistry,
+    token: opts.token,
   });
 
   if (liveVoiceSurfaceAvailable) {
