@@ -86,6 +86,9 @@ describe('VirtualSubagentSessions', () => {
     expect(() => createVirtualSubagentSessionId('parent-session', '')).toThrow(
       'valid id parts',
     );
+    expect(() =>
+      createVirtualSubagentSessionId('parent-session', '界'.repeat(500)),
+    ).toThrow('valid id parts');
   });
 
   it.each(['general-purpose-agent:8', 'general-purpose-agent/8'])(
