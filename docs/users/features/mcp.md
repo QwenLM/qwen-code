@@ -415,6 +415,18 @@ Example:
 - **Server shows “Disconnected” in `qwen mcp list`**: verify the URL/command is correct, then increase `timeout`.
 - **Stdio server fails to start**: use an absolute `command` path, and double-check `cwd`/`env`.
 - **Environment variables in JSON don’t resolve**: ensure they exist in the environment where Qwen Code runs (shell vs GUI app environments can differ).
+- **Chrome asks “Allow remote debugging?” on every session**: this consent is
+  enforced by Chrome **per new connection** to its remote-debugging endpoint —
+  it cannot be remembered. A `chrome-devtools` server launched with
+  `--autoConnect` dials Chrome from every Qwen Code process, so each session
+  (and every MCP restart) pops the dialog again. To get one consent per
+  machine instead of one per session, run `qwen serve` with the Qwen Code
+  Chrome extension connected and keep the same `chrome-devtools` config: the
+  CLI automatically routes the server through the daemon’s shared `/cdp`
+  bridge (`chrome.debugger`-based, no consent dialog) when it is available.
+  See [Qwen Serve](../qwen-serve.md) and the
+  [Chrome extension README](../../../packages/chrome-extension/README.md).
+  Set `QWEN_NO_SHARED_CHROME_BRIDGE=1` to keep dialing Chrome directly.
 
 ## Reference
 

@@ -14,7 +14,13 @@
  *   - debugger events  → `cdp_event`
  *   - debugger detach  → `cdp_detach`
  *
- * Single tab, single debugger.
+ * Single tab, single debugger — but since issue #8737 several `/cdp` clients
+ * (links, tagged by `linkId`) share that one debugger attachment: every link
+ * that attaches refcounts the attachment, results/acks echo the requesting
+ * link, and `cdp_release` detaches only when the last link lets go. Events
+ * and detach notices are broadcast — one shared tab means every client sees
+ * the same page. Frames without a `linkId` (old daemon) map to the default
+ * link and keep the legacy single-client behavior.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
@@ -26,27 +32,38 @@ const LOG_PREFIX = '[CdpBridge]';
 /** CDP attach protocol version (matches the network tools). */
 const CDP_PROTOCOL_VERSION = '1.3';
 
+/**
+ * Link id for frames from a daemon that predates multi-client routing
+ * (no `linkId` on frames). Behaves exactly like the legacy single client.
+ */
+const DEFAULT_LINK_ID = '';
+
 /** Inbound `cdp_command` frame (daemon → extension). */
 interface CdpCommandFrame {
   type: 'cdp_command';
   id: number;
   method: string;
   params?: Record<string, unknown>;
+  /** Owning `/cdp` link; echoed back on the `cdp_result`. */
+  linkId?: string;
 }
 
 /** Inbound `cdp_attach` frame (daemon → extension). */
 interface CdpAttachFrame {
   type: 'cdp_attach';
   id: number;
+  /** Owning `/cdp` link; absent on legacy daemons (→ DEFAULT_LINK_ID). */
+  linkId?: string;
 }
 
 /**
- * Inbound `cdp_release` frame (daemon → extension): the `/cdp` puppeteer client
- * disconnected, so detach the debugger and stop forwarding even though the
- * `/acp` socket is still up.
+ * Inbound `cdp_release` frame (daemon → extension): one `/cdp` puppeteer
+ * client disconnected, so drop its attachment ref; detach the debugger when
+ * the last link releases (or immediately for a legacy untagged release).
  */
 interface CdpReleaseFrame {
   type: 'cdp_release';
+  linkId?: string;
 }
 
 /** Any outbound `cdp_*` frame (extension → daemon). */
@@ -56,6 +73,7 @@ type CdpOutbound =
       id: number;
       result?: unknown;
       error?: { code?: number; message?: string };
+      linkId?: string;
     }
   | { type: 'cdp_event'; method: string; params?: Record<string, unknown> }
   | {
@@ -64,6 +82,7 @@ type CdpOutbound =
       url?: string;
       title?: string;
       error?: { message: string };
+      linkId?: string;
     }
   | { type: 'cdp_detach'; reason: string };
 
@@ -76,16 +95,35 @@ let attachedTabId: number | null = null;
 let activeSend: CdpSend | null = null;
 /** While set, keeps the MV3 worker awake during an attachment (see startAttachKeepalive). */
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-/** True while a `handleAttach` is mid-flight (guards against overlapping attaches). */
-let attaching = false;
 /**
- * Set when a `cdp_release` (or socket close) arrives while `handleAttach` is
- * mid-flight. A teardown that fires before the attach lands can't detach a tab
- * the debugger isn't on yet, so it records the request here; `handleAttach`
+ * Links (`/cdp` puppeteer clients, by `linkId`) currently holding a ref on the
+ * debugger attachment. Empty when nothing is attached.
+ */
+let attachedLinks = new Set<string>();
+/**
+ * Shared in-flight attach: concurrent `cdp_attach` frames join the same
+ * chrome.debugger.attach instead of interleaving attach/teardown (the old
+ * reentrancy hazard) and refcount the single resulting attachment.
+ */
+let attachInFlight: Promise<{ url?: string; title?: string }> | null = null;
+/**
+ * Links whose `cdp_release` (or socket close) arrived while their attach was
+ * mid-flight. A teardown that fires before the attach lands can't detach a
+ * tab the debugger isn't on yet, so it records the link here; the attach
  * honors it the moment it finishes wiring up. Without this, the late attach
  * would leave a debugger attachment with no live `/cdp` client behind it.
  */
-let releaseRequestedDuringAttach = false;
+let releasedDuringAttach = new Set<string>();
+/**
+ * A full bridge teardown (`shutdownCdpBridge`) raced an in-flight attach.
+ * Every link joining that attach honors it the same way as a per-link
+ * release; cleared when the next fresh attach starts.
+ */
+let releaseAllDuringAttach = false;
+
+function linkIdOf(frame: { linkId?: unknown }): string {
+  return typeof frame.linkId === 'string' ? frame.linkId : DEFAULT_LINK_ID;
+}
 
 /**
  * Keep the MV3 worker alive while the debugger is attached: it idles out after
@@ -120,7 +158,8 @@ export function isCdpBridgeFrame(type: unknown): boolean {
 
 /**
  * Forward a CDP event from the real tab to the daemon. Only events for the
- * currently-attached tab are forwarded.
+ * currently-attached tab are forwarded. The daemon broadcasts the event to
+ * every bound `/cdp` link (one shared tab → every client sees the same page).
  */
 function onDebuggerEvent(
   source: chrome.debugger.Debuggee,
@@ -138,8 +177,8 @@ function onDebuggerEvent(
 
 /**
  * The debugger detached (user opened DevTools, clicked the banner Cancel, the
- * page crashed, or we detached). Notify the daemon so puppeteer observes the
- * disconnect, then drop our attachment.
+ * page crashed, or we detached). Notify the daemon so every puppeteer client
+ * observes the disconnect, then drop our attachment.
  */
 function onDebuggerDetach(
   source: chrome.debugger.Debuggee,
@@ -153,7 +192,7 @@ function onDebuggerDetach(
   teardownAttachment();
 }
 
-/** Remove our debugger listeners and forget the attached tab. */
+/** Remove our debugger listeners and forget the attached tab and all links. */
 function teardownAttachment(): void {
   if (attachedTabId === null) return;
   stopAttachKeepalive();
@@ -164,6 +203,7 @@ function teardownAttachment(): void {
     /* listeners already gone */
   }
   attachedTabId = null;
+  attachedLinks = new Set();
 }
 
 /** Resolve the active tab's id (rejects if none / no id). */
@@ -174,6 +214,18 @@ async function getActiveTabId(): Promise<number> {
     throw new Error('No active tab to attach the CDP tunnel to');
   }
   return tab.id;
+}
+
+/** Best-effort tab metadata for the daemon's synthetic targetInfo. */
+async function tabInfoOf(
+  tabId: number,
+): Promise<{ url?: string; title?: string }> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return { url: tab.url, title: tab.title };
+  } catch {
+    return {};
+  }
 }
 
 /** Promisified `chrome.debugger.sendCommand` (callback API → Promise). */
@@ -199,46 +251,70 @@ function sendDebuggerCommand(
   });
 }
 
-/** Handle a `cdp_attach` frame: attach the active tab and ack. */
-async function handleAttach(
-  frame: CdpAttachFrame,
-  send: CdpSend,
-): Promise<void> {
-  // Reentrancy guard: handleAttach awaits twice (attach + tabs.get) and is
-  // dispatched fire-and-forget. A second cdp_attach mid-flight would interleave
-  // teardownAttachment() with the first attach and corrupt attachedTabId. Only
-  // one puppeteer client binds today, but the guard keeps the next caller safe.
-  if (attaching) {
-    send({
-      type: 'cdp_attached',
-      id: frame.id,
-      error: { message: 'attach already in progress' },
+/**
+ * Attach `chrome.debugger` to a tab, or join the attachment already owned by
+ * other links. Returns tab metadata for the daemon's synthetic targetInfo.
+ *
+ * The in-flight flow is registered SYNCHRONOUSLY at entry (before any await),
+ * so back-to-back `cdp_attach` frames always join one shared flow instead of
+ * each starting their own chrome.debugger.attach.
+ */
+function ensureAttachment(
+  linkId: string,
+): Promise<{ url?: string; title?: string }> {
+  const inFlight = attachInFlight;
+  if (inFlight) {
+    // Join the attachment another link is establishing; add our ref once it
+    // lands (a rejection propagates to our caller's error ack as well).
+    return inFlight.then((info) => {
+      attachedLinks.add(linkId);
+      return info;
     });
-    return;
   }
-  attaching = true;
+  const flow = runAttachFlow(linkId);
+  attachInFlight = flow;
+  return flow;
+}
+
+async function runAttachFlow(
+  linkId: string,
+): Promise<{ url?: string; title?: string }> {
+  releaseAllDuringAttach = false;
   try {
     const tabId = await getActiveTabId();
 
-    // Switching to a different tab: detach the previous one first so it doesn't
-    // keep Chrome's debugging banner + keepalive after we move on.
-    if (attachedTabId !== null && attachedTabId !== tabId) {
+    // Already attached to exactly this tab: just refcount, no debugger churn.
+    if (attachedTabId === tabId) {
+      attachedLinks.add(linkId);
+      return tabInfoOf(tabId);
+    }
+
+    // Switching to a different tab (or first attach): the previous tab's
+    // links lose their debugger, so tell the daemon (it closes their
+    // puppeteer sockets) before we move on. The explicit broadcast keeps
+    // every client's view consistent — Chrome's own onDetach for a
+    // self-detach is racy with the re-attach below, so don't rely on it.
+    if (attachedTabId !== null) {
+      if (activeSend) {
+        activeSend({ type: 'cdp_detach', reason: 'target_switched' });
+      }
       const prev = attachedTabId;
+      teardownAttachment();
       await new Promise<void>((resolve) => {
         chrome.debugger.detach({ tabId: prev }, () => {
           void chrome.runtime.lastError; // best-effort; tab may already be gone
           resolve();
         });
       });
-      teardownAttachment();
     }
 
     await new Promise<void>((resolve, reject) => {
       chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION, () => {
         const err = chrome.runtime.lastError;
-        // "Already attached" is only benign when WE already own this exact tab.
-        // Chrome reports the same error when DevTools / another debugger owns
-        // it — acking success there would let us claim a tab we can't drive.
+        // "Already attached" is only benign when WE already own this exact
+        // tab. Chrome reports the same error when DevTools / another debugger
+        // owns it — acking success there would let us claim a tab we can't
+        // drive.
         const ownAlreadyAttached =
           /already attached/i.test(err?.message ?? '') &&
           attachedTabId === tabId;
@@ -250,39 +326,44 @@ async function handleAttach(
       });
     });
 
-    // Idempotent re-attach: a prior attachment may still hold live listeners +
-    // keepalive. Drop them before re-registering so a second `cdp_attach` can't
-    // double-register onDebuggerEvent/onDebuggerDetach — otherwise every CDP
-    // event would fire twice and corrupt the puppeteer stream. teardown is a
-    // no-op on a fresh attach (attachedTabId is null) and clears attachedTabId,
-    // so it must run before we record the new tab below.
+    // Idempotent re-attach: a prior attachment may still hold live listeners
+    // + keepalive. Drop them before re-registering so a second attach can't
+    // double-register onDebuggerEvent/onDetach — otherwise every CDP event
+    // would fire twice and corrupt the puppeteer stream.
     teardownAttachment();
 
     attachedTabId = tabId;
+    attachedLinks = new Set([linkId]);
     chrome.debugger.onEvent.addListener(onDebuggerEvent);
     chrome.debugger.onDetach.addListener(onDebuggerDetach);
     startAttachKeepalive();
 
-    // Best-effort tab metadata for the daemon's synthetic targetInfo.
-    let url: string | undefined;
-    let title: string | undefined;
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      url = tab.url;
-      title = tab.title;
-    } catch {
-      /* metadata is optional */
-    }
+    return tabInfoOf(tabId);
+  } finally {
+    attachInFlight = null;
+  }
+}
 
-    // A cdp_release (or socket close) that arrived while we were awaiting above
-    // couldn't tear down an attachment that hadn't landed yet. Now that it has,
-    // honor that release immediately so we never leak a debugger attachment with
-    // no live `/cdp` client. Clear `attaching` first so shutdownCdpBridge runs a
-    // real teardown instead of re-arming the flag we're acting on.
-    if (releaseRequestedDuringAttach) {
-      attaching = false;
-      releaseRequestedDuringAttach = false;
-      console.log(LOG_PREFIX, 'release arrived during attach; tearing down');
+/** Handle a `cdp_attach` frame: attach (or join) the active tab and ack. */
+async function handleAttach(
+  frame: CdpAttachFrame,
+  send: CdpSend,
+): Promise<void> {
+  const linkId = linkIdOf(frame);
+  try {
+    const { url, title } = await ensureAttachment(linkId);
+
+    // A cdp_release (or full teardown) that arrived while this link's attach
+    // was awaiting couldn't tear down an attachment that hadn't landed yet.
+    // Now that it has, honor that release immediately so we never leak a
+    // debugger attachment with no live `/cdp` client.
+    if (releaseAllDuringAttach || releasedDuringAttach.delete(linkId)) {
+      console.log(
+        LOG_PREFIX,
+        'release arrived during attach; dropping link',
+        linkId || '(default)',
+      );
+      attachedLinks.delete(linkId);
       // Ack the attach (as an error) before tearing down: the daemon's reverse
       // link is awaiting a `cdp_attached` for this id, so without it the
       // puppeteer client hangs until the ~170s CDP command timeout.
@@ -290,20 +371,37 @@ async function handleAttach(
         type: 'cdp_attached',
         id: frame.id,
         error: { message: 'released during attach' },
+        ...(frame.linkId !== undefined ? { linkId: frame.linkId } : {}),
       });
-      shutdownCdpBridge();
+      if (attachedLinks.size === 0) {
+        shutdownCdpBridge();
+      }
       return;
     }
 
-    console.log(LOG_PREFIX, 'attached tab', tabId);
-    send({ type: 'cdp_attached', id: frame.id, url, title });
+    console.log(
+      LOG_PREFIX,
+      'link',
+      linkId || '(default)',
+      'attached; links =',
+      attachedLinks.size,
+    );
+    send({
+      type: 'cdp_attached',
+      id: frame.id,
+      url,
+      title,
+      ...(frame.linkId !== undefined ? { linkId: frame.linkId } : {}),
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.warn(LOG_PREFIX, 'attach failed:', message);
-    send({ type: 'cdp_attached', id: frame.id, error: { message } });
-  } finally {
-    attaching = false;
-    releaseRequestedDuringAttach = false;
+    send({
+      type: 'cdp_attached',
+      id: frame.id,
+      error: { message },
+      ...(frame.linkId !== undefined ? { linkId: frame.linkId } : {}),
+    });
   }
 }
 
@@ -321,11 +419,13 @@ async function handleCommand(
   frame: CdpCommandFrame,
   send: CdpSend,
 ): Promise<void> {
+  const linkTag = frame.linkId !== undefined ? { linkId: frame.linkId } : {};
   if (attachedTabId === null) {
     send({
       type: 'cdp_result',
       id: frame.id,
       error: { code: -32000, message: 'CDP tunnel not attached to a tab' },
+      ...linkTag,
     });
     return;
   }
@@ -335,25 +435,43 @@ async function handleCommand(
       frame.method,
       frame.params,
     );
-    send({ type: 'cdp_result', id: frame.id, result });
+    send({ type: 'cdp_result', id: frame.id, result, ...linkTag });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     send({
       type: 'cdp_result',
       id: frame.id,
       error: { code: -32000, message },
+      ...linkTag,
     });
   }
 }
 
 /**
- * Handle a `cdp_release` frame: the daemon's `/cdp` puppeteer client
- * disconnected, so tear the bridge down (detach the debugger + stop forwarding)
- * even though the `/acp` socket is still up.
+ * Handle a `cdp_release` frame: one `/cdp` puppeteer client disconnected.
+ * Drop the link's ref on the shared debugger attachment; detach only when the
+ * last link releases (a legacy untagged release tears down immediately).
  */
-function handleRelease(_frame: CdpReleaseFrame): void {
-  console.log(LOG_PREFIX, 'cdp_release received; detaching debugger');
-  shutdownCdpBridge();
+function handleRelease(frame: CdpReleaseFrame): void {
+  const linkId = linkIdOf(frame);
+  if (attachInFlight) {
+    // The attachment hasn't landed yet (whether this link initiated it or is
+    // joining it); record the release so handleAttach drops the link the
+    // moment it finishes wiring up.
+    releasedDuringAttach.add(linkId);
+    return;
+  }
+  attachedLinks.delete(linkId);
+  console.log(
+    LOG_PREFIX,
+    'cdp_release for link',
+    linkId || '(default)',
+    '; remaining links =',
+    attachedLinks.size,
+  );
+  if (attachedLinks.size === 0) {
+    shutdownCdpBridge();
+  }
 }
 
 /**
@@ -374,16 +492,19 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
 
 /**
  * Tear down the bridge: detach the debugger and stop forwarding. Called when
- * the daemon socket closes so a stale attachment doesn't linger. Idempotent.
+ * the daemon socket closes (or the last link releases) so a stale attachment
+ * doesn't linger. Idempotent.
  */
 export function shutdownCdpBridge(): void {
-  // A release that races an in-flight handleAttach can't detach a tab the
-  // debugger hasn't attached to yet (attachedTabId is still null, listeners
-  // aren't registered). Record it so handleAttach tears down the moment it
-  // finishes wiring up, instead of leaving a debugger attachment behind.
-  if (attaching) {
-    releaseRequestedDuringAttach = true;
+  // A teardown that races an in-flight attach can't detach a tab the debugger
+  // hasn't attached to yet (attachedTabId is still null, listeners aren't
+  // registered). Flag it so every link joining that attach drops itself the
+  // moment wiring finishes — and the last one detaches — instead of leaving a
+  // debugger attachment with no live `/cdp` client behind it.
+  if (attachInFlight) {
+    releaseAllDuringAttach = true;
   }
+  releasedDuringAttach = new Set();
   const tabId = attachedTabId;
   teardownAttachment();
   activeSend = null;
