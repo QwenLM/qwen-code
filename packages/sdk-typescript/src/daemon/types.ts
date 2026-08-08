@@ -3977,6 +3977,12 @@ export interface ExtensionInstallRequest {
   consent?: boolean;
 }
 
+export interface ExtensionArchiveInstallRequest {
+  archive: Blob;
+  filename: string;
+  consent?: boolean;
+}
+
 export type ExtensionInitialActivation =
   | { scope: 'user' }
   | { scope: 'workspace'; workspaceId: string };

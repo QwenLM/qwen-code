@@ -100,6 +100,194 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('uploads an Extension archive from the manager @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  let uploadUrl = '';
+  let uploadHeaders: Record<string, string> = {};
+  let uploadBody: Buffer | null = null;
+  let rejectUpload = false;
+  await page.route(
+    '**/workspace/extensions/install-archive?*',
+    async (route) => {
+      uploadUrl = route.request().url();
+      uploadHeaders = route.request().headers();
+      uploadBody = route.request().postDataBuffer();
+      await route.fulfill({
+        contentType: 'application/json',
+        status: rejectUpload ? 400 : 202,
+        body: JSON.stringify(
+          rejectUpload
+            ? { error: 'Archive rejected for test' }
+            : { accepted: true, operationId: 'op-upload' },
+        ),
+      });
+    },
+  );
+  await page.route(
+    '**/workspace/extensions/operations/op-upload',
+    async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          v: 1,
+          operationId: 'op-upload',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          result: {
+            status: 'installed',
+            source: 'upload:demo.zip',
+            name: 'demo',
+            version: '1.0.0',
+          },
+        }),
+      });
+    },
+  );
+
+  await gotoSession(page, scenario, daemon);
+  await submitLocalCommand(page, '/extensions');
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
+  await archiveInput.setInputFiles({
+    name: 'stale.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('stale-archive'),
+  });
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'backup.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'扩'.repeat(84)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  for (const name of ['bad\\name.zip', 'bad\u007fname.zip']) {
+    await archiveInput.setInputFiles({
+      name,
+      mimeType: 'application/zip',
+      buffer: Buffer.from('archive-content'),
+    });
+    await expect(
+      page.getByText(
+        'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+  }
+
+  await archiveInput.setInputFiles({
+    name: 'empty.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(0),
+  });
+  await expect(
+    page.getByText('The selected Extension archive is empty.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'a'.repeat(251)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'exact.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'large.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024 + 1),
+  });
+  await expect(
+    page.getByText('Extension archives must be 10 MB or smaller.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'demo.tar.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.tar.gz')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'demo.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  rejectUpload = true;
+  await page.getByRole('button', { name: 'Install' }).click();
+  await expect(page.getByText('Archive rejected for test')).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toBeVisible();
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  uploadUrl = '';
+  uploadHeaders = {};
+  uploadBody = null;
+  rejectUpload = false;
+  await page.getByRole('button', { name: 'Install' }).click();
+
+  await expect
+    .poll(() => uploadUrl)
+    .toContain(
+      '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+    );
+  expect(uploadHeaders['content-type']).toBe('application/octet-stream');
+  expect(uploadHeaders['x-qwen-client-id']).toBe(scenario.clientId);
+  expect(uploadBody?.toString()).toBe('archive-content');
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toHaveCount(0);
+  await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: demo.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+});
+
 test('pastes long plain text as editable composer content @smoke', async ({
   page,
 }, testInfo) => {
