@@ -2207,3 +2207,70 @@ describe('workflow expression length', () => {
     expect(runReviewStep()).not.toContain('${{');
   });
 });
+
+describe('command shape matching', () => {
+  // A comment may be `@qwen-code /review` followed by a newline and a body.
+  // The `if`s tried to accept that with format('…{0}', '\n'), but expression
+  // string literals are NOT escape-processed: that '\n' is a literal
+  // backslash + n, so the branch matched nothing and every multi-line command
+  // was silently ignored — no run, no feedback. Measured on a live runner:
+  //   startsWith(<LF body>, format('…{0}', '\n'))            => false
+  //   startsWith(<LF body>, format('…{0}', fromJSON('"\n"'))) => true
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\n"'))) => false
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\r"'))) => true
+  // Hence fromJSON (JSON *is* escape-processed) and both line endings: the
+  // REST API sends LF, the web UI sends CRLF.
+  const doc = parse(workflow);
+  const ifs = Object.entries(doc.jobs)
+    .filter(([, job]) => typeof job?.if === 'string')
+    .map(([id, job]) => [id, job.if]);
+
+  it('never matches a command shape with a non-escaped literal newline', () => {
+    const broken = ifs.filter(([, cond]) => /'\\[nr]'/.test(cond));
+    expect(broken.map(([id]) => id)).toEqual([]);
+  });
+
+  it('accepts both LF and CRLF after the command in every shape match', () => {
+    // `authorize` deliberately matches only a loose prefix — it is a filter to
+    // avoid spawning a job per comment, and delegates the exact shape to the
+    // downstream jobs. Jobs that do the shape match are the ones that use
+    // format('@qwen-code /<cmd>{0}', …), so key off that.
+    const withShape = ifs.filter(([, cond]) =>
+      cond.includes("format('@qwen-code /"),
+    );
+    expect(withShape.length).toBeGreaterThan(0);
+    const missing = [];
+    for (const [id, cond] of withShape) {
+      for (const cmd of ['review', 'resolve']) {
+        // Only check commands this job actually matches on.
+        if (!cond.includes(`format('@qwen-code /${cmd}{0}'`)) continue;
+        const lf = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\n"'))`,
+        );
+        const cr = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\r"'))`,
+        );
+        if (!lf || !cr) missing.push(`${id}/${cmd} (LF:${lf} CR:${cr})`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('strips a trailing CR before parsing command tokens', () => {
+    // Word splitting uses IFS, which has no CR, so a CRLF comment would carry
+    // `\r` into tokens like `--timeout=300` and fail the numeric check.
+    // The command is parsed in "Resolve PR context", not in "Run review".
+    const run = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    ).run;
+    const firstLine = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_BODY%%$\'\\n\'*}"',
+    );
+    const stripCr = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_COMMAND%$\'\\r\'}"',
+    );
+    expect(firstLine).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(firstLine);
+  });
+});
