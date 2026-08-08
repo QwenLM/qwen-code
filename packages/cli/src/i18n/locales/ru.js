@@ -1482,10 +1482,10 @@ export default {
   Running: 'Выполняется',
   Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
-  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
-    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен.',
-  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
-    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить.',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен. Вызов агента, ожидающий одобрения инструмента, удерживает запуск в этом состоянии и продолжает учитываться в лимите активного времени, пока одобрение не будет обработано.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить. /clear, /branch и переключение сессий отменяют приостановленные запуски.',
   'Pause/resume was rejected; the workflow state changed. Try again.':
     'Приостановка/возобновление отклонены; состояние рабочего процесса изменилось. Повторите попытку.',
   'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':

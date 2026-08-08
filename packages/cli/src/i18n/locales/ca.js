@@ -1595,10 +1595,10 @@ export default {
   Running: 'En execució',
   Pausing: 'Pausant',
   Paused: 'En pausa',
-  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
-    'La pausa és cooperativa; el treball en curs pot acabar abans que el flux de treball es posi en pausa.',
-  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
-    "En pausa: no s'iniciaran agents nous; el codi de l'script entre crides d'agent continua executant-se. Prem p per reprendre.",
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pausa és cooperativa; el treball en curs pot acabar abans que el flux de treball es posi en pausa. Una crida d'agent que espera una aprovació d'eina manté l'execució en aquest estat i continua comptant per al límit de temps actiu fins que es respongui l'aprovació.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pausa: no s'iniciaran agents nous; el codi de l'script entre crides d'agent continua executant-se. Prem p per reprendre. /clear, /branch i el canvi de sessió cancel·len les execucions en pausa.",
   'Pause/resume was rejected; the workflow state changed. Try again.':
     "La pausa o la represa ha estat rebutjada; l'estat del flux de treball ha canviat. Torna-ho a provar.",
   'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':

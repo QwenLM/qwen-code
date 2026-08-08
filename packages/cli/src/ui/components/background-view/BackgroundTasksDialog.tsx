@@ -1252,10 +1252,10 @@ const WorkflowDetailBody: React.FC<{
             <Text color={theme.status.warning}>
               {entry.status === 'pausing'
                 ? t(
-                    'Pause is cooperative; in-flight work may finish before the workflow is paused.',
+                    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
                   )
                 : t(
-                    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.',
+                    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
                   )}
             </Text>
           </Box>

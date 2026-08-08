@@ -1605,10 +1605,10 @@ export default {
   Running: 'En cours',
   Pausing: 'Mise en pause',
   Paused: 'En pause',
-  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
-    'La pause est coopérative ; le travail en cours peut se terminer avant que le workflow ne soit mis en pause.',
-  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
-    "En pause : aucun nouvel agent ne démarrera ; le code du script entre les appels d'agents continue de s'exécuter. Appuyez sur p pour reprendre.",
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pause est coopérative ; le travail en cours peut se terminer avant que le workflow ne soit mis en pause. Un appel d'agent en attente d'une approbation d'outil maintient l'exécution dans cet état et continue de compter dans la limite de temps actif tant que l'approbation n'a pas été traitée.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pause : aucun nouvel agent ne démarrera ; le code du script entre les appels d'agents continue de s'exécuter. Appuyez sur p pour reprendre. /clear, /branch et le changement de session annulent les exécutions en pause.",
   'Pause/resume was rejected; the workflow state changed. Try again.':
     "La mise en pause ou la reprise a été refusée ; l'état du workflow a changé. Réessayez.",
   'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':

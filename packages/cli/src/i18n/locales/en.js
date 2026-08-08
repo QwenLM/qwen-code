@@ -2050,10 +2050,10 @@ export default {
   Running: 'Running',
   Pausing: 'Pausing',
   Paused: 'Paused',
-  'Pause is cooperative; in-flight work may finish before the workflow is paused.':
-    'Pause is cooperative; in-flight work may finish before the workflow is paused.',
-  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.':
-    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume.',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
   'Pause/resume was rejected; the workflow state changed. Try again.':
     'Pause/resume was rejected; the workflow state changed. Try again.',
   'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':

@@ -1523,6 +1523,12 @@ describe('BackgroundTasksDialog', () => {
         // satisfied by the footer hint. A single-line fragment is used
         // because the full string wraps inside the bordered box.
         expect(h.lastFrame()).toContain('in-flight work may finish before');
+        // R15 (yiliang114 P2): pin the approval-park budget warning too.
+        expect(h.lastFrame()).toContain('counts against the active-time');
+      } else {
+        // R15 (yiliang114 P2): pin the session-teardown warning on the
+        // paused explainer.
+        expect(h.lastFrame()).toContain('switching sessions cancel');
       }
     },
   );
