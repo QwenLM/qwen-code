@@ -5,12 +5,18 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { InvocationContextV1 } from '../utils/invocation-context.js';
 
 export interface ToolInvocationGuardContext {
   callId: string;
   toolName: string;
   args: Readonly<Record<string, unknown>>;
   signal: AbortSignal;
+  /**
+   * Runtime-owned managed invocation identity. Ordinary CLI/SDK calls may not
+   * have one; a host that requires it must fail closed when it is absent.
+   */
+  invocationContext?: Readonly<InvocationContextV1>;
 }
 
 export type ToolInvocationGuardDecision =
@@ -58,6 +64,13 @@ export async function evaluateToolInvocationGuard(
     const decision = await guard({
       ...context,
       args: structuredClone(context.args),
+      ...(context.invocationContext
+        ? {
+            invocationContext: Object.freeze({
+              ...context.invocationContext,
+            }),
+          }
+        : {}),
     });
     if (context.signal.aborted) {
       return { allowed: false, reason: FAILED_MESSAGE };

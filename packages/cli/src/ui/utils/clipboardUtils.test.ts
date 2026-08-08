@@ -148,6 +148,11 @@ function setupX11Env() {
 
 const originalPlatform = process.platform;
 
+// The beforeEach below resets the module registry and re-imports the module
+// graph for every test; under heavy parallel CI load that can exceed the
+// default hook timeout without any real hang.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
 describe('clipboardUtils', () => {
   let clipboardHasImage: () => Promise<boolean>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;

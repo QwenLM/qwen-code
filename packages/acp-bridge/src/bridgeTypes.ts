@@ -110,7 +110,13 @@ export interface BridgeSpawnRequest {
 
 export interface BridgeSession {
   sessionId: string;
+  /**
+   * Runtime ownership root used for routing and persisted-session lookup.
+   * This does not change when the agent session changes cwd.
+   */
   workspaceCwd: string;
+  /** Current agent cwd when it differs from {@link workspaceCwd}. */
+  currentCwd?: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
   /**
@@ -185,7 +191,115 @@ export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const ACTIVE_WORK_HEARTBEAT_META_KEY = 'qwen.daemon.activeWorkHeartbeat';
+export const ACTIVE_WORK_HEARTBEAT_VERSION = 1 as const;
+/** Reporting cadence the daemon asks for; the child may choose another value
+ *  inside [MIN, MAX] and the daemon clamps whatever comes back. */
+export const ACTIVE_WORK_HEARTBEAT_INTERVAL_MS = 15_000;
+export const ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS = 5_000;
+export const ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS = 60_000;
+/** A channel's cached snapshot goes stale after this many report intervals. */
+export const ACTIVE_WORK_STALE_INTERVALS = 3;
+export const ACTIVE_WORK_NOTIFICATION_METHOD =
+  'qwen/notify/channel/active-work';
+export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
+/** Bound on the conditional-close round trip. Its own constant rather than the
+ *  handshake timeout: this runs on the automatic-cleanup path, where waiting
+ *  longer buys nothing — an unanswered request is simply left for the next
+ *  snapshot to settle. */
+export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
+/** Bounds on a single snapshot. Generous next to any real deployment — they
+ *  exist so a version-skewed or buggy child cannot make the daemon walk an
+ *  unbounded structure per report, not to constrain legitimate use. A packet
+ *  over either bound is discarded whole, like any other malformed one. */
+export const ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS = 1024;
+export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
+
+/**
+ * Work categories a child reports holds for. Deliberately excludes background
+ * shells, Monitors, workflows, and cron: those are out of `activeWork`'s
+ * declared scope. The category travels on every hold so widening the scope
+ * later adds data rather than changing what the `activeWork` boolean means.
+ */
+export type ActiveWorkHoldCategory = 'agent' | 'notification';
+
+export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
+  'agent',
+  'notification',
+];
+
+export interface ActiveWorkHeartbeatCapabilityV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+  intervalMs: number;
+  /** Which categories this child actually reports. A daemon that cares about
+   *  a category the child omits degrades its reporting grade rather than
+   *  silently treating the gap as "no work". */
+  categories: ActiveWorkHoldCategory[];
+}
+
+/**
+ * Coerce a peer-supplied reporting cadence into the agreed range.
+ *
+ * Both sides call this on whatever the other side sent. Neither is treated as
+ * hostile, but a version-skewed or buggy peer proposing 1ms would flood the
+ * transport and one proposing hours would make the daemon's freshness grade
+ * meaningless, so the value is never used raw. Anything unusable falls back to
+ * the default cadence rather than disabling reporting.
+ */
+export function clampActiveWorkIntervalMs(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : NaN;
+  if (Number.isNaN(value)) return ACTIVE_WORK_HEARTBEAT_INTERVAL_MS;
+  return Math.min(
+    ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS,
+    Math.max(ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS, Math.round(value)),
+  );
+}
+
+/**
+ * Collapse coverage counts into the grade `/health?deep=1` reports.
+ *
+ * Deliberately a function over summed counts rather than a per-runtime getter:
+ * grades do not compose. A runtime with no Sessions vouches for everything it
+ * has, so folding its vacuous `full` in as evidence let an empty workspace
+ * vouch for another workspace's unreported Sessions. Callers sum the counts
+ * across every runtime first, then grade once.
+ */
+export function gradeActiveWorkCoverage(totals: {
+  total: number;
+  covered: number;
+  onNegotiatedChannel: number;
+}): 'full' | 'partial' | 'none' {
+  // No Sessions means nothing is unreported, so the picture is complete.
+  if (totals.total === 0 || totals.covered === totals.total) return 'full';
+  // `none` is reserved for "not one Session sits on a channel that negotiated
+  // reporting" — the case where acting on `activeWork` is unsafe rather than
+  // merely degraded.
+  return totals.onNegotiatedChannel === 0 ? 'none' : 'partial';
+}
+
+export interface ActiveWorkHoldV1 {
+  category: ActiveWorkHoldCategory;
+  id: string;
+}
+
+export interface ActiveWorkSessionSnapshotV1 {
+  sessionId: string;
+  holds: ActiveWorkHoldV1[];
+}
+
+/**
+ * A full, channel-wide snapshot: every Session the child currently owns, with
+ * every hold it currently holds. Full-snapshot (rather than incremental
+ * transition) semantics are what make a dropped report self-correcting in
+ * both directions, and a Session's *absence* from a fresh snapshot is
+ * positive evidence the child no longer owns it.
+ */
+export interface ActiveWorkSnapshotV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+  seq: number;
+  sessions: ActiveWorkSessionSnapshotV1[];
+}
 
 export interface ChannelStartupProfileV1 {
   v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
@@ -329,11 +443,17 @@ export interface ChangeSessionCwdRequest {
   /**
    * Server-controlled containment roots. When present, the agent-side
    * sessionCd handler verifies (after its own realpath) that the
-   * canonical target is under one of these roots. Only set by the
-   * daemon's worktree create/restore paths; direct user cd omits this
-   * field, preserving existing behavior.
+   * canonical target is under one of these roots. Only set by daemon-owned
+   * relocation paths; direct user cd omits this field, preserving existing
+   * behavior.
    */
   allowedRoots?: string[];
+  /**
+   * Private daemon capability for a Live conversation directory. The ACP
+   * child validates the authenticated parent, private root, and direct child
+   * before this may bypass the independent global folder-trust registry.
+   */
+  managedRelocation?: 'live-conversation';
 }
 
 export interface ChangeSessionCwdResult {
@@ -536,6 +656,18 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal synchronous admission signal. The bridge invokes it only after
+   * the prompt owns a pending-queue slot. Transport routes never populate it
+   * from request input.
+   */
+  onPromptAdmitted?: () => void;
+  /**
+   * Internal model input that replaces the public prompt only inside the
+   * trusted ACP child. The bridge still echoes and persists `PromptRequest`
+   * unchanged. HTTP routes never populate this from request input.
+   */
+  modelPrompt?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -561,6 +693,17 @@ export interface BridgeClientRequestContext {
    * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
    */
   deadlineMs?: number;
+}
+
+export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
+
+export function isValidTrustedModelPrompt(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_TRUSTED_MODEL_PROMPT_CHARS
+  );
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
@@ -843,6 +986,16 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+/** A daemon-owned worker completion injected into its parent session. */
+export interface BridgeBackgroundNotification {
+  displayText: string;
+  modelText: string;
+  taskId: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  kind: 'agent';
+  toolUseId?: string;
+}
+
 export type RuntimeMcpServerAddResult =
   | {
       name: string;
@@ -870,6 +1023,29 @@ export type RuntimeMcpServerRemoveResult =
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
+
+  /**
+   * Installs the daemon-owned capture handler used by the dedicated Live
+   * `capture_screen_context` tool. Undefined disables the child-to-daemon
+   * route. The bridge authenticates the caller session before invoking it.
+   */
+  setLiveScreenContextCaptureHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveScreenContextCaptureHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the five Codex-parity Live task tools. */
+  setLiveTaskToolRequestHandler?(
+    handler:
+      | import('./bridgeOptions.js').LiveTaskToolRequestHandler
+      | undefined,
+  ): void;
+
+  /** Installs the daemon-owned handler for the backend-only Live speech tool. */
+  setLiveSpeakToUserHandler?(
+    handler: import('./bridgeOptions.js').LiveSpeakToUserHandler | undefined,
+  ): void;
 
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
@@ -1355,6 +1531,22 @@ export interface AcpSessionBridge {
     refreshed: boolean;
   }>;
 
+  /** Apply Codex's realtime-active world-state transition to one session. */
+  setSessionLiveConversationActive(
+    sessionId: string,
+    active: boolean,
+  ): Promise<void>;
+
+  /** Persist Realtime-owned dialogue without starting a backend model turn. */
+  appendSessionLiveTranscript(
+    sessionId: string,
+    entries: ReadonlyArray<{
+      role: 'user' | 'assistant';
+      text: string;
+    }>,
+    model: string,
+  ): Promise<void>;
+
   /**
    * Change the approval mode of a live session and broadcast an
    * `approval_mode_changed` event. `opts.persist === true` also writes
@@ -1447,6 +1639,16 @@ export interface AcpSessionBridge {
     messageId: string,
     context?: BridgeClientRequestContext,
   ): { removed: boolean };
+
+  /**
+   * Queue a daemon-owned worker completion in its live parent session. The
+   * session records the notification and runs its normal automatic follow-up
+   * turn, matching the return path used by in-process background agents.
+   */
+  enqueueBackgroundNotification(
+    sessionId: string,
+    notification: BridgeBackgroundNotification,
+  ): Promise<{ sessionId: string; accepted: boolean }>;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).
@@ -1601,6 +1803,44 @@ export interface AcpSessionBridge {
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
+  /**
+   * Whether an accepted prompt, a running background Agent, or an Agent
+   * terminal notification is unsettled. Background shells, Monitors,
+   * workflows, and cron are deliberately outside this.
+   */
+  readonly activeWork: boolean;
+
+  /**
+   * How much of `activeWork` this runtime can vouch for, as counts rather than
+   * a grade.
+   *
+   * Counts, because the daemon-wide grade cannot be assembled from per-runtime
+   * grades: a runtime with zero Sessions vouches for everything it has and is
+   * therefore vacuously complete, which must not count as evidence that some
+   * *other* runtime's unreported Sessions are covered. Summing counts and
+   * grading once at the end is the only composition that gets that right.
+   *
+   * A Session counts as covered only when its owning channel negotiated
+   * reporting, reports every category, and its last snapshot is still inside
+   * the freshness window. Without this a controller cannot tell "nothing is
+   * running" from "nobody told me what is running", and those must not lead to
+   * the same decision.
+   */
+  readonly activeWorkCoverage: {
+    /** Live Sessions in this runtime. */
+    total: number;
+    /** Of those, how many `activeWork` actually speaks for. */
+    covered: number;
+    /** Of those, how many sit on a channel that negotiated reporting at all.
+     *  Zero is what distinguishes `none` from `partial`. */
+    onNegotiatedChannel: number;
+    /** Epoch ms of the oldest snapshot among the *covered* Sessions, or null
+     *  when none are covered. Diagnostic: the freshness decision is already
+     *  folded into `covered`, because only the daemon knows each channel's
+     *  negotiated cadence. */
+    oldestCoveredReportAt: number | null;
+  };
+
   /** Queued prompts across all sessions — accepted but not yet dispatched,
    *  excluding the one running per session — i.e. the queue-depth gauge for the
    *  Daemon Status charts (distinct from `activePromptCount`). Optional: a
@@ -1613,7 +1853,14 @@ export interface AcpSessionBridge {
    *  live. Synchronous cache read for the metrics sampler. Optional — see
    *  {@link pendingPromptTotal}. */
   getChildResourceSnapshot?():
-    | { rssBytes: number; cpuPercent: number }
+    | {
+        rssBytes: number;
+        cpuPercent: number;
+        /** How old this reading is, in ms. Absent on bridges predating the
+         *  field — see {@link pendingPromptTotal} — so a caller aggregating
+         *  several children must treat it as unknown rather than as fresh. */
+        ageMs?: number;
+      }
     | undefined;
   /** Poll the live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the

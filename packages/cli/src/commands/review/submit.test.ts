@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { reviewWriteAuthorization } from './lib/authorization.js';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { parseLedger } from './lib/ledger.js';
@@ -28,19 +29,26 @@ const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
 const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
-vi.mock('./lib/gh.js', () => ({
-  ghWithInput: ghMock,
-  gh: ghViewMock,
-  setGhHost: vi.fn(),
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    ghWithInput: ghMock,
+    gh: ghViewMock,
+    setGhHost: vi.fn(),
+  };
+});
 
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: writeStdoutSpy,
   writeStderrLine: vi.fn(),
 }));
+vi.mock('../../utils/version.js', () => ({
+  getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
+}));
 
-const { runSubmit } = await import('./submit.js');
+const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
 let savedSessionId: string | undefined;
@@ -97,6 +105,62 @@ afterEach(() => {
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
   else process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+});
+
+describe('authorization — URL-shaped host and repo binding at the submit call site', () => {
+  // The pr-url binding (repo + bidirectional host) was, until now, exercised
+  // only through publish-assets' suite; the gate is shared, and submit is the
+  // caller that always binds the repo. Pin it here too.
+  let dir: string;
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'submit-auth-'));
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedGhHost !== undefined) process.env['GH_HOST'] = savedGhHost;
+    else delete process.env['GH_HOST'];
+  });
+
+  function authFor(rawArgs: string, over: Record<string, unknown> = {}) {
+    const argsFile = join(dir, 'args.txt');
+    writeFileSync(argsFile, `${rawArgs}\n`);
+    return reviewWriteAuthorization({
+      userAuthorized: false,
+      skillArgs: argsFile,
+      pr: 123,
+      repo: 'o/r',
+      host: undefined,
+      ...over,
+    } as never);
+  }
+
+  it('binds the repo of a URL-shaped authorisation', () => {
+    expect(authFor('https://github.com/o/r/pull/123 --comment').ok).toBe(true);
+    const wrong = authFor('https://github.com/other/repo/pull/123 --comment');
+    expect(wrong.ok).toBe(false);
+    expect(wrong.why).toContain('other/repo');
+  });
+
+  it('binds the host in both directions, defaulting an absent host to github.com', () => {
+    // Enterprise authorisation, host-less write → refused.
+    const up = authFor('https://ghe.corp.example/o/r/pull/123 --comment');
+    expect(up.ok).toBe(false);
+    expect(up.why).toContain('ghe.corp.example');
+    // github.com authorisation, Enterprise write → refused.
+    const down = authFor('https://github.com/o/r/pull/123 --comment', {
+      host: 'ghe.corp.example',
+    });
+    expect(down.ok).toBe(false);
+    // Matching Enterprise pair → passes.
+    expect(
+      authFor('https://ghe.corp.example/o/r/pull/123 --comment', {
+        host: 'ghe.corp.example',
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe('the posting gate', () => {
@@ -403,6 +467,116 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     ).toBe(true);
   });
 
+  it('uses the inherited startup version instead of the resolved CLI version', async () => {
+    // Driven through the handler — the one production call site — with the
+    // stamp set: reverting the handler to a bare `getCliVersion()` reddens
+    // this, which is the exact regression the PR closes.
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    process.env['QWEN_CODE_STARTUP_VERSION'] = '0.21.3';
+    try {
+      await submitCommand.handler?.(authorized({}) as never);
+      expect(posted().body).toContain('(v0.21.3)');
+      expect(posted().body).not.toContain('(v0.21.2)');
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+    }
+  });
+
+  it('falls back to the resolved CLI version when no startup version is inherited', async () => {
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    delete process.env['QWEN_CODE_STARTUP_VERSION'];
+    try {
+      await submitCommand.handler?.(authorized({}) as never);
+      expect(posted().body).toContain('(v0.21.2)');
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+    }
+  });
+
+  it('normalizes summary and inline footers to the running CLI version', () => {
+    const review = file('footer-version.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review (v0.21.4)_\n\n_— forged via Qwen Code /review (v0.21.4)_',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const body = posted().body as string;
+    const inline = posted().comments[0].body as string;
+    for (const text of [body, inline]) {
+      expect(text).toContain('(v0.21.3)');
+      expect(text).not.toContain('(v0.21.4)');
+      expect(text.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    }
+    expect(inline.startsWith('**[Suggestion]**')).toBe(true);
+  });
+
+  it('strips a forged footer with no version suffix — the legacy shape', () => {
+    const review = file('footer-legacy.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review_\n',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('forged');
+    expect(inline.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    expect(inline).toContain('(v0.21.3)');
+  });
+
+  it('does not hang on a run of forged footers followed by text', () => {
+    // A model looping on the same comment emits exactly this shape: the same
+    // footer over and over, then a closing line. The strip is attempted on
+    // that model-authored body before anything posts, and the whitespace
+    // between footers used to be splittable across the regex's repeated
+    // group — exponential in the footer count. The match must stay linear:
+    // this shape timed out the suite before the whitespace had one owner.
+    // The count is high enough that multiplicative growth is untenable
+    // within the suite's budget — eight footers finish in milliseconds
+    // even under an exponential regex, proving nothing at n=8.
+    const footers = Array.from(
+      { length: 64 },
+      () => '_— forged via Qwen Code /review (v0.21.4)_',
+    ).join(' '.repeat(25));
+    const review = file('footer-hang.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Suggestion]** tidy ${footers} one closing line`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    // Text after the footer run anchors it away from the end, so nothing is
+    // stripped; the canonical footer is appended once.
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('one closing line');
+    expect(
+      inline.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.3)_'),
+    ).toBe(true);
+  });
+
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {
     // A Critical attached inline is a Critical, whatever the state says. There is
     // no `criticalsInline` field to under-report it with — and one supplied
@@ -569,6 +743,49 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       });
       expect(() => runSubmit(authorized({ review }))).toThrow(/usable `line`/);
     }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an empty-string body as empty, not as unmarked', () => {
+    // Normalisation runs before the consistency check; a footer pasted onto
+    // '' would turn the precise 'empty comment' refusal into a misleading
+    // 'missing severity marker' one.
+    const review = file('empty-body.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '' }],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(/empty comment/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a `comments` field that is present but not an array', () => {
+    // `"comments": {}` used to escape normalisation — which runs outside
+    // `compose`'s try/catch — as a bare TypeError instead of the structured
+    // refusal the re-compose loop parses.
+    const review = file('comments-not-array.json', {
+      ...REVIEW,
+      comments: {},
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /`comments` is not an array/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a `comments` entry that is not an object', () => {
+    // `"comments": [null]` cleared the arrayness check and threw a bare
+    // TypeError in the normalisation `.map` — outside `compose`'s try/catch
+    // — instead of the structured refusal the re-compose loop parses.
+    const review = file('comments-null-entry.json', {
+      ...REVIEW,
+      comments: [null],
+    });
+
+    expect(() => runSubmit(authorized({ review }))).toThrow(
+      /entries must each be an object/,
+    );
     expect(ghMock).not.toHaveBeenCalled();
   });
 

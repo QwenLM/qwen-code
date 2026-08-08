@@ -69,7 +69,11 @@ export interface CdpTabInfo {
 }
 
 export class CdpBrowserEmulator {
-  readonly pageSessionId = PAGE_SESSION_ID;
+  private readonly attachedPageSessions = new Set<string>();
+  private nextPageSessionId = 1;
+  private autoAttachActive = false;
+  private pageSessionDetached = false;
+  private droppedTabEvents = 0;
 
   constructor(
     private readonly cb: CdpEmulatorCallbacks,
@@ -164,6 +168,83 @@ export class CdpBrowserEmulator {
             id,
             result: { targetInfo: this.pageTargetInfo() },
           });
+        case 'Target.getDevToolsTarget':
+          // Known and deliberately unsupported: the tunnel exposes a single real
+          // tab, not a DevTools frontend target, so there is nothing to return.
+          // Handled explicitly (not via `default:`) so the empty ack is not
+          // logged as an unsupported-method coverage gap.
+          return this.cb.reply({ id, result: {} });
+        case 'Target.attachToTarget': {
+          const targetId = params?.['targetId'];
+          if (targetId !== PAGE_TARGET_ID) {
+            return this.cb.reply({
+              id,
+              error: {
+                code: SERVER_ERROR,
+                message: `Cannot attach to target: ${String(targetId)}`,
+              },
+            });
+          }
+          const attachedSessionId = `qwen-cdp-page-session-${this.nextPageSessionId++}`;
+          this.attachedPageSessions.add(attachedSessionId);
+          this.cb.reply({
+            method: 'Target.attachedToTarget',
+            params: {
+              targetInfo: this.pageTargetInfo(),
+              sessionId: attachedSessionId,
+              waitingForDebugger: false,
+            },
+          });
+          return this.cb.reply({
+            id,
+            result: { sessionId: attachedSessionId },
+          });
+        }
+        case 'Target.detachFromTarget': {
+          const attachedSessionId = params?.['sessionId'];
+          if (attachedSessionId === PAGE_SESSION_ID) {
+            // The auto-attach session is only live after the tab-session
+            // handshake; detaching it stops event delivery and reports the
+            // teardown, so a client that switches to explicit-attach-only mode
+            // does not keep receiving events on a session it believes is gone.
+            if (this.autoAttachActive) {
+              this.autoAttachActive = false;
+              this.pageSessionDetached = true;
+              this.cb.reply({
+                method: 'Target.detachedFromTarget',
+                params: {
+                  sessionId: PAGE_SESSION_ID,
+                  targetId: PAGE_TARGET_ID,
+                },
+              });
+            }
+            // Without a prior handshake the session was never announced, so
+            // there is no detachedFromTarget to emit, and PAGE_SESSION_ID
+            // stays a valid lazy-attach command route (cdp-reverse-link.ts).
+            // Deliberately asymmetric with the auto-attach path, where detach
+            // ends both events and commands: see the setAutoAttach note.
+          } else if (
+            typeof attachedSessionId === 'string' &&
+            this.attachedPageSessions.delete(attachedSessionId)
+          ) {
+            this.cb.reply({
+              method: 'Target.detachedFromTarget',
+              params: {
+                sessionId: attachedSessionId,
+                targetId: PAGE_TARGET_ID,
+              },
+            });
+          } else {
+            return this.cb.reply({
+              id,
+              error: {
+                code: SERVER_ERROR,
+                message: `Unknown CDP session: ${String(attachedSessionId)}`,
+              },
+            });
+          }
+          return this.cb.reply({ id, result: {} });
+        }
         default:
           // TODO(#5626): return SERVER_ERROR once the emulator covers every
           // browser-level command a CDP client sends. Until then the
@@ -179,15 +260,22 @@ export class CdpBrowserEmulator {
     // ── tab session: recursive auto-attach mints the page session ──
     if (sessionId === TAB_SESSION_ID) {
       if (method === 'Target.setAutoAttach') {
-        this.cb.reply({
-          method: 'Target.attachedToTarget',
-          sessionId: TAB_SESSION_ID,
-          params: {
-            targetInfo: this.pageTargetInfo(),
-            sessionId: PAGE_SESSION_ID,
-            waitingForDebugger: false,
-          },
-        });
+        this.autoAttachActive = params?.['autoAttach'] !== false;
+        // autoAttach:false pauses event delivery on PAGE_SESSION_ID but keeps
+        // its command forwarding alive (lazy-attach compat); only
+        // detachFromTarget ends both.
+        if (this.autoAttachActive) {
+          this.pageSessionDetached = false;
+          this.cb.reply({
+            method: 'Target.attachedToTarget',
+            sessionId: TAB_SESSION_ID,
+            params: {
+              targetInfo: this.pageTargetInfo(),
+              sessionId: PAGE_SESSION_ID,
+              waitingForDebugger: false,
+            },
+          });
+        }
         return this.cb.reply({ id, sessionId, result: {} });
       }
       // ack other tab-session commands (e.g. Runtime.runIfWaitingForDebugger).
@@ -195,7 +283,24 @@ export class CdpBrowserEmulator {
     }
 
     // ── page session: forward to the real tab via the extension ──
-    if (sessionId === PAGE_SESSION_ID) {
+    // PAGE_SESSION_ID forwarding works without a prior setAutoAttach handshake
+    // because the lazy-attach path (cdp-reverse-link.ts) sends page commands
+    // directly. After an explicit detachFromTarget the session is rejected,
+    // matching Chrome's "Unknown session" behavior.
+    if (sessionId === PAGE_SESSION_ID && this.pageSessionDetached) {
+      return this.cb.reply({
+        id,
+        sessionId,
+        error: {
+          code: SERVER_ERROR,
+          message: `Unknown CDP session: ${sessionId}`,
+        },
+      });
+    }
+    if (
+      sessionId === PAGE_SESSION_ID ||
+      this.attachedPageSessions.has(sessionId)
+    ) {
       try {
         const result = await this.cb.forwardToTab(method ?? '', params);
         return this.cb.reply({ id, sessionId, result });
@@ -227,13 +332,37 @@ export class CdpBrowserEmulator {
   }
 
   /**
-   * Re-emit a CDP event that arrived from the real tab (via the extension),
-   * tagged with the page session id so puppeteer routes it to its Page.
+   * Re-emit a CDP event that arrived from the real tab (via the extension) on
+   * every page session this tunnel has minted: the auto-attach `PAGE_SESSION_ID`
+   * plus each session created by an explicit `Target.attachToTarget`.
+   *
+   * This mirrors Chrome's per-session delivery — each attachment is an
+   * independent subscription that gets its own copy of the page's events. The
+   * auto-attach session only receives events after the `Target.setAutoAttach`
+   * handshake on the tab session, so a client that uses only explicit
+   * `Target.attachToTarget` does not pay for a duplicate stream it never
+   * listens to. A client that deliberately attached twice would see an event
+   * twice, exactly as it would against a real browser.
    */
   emitTabEvent(
     method: string,
     params: Record<string, unknown> | undefined,
   ): void {
-    this.cb.reply({ method, params, sessionId: PAGE_SESSION_ID });
+    if (this.autoAttachActive) {
+      this.cb.reply({ method, params, sessionId: PAGE_SESSION_ID });
+    }
+    for (const sessionId of this.attachedPageSessions) {
+      this.cb.reply({ method, params, sessionId });
+    }
+    if (!this.autoAttachActive && this.attachedPageSessions.size === 0) {
+      this.droppedTabEvents += 1;
+      // A one-shot warning hides mid-session regressions; re-log periodically
+      // with a running total so the drop stream stays diagnosable.
+      if (this.droppedTabEvents === 1 || this.droppedTabEvents % 100 === 0) {
+        this.cb.log?.(
+          `qwen serve: /cdp tab event "${method}" dropped (${this.droppedTabEvents} total) — no active page session (lazy-attach clients are command-only until Target.setAutoAttach)`,
+        );
+      }
+    }
   }
 }

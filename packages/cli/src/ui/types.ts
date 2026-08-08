@@ -55,6 +55,11 @@ export enum ToolCallStatus {
   Error = 'Error',
 }
 
+export interface InlineImageData {
+  data: string;
+  mimeType: string;
+}
+
 export interface ToolCallEvent {
   type: 'tool_call';
   status: ToolCallStatus;
@@ -80,6 +85,10 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /** Inline images carried by this tool's persisted response parts. */
+  images?: InlineImageData[];
+  /** Images hidden after the per-row rendering limit. */
+  omittedImageCount?: number;
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
@@ -139,12 +148,16 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
   type: 'gemini_content';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
 };
 
 export type HistoryItemGeminiThought = HistoryItemBase & {
@@ -463,7 +476,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   mcpTools: ContextToolDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
-  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
   isEstimated?: boolean;
   /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
   showDetails?: boolean;
@@ -839,6 +852,8 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. Applies to this submitted prompt (and its
    * tool-call continuations) only — no session change, no persistence.

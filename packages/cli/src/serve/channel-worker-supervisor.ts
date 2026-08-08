@@ -18,6 +18,7 @@ import {
   CHANNEL_WORKER_STARTUP_TIMEOUT_MS,
   CHANNEL_WORKER_STOP_GRACE_MS,
 } from '@qwen-code/acp-bridge/channelControlTimeouts';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CHANNEL_WEBHOOK_TASK_IPC_TIMEOUT_MS,
   ChannelWebhookEnqueueError,
@@ -375,11 +376,16 @@ function createWorkerEnv(opts: {
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+  // Marks the worker (and the ACP children it spawns) as daemon-spawned so
+  // the ACP channel fallback reports channel=daemon in usage statistics
+  // (see cli/src/config/acp-channel-fallback.ts).
+  env['QWEN_CODE_SERVE'] = '1';
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
   env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
   delete env[QWEN_SERVER_TOKEN_ENV];
   delete env[QWEN_DAEMON_TOKEN_ENV];
+  delete env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   if (opts.daemonToken) {
     env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
   }

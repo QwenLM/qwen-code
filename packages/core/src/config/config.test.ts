@@ -630,6 +630,45 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getMemoryAgentMaxTurns', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getMemoryAgentMaxTurns()).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 25,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(25);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 0,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: -1,
+        }).getMemoryAgentMaxTurns(),
+      ).toBeUndefined();
+    });
+
+    it('treats fractional values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 2.5,
+        }).getMemoryAgentMaxTurns(),
+      ).toBeUndefined();
+    });
+  });
+
   describe('getVisionBridgeTimeoutMs', () => {
     it('returns undefined when unset', () => {
       expect(new Config(baseParams).getVisionBridgeTimeoutMs()).toBeUndefined();
@@ -3128,7 +3167,9 @@ describe('Server Config (config.ts)', () => {
 
       await config.initialize();
 
-      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(TARGET_DIR);
+      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(
+        path.resolve(TARGET_DIR),
+      );
       expect(
         vi.mocked(maybeRunAutoSkillCurator).mock.invocationCallOrder[0],
       ).toBeLessThan(vi.mocked(SkillManager).mock.invocationCallOrder[0]);

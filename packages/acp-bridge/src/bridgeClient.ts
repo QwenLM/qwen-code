@@ -25,8 +25,15 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // so a rename can't silently break the protocol.
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
+  ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+  type ActiveWorkHoldV1,
+  type ActiveWorkSnapshotV1,
 } from './bridgeTypes.js';
 import type {
   BridgeWorkspaceGenerationNotificationEvent,
@@ -36,6 +43,7 @@ import type {
   PendingPromptEntry,
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
 import type {
   ChannelDeliveryErrorCode,
   ChannelDeliveryHandler,
@@ -43,9 +51,16 @@ import type {
   ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
+  ExternalToolGuardHandler,
+  LiveScreenContextCaptureHandler,
+  LiveSpeakToUserHandler,
+  LiveTaskToolRequestHandler,
 } from './bridgeOptions.js';
 import {
   CHANNEL_DELIVERY_ERROR_CODES,
+  LIVE_TASK_TOOL_NAMES,
+  MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
+  MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -67,6 +82,68 @@ import type {
   SessionArtifactInput,
   SessionArtifactStore,
 } from './sessionArtifacts.js';
+
+/**
+ * Validate a channel-wide active-work snapshot off the wire.
+ *
+ * Returns `undefined` for anything malformed so a bad report is ignored
+ * outright: the daemon's cached copy then simply ages, which its freshness
+ * grading already treats as untrustworthy. Partially applying a half-parsed
+ * snapshot would be worse than applying none, because full-snapshot semantics
+ * are what let a Session's absence mean "released".
+ */
+function parseActiveWorkSnapshot(
+  params: Record<string, unknown>,
+): ActiveWorkSnapshotV1 | undefined {
+  const seq = params['seq'];
+  const sessions = params['sessions'];
+  if (
+    params['v'] !== ACTIVE_WORK_HEARTBEAT_VERSION ||
+    typeof seq !== 'number' ||
+    !Number.isSafeInteger(seq) ||
+    seq <= 0 ||
+    !Array.isArray(sessions) ||
+    sessions.length > ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS
+  ) {
+    return undefined;
+  }
+  const parsed: ActiveWorkSnapshotV1['sessions'] = [];
+  for (const raw of sessions) {
+    if (typeof raw !== 'object' || raw === null) return undefined;
+    const entry = raw as Record<string, unknown>;
+    const sessionId = entry['sessionId'];
+    const holds = entry['holds'];
+    if (
+      typeof sessionId !== 'string' ||
+      !Array.isArray(holds) ||
+      holds.length > ACTIVE_WORK_MAX_SESSION_HOLDS
+    ) {
+      return undefined;
+    }
+    const parsedHolds: ActiveWorkHoldV1[] = [];
+    for (const rawHold of holds) {
+      if (typeof rawHold !== 'object' || rawHold === null) return undefined;
+      const hold = rawHold as Record<string, unknown>;
+      const category = hold['category'];
+      const id = hold['id'];
+      if (
+        typeof id !== 'string' ||
+        typeof category !== 'string' ||
+        !ACTIVE_WORK_HOLD_CATEGORIES.includes(
+          category as ActiveWorkHoldV1['category'],
+        )
+      ) {
+        return undefined;
+      }
+      parsedHolds.push({
+        category: category as ActiveWorkHoldV1['category'],
+        id,
+      });
+    }
+    parsed.push({ sessionId, holds: parsedHolds });
+  }
+  return { v: ACTIVE_WORK_HEARTBEAT_VERSION, seq, sessions: parsed };
+}
 
 // Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
 // import from core for this hot demux path.
@@ -106,6 +183,30 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeExternalToolGuardResult(
+  value: unknown,
+): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  const keys = Object.keys(value);
+  if (value['allowed'] === true && keys.length === 1 && keys[0] === 'allowed') {
+    return { allowed: true };
+  }
+  if (
+    value['allowed'] !== false ||
+    keys.some((key) => key !== 'allowed' && key !== 'reason')
+  ) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  if (!Object.hasOwn(value, 'reason')) return { allowed: false };
+  const reason = value['reason'];
+  if (!isValidExternalToolGuardDenialReason(reason)) {
+    throw new Error('External tool guard handler returned an invalid result.');
+  }
+  return { allowed: false, reason };
 }
 
 function isBoundedChannelDeliveryString(value: unknown): value is string {
@@ -687,6 +788,21 @@ export class BridgeClient implements Client {
     private readonly onChannelDelivery?: ChannelDeliveryHandler,
     /** Permits pre-registration client-MCP discovery without trusting its id. */
     private readonly hasSessionSpawnInFlight: () => boolean = () => false,
+    private readonly getLiveScreenContextCaptureHandler: () =>
+      | LiveScreenContextCaptureHandler
+      | undefined = () => undefined,
+    private readonly getLiveTaskToolRequestHandler: () =>
+      | LiveTaskToolRequestHandler
+      | undefined = () => undefined,
+    private readonly getLiveSpeakToUserHandler: () =>
+      | LiveSpeakToUserHandler
+      | undefined = () => undefined,
+    /**
+     * Managed tool guard hosted by the daemon. Kept after the Live handlers so
+     * existing direct BridgeClient constructors remain source-compatible.
+     */
+    private readonly externalToolGuard?: ExternalToolGuardHandler,
+    private readonly onActiveWork?: (snapshot: ActiveWorkSnapshotV1) => void,
   ) {}
 
   async requestPermission(
@@ -1073,8 +1189,20 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
     }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext) {
+      return this.handleLiveScreenContextCapture(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveTaskTool) {
+      return this.handleLiveTaskTool(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.liveSpeakToUser) {
+      return this.handleLiveSpeakToUser(params);
+    }
     if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
       return this.handleChannelDelivery(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare) {
+      return this.handleExternalToolGuardPrepare(params);
     }
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       return this.handleTodoStopGuardContinuationClaim(params);
@@ -1137,6 +1265,70 @@ export class BridgeClient implements Client {
       }
     }
     return { messages, hasQueuedPrompt };
+  }
+
+  private async handleExternalToolGuardPrepare(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.externalToolGuard) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      );
+    }
+    const sessionId = params['sessionId'];
+    const promptId = params['promptId'];
+    const toolCallId = params['toolCallId'];
+    const toolName = params['toolName'];
+    const args = params['arguments'];
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      typeof promptId !== 'string' ||
+      promptId.length === 0 ||
+      typeof toolCallId !== 'string' ||
+      toolCallId.length === 0 ||
+      typeof toolName !== 'string' ||
+      toolName.length === 0 ||
+      !isRecord(args)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid external tool guard request',
+      );
+    }
+    if (!this.ownsSession(sessionId)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard session is not owned by this connection',
+      );
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry || !entry.promptActive || entry.activePromptId !== promptId) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard prompt is not the active prompt',
+      );
+    }
+    const decision: unknown = await this.externalToolGuard({
+      sessionId: entry.sessionId,
+      promptId: entry.activePromptId,
+      toolCallId,
+      toolName,
+      arguments: args,
+    });
+    const currentEntry = this.resolveEntry(sessionId);
+    if (
+      !this.ownsSession(sessionId) ||
+      currentEntry !== entry ||
+      !currentEntry.promptActive ||
+      currentEntry.activePromptId !== promptId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'External tool guard prompt is no longer active',
+      );
+    }
+    return normalizeExternalToolGuardResult(decision);
   }
 
   private handleTodoStopGuardContinuationClaim(
@@ -1485,6 +1677,107 @@ export class BridgeClient implements Client {
     };
   }
 
+  private async handleLiveScreenContextCapture(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveScreenContextCaptureHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveCaptureScreenContext,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    const result = await handler({ callerSessionId });
+    if (
+      result.appName.length === 0 ||
+      result.appName.length > 512 ||
+      (result.windowTitle !== undefined && result.windowTitle.length > 2_048) ||
+      result.accessibilityText.length > MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS ||
+      result.screenshotPath.length === 0 ||
+      result.screenshotPath.length > 4_096
+    ) {
+      throw RequestError.internalError(undefined, 'Invalid Appshot result.');
+    }
+    return {
+      appName: result.appName,
+      ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
+      accessibilityText: result.accessibilityText,
+      screenshotPath: result.screenshotPath,
+    };
+  }
+
+  private async handleLiveTaskTool(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveTaskToolRequestHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(SERVE_CONTROL_EXT_METHODS.liveTaskTool);
+    }
+    const callerSessionId = params['callerSessionId'];
+    const name = params['name'];
+    const args = params['arguments'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof name !== 'string' ||
+      !LIVE_TASK_TOOL_NAMES.includes(
+        name as (typeof LIVE_TASK_TOOL_NAMES)[number],
+      ) ||
+      typeof args !== 'object' ||
+      args === null ||
+      Array.isArray(args)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live task-tool request.',
+      );
+    }
+    return handler({
+      callerSessionId,
+      name: name as (typeof LIVE_TASK_TOOL_NAMES)[number],
+      arguments: args as Record<string, unknown>,
+    });
+  }
+
+  private async handleLiveSpeakToUser(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const handler = this.getLiveSpeakToUserHandler();
+    if (!handler) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.liveSpeakToUser,
+      );
+    }
+    const callerSessionId = params['callerSessionId'];
+    const message = params['message'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId) ||
+      typeof message !== 'string' ||
+      message.trim().length === 0 ||
+      message.length > MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid Live speak-to-user request.',
+      );
+    }
+    await handler({ callerSessionId, message });
+    return { accepted: true };
+  }
+
   /**
    * Handle child->bridge ACP `extNotification` calls. Recognized methods are
    * `qwen/notify/session/model-update`,
@@ -1494,6 +1787,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
+   * `_qwencode/end_turn` (background-notification turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -1502,6 +1796,43 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
+      const snapshot = parseActiveWorkSnapshot(params);
+      if (snapshot) {
+        // Sessions the child claims but this channel does not own are dropped
+        // rather than rejecting the whole snapshot: the rest of it is still
+        // usable, and a channel must never influence another channel's state.
+        this.onActiveWork?.({
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          seq: snapshot.seq,
+          sessions: snapshot.sessions.filter((session) =>
+            this.ownsSession(session.sessionId),
+          ),
+        });
+      }
+      return;
+    }
+    if (method === '_qwencode/end_turn') {
+      const sessionId = params['sessionId'];
+      const reason = params['reason'];
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof reason !== 'string' ||
+        reason.length === 0 ||
+        reason.length > 128 ||
+        params['source'] !== 'background_notification'
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      entry.events.publish({
+        type: 'background_notification_turn_complete',
+        data: { sessionId, reason },
+      });
+      return;
+    }
     if (method === 'qwen/notify/session/generation/event') {
       const sessionId = params['sessionId'];
       const requestId = params['requestId'];

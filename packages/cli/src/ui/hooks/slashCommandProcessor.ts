@@ -163,6 +163,7 @@ export interface SlashCommandProcessorActions {
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
+  clearPendingState: () => void;
 }
 
 /**
@@ -479,11 +480,13 @@ export const useSlashCommandProcessor = (
         addItem,
         clear: () => {
           cancelBtw();
+          actions.clearPendingState();
           clearItems();
           clearScreen();
           refreshStatic();
           setSessionName?.(null);
         },
+        clearPendingState: actions.clearPendingState,
         loadHistory,
         refreshStatic,
         setDebugMessage: actions.setDebugMessage,
@@ -903,6 +906,7 @@ export const useSlashCommandProcessor = (
           const combinedContent: PartListUnion[] = [];
           let firstModelOverride: string | undefined;
           const onCompleteCallbacks: Array<() => Promise<void>> = [];
+          let refreshContextFilesOnWrite = false;
 
           for (const skill of stackedResult.skills) {
             if (!skill.action) continue;
@@ -919,6 +923,9 @@ export const useSlashCommandProcessor = (
             if (skillResult?.type === 'submit_prompt') {
               combinedContent.push(skillResult.content);
               firstModelOverride ??= skillResult.modelOverride;
+              refreshContextFilesOnWrite ||= Boolean(
+                skillResult.refreshContextFilesOnWrite,
+              );
               if (skillResult.onComplete) {
                 onCompleteCallbacks.push(skillResult.onComplete);
               }
@@ -971,6 +978,9 @@ export const useSlashCommandProcessor = (
             content: mergedContent,
             ...(firstModelOverride
               ? { modelOverride: firstModelOverride }
+              : {}),
+            ...(refreshContextFilesOnWrite
+              ? { refreshContextFilesOnWrite: true }
               : {}),
             ...(onCompleteCallbacks.length
               ? {
@@ -1307,6 +1317,8 @@ export const useSlashCommandProcessor = (
                     onComplete: result.onComplete,
                     modelOverride: result.modelOverride,
                     toolInvocationGuard: result.toolInvocationGuard,
+                    refreshContextFilesOnWrite:
+                      result.refreshContextFilesOnWrite,
                   };
                 }
                 case 'confirm_shell_commands': {
