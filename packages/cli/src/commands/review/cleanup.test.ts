@@ -345,6 +345,56 @@ describe('runCleanup', () => {
         );
       });
 
+      it('accumulates orphans across BOTH bases, not just the last one', () => {
+        // No fixture returned entries from both socket bases at once, so
+        // the cross-base `entries.concat(...)` was unpinned and an
+        // overwrite mutant shipped green — losing every orphan under the
+        // env base whenever /tmp also had one (and vice versa).
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation(
+          (p: string) => p === dir || p === tmpDir,
+        );
+        mocks.readdirSync.mockImplementation((p: string) => {
+          if (p === dir) return [orphan];
+          if (p === tmpDir) return [orphan2];
+          return [];
+        });
+        runCleanup('local');
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan2}`,
+        );
+      });
+
+      it('scans the OTHER base after one of them cannot be read', () => {
+        // The unreadable-dir fixture makes both bases throw, so a
+        // catch-then-break mutant shipped green: an env-base tmux-<uid>
+        // that exists but is mode-000 would then hide every orphan under
+        // /tmp behind one stderr note.
+        const tmpDir = `/tmp/tmux-${String(uid)}`;
+        mocks.existsSync.mockImplementation(
+          (p: string) => p === dir || p === tmpDir,
+        );
+        mocks.readdirSync.mockImplementation((p: string) => {
+          if (p === dir) {
+            throw Object.assign(new Error('EACCES: permission denied'), {
+              code: 'EACCES',
+            });
+          }
+          if (p === tmpDir) return [orphan];
+          return [];
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
       it('sweeps under a pr-<n> target too — the sweep is host-wide', () => {
         // Every other fixture drives 'local'. The sweep is deliberately not
         // target-scoped (an orphan belongs to the host, not to one review),
@@ -399,7 +449,13 @@ describe('runCleanup', () => {
           'tmux',
           ['-L', orphan, 'kill-server'],
           expect.objectContaining({
-            env: expect.objectContaining({ TMUX_TMPDIR: '/tmp' }),
+            env: expect.objectContaining({
+              TMUX_TMPDIR: '/tmp',
+              // The parent environment rides along: `env: { TMUX_TMPDIR }`
+              // alone leaves tmux without a PATH, and every kill then fails
+              // for a reason that has nothing to do with the socket.
+              PATH: process.env['PATH'],
+            }),
           }),
         );
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
@@ -489,6 +545,31 @@ describe('runCleanup', () => {
         // assertion here holds for any cap >= 2, so a "robustness" edit
         // could widen it silently — and against a genuinely wedged server
         // each attempt pays the full 15s belt before the cleanup moves on.
+        const killCalls = mocks.execFileSync.mock.calls.filter(
+          (c: unknown[]) =>
+            c[0] === 'tmux' &&
+            Array.isArray(c[1]) &&
+            (c[1] as string[]).includes('kill-server') &&
+            (c[1] as string[]).includes(orphan),
+        );
+        expect(killCalls).toHaveLength(2);
+      });
+
+      it('gives up after ONE retry — the cap, pinned from above', () => {
+        // The fixture above stops throwing after the first call, so the
+        // loop exits via serverDead on attempt 2 for ANY cap >= 2. Here
+        // every attempt throws, so the count IS the cap: a widened cap pays
+        // the full 15s belt per attempt against a genuinely wedged server
+        // while the cleanup waits.
+        mocks.execFileSync.mockImplementation((bin: string) => {
+          if (bin === 'tmux') {
+            throw Object.assign(new Error('wedged'), {
+              stderr: 'tmux: server is wedged',
+            });
+          }
+          return Buffer.from('');
+        });
+        runCleanup('local');
         const killCalls = mocks.execFileSync.mock.calls.filter(
           (c: unknown[]) =>
             c[0] === 'tmux' &&

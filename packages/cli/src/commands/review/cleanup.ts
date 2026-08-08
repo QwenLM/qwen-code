@@ -14,10 +14,16 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { CAPTURE_SERVER_PREFIX } from './lib/tui-capture.js';
+import { CAPTURE_SERVER_PREFIX, isNothingToKill } from './lib/tui-capture.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -406,7 +412,18 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   const bases: string[] = [];
   const seen = new Set<string>();
   for (const base of [envBase || '/tmp', '/tmp']) {
-    const key = join(base, `tmux-${uid}`);
+    const dir = join(base, `tmux-${uid}`);
+    // Keyed on the RESOLVED directory: string normalization collapses
+    // `/tmp/`, `/tmp/.` and `//tmp`, but a TMUX_TMPDIR that is a symlink to
+    // /tmp still named a different string while opening the same directory,
+    // so every socket in it was listed, killed and reported twice.
+    let key = dir;
+    try {
+      key = realpathSync(dir);
+    } catch {
+      // Not there (or unreadable): the raw path is a fine key, and the
+      // scan below reports what it cannot read.
+    }
     if (seen.has(key)) continue;
     seen.add(key);
     bases.push(base);
@@ -477,7 +494,7 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
         });
         serverDead = true;
       } catch (e) {
-        serverDead = /no server running/i.test(
+        serverDead = isNothingToKill(
           String((e as { stderr?: unknown }).stderr ?? ''),
         );
       }

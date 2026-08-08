@@ -120,15 +120,55 @@ function isAptGet(stmt) {
 // The commands on one logical line, with grouping punctuation removed: a
 // subshell-wrapped `(exit 1)` is an exit like any other, and it gives its
 // enclosing if/elif/else branch the same status. A single `&` separates
-// statements too — `sleep 1 & exit 1` is two commands, and the exit was
-// invisible while the alphabet knew only `&&`.
+// statements too — `sleep 1 & exit 1` is two commands.
+// QUOTE-AWARE, like the line scanner: a `;` inside a warning message is
+// message text, and splitting on it tore an `echo '…; …' > /dev/null` into
+// fragments where the redirect no longer belonged to any echo — so the
+// annotation pins never saw it.
 function statementsOf(line) {
-  return line
-    .split(/;|&&|\|\||\||&|\bthen\b|\belse\b|\bdo\b|\bfi\b/)
-    .map((x) =>
-      unwrapCommand(x.replace(/^[\s({]+/, '').replace(/[\s)}]+$/, '')),
-    )
-    .filter(Boolean);
+  const parts = [];
+  let cur = '';
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+      continue;
+    }
+    const two = line.slice(i, i + 2);
+    if (two === '&&' || two === '||') {
+      parts.push(cur);
+      cur = '';
+      i++;
+      continue;
+    }
+    // `&` separates statements, EXCEPT in a redirection like `2>&1`.
+    if (c === ';' || c === '|' || (c === '&' && line[i - 1] !== '>')) {
+      parts.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  parts.push(cur);
+  return (
+    parts
+      // Keyword boundaries only where no quoting is in play — inside a
+      // message, `then` is a word.
+      .flatMap((p) =>
+        /['"]/.test(p) ? [p] : p.split(/\bthen\b|\belse\b|\bdo\b|\bfi\b/),
+      )
+      .map((x) =>
+        unwrapCommand(x.replace(/^[\s({]+/, '').replace(/[\s)}]+$/, '')),
+      )
+      .filter(Boolean)
+  );
 }
 
 // Does this `set` enable errexit? Any position, any spelling — `set -e`,
@@ -188,10 +228,32 @@ describe('ci.yml capture tooling', () => {
     const installLines = logicalLinesOf(steps[install].run);
     for (const pkg of ['tmux', 'zip', 'unzip']) {
       expect(
-        installLines.some((l) => installsPackage(l, pkg)),
+        // Execution-aware, like the guard walk: a mere MENTION of an
+        // install (inside an `echo '::warning::apt-get install tmux …'`)
+        // satisfied a containment pin while the guard walker correctly
+        // waived it as a message — the two pins disagreeing let a step that
+        // installs NOTHING pass both.
+        installLines.some(
+          (l) =>
+            statementsOf(l).some((stmt) => isAptGet(stmt)) &&
+            installsPackage(l, pkg),
+        ),
         `no apt-get install of the exact package ${pkg}`,
       ).toBe(true);
     }
+    // The flags that make it work UNATTENDED: without -y apt-get prompts
+    // and fails on a runner with no tty, and without root it cannot write
+    // /var/lib/dpkg — both keep every structural pin green while installing
+    // nothing.
+    const installStatement = installLines
+      .flatMap((l) => statementsOf(l))
+      .find((stmt) => isAptGet(stmt) && /^apt-get\s+install\b/.test(stmt));
+    expect(installStatement, 'no apt-get install statement').toBeDefined();
+    expect(installStatement.split(/\s+/)).toContain('-y');
+    expect(
+      installLines.some((l) => /\bsudo\s+apt-get\s+install\b/.test(l)),
+      'the install does not run through sudo',
+    ).toBe(true);
     // And it must really install: `-s`/`--download-only` and friends exit 0
     // having installed nothing, with no warning — the step stays green while
     // the real-tmux suite skips inside the required check.
@@ -255,9 +317,13 @@ describe('ci.yml capture tooling', () => {
       expect(hasForcingTerm(line), `forced condition :: ${line}`).toBe(false);
       expect(line, line).not.toMatch(/(^|\s)(true|false|:)\s*(&&|\|\||;)/);
     }
-    // The install branch is guarded by the tools it needs, not by a
-    // constant.
-    expect(elifLine).toMatch(/command -v apt-get\b/);
+    // The install branch is pinned WHOLE too: a near-miss falsifier
+    // (`elif false2 && …`, a command that does not exist and therefore
+    // always fails) kills the branch while satisfying a containment pin and
+    // the forcing-term blacklist alike.
+    expect(elifLine.replace(/\s+/g, ' ')).toBe(
+      'elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then',
+    );
     // And the ELSE fallback exists: on a lane with neither tmux nor
     // sudo+apt-get — a root-container self-hosted runner, the family this
     // PR's own evidence is produced on — it is the only signal that the
@@ -303,7 +369,7 @@ describe('ci.yml capture tooling', () => {
         const stmt =
           line
             .slice(0, at)
-            .split(/;|&&|\|\||\||&|\bthen\b|\belse\b|\bdo\b/)
+            .split(/;|&&|\|\||\||(?<!>)&|\bthen\b|\belse\b|\bdo\b/)
             .pop() + 'apt-get';
         // isAptGet strips grouping punctuation and every wrapper (with its
         // options) before deciding — a `( sudo apt-get …` or a
@@ -317,7 +383,9 @@ describe('ci.yml capture tooling', () => {
         // status the pipeline's last command: either one ends the guard's
         // reach, and the apt-get is unguarded.
         let guarded = false;
-        const ops = /(\|\||&&|;|\|)/g;
+        // Same alphabet as statementsOf, and `2>&1` is a redirection, not a
+        // separator.
+        const ops = /(\|\||&&|;|\||(?<!>)&)/g;
         for (let m = ops.exec(rest); m !== null; m = ops.exec(rest)) {
           if (m[1] === '&&') continue;
           guarded = m[1] === '||' && /^\|\|\s*echo\b/.test(rest.slice(m.index));
@@ -333,11 +401,20 @@ describe('ci.yml capture tooling', () => {
       // permanently fails then hides the loss in a multi-thousand-line log
       // instead of showing it in the check UI.
       for (const stmt of statementsOf(line)) {
-        if (/^echo\b/.test(stmt)) {
-          expect(stmt, `echo without an annotation :: ${line}`).toContain(
-            '::warning::',
-          );
-        }
+        if (!/^echo\b/.test(stmt)) continue;
+        expect(stmt, `echo without an annotation :: ${line}`).toContain(
+          '::warning::',
+        );
+        // A workflow command is only a command if the runner SEES it: the
+        // runner parses stdout, so bytes sent to a file or /dev/null, or to
+        // stderr, are just log noise — and `::warning::` must open the
+        // line, since the runner does not scan mid-line.
+        expect(stmt, `annotation redirected away :: ${line}`).not.toMatch(
+          /\d?>(>|&\d)?\s*\S/,
+        );
+        expect(stmt, `annotation not at line start :: ${line}`).toMatch(
+          /^echo\s+(-[a-zA-Z]+\s+)*['"]?::warning::/,
+        );
       }
     }
   });

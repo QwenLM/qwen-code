@@ -31,6 +31,23 @@
  * a prefix rename silently turns the sweep into a permanent no-op. */
 export const CAPTURE_SERVER_PREFIX = 'qwen-review-capture-';
 
+/** Whether a failed `kill-server` means there was NOTHING to kill — the
+ * goal state, not a failure. tmux says it several ways depending on how far
+ * the server got: `no server running on <socket>`, `error connecting to
+ * <socket> (No such file or directory)`, `no such file or directory`, and —
+ * when the socket directory itself could never be created (measured with a
+ * mode-0555 TMUX_TMPDIR) — `couldn't create directory <dir> (Permission
+ * denied)`. Reading only the first wording printed a false orphan WARNING
+ * naming a server that never existed. */
+export function isNothingToKill(stderr: string): boolean {
+  return (
+    /no server running/i.test(stderr) ||
+    /error connecting to .*(no such file or directory)/i.test(stderr) ||
+    /(couldn't|could not|can't|cannot) create directory/i.test(stderr) ||
+    /no such file or directory/i.test(stderr)
+  );
+}
+
 export function captureServerName(pid: number, nonce: string): string {
   return `${CAPTURE_SERVER_PREFIX}${pid}-${nonce}`;
 }
@@ -238,7 +255,15 @@ export function tmuxPlan(opts: {
   // end — pane, session and server gone (measured 5/5). The loop re-enters
   // sleep and the pane survives. The loop is BOUNDED — 180 periods of one
   // minute — so an unreaped holder (SIGKILL'd harness, OOM) self-terminates
-  // after three hours instead of living indefinitely. MANY SHORT periods,
+  // after three hours instead of living indefinitely. The WATCHDOG carries
+  // that same cap for the other half of the lifetime: the loop only starts
+  // once the captured command has exited, so a command that keeps running
+  // (a TUI — the normal case) left the cap unreachable and an orphaned
+  // server lived on. `kill -9 -$$` takes the whole pane process group, and
+  // tmux tears the pane, session and server down behind it (probe-verified
+  // with a still-running command: `no server running` right after the
+  // watchdog fired). `$$` is the holder's pid inside the subshell — a
+  // subshell does not change it — and the holder is its group leader. MANY SHORT periods,
   // not a few long ones: each post-exit signal consumes the period it
   // interrupts, so with three hour-long sleeps the three C-c tokens this
   // command explicitly supports exhausted the whole budget MID-CAPTURE —
@@ -254,7 +279,7 @@ export function tmuxPlan(opts: {
   // semantics, but a --keys C-\ (SIGQUIT) killed the untrapped layer 0 —
   // pane, session, server gone (measured end-to-end). QUIT is trapped for
   // the same reason INT is; both reset to default in the children.
-  const held = `trap : INT QUIT\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`;
+  const held = `trap : INT QUIT\n( sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the

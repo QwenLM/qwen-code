@@ -40,6 +40,12 @@ describe('validGeometry', () => {
       [80, 201],
       [80.5, 24],
       [Number.NaN, 24],
+      // The ROWS branch needs its own non-integer and NaN cases: with only
+      // the cols ones, an asymmetric mutant that drops `Number.isInteger`
+      // from the rows check shipped green — and `new-session -y 24.5`
+      // reaches real tmux, which is not a shape this command should send.
+      [80, 24.5],
+      [80, Number.NaN],
     ] as const) {
       const v = validGeometry(c, r);
       expect(v.ok, `${c}x${r}`).toBe(false);
@@ -316,7 +322,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `trap : INT QUIT\n: > '/ready'\nsh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\nsh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
@@ -342,7 +348,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const inner = `sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
-      `trap : INT QUIT\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 
@@ -369,7 +375,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // is pinned to /bin/sh in the same invocation), so the trap lives at
     // layer 0 — QUIT included — and only the sentinel path needs escaping.
     expect(held).toBe(
-      `trap : INT QUIT\n: > '${esc(readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
     );
   });
 

@@ -62,6 +62,7 @@ import {
   tmuxSupportsCaptureN,
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
+  isNothingToKill,
   validGeometry,
   type CaptureManifest,
 } from './lib/tui-capture.js';
@@ -97,7 +98,10 @@ type ProbeResult =
   // operator told "not installed" for a wedged binary goes to fix an
   // installation that exists (the freeze render path names its belt kill
   // for the same reason).
-  | { status: 'hung' };
+  // `code` is set when the SPAWN itself failed for a reason that is not
+  // absence (EMFILE/ENFILE/EACCES): the binary may be perfectly installed,
+  // and the messages below say so rather than claiming it is missing.
+  | { status: 'hung'; code?: string };
 
 /** Probe the binary itself (`tmux -V` / `freeze --help`), not `which`: a
  * host without `which` would otherwise misdiagnose an installed binary as
@@ -116,9 +120,14 @@ function probeOutput(bin: string, flag: string): ProbeResult {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (r.status === 0) return { status: 'ok', out: (r.stdout ?? '').trim() };
-  if (r.error && (r.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
-    return { status: 'hung' };
-  }
+  const code = r.error && (r.error as NodeJS.ErrnoException).code;
+  if (code === 'ETIMEDOUT') return { status: 'hung' };
+  // A spawn that could not even be attempted is NOT an absent binary: under
+  // fd exhaustion (the transient condition this file names three times)
+  // both probes reported 'not installed', and that false environment claim
+  // then persisted into the manifest's degradedBecause. ENOENT is the only
+  // answer that means absent; the rest are this host, right now.
+  if (code && code !== 'ENOENT') return { status: 'hung', code };
   return { status: 'absent' };
 }
 
@@ -521,9 +530,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const tmuxProbe = probes.tmux();
   if (tmuxProbe.status === 'hung') {
     refuse(
-      `tmux did not answer -V within ${probeBudget.timeoutMs}ms — present ` +
-        'but wedged, not absent. Fix or restart the tmux binary; rendering ' +
-        'claims stay argued from the code until it answers.',
+      tmuxProbe.code
+        ? `tmux could not be probed (${tmuxProbe.code}) — the binary may be ` +
+            'installed; this host could not spawn it. Retry once the ' +
+            'condition clears; rendering claims stay argued from the code ' +
+            'until it answers.'
+        : `tmux did not answer -V within ${probeBudget.timeoutMs}ms — present ` +
+            'but wedged, not absent. Fix or restart the tmux binary; rendering ' +
+            'claims stay argued from the code until it answers.',
     );
     return;
   }
@@ -704,8 +718,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         tmux(plan.kill);
         serverDead = true;
       } catch (e) {
-        // A kill failing because the server already died is the goal state.
-        serverDead = /no server running/i.test(
+        // A kill failing because there was nothing to kill is the goal
+        // state — in every wording tmux uses for it, including the
+        // socket-directory-never-created one a start that failed before the
+        // socket existed produces (measured with a mode-0555 TMUX_TMPDIR:
+        // both attempts answered `couldn't create directory …` and the
+        // one-wording test printed a false orphan WARNING).
+        serverDead = isNothingToKill(
           String((e as { stderr?: unknown }).stderr ?? ''),
         );
       }
@@ -1006,7 +1025,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   } else if ((freezeProbe = probes.freeze()).status !== 'ok') {
     degradations.push(
       freezeProbe.status === 'hung'
-        ? `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
+        ? freezeProbe.code
+          ? // The SPAWN failed, which says nothing about installation: a
+            // false 'not installed' would persist in the manifest as an
+            // environment claim this run never established.
+            `freeze could not be probed (${freezeProbe.code}) — it may be installed; this host could not spawn it. .ans text captured, no image rendered`
+          : `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
         : 'freeze is not installed — .ans text captured, no image rendered',
     );
   } else {

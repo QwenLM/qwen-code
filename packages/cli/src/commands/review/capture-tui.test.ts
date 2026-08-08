@@ -600,6 +600,59 @@ describe('capture-tui without tmux (probe seam)', () => {
     },
   );
 
+  it('clears stale artifacts for the SHAPE-BOUNDS gate family too', async () => {
+    // Seven refusal gates have seeded-artifact ordering pins; the family
+    // between the probe gates and the marker gate — geometry bounds, an
+    // empty --command, a non-enterable --cwd, the settle/timeout bounds —
+    // had none, so hoisting any of them above the clear block shipped green
+    // while a stale manifest claiming "evidence":"png" survived beside the
+    // refusal.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    for (const [name, over] of [
+      ['geometry', { rows: 9999 }],
+      ['empty command', { command: '   ' }],
+      ['cwd', { cwd: join(tmpdir(), 'capture-tui-nope-does-not-exist') }],
+      ['settle bound', { settleMs: -1 }],
+    ] as ReadonlyArray<readonly [string, Record<string, unknown>]>) {
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-boundstale-'));
+      try {
+        writeFileSync(join(dir, 'cap.ans'), 'old run');
+        writeFileSync(join(dir, 'cap.png'), 'old run');
+        writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+            rows: 24,
+            ...(over as Record<string, unknown>),
+          } as never),
+        );
+        expect({
+          gate: name,
+          exitCode: process.exitCode,
+          ans: existsSync(join(dir, 'cap.ans')),
+          png: existsSync(join(dir, 'cap.png')),
+          manifest: existsSync(join(dir, 'cap.json')),
+        }).toEqual({
+          gate: name,
+          exitCode: 3,
+          ans: false,
+          png: false,
+          manifest: false,
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        process.exitCode = undefined;
+      }
+    }
+  });
+
   it('refuses a BARE --keys — no tokens is a template that drove nothing', async () => {
     // yargs `array: true` turns `--keys` (bare), `--keys=` and an unquoted
     // `--keys $EMPTY` into [], which was accepted silently: nothing typed,
@@ -2493,9 +2546,12 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBeUndefined();
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('timeout');
-    // The ready gate's residue proves the gate RAN (a keys-gated mutant
-    // skips it entirely when no keys are given): ready matched, so the
-    // degradation names the until miss, and timeoutMs was the active knob.
+    // What this pins is the SINGLE deadline, not that the gate ran: with
+    // --ready matching and no keys, no observable here separates a gate
+    // that polled from one that skipped (a keys-gated skip mutant passes —
+    // the sibling test below pins the gate's own residue through the
+    // overrun accounting instead). The degradation names the until miss and
+    // timeoutMs was the active knob.
     expect(manifest.degradedBecause).toContain('--until never matched');
     expect(manifest.timeoutMs).toBe(2500);
     // Pristine ends near the single 2.5s deadline; the two-clock mutant
