@@ -5,9 +5,10 @@
  */
 
 import { vi } from 'vitest';
-import { realpathNearestExisting } from '../utils/paths.js';
+import { isNodeError } from '../utils/errors.js';
 import { isPathWithinRoot } from '../utils/workspaceContext.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import * as fs from 'node:fs';
 
 /**
  * Creates a mock WorkspaceContext for testing
@@ -26,8 +27,14 @@ export function createMockWorkspaceContext(
     addDirectory: vi.fn(),
     getDirectories: vi.fn().mockReturnValue(allDirs),
     isPathWithinWorkspace: vi.fn().mockImplementation((path: string) => {
-      const canonicalPath = canonicalizeForContainment(path);
-      return canonicalDirs.some((dir) => isPathWithinRoot(canonicalPath, dir));
+      try {
+        const canonicalPath = canonicalizeForContainment(path);
+        return canonicalDirs.some((dir) =>
+          isPathWithinRoot(canonicalPath, dir),
+        );
+      } catch {
+        return false;
+      }
     }),
   } as unknown as WorkspaceContext;
 
@@ -36,10 +43,30 @@ export function createMockWorkspaceContext(
 
 function canonicalizeForContainment(inputPath: string): string {
   try {
-    return realpathNearestExisting(inputPath);
-  } catch {
-    // Some tests stub filesystem stat calls; retain the old lexical behavior
-    // when canonicalization is unavailable in that mocked environment.
+    const resolved = fs.realpathSync(inputPath);
+    return typeof resolved === 'string' ? resolved : inputPath;
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      if (error.path && isFileSymlink(error.path)) {
+        throw error;
+      }
+      return error.path ?? inputPath;
+    }
+
+    if (isNodeError(error)) {
+      throw error;
+    }
+
+    // Some tests stub filesystem calls; retain lexical behavior for those
+    // mocked environments.
     return inputPath;
+  }
+}
+
+function isFileSymlink(filePath: string): boolean {
+  try {
+    return !fs.readlinkSync(filePath).endsWith('/');
+  } catch {
+    return false;
   }
 }

@@ -6,7 +6,7 @@
 
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createMockWorkspaceContext } from './mockWorkspaceContext.js';
 
@@ -39,5 +39,21 @@ describe('createMockWorkspaceContext', () => {
     expect(
       workspace.isPathWithinWorkspace(path.join(additionalDir, 'missing.txt')),
     ).toBe(true);
+  });
+
+  it('rejects paths through a symlink cycle', () => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    const cyclePath = path.join(rootDir, 'cycle');
+    symlinkSync('cycle', cyclePath);
+
+    try {
+      const workspace = createMockWorkspaceContext(rootDir);
+
+      expect(
+        workspace.isPathWithinWorkspace(path.join(cyclePath, 'file.txt')),
+      ).toBe(false);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 });
