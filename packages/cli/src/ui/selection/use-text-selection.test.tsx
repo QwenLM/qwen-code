@@ -256,6 +256,27 @@ describe('TextSelectionController', () => {
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
   });
 
+  it('extends a triple-click line selection across multi-word lines', () => {
+    frame = makeTwoLineFrame('foo bar', 'baz qux');
+    viewportRect = { x: 0, y: 0, width: 7, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
+    handler(makeEvent('move', 2, 2)); // drag into 'baz' on line 1
+    handler(makeEvent('left-release', 2, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 6,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('foo bar\nbaz qux');
+  });
+
   it('copies a single-character word on a no-drag double-click', () => {
     frame = makeFrame('a b');
     viewportRect = { x: 0, y: 0, width: 3, height: 1 };

@@ -11,9 +11,9 @@ import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { SelectionState } from './selection-state.js';
+import { SelectionState, type NormalizedSelection } from './selection-state.js';
 import { getSelectedText } from './selection-text.js';
-import { wordSpanAt, lineSpanAt } from './selection-span.js';
+import { spanAtForMode } from './selection-span.js';
 import {
   terminalToGrid,
   pointInViewport,
@@ -100,10 +100,9 @@ export function TextSelectionController(
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
   const baselineViewportRectRef = useRef<ViewportRect | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
-  const spanDragRef = useRef<{
-    mode: 'word' | 'line';
-    anchorSpan: { sx: number; sy: number; ex: number; ey: number };
-  } | null>(null);
+  // Anchor span of an active word/line drag; null for char drags. While
+  // non-null, the selection mode is the matching 'word' | 'line'.
+  const anchorSpanRef = useRef<NormalizedSelection | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -117,7 +116,7 @@ export function TextSelectionController(
 
   const clearSelection = useCallback(() => {
     const selection = selectionRef.current;
-    spanDragRef.current = null;
+    anchorSpanRef.current = null;
     if (selection.isEmpty) {
       return;
     }
@@ -193,24 +192,22 @@ export function TextSelectionController(
   // #8738). Falls back to a single cell when the cursor is over whitespace.
   const extendSpanDrag = useCallback(
     (point: { x: number; y: number }) => {
-      const spanDrag = spanDragRef.current;
-      if (!spanDrag) return;
+      const anchorSpan = anchorSpanRef.current;
+      if (!anchorSpan) return;
       const selection = selectionRef.current;
       const frame = getBuffer()?.frame ?? null;
-      const current = (spanDrag.mode === 'word'
-        ? wordSpanAt(frame, point.x, point.y)
-        : lineSpanAt(frame, point.y)) ?? {
+      const current = spanAtForMode(frame, selection.mode, point) ?? {
         sx: point.x,
         sy: point.y,
         ex: point.x,
         ey: point.y,
       };
-      const a = spanDrag.anchorSpan;
       const cursorAfter =
-        point.y > a.ey || (point.y === a.ey && point.x >= a.ex);
+        point.y > anchorSpan.ey ||
+        (point.y === anchorSpan.ey && point.x >= anchorSpan.ex);
       selection.anchor = cursorAfter
-        ? { x: a.sx, y: a.sy }
-        : { x: a.ex, y: a.ey };
+        ? { x: anchorSpan.sx, y: anchorSpan.sy }
+        : { x: anchorSpan.ex, y: anchorSpan.ey };
       selection.focus = cursorAfter
         ? { x: current.ex, y: current.ey }
         : { x: current.sx, y: current.sy };
@@ -220,7 +217,7 @@ export function TextSelectionController(
 
   const extendActiveDrag = useCallback(
     (point: { x: number; y: number }) => {
-      if (spanDragRef.current) {
+      if (anchorSpanRef.current) {
         extendSpanDrag(point);
       } else {
         selectionRef.current.extend(point);
@@ -267,17 +264,14 @@ export function TextSelectionController(
         if (count >= 2) {
           const frame = getBuffer()?.frame ?? null;
           const mode = count === 2 ? 'word' : 'line';
-          const span =
-            count === 2
-              ? wordSpanAt(frame, point.x, point.y)
-              : lineSpanAt(frame, point.y);
+          const span = spanAtForMode(frame, mode, point);
           if (span) {
             // Enter a drag-capable word/line selection so a held double/triple
             // click can extend by word/line on move (issue #8738). Copy happens
             // on release, matching char drags.
             selection.start({ x: span.sx, y: span.sy }, mode);
             selection.extend({ x: span.ex, y: span.ey });
-            spanDragRef.current = { mode, anchorSpan: span };
+            anchorSpanRef.current = span;
             dragScrollTopRef.current =
               propsRef.current.getScrollState().scrollTop;
             recordBaseline();
@@ -286,7 +280,7 @@ export function TextSelectionController(
           }
         }
 
-        spanDragRef.current = null;
+        anchorSpanRef.current = null;
         selection.start(point);
         dragScrollTopRef.current = propsRef.current.getScrollState().scrollTop;
         recordBaseline();
@@ -300,7 +294,7 @@ export function TextSelectionController(
         }
         // A held multi-click keeps its click record so pointer drift cannot
         // break a triple-click; char drags still break the chain.
-        if (!spanDragRef.current) {
+        if (!anchorSpanRef.current) {
           lastClickRef.current = null;
         }
         // A scroll under the drag invalidates coordinates in B1.
@@ -330,7 +324,7 @@ export function TextSelectionController(
         }
         // Clear the span drag only after extending, so the release cell still
         // applies to a word/line drag when no move covered it.
-        spanDragRef.current = null;
+        anchorSpanRef.current = null;
         selection.finish();
         // A collapsed range is a real single-cell span in word/line mode,
         // but only a bare click in char mode.
