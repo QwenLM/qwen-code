@@ -18,6 +18,25 @@ import {
   runForkedAgent,
 } from '@qwen-code/qwen-code-core';
 
+const ADVISOR_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    verdict: { type: 'string', minLength: 1 },
+    risks: { type: 'string', minLength: 1 },
+    missingEvidence: { type: 'string', minLength: 1 },
+    recommendation: { type: 'string', minLength: 1 },
+  },
+  required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
+} as const;
+
+interface AdvisorReview {
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
 function buildAdvisorPrompt(focus: string): string {
   return [
     '<system-reminder>',
@@ -29,15 +48,44 @@ function buildAdvisorPrompt(focus: string): string {
     '- Be direct about problems: flawed assumptions, premature conclusions, unverified claims, risky next steps.',
     '- The main conversation is NOT interrupted; your review is shown to the user only.',
     '',
-    'Respond in markdown with exactly these sections:',
-    '## Verdict — one short paragraph: is the current approach or conclusion sound?',
-    '## Risks — concrete risks or flawed assumptions, each citing transcript evidence. Write "None found" if none.',
-    '## Missing evidence — claims asserted but not verified in the visible transcript (earlier verification may exist outside the shown window).',
-    '## Recommendation — the single most valuable next action.',
+    'Return exactly one JSON object with these string fields and no markdown fence, preamble, extra key, or commentary:',
+    '- verdict: one short paragraph stating whether the current approach or conclusion is sound.',
+    '- risks: concrete risks or flawed assumptions, each citing transcript evidence. Write "None found" if none.',
+    '- missingEvidence: claims asserted but not verified in the visible transcript (earlier verification may exist outside the shown window).',
+    '- recommendation: the single most valuable next action.',
     '</system-reminder>',
     '',
     focus || 'Review the conversation above.',
   ].join('\n');
+}
+
+function formatAdvisorReview(
+  value: Record<string, unknown> | undefined,
+): string {
+  const fields = ['verdict', 'risks', 'missingEvidence', 'recommendation'];
+  if (
+    !value ||
+    Object.keys(value).length !== fields.length ||
+    fields.some((field) => {
+      const fieldValue = value[field];
+      return typeof fieldValue !== 'string' || fieldValue.trim().length === 0;
+    })
+  ) {
+    throw new Error('Advisor returned invalid structured output.');
+  }
+
+  const review = value as unknown as AdvisorReview;
+
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
 }
 
 function formatAdvisorError(error: unknown): string {
@@ -71,13 +119,14 @@ async function askAdvisor(
     config,
     userMessage: buildAdvisorPrompt(focus),
     cacheSafeParams,
+    jsonSchema: ADVISOR_SCHEMA,
     ...(advisorModel ? { model: advisorModel } : {}),
     abortSignal,
     disableModelFallbacks: true,
   });
 
   return {
-    text: result.text || t('No response received.'),
+    text: formatAdvisorReview(result.jsonResult),
     model: result.model,
   };
 }

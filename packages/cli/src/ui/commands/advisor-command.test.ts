@@ -39,6 +39,31 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
 }));
 
+const ADVISOR_REVIEW = {
+  verdict: 'Sound.',
+  risks: 'None found.',
+  missingEvidence: 'None.',
+  recommendation: 'Proceed.',
+};
+
+const advisorResult = (model = 'test-model') => ({
+  text: JSON.stringify(ADVISOR_REVIEW),
+  jsonResult: ADVISOR_REVIEW,
+  model,
+  usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
+});
+
+const ADVISOR_MARKDOWN = [
+  '## Verdict',
+  ADVISOR_REVIEW.verdict,
+  '## Risks',
+  ADVISOR_REVIEW.risks,
+  '## Missing evidence',
+  ADVISOR_REVIEW.missingEvidence,
+  '## Recommendation',
+  ADVISOR_REVIEW.recommendation,
+].join('\n\n');
+
 describe('advisorCommand', () => {
   let mockContext: CommandContext;
 
@@ -86,11 +111,7 @@ describe('advisorCommand', () => {
   });
 
   it('should accept a focus at exactly the max length', async () => {
-    mockRunForkedAgent.mockResolvedValue({
-      text: 'review',
-      model: 'test-model',
-      usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-    });
+    mockRunForkedAgent.mockResolvedValue(advisorResult());
 
     const result = await advisorCommand.action!(mockContext, 'x'.repeat(4096));
 
@@ -131,11 +152,7 @@ describe('advisorCommand', () => {
 
   describe('interactive mode', () => {
     it('should show pending item, add an advisor review item, then clear pending', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: '## Verdict\nSound.',
-        model: 'resolved-model',
-        usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult('resolved-model'));
 
       const result = await advisorCommand.action!(mockContext, '');
 
@@ -151,7 +168,7 @@ describe('advisorCommand', () => {
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: MessageType.ADVISOR,
-          text: '## Verdict\nSound.',
+          text: ADVISOR_MARKDOWN,
           model: 'resolved-model',
         },
         expect.any(Number),
@@ -163,11 +180,7 @@ describe('advisorCommand', () => {
     });
 
     it('should pass focus into the advisor prompt', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
 
       await advisorCommand.action!(mockContext, 'check the error handling');
 
@@ -175,16 +188,20 @@ describe('advisorCommand', () => {
         expect.objectContaining({
           cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
           userMessage: expect.stringContaining('check the error handling'),
+          jsonSchema: expect.objectContaining({
+            type: 'object',
+            required: ['verdict', 'risks', 'missingEvidence', 'recommendation'],
+          }),
           disableModelFallbacks: true,
         }),
       );
       const prompt = mockRunForkedAgent.mock.calls[0][0].userMessage;
       for (const required of [
         'You have NO tools',
-        '## Verdict',
-        '## Risks',
-        '## Missing evidence',
-        '## Recommendation',
+        'verdict',
+        'risks',
+        'missingEvidence',
+        'recommendation',
       ]) {
         expect(prompt).toContain(required);
       }
@@ -196,11 +213,7 @@ describe('advisorCommand', () => {
     });
 
     it('should trim padding around the focus before building the prompt', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
 
       await advisorCommand.action!(mockContext, ' check the padding ');
 
@@ -210,11 +223,7 @@ describe('advisorCommand', () => {
     });
 
     it('should not pass model override when advisorModel is unset', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
 
       await advisorCommand.action!(mockContext, '');
 
@@ -224,11 +233,7 @@ describe('advisorCommand', () => {
     });
 
     it('should not pass model override when advisorModel is whitespace-only', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
       const contextWithBlankModel = createMockCommandContext({
         services: {
           config: createConfig(),
@@ -245,11 +250,7 @@ describe('advisorCommand', () => {
     });
 
     it('should pass advisorModel setting as model override', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'stronger-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult('stronger-model'));
       const contextWithModel = createMockCommandContext({
         services: {
           config: createConfig(),
@@ -270,11 +271,7 @@ describe('advisorCommand', () => {
     });
 
     it('should strip tools (never preserve) on the default path, matching /btw', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
 
       await advisorCommand.action!(mockContext, '');
 
@@ -283,11 +280,7 @@ describe('advisorCommand', () => {
     });
 
     it('should strip tools even when advisorModel is set', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'stronger-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult('stronger-model'));
       const contextWithModel = createMockCommandContext({
         services: {
           config: createConfig(),
@@ -304,11 +297,7 @@ describe('advisorCommand', () => {
     });
 
     it('should forward abortSignal to runForkedAgent', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review',
-        model: 'test-model',
-        usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
       const abortController = new AbortController();
       const contextWithSignal = createMockCommandContext({
         services: { config: createConfig() },
@@ -443,11 +432,7 @@ describe('advisorCommand', () => {
       const abortController = new AbortController();
       mockRunForkedAgent.mockImplementation(async () => {
         abortController.abort();
-        return {
-          text: 'late review',
-          model: 'test-model',
-          usage: { inputTokens: 1, outputTokens: 1, cacheHitTokens: 0 },
-        };
+        return advisorResult();
       });
       const abortableContext = createMockCommandContext({
         services: { config: createConfig() },
@@ -489,9 +474,10 @@ describe('advisorCommand', () => {
       );
     });
 
-    it('should show fallback text when result text is empty', async () => {
+    it('should reject malformed advisor output', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        text: null,
+        text: '{"verdict":"Sound."}',
+        jsonResult: { verdict: 'Sound.' },
         model: 'test-model',
         usage: { inputTokens: 1, outputTokens: 0, cacheHitTokens: 0 },
       });
@@ -500,9 +486,8 @@ describe('advisorCommand', () => {
 
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
-          type: MessageType.ADVISOR,
-          text: 'No response received.',
-          model: 'test-model',
+          type: MessageType.ERROR,
+          text: 'Advisor review failed: Advisor returned invalid structured output.',
         },
         expect.any(Number),
       );
@@ -511,11 +496,7 @@ describe('advisorCommand', () => {
 
   describe('acp mode', () => {
     it('should return message result with review on success', async () => {
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'review text',
-        model: 'test-model',
-        usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
-      });
+      mockRunForkedAgent.mockResolvedValue(advisorResult());
       const acpContext = createMockCommandContext({
         executionMode: 'acp',
         services: { config: createConfig() },
@@ -526,7 +507,7 @@ describe('advisorCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: 'review text',
+        content: ADVISOR_MARKDOWN,
       });
       expect(mockRunForkedAgent).toHaveBeenCalledTimes(1);
       expect(acpContext.ui.setPendingItem).not.toHaveBeenCalled();
