@@ -38,6 +38,8 @@ const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
+const mockHandleAgentViewBackgroundPrompt = vi.hoisted(() => vi.fn());
+const mockStartExtensionWatcher = vi.hoisted(() => vi.fn());
 const lspConfigWatcherMock = vi.hoisted(() => ({
   instances: [] as Array<{
     listener?: (event: unknown) => void | Promise<void>;
@@ -181,6 +183,10 @@ vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
 }));
 
+vi.mock('./commands/agents.js', () => ({
+  handleAgentViewBackgroundPrompt: mockHandleAgentViewBackgroundPrompt,
+}));
+
 vi.mock('./ui/AppContainer.js', () => ({
   AppContainer: () => null,
 }));
@@ -217,7 +223,9 @@ vi.mock('./config/lsp-config-watcher.js', () => ({
 
 vi.mock('./config/extension-file-watcher.js', () => ({
   ExtensionFileWatcher: class {
-    startWatching() {}
+    startWatching() {
+      mockStartExtensionWatcher();
+    }
     restartWatching() {}
     stopWatching() {}
   },
@@ -246,6 +254,7 @@ describe('gemini.tsx main function', () => {
 
   beforeEach(() => {
     lspConfigWatcherMock.instances.length = 0;
+    mockStartExtensionWatcher.mockClear();
     mockUpdateBeforeRelaunch.mockResolvedValue(true);
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
@@ -543,93 +552,127 @@ describe('gemini.tsx main function', () => {
     }
   });
 
-  it('should skip full settings discovery in bare mode', async () => {
-    const originalArgv = process.argv;
-    process.argv = ['node', 'script.js', '--bare'];
+  it.each([
+    ['bare mode', '--bare', { bare: true }, false],
+    [
+      'an Agent View read-only worker',
+      '--agent-view-read-only',
+      { agentViewReadOnly: true },
+      true,
+    ],
+  ])(
+    'should skip full settings discovery in %s',
+    async (_name, flag, args, skipsSandbox) => {
+      const originalArgv = process.argv;
+      process.argv = ['node', 'script.js', flag];
 
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings, createMinimalSettings } = await import(
-      './config/settings.js'
-    );
-    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
-    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
-    const nonInteractiveModule = await import('./nonInteractiveCli.js');
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((code) => {
-        throw new MockProcessExitError(code);
-      });
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings, createMinimalSettings } = await import(
+        './config/settings.js'
+      );
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+      const nonInteractiveModule = await import('./nonInteractiveCli.js');
+      const processExitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((code) => {
+          throw new MockProcessExitError(code);
+        });
 
-    const minimalSettings = {
-      errors: [],
-      merged: {},
-      setValue: vi.fn(),
-      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
-      migrationWarnings: [],
-      getUserHooks: () => undefined,
-      getProjectHooks: () => undefined,
-    };
-    const configStub = {
-      isInteractive: () => false,
-      getQuestion: () => 'bare prompt',
-      getSandbox: () => false,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getDebugMode: () => false,
-      getListExtensions: () => false,
-      getMcpServers: () => ({}),
-      getTopTierMcpServers: () => undefined,
-      initialize: vi.fn().mockResolvedValue(undefined),
-      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
-      getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
-      getScreenReader: () => false,
-      getGeminiMdFileCount: () => 0,
-      getProjectRoot: () => '/',
-      getOutputFormat: () => OutputFormat.TEXT,
-      getWarnings: () => [],
-      isSafeMode: () => false,
-      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
-      getSessionId: () => 'test-session-id',
-    } as unknown as Config;
+      const minimalSettings = {
+        errors: [],
+        merged: {},
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      };
+      const configStub = {
+        isInteractive: () => false,
+        getQuestion: () => 'bare prompt',
+        getSandbox: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getDebugMode: () => false,
+        getListExtensions: () => false,
+        getMcpServers: () => ({}),
+        getTopTierMcpServers: () => undefined,
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getIdeMode: () => false,
+        getExperimentalZedIntegration: () => false,
+        getScreenReader: () => false,
+        getGeminiMdFileCount: () => 0,
+        getProjectRoot: () => '/',
+        getOutputFormat: () => OutputFormat.TEXT,
+        getWarnings: () => [],
+        isSafeMode: () => false,
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getSessionId: () => 'test-session-id',
+      } as unknown as Config;
 
+      vi.mocked(parseArguments).mockResolvedValue(args as unknown as CliArgs);
+      vi.mocked(createMinimalSettings).mockReturnValue(
+        minimalSettings as never,
+      );
+      vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+      vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
+      vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+      vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) {
+          throw error;
+        }
+      } finally {
+        process.argv = originalArgv;
+        processExitSpy.mockRestore();
+      }
+
+      expect(createMinimalSettings).toHaveBeenCalledOnce();
+      expect(loadSettings).not.toHaveBeenCalled();
+      expect(mockStartExtensionWatcher).not.toHaveBeenCalled();
+      if (skipsSandbox) {
+        expect(loadSandboxConfig).not.toHaveBeenCalled();
+      }
+      expect(loadCliConfig).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining(args),
+        process.cwd(),
+        undefined,
+        {
+          userHooks: undefined,
+          projectHooks: undefined,
+        },
+        expect.any(Function),
+        undefined,
+        // settingsWatcher: not started in minimal-settings mode
+        undefined,
+      );
+    },
+  );
+
+  it('rejects nested background dispatch from an Agent View worker', async () => {
+    const { parseArguments } = await import('./config/config.js');
     vi.mocked(parseArguments).mockResolvedValue({
-      bare: true,
-    } as unknown as CliArgs);
-    vi.mocked(createMinimalSettings).mockReturnValue(minimalSettings as never);
-    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
-    vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
-    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
-    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+      background: true,
+      query: 'nested task',
+    } as CliArgs);
+    vi.stubEnv('QWEN_AGENT_VIEW_WORKER', '1');
+    mockHandleAgentViewBackgroundPrompt.mockClear();
 
     try {
-      await main();
-    } catch (error) {
-      if (!(error instanceof MockProcessExitError)) {
-        throw error;
-      }
+      await expect(main()).rejects.toThrow(
+        'Agent View workers cannot start background agents.',
+      );
+      expect(mockHandleAgentViewBackgroundPrompt).not.toHaveBeenCalled();
     } finally {
-      process.argv = originalArgv;
-      processExitSpy.mockRestore();
+      vi.unstubAllEnvs();
     }
-
-    expect(createMinimalSettings).toHaveBeenCalledOnce();
-    expect(loadSettings).not.toHaveBeenCalled();
-    expect(loadCliConfig).toHaveBeenCalledWith(
-      {},
-      expect.objectContaining({ bare: true }),
-      process.cwd(),
-      undefined,
-      {
-        userHooks: undefined,
-        projectHooks: undefined,
-      },
-      expect.any(Function),
-      undefined,
-      // settingsWatcher: not started in bare mode
-      undefined,
-    );
   });
 
   describe('registerLspHotReload', () => {

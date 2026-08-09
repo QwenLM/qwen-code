@@ -8,6 +8,7 @@ import {
   AuthType,
   type Config,
   InputFormat,
+  OutputFormat,
   isDebugLogFileEnabled,
   isDebugLoggingDegraded,
   isBareMode,
@@ -431,6 +432,12 @@ export async function main() {
   }
 
   if (argv.background) {
+    const { isAgentViewWorkerEnv } = await import(
+      './agent-view/worker-sideband.js'
+    );
+    if (isAgentViewWorkerEnv()) {
+      throw new Error('Agent View workers cannot start background agents.');
+    }
     const prompt = argv.query;
     if (!prompt) {
       throw new Error('Cannot use --bg/--background without a prompt.');
@@ -438,19 +445,23 @@ export async function main() {
     const { handleAgentViewBackgroundPrompt } = await import(
       './commands/agents.js'
     );
-    await handleAgentViewBackgroundPrompt(prompt);
+    await handleAgentViewBackgroundPrompt(prompt, {
+      json: argv.outputFormat === OutputFormat.JSON,
+      readOnly: argv.readOnly === true,
+    });
     process.exit(0);
   }
 
-  if (isBareMode(argv.bare)) {
+  const startupBareMode = isBareMode(
+    argv.bare || argv.agentViewReadOnly === true,
+  );
+  if (startupBareMode) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
   // Load user settings — bare mode uses minimal config, normal mode loads full.
   markAcpStartup('settingsLoadStart');
-  const settings = isBareMode(argv.bare)
-    ? createMinimalSettings()
-    : loadSettings();
+  const settings = startupBareMode ? createMinimalSettings() : loadSettings();
   markAcpStartup('settingsLoadEnd');
 
   // Propagate corruption state to child process via env vars so
@@ -552,7 +563,9 @@ export async function main() {
       );
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
-    const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
+    const sandboxConfig = argv.agentViewReadOnly
+      ? undefined
+      : await loadSandboxConfig(settings.merged, argv);
     const customSandboxImage =
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
@@ -856,13 +869,13 @@ export async function main() {
   profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  if (!isBareMode(argv.bare)) {
+  if (!startupBareMode) {
     initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
   }
 
   {
     // Start settings file watcher (skip in bare mode)
-    const settingsWatcher = isBareMode(argv.bare)
+    const settingsWatcher = startupBareMode
       ? undefined
       : new SettingsWatcher(settings);
     settingsWatcher?.startWatching();
@@ -934,7 +947,7 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
-      isBareMode(argv.bare) || config.isSafeMode()
+      startupBareMode || config.isSafeMode()
         ? undefined
         : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const AGENT_VIEW_PROTOCOL_VERSION = 1;
+export const AGENT_VIEW_PROTOCOL_VERSION = 2;
 
 export type AgentViewOwnership =
   | 'unmanaged'
@@ -109,6 +109,8 @@ export interface AgentViewWorkerFile {
   hostEndpoint?: string;
   hostAuthToken?: string;
   tokenDigest?: string;
+  workerGeneration?: string;
+  lastSequence?: number;
   lastHeartbeatAt?: string;
   protocolVersion: number;
   platform: NodeJS.Platform;
@@ -153,10 +155,13 @@ export interface AgentViewSessionSnapshot {
   rosterEntry?: AgentViewRosterEntry;
 }
 
-export type AgentViewWorkerEvent =
+export type AgentViewWorkerEvent = {
+  sessionId: string;
+  workerGeneration: string;
+  sequence: number;
+} & (
   | {
       type: 'ready';
-      sessionId: string;
       cwd: string;
       capabilities?: string[];
       summary?: string;
@@ -164,17 +169,14 @@ export type AgentViewWorkerEvent =
     }
   | {
       type: 'heartbeat';
-      sessionId: string;
       at?: string;
     }
   | {
       type: 'detach';
-      sessionId: string;
       at?: string;
     }
   | {
       type: 'state';
-      sessionId: string;
       sessionState: AgentViewSessionState;
       cwd?: string;
       summary?: string;
@@ -182,7 +184,8 @@ export type AgentViewWorkerEvent =
       inputKind?: AgentViewInputKind;
       lastResult?: string;
       at?: string;
-    };
+    }
+);
 
 export type AgentViewWorkerControlEvent =
   | {

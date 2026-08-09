@@ -70,6 +70,7 @@ interface AgentViewPtyHostRequest {
 
 export interface AgentViewPtyHostProcessOptions {
   globalDir?: string;
+  workerEnv?: Readonly<Record<string, string>>;
   spawnProcess?: (
     args: readonly string[],
     env: Readonly<Record<string, string>>,
@@ -94,7 +95,10 @@ export async function launchAgentViewPtyHostProcess(
   }).launchPath;
   const child = (options.spawnProcess ?? defaultSpawnPtyHost)(
     [INTERNAL_AGENT_VIEW_PTY_HOST_ARG, launchPath, socketPath],
-    { [PTY_HOST_AUTH_TOKEN_ENV]: authToken },
+    {
+      ...options.workerEnv,
+      [PTY_HOST_AUTH_TOKEN_ENV]: authToken,
+    },
   );
   child.unref?.();
 

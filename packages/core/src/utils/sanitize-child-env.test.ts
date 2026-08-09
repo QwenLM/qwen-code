@@ -16,11 +16,15 @@ describe('sanitizeChildEnv', () => {
       QWEN_SERVER_TOKEN: 'super-secret',
       QWEN_DAEMON_TOKEN: 'also-secret',
       QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+      QWEN_AGENT_VIEW_TOKEN: 'worker-token',
+      QWEN_AGENT_VIEW_PTY_HOST_TOKEN: 'host-token',
       PATH: '/usr/bin',
     });
     expect(result['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(result['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(result['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+    expect(result['QWEN_AGENT_VIEW_TOKEN']).toBeUndefined();
+    expect(result['QWEN_AGENT_VIEW_PTY_HOST_TOKEN']).toBeUndefined();
   });
 
   it('preserves benign vars and third-party credentials that shell workflows need', () => {
@@ -67,6 +71,8 @@ describe('sanitizeChildEnv', () => {
     // Guardrail: this list must not grow to include third-party credentials,
     // which the shell tool legitimately inherits (see #6601 discussion).
     expect([...INTERNAL_SECRET_ENV_VARS].sort()).toEqual([
+      'QWEN_AGENT_VIEW_PTY_HOST_TOKEN',
+      'QWEN_AGENT_VIEW_TOKEN',
       'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
       'QWEN_DAEMON_TOKEN',
       'QWEN_SERVER_TOKEN',

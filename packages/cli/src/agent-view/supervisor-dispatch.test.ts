@@ -14,6 +14,7 @@ import {
   readAgentViewLaunch,
   readAgentViewRoster,
   readAgentViewSessionState,
+  readAgentViewWorker,
 } from './supervisor-store.js';
 
 describe('dispatchAgentViewSession', () => {
@@ -32,6 +33,7 @@ describe('dispatchAgentViewSession', () => {
       globalDir: tempDir,
       token: 'token',
       sidebandEndpoint: '/tmp/agent-view.sock',
+      workerGeneration: 'generation-1',
     });
 
     const state = await readAgentViewSessionState(result.sessionId, {
@@ -41,6 +43,9 @@ describe('dispatchAgentViewSession', () => {
       globalDir: tempDir,
     });
     const roster = await readAgentViewRoster({ globalDir: tempDir });
+    const worker = await readAgentViewWorker(result.sessionId, {
+      globalDir: tempDir,
+    });
 
     expect(state).toMatchObject({
       sessionId: result.sessionId,
@@ -56,13 +61,31 @@ describe('dispatchAgentViewSession', () => {
       env: {
         QWEN_AGENT_VIEW_ACTIVE_CWD: path.resolve('/repo/pkg'),
         QWEN_AGENT_VIEW_SIDEBAND: '/tmp/agent-view.sock',
+        QWEN_AGENT_VIEW_GENERATION: 'generation-1',
       },
+    });
+    expect(launch?.env).not.toHaveProperty('QWEN_AGENT_VIEW_TOKEN');
+    expect(worker).toMatchObject({
+      workerGeneration: 'generation-1',
+      lastSequence: -1,
     });
     expect(roster.sessions[0]).toMatchObject({
       sessionId: result.sessionId,
       projectCwd: path.resolve('/repo/pkg'),
       activeCwd: path.resolve('/repo/pkg'),
     });
+  });
+
+  it('pins the internal read-only profile in worker argv', async () => {
+    const result = await dispatchAgentViewSession('inspect tests', '/repo', {
+      globalDir: tempDir,
+      readOnly: true,
+    });
+
+    const launch = await readAgentViewLaunch(result.sessionId, {
+      globalDir: tempDir,
+    });
+    expect(launch?.argv).toContain('--agent-view-read-only');
   });
 
   it('does not leave a roster entry when persistence fails', async () => {

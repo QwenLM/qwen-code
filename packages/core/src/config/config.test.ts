@@ -6977,6 +6977,43 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers only inspection tools for a read-only worker', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        readOnlyMode: true,
+      });
+      const toolRegistryMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              getAllToolNames: Mock;
+              registerFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+      toolRegistryMock.getAllToolNames.mockReturnValueOnce([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.LS,
+      ]);
+      await config.initialize();
+
+      expect(
+        toolRegistryMock.registerFactory.mock.calls.map((call) => call[0]),
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.LS,
+      ]);
+      expect(config.getBareMode()).toBe(true);
+      expect(config.isCronEnabled()).toBe(false);
+      expect(config.getMcpServers()).toEqual({});
+    });
+
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
       // Bare mode strips the toolset to READ_FILE/EDIT/NOTEBOOK_EDIT/SHELL, but the
       // synthetic structured_output tool is the terminal contract for

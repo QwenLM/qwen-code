@@ -127,6 +127,8 @@ describe('Agent View supervisor server', () => {
         callAgentViewSupervisor(socketPath, 'workerEvent', {
           type: 'heartbeat',
           sessionId: 'session-1',
+          workerGeneration: 'generation-1',
+          sequence: 0,
         }),
       ).rejects.toMatchObject({ code: 'unauthorized' });
       expect(handler.workerEvent).not.toHaveBeenCalled();
@@ -157,6 +159,8 @@ describe('Agent View supervisor server', () => {
           type: 'heartbeat',
           sessionId: 'session-1',
           token: 'wrong-token',
+          workerGeneration: 'generation-1',
+          sequence: 0,
         }),
       ).rejects.toMatchObject({ code: 'unauthorized' });
       expect(handler.workerEvent).not.toHaveBeenCalled();
@@ -166,12 +170,16 @@ describe('Agent View supervisor server', () => {
           type: 'heartbeat',
           sessionId: 'session-1',
           token: 'session-token',
+          workerGeneration: 'generation-1',
+          sequence: 0,
         }),
       ).resolves.toEqual({ received: true });
       expect(handler.workerEvent).toHaveBeenCalledWith({
         type: 'heartbeat',
         sessionId: 'session-1',
         token: 'session-token',
+        workerGeneration: 'generation-1',
+        sequence: 0,
       });
     } finally {
       await server.close();

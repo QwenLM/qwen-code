@@ -16,9 +16,19 @@ import {
   shouldUsePlanOnlyReminderInSubagentContext,
   isSubagentLikeExecutionContext,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  READ_ONLY_INSPECTION_TOOLS,
 } from './subagent-plan-tool-policy.js';
 
 describe('subagent plan tool policy', () => {
+  it('keeps one canonical read-only inspection allowlist', () => {
+    expect([...READ_ONLY_INSPECTION_TOOLS]).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.GREP,
+      ToolNames.GLOB,
+      ToolNames.LS,
+    ]);
+  });
+
   it('recognizes subagent and teammate execution contexts', async () => {
     expect(isSubagentLikeExecutionContext()).toBe(false);
 

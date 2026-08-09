@@ -17,6 +17,7 @@ export const QWEN_AGENT_VIEW_SESSION_ID = 'QWEN_AGENT_VIEW_SESSION_ID';
 export const QWEN_AGENT_VIEW_SIDEBAND = 'QWEN_AGENT_VIEW_SIDEBAND';
 export const QWEN_AGENT_VIEW_TOKEN = 'QWEN_AGENT_VIEW_TOKEN';
 export const QWEN_AGENT_VIEW_ACTIVE_CWD = 'QWEN_AGENT_VIEW_ACTIVE_CWD';
+export const QWEN_AGENT_VIEW_GENERATION = 'QWEN_AGENT_VIEW_GENERATION';
 
 export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_WORKER,
@@ -24,6 +25,7 @@ export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_SIDEBAND,
   QWEN_AGENT_VIEW_TOKEN,
   QWEN_AGENT_VIEW_ACTIVE_CWD,
+  QWEN_AGENT_VIEW_GENERATION,
 ] as const;
 
 export type AgentViewWorkerEnvKey = (typeof AGENT_VIEW_WORKER_ENV_KEYS)[number];
@@ -33,13 +35,26 @@ export interface AgentViewWorkerSidebandEnv {
   sidebandEndpoint: string;
   token: string;
   activeCwd: string;
+  workerGeneration: string;
 }
 
 type AgentViewWorkerEventWithoutSession =
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'ready' }>, 'sessionId'>
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'heartbeat' }>, 'sessionId'>
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'detach' }>, 'sessionId'>
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'state' }>, 'sessionId'>;
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'ready' }>,
+      'sessionId' | 'workerGeneration' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'heartbeat' }>,
+      'sessionId' | 'workerGeneration' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'detach' }>,
+      'sessionId' | 'workerGeneration' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'state' }>,
+      'sessionId' | 'workerGeneration' | 'sequence'
+    >;
 
 export interface AgentViewWorkerStateReport {
   sessionState: AgentViewSessionState;
@@ -55,6 +70,16 @@ export interface AgentViewWorkerHeartbeat {
 }
 
 const lastStateReportKeys = new Map<string, string>();
+const workerEventQueues = new Map<string, Promise<void>>();
+const workerEventSequences = new Map<string, number>();
+const pendingWorkerEvents = new Map<
+  string,
+  {
+    event: AgentViewWorkerEventWithoutSession;
+    eventKey: string;
+    sequence: number;
+  }
+>();
 
 export function createAgentViewWorkerSidebandEnv(
   config: AgentViewWorkerSidebandEnv,
@@ -65,6 +90,19 @@ export function createAgentViewWorkerSidebandEnv(
     [QWEN_AGENT_VIEW_SIDEBAND]: config.sidebandEndpoint,
     [QWEN_AGENT_VIEW_TOKEN]: config.token,
     [QWEN_AGENT_VIEW_ACTIVE_CWD]: config.activeCwd,
+    [QWEN_AGENT_VIEW_GENERATION]: config.workerGeneration,
+  };
+}
+
+export function createPersistedAgentViewWorkerEnv(
+  config: Omit<AgentViewWorkerSidebandEnv, 'token'>,
+): Record<string, string> {
+  return {
+    [QWEN_AGENT_VIEW_WORKER]: '1',
+    [QWEN_AGENT_VIEW_SESSION_ID]: config.sessionId,
+    [QWEN_AGENT_VIEW_SIDEBAND]: config.sidebandEndpoint,
+    [QWEN_AGENT_VIEW_ACTIVE_CWD]: config.activeCwd,
+    [QWEN_AGENT_VIEW_GENERATION]: config.workerGeneration,
   };
 }
 
@@ -85,8 +123,15 @@ export function readAgentViewWorkerSidebandEnv(
   const sidebandEndpoint = env[QWEN_AGENT_VIEW_SIDEBAND];
   const token = env[QWEN_AGENT_VIEW_TOKEN];
   const activeCwd = env[QWEN_AGENT_VIEW_ACTIVE_CWD];
+  const workerGeneration = env[QWEN_AGENT_VIEW_GENERATION];
 
-  if (!sessionId || !sidebandEndpoint || !token || !activeCwd) {
+  if (
+    !sessionId ||
+    !sidebandEndpoint ||
+    !token ||
+    !activeCwd ||
+    !workerGeneration
+  ) {
     return undefined;
   }
 
@@ -95,6 +140,7 @@ export function readAgentViewWorkerSidebandEnv(
     sidebandEndpoint,
     token,
     activeCwd,
+    workerGeneration,
   };
 }
 
@@ -104,11 +150,46 @@ export async function sendAgentViewWorkerEvent(
 ): Promise<unknown> {
   const sideband = readAgentViewWorkerSidebandEnv(env);
   if (!sideband) return undefined;
-  return callAgentViewSupervisor(sideband.sidebandEndpoint, 'workerEvent', {
-    ...event,
-    sessionId: sideband.sessionId,
-    token: sideband.token,
+  const key = `${sideband.sessionId}:${sideband.workerGeneration}`;
+  const previous = workerEventQueues.get(key) ?? Promise.resolve();
+  const current = previous.then(async () => {
+    const eventKey = JSON.stringify(event);
+    const pending = pendingWorkerEvents.get(key);
+    if (pending) {
+      const result = await sendWorkerEventAndRequireAck(
+        sideband,
+        pending.event,
+        pending.sequence,
+      );
+      pendingWorkerEvents.delete(key);
+      workerEventSequences.set(key, pending.sequence + 1);
+      if (pending.eventKey === eventKey) return result;
+    }
+    const sequence = workerEventSequences.get(key) ?? 0;
+    try {
+      const result = await sendWorkerEventAndRequireAck(
+        sideband,
+        event,
+        sequence,
+      );
+      workerEventSequences.set(key, sequence + 1);
+      return result;
+    } catch (error) {
+      pendingWorkerEvents.set(key, { event, eventKey, sequence });
+      throw error;
+    }
   });
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  );
+  workerEventQueues.set(key, tail);
+  void tail.finally(() => {
+    if (workerEventQueues.get(key) === tail) {
+      workerEventQueues.delete(key);
+    }
+  });
+  return current;
 }
 
 export async function readAgentViewWorkerControlEvents(
@@ -174,6 +255,36 @@ export function startAgentViewWorkerHeartbeat(
 
 export function resetAgentViewWorkerStateReportForTests(): void {
   lastStateReportKeys.clear();
+  workerEventQueues.clear();
+  workerEventSequences.clear();
+  pendingWorkerEvents.clear();
+}
+
+async function sendWorkerEventAndRequireAck(
+  sideband: AgentViewWorkerSidebandEnv,
+  event: AgentViewWorkerEventWithoutSession,
+  sequence: number,
+): Promise<unknown> {
+  const result = await callAgentViewSupervisor(
+    sideband.sidebandEndpoint,
+    'workerEvent',
+    {
+      ...event,
+      sessionId: sideband.sessionId,
+      token: sideband.token,
+      workerGeneration: sideband.workerGeneration,
+      sequence,
+    },
+  );
+  if (
+    !isRecord(result) ||
+    result['accepted'] !== true ||
+    result['workerGeneration'] !== sideband.workerGeneration ||
+    result['sequence'] !== sequence
+  ) {
+    throw new Error('Agent View supervisor returned an invalid event ACK.');
+  }
+  return result;
 }
 
 function isAgentViewWorkerControlEvent(

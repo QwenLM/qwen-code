@@ -88,7 +88,7 @@ export interface AgentViewSupervisorRequestMap {
   list: { cwd?: string } | undefined;
   subscribe: undefined;
   shutdown: { keepWorkers?: boolean } | undefined;
-  dispatch: { prompt: string; cwd: string };
+  dispatch: { prompt: string; cwd: string; readOnly?: boolean };
   adopt: AgentViewSupervisorAdoptParams;
   workerEvent: AgentViewWorkerEvent & { token?: string };
   workerControl: { sessionId: string; token?: string };

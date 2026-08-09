@@ -488,6 +488,7 @@ describe('Agent View PTY host process server', () => {
 
   it('fails quickly when the spawned PTY host exits before ready', async () => {
     const child = fakeChildProcess(2468);
+    let spawnedEnv: Readonly<Record<string, string>> = {};
     const launched = launchAgentViewPtyHostProcess(
       {
         schemaVersion: 1,
@@ -502,7 +503,11 @@ describe('Agent View PTY host process server', () => {
       },
       {
         globalDir: '/tmp/qwen-agent-view-test',
-        spawnProcess: () => child,
+        workerEnv: { QWEN_AGENT_VIEW_TOKEN: 'ephemeral-token' },
+        spawnProcess: (_args, env) => {
+          spawnedEnv = env;
+          return child;
+        },
       },
     );
     child.emit('exit', 1, null);
@@ -511,6 +516,7 @@ describe('Agent View PTY host process server', () => {
       'Agent View PTY host exited before ready (code 1).',
     );
     expect(child.killedWith).toBe('SIGKILL');
+    expect(spawnedEnv['QWEN_AGENT_VIEW_TOKEN']).toBe('ephemeral-token');
   });
 
   it('kills a spawned child when the handle is disposed', async () => {

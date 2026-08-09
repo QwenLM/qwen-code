@@ -70,6 +70,7 @@ vi.mock('../commands/update.js', () => ({
 
 vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
+  connectExistingAgentViewSupervisor: mockEnsureAgentViewSupervisor,
 }));
 
 const createNativeLspServiceInstance = () => ({
@@ -448,8 +449,8 @@ describe('parseArguments', () => {
       'Cannot use --bg/--background with --input-format stream-json',
     ],
     [
-      ['--bg', 'background task', '--output-format', 'json'],
-      'Cannot use --bg/--background with JSON output',
+      ['--bg', 'background task', '--output-format', 'stream-json'],
+      'Cannot use --bg/--background with stream-json output',
     ],
   ])('rejects %s', async (args, message) => {
     process.argv = ['node', 'script.js', ...args];
@@ -480,6 +481,42 @@ describe('parseArguments', () => {
       expect(argv.promptInteractive).toBeUndefined();
     },
   );
+
+  it('allows JSON ACK output for a read-only background prompt', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--bg',
+      '--read-only',
+      '--output-format',
+      'json',
+      'inspect the repository',
+    ];
+
+    const argv = await parseArguments();
+
+    expect(argv).toMatchObject({
+      background: true,
+      readOnly: true,
+      outputFormat: 'json',
+      query: 'inspect the repository',
+    });
+  });
+
+  it('rejects --read-only outside background dispatch', async () => {
+    process.argv = ['node', 'script.js', '--read-only'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--read-only requires --bg/--background'),
+    );
+
+    mockExit.mockRestore();
+  });
 
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
@@ -3590,6 +3627,32 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
     expect(config.isLspEnabled()).toBe(false);
+  });
+
+  it('forces the internal Agent View worker into the read-only profile', async () => {
+    process.argv = ['node', 'script.js', '--agent-view-read-only'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        tools: { core: [ToolNames.SHELL] },
+        hooks: { PreToolUse: [] } as Record<string, unknown>,
+        mcpServers: { unsafe: { command: 'node', args: ['server.js'] } },
+        experimental: { cron: true, agentTeam: true },
+      },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.GREP,
+      ToolNames.GLOB,
+      ToolNames.LS,
+    ]);
+    expect(config.getDisableAllHooks()).toBe(true);
+    expect(config.getMcpServers()).toEqual({});
+    expect(config.isCronEnabled()).toBe(false);
   });
 
   it('should ignore coreTools overrides in bare mode', async () => {

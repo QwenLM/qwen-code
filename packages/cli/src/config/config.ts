@@ -71,7 +71,7 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
-import { agentsCommand } from '../commands/agents.js';
+import { agentsCommand, collectCommand } from '../commands/agents.js';
 import { agentDaemonCommand } from '../commands/agent-daemon.js';
 import {
   attachCommand,
@@ -247,6 +247,8 @@ export interface CliArgs {
   jsonSchema?: string | undefined;
   inputFile?: string | undefined;
   background?: boolean | undefined;
+  readOnly?: boolean | undefined;
+  agentViewReadOnly?: boolean | undefined;
 }
 
 /**
@@ -709,6 +711,14 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description: 'Start a new Agent View background session',
         })
+        .option('read-only', {
+          type: 'boolean',
+          description: 'Restrict a background agent to repository inspection',
+        })
+        .option('agent-view-read-only', {
+          type: 'boolean',
+          hidden: true,
+        })
         .option('system-prompt', {
           type: 'string',
           description:
@@ -1021,10 +1031,12 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           if (
             argv['background'] &&
-            (argv['outputFormat'] === OutputFormat.JSON ||
-              argv['outputFormat'] === OutputFormat.STREAM_JSON)
+            argv['outputFormat'] === OutputFormat.STREAM_JSON
           ) {
-            return 'Cannot use --bg/--background with JSON output';
+            return 'Cannot use --bg/--background with stream-json output';
+          }
+          if (argv['readOnly'] && !argv['background']) {
+            return '--read-only requires --bg/--background';
           }
           if (argv['prompt'] && hasPositionalQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
@@ -1139,6 +1151,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(sessionsCommand)
     // Register Agent View Phase 1 command surface
     .command(agentsCommand)
+    .command(collectCommand)
     .command(agentDaemonCommand)
     .command(attachCommand)
     .command(logsCommand)
@@ -1623,7 +1636,8 @@ export async function loadCliConfig(
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
-  const bareMode = isBareMode(argv.bare);
+  const readOnlyMode = argv.agentViewReadOnly === true;
+  const bareMode = isBareMode(argv.bare || readOnlyMode);
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
@@ -2024,10 +2038,12 @@ export async function loadCliConfig(
     }
   }
 
-  const sandboxConfig = await loadSandboxConfig(
-    bareMode || safeMode ? ({} as Settings) : settings,
-    argv,
-  );
+  const sandboxConfig = readOnlyMode
+    ? undefined
+    : await loadSandboxConfig(
+        bareMode || safeMode ? ({} as Settings) : settings,
+        argv,
+      );
   const screenReader =
     argv.screenReader !== undefined
       ? argv.screenReader
@@ -2341,6 +2357,7 @@ export async function loadCliConfig(
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     warnings: resolvedCliConfig.warnings,
     bareMode,
+    readOnlyMode,
     safeMode,
     allowedHttpHookUrls:
       bareMode || safeMode

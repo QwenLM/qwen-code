@@ -45,6 +45,7 @@ import {
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import { READ_ONLY_INSPECTION_TOOLS } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -1209,6 +1210,7 @@ export interface ConfigParameters {
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
   bareMode?: boolean;
+  readOnlyMode?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
@@ -2010,6 +2012,7 @@ export class Config {
   private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
+  private readonly readOnlyMode: boolean;
   private readonly safeMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
@@ -2245,7 +2248,8 @@ export class Config {
     this.sessionWriterLeaseEnabled =
       this.experimentalZedIntegration === true &&
       params.sessionWriterLeaseEnabled === true;
-    this.cronEnabled = params.cronEnabled ?? true;
+    this.cronEnabled =
+      params.readOnlyMode === true ? false : (params.cronEnabled ?? true);
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
     );
@@ -2288,7 +2292,8 @@ export class Config {
     // explicit value is honored as a hard cap; the default is adaptive.
     this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
-    this.bareMode = params.bareMode ?? false;
+    this.readOnlyMode = params.readOnlyMode ?? false;
+    this.bareMode = params.bareMode === true || this.readOnlyMode;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
     if (this.safeMode) {
       this.debugLogger.info(
@@ -5058,6 +5063,9 @@ export class Config {
 
   /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
+    if (this.readOnlyMode) {
+      return [...READ_ONLY_INSPECTION_TOOLS];
+    }
     if (this.getBareMode()) {
       return DEFAULT_BARE_CORE_TOOLS;
     }
@@ -5308,6 +5316,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    if (this.readOnlyMode) return {};
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -7934,6 +7943,33 @@ export class Config {
         return new UpdateGoalTool(this);
       });
     };
+
+    if (this.readOnlyMode) {
+      await registerLazy(ToolNames.READ_FILE, async () => {
+        const { ReadFileTool } = await import('../tools/read-file.js');
+        return new ReadFileTool(this);
+      });
+      await registerLazy(ToolNames.GREP, async () => {
+        const { GrepTool } = await import('../tools/grep.js');
+        return new GrepTool(this);
+      });
+      await registerLazy(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
+      });
+      await registerLazy(ToolNames.LS, async () => {
+        const { LSTool } = await import('../tools/ls.js');
+        return new LSTool(this);
+      });
+      const registered = registry.getAllToolNames();
+      if (
+        registered.length !== READ_ONLY_INSPECTION_TOOLS.size ||
+        registered.some((toolName) => !READ_ONLY_INSPECTION_TOOLS.has(toolName))
+      ) {
+        throw new Error('Read-only worker registered a non-read-only tool.');
+      }
+      return registry;
+    }
 
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {

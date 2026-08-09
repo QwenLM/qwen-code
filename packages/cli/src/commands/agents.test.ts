@@ -6,7 +6,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { agentsCommand, handleAgentViewBackgroundPrompt } from './agents.js';
+import {
+  agentsCommand,
+  collectCommand,
+  handleAgentViewBackgroundPrompt,
+} from './agents.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSupervisor = vi.hoisted(() => ({
@@ -35,6 +39,7 @@ const mockSupervisor = vi.hoisted(() => ({
         summary: 'write tests',
         lastActivityAt: '2026-07-17T09:00:00.000Z',
         capabilities: [],
+        lastResult: 'Tests added.',
       },
       rosterEntry: {
         sessionId: 'session-1',
@@ -225,5 +230,39 @@ describe('agents command', () => {
       'Attach with qwen attach session-2.',
       'View logs with qwen logs session-2.',
     ]);
+  });
+
+  it('prints a machine-readable ACK for read-only dispatch', async () => {
+    await handleAgentViewBackgroundPrompt('inspect tests', {
+      json: true,
+      readOnly: true,
+    });
+
+    expect(mockSupervisor.dispatch).toHaveBeenCalledWith(
+      'inspect tests',
+      process.cwd(),
+      true,
+    );
+    expect(JSON.parse(String(mockWriteStdoutLine.mock.calls[0]?.[0]))).toEqual({
+      type: 'dispatch_ack',
+      sessionId: 'session-2',
+      state: 'created',
+      profile: 'read-only',
+    });
+  });
+
+  it('collects the latest result by session id prefix', async () => {
+    const handler = collectCommand.handler;
+    if (!handler) throw new Error('collect command handler missing');
+
+    await handler({ id: 'session-1' } as Parameters<typeof handler>[0]);
+
+    expect(JSON.parse(String(mockWriteStdoutLine.mock.calls[0]?.[0]))).toEqual({
+      type: 'collect_result',
+      sessionId: 'session-1',
+      state: 'working',
+      processState: 'alive',
+      result: 'Tests added.',
+    });
   });
 });

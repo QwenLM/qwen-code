@@ -17,7 +17,7 @@ import {
   writeAgentViewSessionState,
   writeAgentViewWorker,
 } from './supervisor-store.js';
-import { createAgentViewWorkerSidebandEnv } from './worker-sideband.js';
+import { createPersistedAgentViewWorkerEnv } from './worker-sideband.js';
 import {
   buildCurrentQwenCliArgv,
   getCurrentQwenCliEntrypoint,
@@ -29,6 +29,8 @@ interface DispatchOptions {
   token?: string;
   publishRoster?: boolean;
   promptInArgv?: boolean;
+  readOnly?: boolean;
+  workerGeneration?: string;
 }
 
 export async function dispatchAgentViewSession(
@@ -38,6 +40,7 @@ export async function dispatchAgentViewSession(
 ): Promise<{ sessionId: string; state: 'created' }> {
   const sessionId = randomUUID();
   const token = options.token ?? randomUUID();
+  const workerGeneration = options.workerGeneration ?? randomUUID();
   const now = new Date().toISOString();
   const resolvedCwd = path.resolve(cwd);
   const state = {
@@ -63,12 +66,13 @@ export async function dispatchAgentViewSession(
         argv: buildNativeWorkerArgv(
           sessionId,
           options.promptInArgv === false ? undefined : prompt,
+          options.readOnly,
         ),
-        env: createAgentViewWorkerSidebandEnv({
+        env: createPersistedAgentViewWorkerEnv({
           sessionId,
           sidebandEndpoint: options.sidebandEndpoint ?? '',
-          token,
           activeCwd: resolvedCwd,
+          workerGeneration,
         }),
         entrypoint: getCurrentQwenCliEntrypoint(),
         projectCwd: resolvedCwd,
@@ -102,6 +106,8 @@ export async function dispatchAgentViewSession(
           ? { endpoint: options.sidebandEndpoint }
           : {}),
         tokenDigest: digestToken(token),
+        workerGeneration,
+        lastSequence: -1,
         recentOutputBytes: 0,
       },
       options,
@@ -178,10 +184,15 @@ function digestToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {
+function buildNativeWorkerArgv(
+  sessionId: string,
+  prompt?: string,
+  readOnly = false,
+): string[] {
   return buildCurrentQwenCliArgv([
     '--session-id',
     sessionId,
+    ...(readOnly ? ['--agent-view-read-only'] : []),
     ...(prompt ? ['--prompt-interactive', prompt] : []),
   ]);
 }

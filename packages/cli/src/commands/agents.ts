@@ -22,12 +22,30 @@ interface AgentsArgs {
   all?: boolean;
 }
 
+interface CollectArgs {
+  id: string;
+}
+
 export async function handleAgentViewBackgroundPrompt(
   prompt: string,
+  options: { json?: boolean; readOnly?: boolean } = {},
 ): Promise<void> {
   const supervisor = await ensureAgentViewSupervisor();
-  const result = await supervisor.dispatch(prompt, process.cwd());
+  const result = options.readOnly
+    ? await supervisor.dispatch(prompt, process.cwd(), true)
+    : await supervisor.dispatch(prompt, process.cwd());
   const sessionId = getSessionId(result);
+  if (options.json) {
+    writeStdoutLine(
+      JSON.stringify({
+        type: 'dispatch_ack',
+        sessionId,
+        state: 'created',
+        profile: options.readOnly ? 'read-only' : 'default',
+      }),
+    );
+    return;
+  }
   const shortId = formatSessionShortId(sessionId);
   writeStdoutLine(`Started background agent ${shortId}.`);
   writeStdoutLine(`Open with qwen agents.`);
@@ -90,6 +108,35 @@ export const agentsCommand: CommandModule<unknown, AgentsArgs> = {
 
     const snapshots = toSnapshots(await supervisor.list(listCwd));
     writeStdoutLine(formatAgentsText(snapshots));
+  },
+};
+
+export const collectCommand: CommandModule<unknown, CollectArgs> = {
+  command: 'collect <id>',
+  describe: 'Collect the latest result from a background agent',
+  handler: async (argv) => {
+    const supervisor = await ensureAgentViewSupervisor();
+    const snapshots = toSnapshots(await supervisor.list());
+    const matches = snapshots.filter((snapshot) =>
+      snapshot.sessionId.startsWith(argv.id),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? `Agent View session ${argv.id} was not found.`
+          : `Agent View session id ${argv.id} is ambiguous.`,
+      );
+    }
+    const snapshot = matches[0]!;
+    writeStdoutLine(
+      JSON.stringify({
+        type: 'collect_result',
+        sessionId: snapshot.sessionId,
+        state: snapshot.state.sessionState,
+        processState: snapshot.state.processState,
+        result: snapshot.activity?.lastResult ?? null,
+      }),
+    );
   },
 };
 

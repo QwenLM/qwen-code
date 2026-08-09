@@ -17,7 +17,7 @@ import type {
   AgentViewSessionStateFile,
 } from './protocol.js';
 import {
-  createAgentViewSupervisorHandler,
+  createAgentViewSupervisorHandler as createAgentViewSupervisorHandlerImpl,
   getAgentViewSupervisorSocketPath,
   getAgentViewSupervisorStaleSocketPath,
 } from './supervisor-process.js';
@@ -35,6 +35,59 @@ import {
 import type { AgentViewPtyHostHandle } from './pty-host.js';
 import { BoundedOutputRing } from './pty-host.js';
 import { createAgentViewPtyHostServer } from './pty-host-process.js';
+import { QWEN_AGENT_VIEW_TOKEN } from './worker-sideband.js';
+
+const workerTokensForTest = new Map<string, string>();
+
+type AgentViewSupervisorHandlerForTest = Omit<
+  ReturnType<typeof createAgentViewSupervisorHandlerImpl>,
+  'workerEvent'
+> & {
+  workerEvent?(params?: Record<string, unknown>): Promise<unknown>;
+};
+
+function createAgentViewSupervisorHandler(
+  options: NonNullable<
+    Parameters<typeof createAgentViewSupervisorHandlerImpl>[0]
+  >,
+): AgentViewSupervisorHandlerForTest {
+  const launchPtyHost = options.launchPtyHost;
+  const handler = createAgentViewSupervisorHandlerImpl({
+    ...options,
+    ...(launchPtyHost
+      ? {
+          launchPtyHost: async (
+            launch: AgentViewLaunchFile,
+            workerEnv?: Readonly<Record<string, string>>,
+          ) => {
+            const token = workerEnv?.[QWEN_AGENT_VIEW_TOKEN];
+            if (token) workerTokensForTest.set(launch.sessionId, token);
+            return launchPtyHost(launch, workerEnv);
+          },
+        }
+      : {}),
+  });
+  const testHandler = handler as AgentViewSupervisorHandlerForTest;
+  const workerEvent = testHandler.workerEvent?.bind(handler);
+  if (workerEvent) {
+    testHandler.workerEvent = async (params) => {
+      const sessionId = params?.['sessionId'];
+      const worker =
+        typeof sessionId === 'string'
+          ? await readAgentViewWorker(sessionId, {
+              ...(options.globalDir ? { globalDir: options.globalDir } : {}),
+            })
+          : undefined;
+      return workerEvent({
+        ...params,
+        workerGeneration:
+          params?.['workerGeneration'] ?? worker?.workerGeneration,
+        sequence: params?.['sequence'] ?? (worker?.lastSequence ?? -1) + 1,
+      });
+    };
+  }
+  return testHandler;
+}
 
 describe('Agent View supervisor process helpers', () => {
   it('computes a stable Unix socket path under the Agent View store', () => {
@@ -246,9 +299,9 @@ describe('Agent View supervisor process helpers', () => {
       platform: 'linux',
       waitForWorkerReady: true,
       workerReadyTimeoutMs: 1000,
-      launchPtyHost: async (launch) => {
+      launchPtyHost: async (launch, workerEnv) => {
         launchedArgv = launch.argv;
-        token = launch.env['QWEN_AGENT_VIEW_TOKEN'] ?? '';
+        token = workerEnv?.[QWEN_AGENT_VIEW_TOKEN] ?? '';
         setImmediate(() => {
           void Promise.resolve(
             handler.workerEvent?.({
@@ -475,9 +528,8 @@ describe('Agent View supervisor process helpers', () => {
       projectCwd: path.join(globalDir, 'project'),
       worktree: { mode: 'none' },
     });
-    await expect(
-      readAgentViewLaunch(sessionId, { globalDir }),
-    ).resolves.toMatchObject({
+    const adoptedLaunch = await readAgentViewLaunch(sessionId, { globalDir });
+    expect(adoptedLaunch).toMatchObject({
       sessionId,
       argv: launched,
       activeCwd: path.join(globalDir, 'project', 'src'),
@@ -485,6 +537,7 @@ describe('Agent View supervisor process helpers', () => {
       approvalMode: 'default',
       terminal: { columns: 100, rows: 40 },
     });
+    expect(adoptedLaunch?.env).not.toHaveProperty(QWEN_AGENT_VIEW_TOKEN);
     await expect(
       readAgentViewActivity(sessionId, { globalDir }),
     ).resolves.toMatchObject({
@@ -592,13 +645,13 @@ describe('Agent View supervisor process helpers', () => {
       platform: 'linux',
       waitForWorkerReady: true,
       workerReadyTimeoutMs: 1000,
-      launchPtyHost: async (launch) => {
+      launchPtyHost: async (launch, workerEnv) => {
         setImmediate(() => {
           void Promise.resolve(
             handler.workerEvent?.({
               type: 'ready',
               sessionId: launch.sessionId,
-              token: launch.env['QWEN_AGENT_VIEW_TOKEN'],
+              token: workerEnv?.[QWEN_AGENT_VIEW_TOKEN],
               cwd: path.join(globalDir, 'other'),
             }),
           ).catch(() => {});
@@ -649,7 +702,6 @@ describe('Agent View supervisor process helpers', () => {
       cwd: globalDir,
     })) as { sessionId: string };
     const token = await readWorkerTokenForTest(result.sessionId, globalDir);
-
     await expect(
       handler.workerEvent?.({
         type: 'ready',
@@ -660,9 +712,11 @@ describe('Agent View supervisor process helpers', () => {
         summary: 'ready summary',
         at: '2026-07-17T00:00:00.000Z',
       }),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       sessionId: result.sessionId,
       accepted: true,
+      workerGeneration: expect.any(String),
+      sequence: 0,
     });
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
@@ -758,6 +812,64 @@ describe('Agent View supervisor process helpers', () => {
     expect(readyActivity).not.toHaveProperty('inputKind');
     expect(readyActivity).not.toHaveProperty('lastResult');
     expect(readyActivity).not.toHaveProperty('queuedPromptCount');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('rejects stale or out-of-order worker events and deduplicates retries', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'inspect tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    const worker = await readAgentViewWorker(result.sessionId, { globalDir });
+    const workerGeneration = worker?.workerGeneration;
+    if (!workerGeneration) throw new Error('expected worker generation');
+
+    const ready = {
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      workerGeneration,
+      sequence: 0,
+      cwd: globalDir,
+    } as const;
+    await handler.workerEvent?.(ready);
+    await expect(handler.workerEvent?.(ready)).resolves.toMatchObject({
+      workerGeneration,
+      sequence: 0,
+    });
+    await expect(
+      handler.workerEvent?.({
+        type: 'state',
+        sessionId: result.sessionId,
+        token,
+        workerGeneration,
+        sequence: 2,
+        sessionState: 'failed',
+      }),
+    ).rejects.toThrow('out of order');
+    await expect(
+      handler.workerEvent?.({
+        type: 'state',
+        sessionId: result.sessionId,
+        token,
+        workerGeneration: 'stale-generation',
+        sequence: 1,
+        sessionState: 'failed',
+      }),
+    ).rejects.toThrow('generation is stale');
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({ sessionState: 'idle' });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -1970,9 +2082,11 @@ describe('Agent View supervisor process helpers', () => {
         sessionId: result.sessionId,
         token,
       }),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       sessionId: result.sessionId,
       accepted: true,
+      workerGeneration: expect.any(String),
+      sequence: 0,
     });
     await attached;
     await expect(
@@ -2059,6 +2173,9 @@ describe('Agent View supervisor process helpers', () => {
       cwd: globalDir,
     })) as { sessionId: string };
     const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    const initialGeneration = (
+      await readAgentViewWorker(result.sessionId, { globalDir })
+    )?.workerGeneration;
     hosts[0]?.output.append('hello from worker');
 
     await expect(
@@ -2137,7 +2254,19 @@ describe('Agent View supervisor process helpers', () => {
       sessionId: result.sessionId,
       respawned: true,
     });
+    const respawnedToken = await readWorkerTokenForTest(
+      result.sessionId,
+      globalDir,
+    );
+    expect(respawnedToken).not.toBe(token);
+    expect(
+      (await readAgentViewWorker(result.sessionId, { globalDir }))
+        ?.workerGeneration,
+    ).not.toBe(initialGeneration);
     expect(hosts).toHaveLength(2);
+    expect(
+      launches.every((launch) => !(QWEN_AGENT_VIEW_TOKEN in launch.env)),
+    ).toBe(true);
     expect(launches[1]).toMatchObject({
       entrypoint: process.argv[1],
       argv: [process.execPath, process.argv[1], '--resume', result.sessionId],
@@ -3030,10 +3159,9 @@ async function writeSessionStateForTest(
 
 async function readWorkerTokenForTest(
   sessionId: string,
-  globalDir: string,
+  _globalDir: string,
 ): Promise<string> {
-  const launch = await readAgentViewLaunch(sessionId, { globalDir });
-  const token = launch?.env['QWEN_AGENT_VIEW_TOKEN'];
+  const token = workerTokensForTest.get(sessionId);
   if (!token) {
     throw new Error(`Missing worker token for ${sessionId}`);
   }

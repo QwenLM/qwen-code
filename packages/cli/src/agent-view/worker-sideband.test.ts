@@ -7,9 +7,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_VIEW_WORKER_ENV_KEYS,
-  createAgentViewWorkerSidebandEnv,
+  createPersistedAgentViewWorkerEnv,
+  createAgentViewWorkerSidebandEnv as createRawAgentViewWorkerSidebandEnv,
   isAgentViewWorkerEnv,
   QWEN_AGENT_VIEW_ACTIVE_CWD,
+  QWEN_AGENT_VIEW_GENERATION,
   QWEN_AGENT_VIEW_SESSION_ID,
   QWEN_AGENT_VIEW_SIDEBAND,
   QWEN_AGENT_VIEW_TOKEN,
@@ -23,8 +25,32 @@ import {
 } from './worker-sideband.js';
 
 const mockCallAgentViewSupervisor = vi.hoisted(() =>
-  vi.fn(async (): Promise<unknown> => ({ accepted: true })),
+  vi.fn(
+    async (
+      _endpoint: string,
+      _method: string,
+      params: Record<string, unknown>,
+    ): Promise<unknown> => ({
+      accepted: true,
+      workerGeneration: params['workerGeneration'],
+      sequence: params['sequence'],
+    }),
+  ),
 );
+
+const WORKER_GENERATION = 'generation-1';
+
+function createAgentViewWorkerSidebandEnv(
+  config: Omit<
+    Parameters<typeof createRawAgentViewWorkerSidebandEnv>[0],
+    'workerGeneration'
+  >,
+) {
+  return createRawAgentViewWorkerSidebandEnv({
+    ...config,
+    workerGeneration: WORKER_GENERATION,
+  });
+}
 
 vi.mock('./supervisor-client.js', () => ({
   callAgentViewSupervisor: mockCallAgentViewSupervisor,
@@ -33,7 +59,13 @@ vi.mock('./supervisor-client.js', () => ({
 describe('worker sideband env', () => {
   beforeEach(() => {
     mockCallAgentViewSupervisor.mockClear();
-    mockCallAgentViewSupervisor.mockResolvedValue({ accepted: true });
+    mockCallAgentViewSupervisor.mockImplementation(
+      async (_endpoint, _method, params) => ({
+        accepted: true,
+        workerGeneration: params['workerGeneration'],
+        sequence: params['sequence'],
+      }),
+    );
     resetAgentViewWorkerStateReportForTests();
   });
 
@@ -51,8 +83,20 @@ describe('worker sideband env', () => {
       [QWEN_AGENT_VIEW_SIDEBAND]: 'unix:/tmp/qwen-agent-view.sock',
       [QWEN_AGENT_VIEW_TOKEN]: 'token-1',
       [QWEN_AGENT_VIEW_ACTIVE_CWD]: '/repo',
+      [QWEN_AGENT_VIEW_GENERATION]: WORKER_GENERATION,
     });
     expect(AGENT_VIEW_WORKER_ENV_KEYS).toContain(QWEN_AGENT_VIEW_WORKER);
+  });
+
+  it('never includes the worker token in persisted launch metadata', () => {
+    const env = createPersistedAgentViewWorkerEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: 'unix:/tmp/qwen-agent-view.sock',
+      activeCwd: '/repo',
+      workerGeneration: WORKER_GENERATION,
+    });
+
+    expect(env).not.toHaveProperty(QWEN_AGENT_VIEW_TOKEN);
   });
 
   it('detects worker mode only when explicitly enabled', () => {
@@ -76,6 +120,7 @@ describe('worker sideband env', () => {
       sidebandEndpoint: 'pipe:qwen',
       token: 'token-1',
       activeCwd: '/repo',
+      workerGeneration: WORKER_GENERATION,
     });
   });
 
@@ -106,7 +151,11 @@ describe('worker sideband env', () => {
         },
         env,
       ),
-    ).resolves.toEqual({ accepted: true });
+    ).resolves.toEqual({
+      accepted: true,
+      workerGeneration: WORKER_GENERATION,
+      sequence: 0,
+    });
 
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledWith(
       '/tmp/qwen-agent-view.sock',
@@ -117,6 +166,8 @@ describe('worker sideband env', () => {
         capabilities: ['ready'],
         sessionId: 'session-1',
         token: 'token-1',
+        workerGeneration: WORKER_GENERATION,
+        sequence: 0,
       },
     );
   });
@@ -138,6 +189,8 @@ describe('worker sideband env', () => {
         type: 'detach',
         sessionId: 'session-1',
         token: 'token-1',
+        workerGeneration: WORKER_GENERATION,
+        sequence: 0,
       },
     );
   });
@@ -240,6 +293,8 @@ describe('worker sideband env', () => {
         waitingFor: 'Bash',
         sessionId: 'session-1',
         token: 'token-1',
+        workerGeneration: WORKER_GENERATION,
+        sequence: 0,
       },
     );
   });
@@ -287,12 +342,42 @@ describe('worker sideband env', () => {
     });
     mockCallAgentViewSupervisor
       .mockRejectedValueOnce(new Error('supervisor unavailable'))
-      .mockResolvedValueOnce({ accepted: true });
+      .mockResolvedValueOnce({
+        accepted: true,
+        workerGeneration: WORKER_GENERATION,
+        sequence: 0,
+      });
 
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
     await reportAgentViewWorkerState({ sessionState: 'working' }, env);
 
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a failed event before assigning its sequence to a newer event', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    mockCallAgentViewSupervisor.mockRejectedValueOnce(
+      new Error('supervisor unavailable'),
+    );
+
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    await reportAgentViewWorkerState({ sessionState: 'idle' }, env);
+
+    expect(
+      mockCallAgentViewSupervisor.mock.calls.map((call) => ({
+        sessionState: call[2]['sessionState'],
+        sequence: call[2]['sequence'],
+      })),
+    ).toEqual([
+      { sessionState: 'working', sequence: 0 },
+      { sessionState: 'working', sequence: 0 },
+      { sessionState: 'idle', sequence: 1 },
+    ]);
   });
 
   it('does not deduplicate concurrent state reports before send succeeds', async () => {
@@ -310,10 +395,17 @@ describe('worker sideband env', () => {
             rejectFirst = reject;
           }),
       )
-      .mockResolvedValueOnce({ accepted: true });
+      .mockResolvedValueOnce({
+        accepted: true,
+        workerGeneration: WORKER_GENERATION,
+        sequence: 0,
+      });
 
     const first = reportAgentViewWorkerState({ sessionState: 'working' }, env);
     const second = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    await vi.waitFor(() => {
+      expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
+    });
     rejectFirst(new Error('supervisor unavailable'));
 
     await Promise.all([first, second]);
@@ -347,6 +439,8 @@ describe('worker sideband env', () => {
           type: 'heartbeat',
           sessionId: 'session-1',
           token: 'token-1',
+          workerGeneration: WORKER_GENERATION,
+          sequence: 0,
         },
       );
 

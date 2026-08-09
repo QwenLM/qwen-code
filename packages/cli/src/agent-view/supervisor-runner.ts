@@ -51,7 +51,7 @@ export interface AgentViewSupervisorClientHandle {
     onEvent: (event: AgentViewSupervisorEvent) => void,
     onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
-  dispatch(prompt: string, cwd: string): Promise<unknown>;
+  dispatch(prompt: string, cwd: string, readOnly?: boolean): Promise<unknown>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
   attach(sessionId: string): Promise<unknown>;
   peek(sessionId: string): Promise<unknown>;
@@ -232,11 +232,11 @@ function createSupervisorHandle(
         ...authOptions,
         ...(onError ? { onError } : {}),
       }),
-    dispatch: (prompt: string, cwd: string) =>
+    dispatch: (prompt: string, cwd: string, readOnly?: boolean) =>
       callAgentViewSupervisor(
         socketPath,
         'dispatch',
-        { prompt, cwd },
+        { prompt, cwd, ...(readOnly ? { readOnly: true } : {}) },
         {
           ...authOptions,
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,

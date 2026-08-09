@@ -45,7 +45,11 @@ import {
   writeAgentViewWorker,
 } from './supervisor-store.js';
 import type { AgentViewSupervisorHandler } from './supervisor-server.js';
-import { createAgentViewWorkerSidebandEnv } from './worker-sideband.js';
+import {
+  createPersistedAgentViewWorkerEnv,
+  QWEN_AGENT_VIEW_GENERATION,
+  QWEN_AGENT_VIEW_TOKEN,
+} from './worker-sideband.js';
 import {
   buildCurrentQwenCliArgv,
   getCurrentQwenCliEntrypoint,
@@ -104,6 +108,7 @@ export interface AgentViewSupervisorProcessOptions
   extends AgentViewSupervisorPathOptions {
   launchPtyHost?: (
     launch: AgentViewLaunchFile,
+    workerEnv?: Readonly<Record<string, string>>,
   ) => Promise<AgentViewPtyHostHandle>;
   hibernationPolicy?: AgentViewSupervisorHibernationPolicy;
   waitForWorkerReady?: boolean;
@@ -306,17 +311,23 @@ class AgentViewSupervisorProcessHandler
       typeof params?.['prompt'] === 'string' ? params['prompt'] : '';
     const cwd =
       typeof params?.['cwd'] === 'string' ? params['cwd'] : process.cwd();
+    const readOnly = params?.['readOnly'] === true;
     if (!prompt.trim()) {
       throw new Error('Agent View dispatch prompt cannot be empty.');
     }
     const store = {
       ...(this.options.globalDir ? { globalDir: this.options.globalDir } : {}),
     };
+    const token = randomUUID();
+    const workerGeneration = randomUUID();
     const result = await dispatchAgentViewSession(prompt, cwd, {
       ...store,
       sidebandEndpoint: this.socketPath,
       publishRoster: false,
       promptInArgv: !shouldWaitForWorkerReady(this.options),
+      readOnly,
+      token,
+      workerGeneration,
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {
@@ -329,7 +340,13 @@ class AgentViewSupervisorProcessHandler
         launch.activeCwd,
       );
       void ready.catch(() => {});
-      const host = await this.workers.launchPtyHostForSupervisor(launch, store);
+      const host = await this.workers.launchPtyHostForSupervisor(
+        launch,
+        store,
+        {
+          [QWEN_AGENT_VIEW_TOKEN]: token,
+        },
+      );
       this.workers.set(result.sessionId, host);
       await writeAgentViewWorker(
         result.sessionId,
@@ -395,6 +412,7 @@ class AgentViewSupervisorProcessHandler
     }
 
     const token = randomUUID();
+    const workerGeneration = randomUUID();
     const now = new Date().toISOString();
     const activeCwd = path.resolve(adoption.activeCwd);
     const projectCwd = path.resolve(adoption.projectCwd);
@@ -421,11 +439,11 @@ class AgentViewSupervisorProcessHandler
           schemaVersion: 1,
           sessionId: adoption.sessionId,
           argv: buildResumeWorkerArgv(adoption.sessionId),
-          env: createAgentViewWorkerSidebandEnv({
+          env: createPersistedAgentViewWorkerEnv({
             sessionId: adoption.sessionId,
             sidebandEndpoint: this.socketPath,
-            token,
             activeCwd,
+            workerGeneration,
           }),
           entrypoint: getCurrentQwenCliEntrypoint(),
           projectCwd,
@@ -455,6 +473,8 @@ class AgentViewSupervisorProcessHandler
           schemaVersion: 1,
           endpoint: this.socketPath,
           tokenDigest: digestToken(token),
+          workerGeneration,
+          lastSequence: -1,
           protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
           platform: process.platform,
           recentOutputBytes: 0,
@@ -480,7 +500,13 @@ class AgentViewSupervisorProcessHandler
         activeCwd,
       );
       void ready.catch(() => {});
-      const host = await this.workers.launchPtyHostForSupervisor(launch, store);
+      const host = await this.workers.launchPtyHostForSupervisor(
+        launch,
+        store,
+        {
+          [QWEN_AGENT_VIEW_TOKEN]: token,
+        },
+      );
       this.workers.set(adoption.sessionId, host);
       await writeAgentViewSessionState(
         {
@@ -538,33 +564,59 @@ class AgentViewSupervisorProcessHandler
   async workerEvent(params?: Record<string, unknown>) {
     const event = parseWorkerEvent(params);
     await requireValidWorkerToken(event.sessionId, params, this.store);
-    if (event.type === 'ready') {
-      this.workers.validatePendingWorkerReady(event);
-    }
-    if (event.type === 'detach') {
-      await requireKnownSession(event.sessionId, this.store);
-      this.attachSockets.get(event.sessionId)?.destroy();
-      await writeAttachState(event.sessionId, 'detached', this.store);
-      this.notifyChanged();
-      return { sessionId: event.sessionId, accepted: true };
-    }
-    if (event.type === 'heartbeat') {
-      await applyWorkerHeartbeatEvent(event, this.store);
-      return { sessionId: event.sessionId, accepted: true };
-    }
-    try {
-      await applyWorkerEvent(event, this.store);
-    } catch (error) {
-      if (event.type === 'ready') {
-        this.workers.rejectPendingWorkerReady(event.sessionId, error);
+    return this.withPromptQueueLock(event.sessionId, async () => {
+      const worker = await readAgentViewWorker(event.sessionId, this.store);
+      if (worker?.workerGeneration !== event.workerGeneration) {
+        throw new Error('Agent View worker generation is stale.');
       }
-      throw error;
-    }
-    if (event.type === 'ready') {
-      this.workers.resolvePendingWorkerReady(event.sessionId);
-    }
-    this.notifyChanged();
-    return { sessionId: event.sessionId, accepted: true };
+      const lastSequence = worker.lastSequence ?? -1;
+      const ack = {
+        sessionId: event.sessionId,
+        accepted: true,
+        workerGeneration: event.workerGeneration,
+        sequence: event.sequence,
+      };
+      if (event.sequence <= lastSequence) return ack;
+      if (event.sequence !== lastSequence + 1) {
+        throw new Error('Agent View worker event sequence is out of order.');
+      }
+      if (event.type === 'ready') {
+        this.workers.validatePendingWorkerReady(event);
+      }
+      if (event.type === 'detach') {
+        await requireKnownSession(event.sessionId, this.store);
+        this.attachSockets.get(event.sessionId)?.destroy();
+        await writeAttachState(event.sessionId, 'detached', this.store);
+      } else if (event.type === 'heartbeat') {
+        await applyWorkerHeartbeatEvent(event, this.store);
+      } else {
+        try {
+          await applyWorkerEvent(event, this.store);
+        } catch (error) {
+          if (event.type === 'ready') {
+            this.workers.rejectPendingWorkerReady(event.sessionId, error);
+          }
+          throw error;
+        }
+      }
+      await writeAgentViewWorker(
+        event.sessionId,
+        {
+          schemaVersion: 1,
+          workerGeneration: event.workerGeneration,
+          lastSequence: event.sequence,
+          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+          platform: process.platform,
+          recentOutputBytes: worker.recentOutputBytes,
+        },
+        this.store,
+      );
+      if (event.type === 'ready') {
+        this.workers.resolvePendingWorkerReady(event.sessionId);
+      }
+      this.notifyChanged();
+      return ack;
+    });
   }
   async workerControl(params?: Record<string, unknown>) {
     const sessionId = requireSessionId(params);
@@ -1144,18 +1196,22 @@ class AgentViewSupervisorProcessHandler
     );
   }
 
-  private async withPromptQueueLock(
+  private async withPromptQueueLock<T>(
     sessionId: string,
-    action: () => Promise<void>,
-  ): Promise<void> {
+    action: () => Promise<T>,
+  ): Promise<T> {
     const previous = this.promptQueues.get(sessionId) ?? Promise.resolve();
     const current = previous.then(action, action);
-    const cleanup = current.finally(() => {
-      if (this.promptQueues.get(sessionId) === cleanup) {
-        this.promptQueues.delete(sessionId);
-      }
-    });
-    void cleanup.catch(() => {});
+    const cleanup = current
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        if (this.promptQueues.get(sessionId) === cleanup) {
+          this.promptQueues.delete(sessionId);
+        }
+      });
     this.promptQueues.set(sessionId, cleanup);
     return current;
   }
@@ -1340,15 +1396,16 @@ class WorkerRegistry {
   async launchPtyHostForSupervisor(
     launchRecord: AgentViewLaunchFile,
     store: AgentViewStoreOptions,
+    workerEnv?: Readonly<Record<string, string>>,
   ): Promise<AgentViewPtyHostHandle> {
     const launch = await refreshStoredResumeWorkerLaunchIfNeeded(
       launchRecord,
       store,
     );
     if (this.options.launchPtyHost) {
-      return this.options.launchPtyHost(launch);
+      return this.options.launchPtyHost(launch, workerEnv);
     }
-    return launchAgentViewPtyHostProcess(launch, store);
+    return launchAgentViewPtyHostProcess(launch, { ...store, workerEnv });
   }
 
   waitForWorkerReadyIfNeeded(
@@ -1516,7 +1573,26 @@ class WorkerRegistry {
     if (!launch) {
       throw new Error(`No Agent View launch record found for ${sessionId}.`);
     }
-    const resumeLaunch = await writeResumeWorkerLaunch(launch, this.store);
+    const workerGeneration = randomUUID();
+    const resumeLaunch = await writeResumeWorkerLaunch(
+      launch,
+      this.store,
+      workerGeneration,
+    );
+    const token = randomUUID();
+    await writeAgentViewWorker(
+      sessionId,
+      {
+        schemaVersion: 1,
+        tokenDigest: digestToken(token),
+        workerGeneration,
+        lastSequence: -1,
+        protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+        platform: process.platform,
+        recentOutputBytes: 0,
+      },
+      this.store,
+    );
     this.ptyHosts.get(sessionId)?.kill('SIGTERM');
     let host: AgentViewPtyHostHandle | undefined;
     try {
@@ -1525,7 +1601,9 @@ class WorkerRegistry {
         resumeLaunch.activeCwd,
       );
       void ready.catch(() => {});
-      host = await this.launchPtyHostForSupervisor(resumeLaunch, this.store);
+      host = await this.launchPtyHostForSupervisor(resumeLaunch, this.store, {
+        [QWEN_AGENT_VIEW_TOKEN]: token,
+      });
       this.set(sessionId, host);
       await writeAgentViewSessionState(
         {
@@ -2486,9 +2564,22 @@ function parseWorkerEvent(
   }
   const type = params['type'];
   const sessionId = params['sessionId'];
+  const workerGeneration = params['workerGeneration'];
+  const sequence = params['sequence'];
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     throw new Error('Agent View worker event session id is required.');
   }
+  if (typeof workerGeneration !== 'string' || workerGeneration.length === 0) {
+    throw new Error('Agent View worker event generation is required.');
+  }
+  if (!Number.isInteger(sequence) || Number(sequence) < 0) {
+    throw new Error('Agent View worker event sequence is invalid.');
+  }
+  const envelope = {
+    sessionId,
+    workerGeneration,
+    sequence: Number(sequence),
+  };
   if (type === 'ready') {
     const cwd = stringParam(params, 'cwd', { required: true });
     if (!cwd) {
@@ -2498,7 +2589,7 @@ function parseWorkerEvent(
     const at = stringParam(params, 'at');
     return {
       type,
-      sessionId,
+      ...envelope,
       cwd,
       ...(summary !== undefined ? { summary } : {}),
       ...(at !== undefined ? { at } : {}),
@@ -2509,7 +2600,7 @@ function parseWorkerEvent(
     const at = stringParam(params, 'at');
     return {
       type,
-      sessionId,
+      ...envelope,
       ...(at !== undefined ? { at } : {}),
     };
   }
@@ -2517,7 +2608,7 @@ function parseWorkerEvent(
     const at = stringParam(params, 'at');
     return {
       type,
-      sessionId,
+      ...envelope,
       ...(at !== undefined ? { at } : {}),
     };
   }
@@ -2542,7 +2633,7 @@ function parseWorkerEvent(
     const at = stringParam(params, 'at');
     return {
       type,
-      sessionId,
+      ...envelope,
       sessionState,
       ...(cwd !== undefined ? { cwd } : {}),
       ...(summary !== undefined ? { summary } : {}),
@@ -2585,25 +2676,37 @@ function stringArrayParam(
     : [];
 }
 
-function buildResumeWorkerArgv(sessionId: string): string[] {
-  return buildCurrentQwenCliArgv(['--resume', sessionId]);
+function buildResumeWorkerArgv(sessionId: string, readOnly = false): string[] {
+  return buildCurrentQwenCliArgv([
+    '--resume',
+    sessionId,
+    ...(readOnly ? ['--agent-view-read-only'] : []),
+  ]);
 }
 
 function refreshResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
+  workerGeneration?: string,
 ): AgentViewLaunchFile {
   return {
     ...launch,
     entrypoint: getCurrentQwenCliEntrypoint(),
-    argv: buildResumeWorkerArgv(launch.sessionId),
+    argv: buildResumeWorkerArgv(
+      launch.sessionId,
+      launch.argv.includes('--agent-view-read-only'),
+    ),
+    env: workerGeneration
+      ? { ...launch.env, [QWEN_AGENT_VIEW_GENERATION]: workerGeneration }
+      : launch.env,
   };
 }
 
 async function writeResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   store: { globalDir?: string },
+  workerGeneration?: string,
 ): Promise<AgentViewLaunchFile> {
-  const resumeLaunch = refreshResumeWorkerLaunch(launch);
+  const resumeLaunch = refreshResumeWorkerLaunch(launch, workerGeneration);
   await writeAgentViewLaunch(resumeLaunch, store);
   return resumeLaunch;
 }
