@@ -2381,6 +2381,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
+      getSettingsMcpServers: () => ({}),
       getTopTierMcpServers: () => undefined,
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
