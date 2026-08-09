@@ -53,6 +53,7 @@ const NUMBER_OPTIONS = new Map<
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
   ['channelIdleTimeoutMs', 'channel-idle-timeout-ms'],
   ['initializeTimeoutMs', 'initialize-timeout-ms'],
+  ['sessionRestoreTimeoutMs', 'session-restore-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],
