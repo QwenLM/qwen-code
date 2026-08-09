@@ -121,8 +121,15 @@ const SCAN_CONCURRENCY = 16;
  * omits it; `| undefined` would poison the whole flag word into `NaN`.
  * Zero is the correct degradation — Windows has no symlink-in-a-shared-
  * home threat model here, and every other guard still applies.
+ *
+ * Read at the call site rather than at module load. This module is
+ * reachable from `config.ts` and from the package barrel, so a top-level
+ * `fs.constants` read makes module *initialization* depend on that export
+ * and takes down every consumer that substitutes `node:fs` without it.
  */
-const O_NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
+function noFollowFlag(): number {
+  return fsSync.constants.O_NOFOLLOW ?? 0;
+}
 
 /** A directory entry's identity, as observed through an open handle. */
 interface EntryIdentity {
@@ -762,7 +769,10 @@ async function readRecord(filePath: string): Promise<ReadRecord | null> {
   let entry: EntryIdentity;
   let handle: fs.FileHandle;
   try {
-    handle = await fs.open(filePath, fsSync.constants.O_RDONLY | O_NOFOLLOW);
+    handle = await fs.open(
+      filePath,
+      fsSync.constants.O_RDONLY | noFollowFlag(),
+    );
   } catch {
     return null;
   }
