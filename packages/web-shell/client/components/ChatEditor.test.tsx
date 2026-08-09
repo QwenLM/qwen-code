@@ -428,10 +428,15 @@ describe('ChatEditor context usage ring', () => {
     expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
     // The arrow must be the Radix-positioned element: a pseudo-element pinned
     // to the content center stops pointing at the trigger once collision
-    // avoidance shifts the content near the viewport edge.
-    expect(
-      document.querySelector('[data-slot="tooltip-arrow"]'),
-    ).not.toBeNull();
+    // avoidance shifts the content near the viewport edge. jsdom has no
+    // layout, so pin the positioning classes the rendered arrow depends on —
+    // a shadcn regeneration that drops them would detach the arrow visually
+    // while an existence check stayed green.
+    const arrowClass = document
+      .querySelector('[data-slot="tooltip-arrow"]')
+      ?.getAttribute('class');
+    expect(arrowClass).toContain('rotate-45');
+    expect(arrowClass).toContain('translate-y-[calc(-50%_-_2px)]');
   });
 
   it('escalates the arc color at the /context panel thresholds', () => {

@@ -31,6 +31,7 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
 } from '../customization';
 import { useI18n } from '../i18n';
+import { formatContextTokens as formatTokenCount } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { MessageItem } from './MessageItem';
@@ -1847,10 +1848,6 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds - minutes * 60;
   return `${minutes}m ${seconds}s`;
-}
-
-function formatTokenCount(tokens: number): string {
-  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
 }
 
 type Translate = (

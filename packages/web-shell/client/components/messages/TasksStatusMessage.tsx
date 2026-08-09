@@ -20,6 +20,7 @@ import {
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
+import { formatContextTokens as formatTokenCount } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { PlanExecutionView } from './PlanExecutionView';
@@ -97,12 +98,6 @@ function arrangeTasks(
   tasks: DaemonSessionTaskStatus[],
 ): DaemonSessionTaskStatus[] {
   return reorderChildrenUnderParents(sortTasks(tasks));
-}
-
-function formatTokenCount(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
-  return String(tokens);
 }
 
 function statusClassName(status: TaskStatus): string {
