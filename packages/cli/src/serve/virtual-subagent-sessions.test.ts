@@ -90,11 +90,56 @@ describe('VirtualSubagentSessions', () => {
       createVirtualSubagentSessionId('parent-session', 'a'.repeat(501)),
     ).toThrow('valid id parts');
     expect(() =>
-      createVirtualSubagentSessionId('parent-session', '界'.repeat(500)),
-    ).toThrow('valid id parts');
+      createVirtualSubagentSessionId('parent-session', '界'.repeat(493)),
+    ).toThrow('exceeds 2000 characters');
     expect(() =>
       createVirtualSubagentSessionId('parent-session', '\ud800'),
     ).toThrow('valid id parts');
+  });
+
+  it.each(['a'.repeat(500), '界'.repeat(492)])(
+    'round-trips an agent id at an accepted length boundary',
+    (agentId) => {
+      const sessionId = createVirtualSubagentSessionId(
+        'parent-session',
+        agentId,
+      );
+
+      expect(parseVirtualSubagentSessionId(sessionId)).toEqual({
+        parentSessionId: 'parent-session',
+        agentId,
+      });
+    },
+  );
+
+  it.each([
+    ['non-canonical parent encoding', true, false],
+    ['non-canonical agent encoding', false, true],
+  ])('rejects %s', (_name, padParent, padAgent) => {
+    const sessionId = createVirtualSubagentSessionId(
+      'parent-session',
+      'agent-1',
+    );
+    const [parentPart, agentPart] = sessionId
+      .slice('subagent.'.length)
+      .split('.');
+    const nonCanonicalSessionId = `subagent.${parentPart}${padParent ? '=' : ''}.${agentPart}${padAgent ? '=' : ''}`;
+
+    expect(
+      parseVirtualSubagentSessionId(nonCanonicalSessionId),
+    ).toBeUndefined();
+  });
+
+  it('rejects a non-canonical agent encoding that decodes as garbage', () => {
+    const sessionId = createVirtualSubagentSessionId(
+      'parent-session',
+      'agent-1',
+    );
+    const [parentPart] = sessionId.slice('subagent.'.length).split('.');
+
+    expect(
+      parseVirtualSubagentSessionId(`subagent.${parentPart}.garbage`),
+    ).toBeUndefined();
   });
 
   it.each(['general-purpose-agent:8', 'general-purpose-agent/8'])(
