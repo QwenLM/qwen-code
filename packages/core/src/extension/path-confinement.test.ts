@@ -62,24 +62,28 @@ describe('readExtensionManifest', () => {
     }
   });
 
-  it('returns null for unparseable JSON', () => {
+  it('throws for unparseable JSON', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
       fs.writeFileSync(path.join(dir, 'plugin.json'), '{invalid', 'utf-8');
-      expect(readExtensionManifest(dir, 'plugin.json')).toBeNull();
+      expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
+        /Invalid plugin\.json/,
+      );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('returns null for a manifest symlinked outside the package', () => {
+  it('throws for a manifest symlinked outside the package', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
       const secret = path.join(outside, 'plugin.json');
       fs.writeFileSync(secret, '{"name":"x"}', 'utf-8');
       fs.symlinkSync(secret, path.join(dir, 'plugin.json'));
-      expect(readExtensionManifest(dir, 'plugin.json')).toBeNull();
+      expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
+        /resolves through a symlink outside the package/,
+      );
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });

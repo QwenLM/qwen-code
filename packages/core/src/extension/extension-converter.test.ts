@@ -37,8 +37,10 @@ vi.mock('node:fs', () => ({
   existsSync: mocks.existsSync,
 }));
 
-import { convertCompatibleExtension } from './extension-converter.js';
-import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import {
+  convertCompatibleExtension,
+  detectManifest,
+} from './extension-converter.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 
 const convertedDir = '/tmp/converted';
@@ -52,112 +54,130 @@ beforeEach(() => {
   mocks.convertQoderPlugin.mockResolvedValue({ convertedDir });
 });
 
-describe('convertCompatibleExtension', () => {
-  // Dispatcher order: native → Claude(marketplace/standalone) → Gemini → Qoder.
-  // "single" rows assert each converter wins alone; "priority" rows assert the
-  // higher-ranked converter wins when both are present.
+describe('detectManifest', () => {
   it.each([
-    // single-manifest routing
     {
-      name: 'native manifest',
-      native: true,
-      claude: null,
-      gemini: false,
-      qoder: false,
-      expected: 'QwenCode',
-    },
-    {
-      name: 'Claude marketplace manifest',
-      native: false,
+      name: 'Claude marketplace',
       claude: 'marketplace',
       gemini: false,
       qoder: false,
-      expected: 'Claude',
+      expected: { source: 'Claude', kind: 'marketplace' },
     },
     {
-      name: 'Claude standalone manifest',
-      native: false,
+      name: 'Claude standalone',
       claude: 'standalone',
       gemini: false,
       qoder: false,
-      expected: 'Claude',
+      expected: { source: 'Claude', kind: 'standalone' },
     },
     {
-      name: 'Gemini manifest',
-      native: false,
+      name: 'Gemini',
       claude: null,
       gemini: true,
       qoder: false,
-      expected: 'Gemini',
+      expected: { source: 'Gemini' },
     },
     {
-      name: 'Qoder manifest',
-      native: false,
+      name: 'Qoder',
       claude: null,
       gemini: false,
       qoder: true,
-      expected: 'Qoder',
-    },
-    // priority pairs
-    {
-      name: 'native beats Claude',
-      native: true,
-      claude: 'marketplace',
-      gemini: false,
-      qoder: false,
-      expected: 'QwenCode',
-    },
-    {
-      name: 'native beats Gemini',
-      native: true,
-      claude: null,
-      gemini: true,
-      qoder: false,
-      expected: 'QwenCode',
+      expected: { source: 'Qoder' },
     },
     {
       name: 'Claude beats Gemini',
-      native: false,
-      claude: 'standalone',
+      claude: 'marketplace',
       gemini: true,
       qoder: false,
-      expected: 'Claude',
+      expected: { source: 'Claude', kind: 'marketplace' },
+    },
+    {
+      name: 'Claude beats Qoder',
+      claude: 'marketplace',
+      gemini: false,
+      qoder: true,
+      expected: { source: 'Claude', kind: 'marketplace' },
     },
     {
       name: 'Gemini beats Qoder',
-      native: false,
       claude: null,
       gemini: true,
       qoder: true,
-      expected: 'Gemini',
+      expected: { source: 'Gemini' },
     },
     {
-      name: 'no manifest falls through',
-      native: false,
+      name: 'no manifest',
       claude: null,
       gemini: false,
       qoder: false,
-      expected: 'QwenCode',
+      expected: null,
     },
   ])(
-    'routes a $name to $expected',
-    async ({ native, claude, gemini, qoder, expected }) => {
+    'detects $name',
+    ({ claude, gemini, qoder, expected }) => {
       mocks.isClaudePluginConfig.mockReturnValue(claude);
       mocks.isGeminiExtensionConfig.mockReturnValue(gemini);
-      mocks.existsSync.mockImplementation((p: string) => {
-        if (native && p.endsWith(EXTENSIONS_CONFIG_FILENAME)) return true;
-        if (qoder && p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)))
-          return true;
-        return false;
-      });
+      mocks.existsSync.mockImplementation((p: string) =>
+        qoder ? p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)) : false,
+      );
 
-      const result = await convertCompatibleExtension('/dir', 'my-plugin');
-
-      expect(result.originSource).toBe(expected);
+      expect(detectManifest('/dir')).toEqual(expected);
     },
   );
 
-  it('routes a native extension without probing converters', async () => {
+  it.each([
+    { kind: 'marketplace', expected: { source: 'Claude', kind: 'marketplace' } },
+    { kind: 'standalone', expected: { source: 'Claude', kind: 'standalone' } },
+  ])(
+    'returns Claude when a specified pluginName matches its $kind',
+    ({ kind, expected }) => {
+      mocks.isClaudePluginConfig.mockReturnValue(kind);
+
+      expect(detectManifest('/dir', 'my-plugin')).toEqual(expected);
+    },
+  );
+
+  it('propagates a detection error when pluginName is specified', () => {
+    mocks.isClaudePluginConfig.mockImplementation(() => {
+      throw new Error('Plugin "my-plugin" not found');
+    });
+
+    expect(() => detectManifest('/dir', 'my-plugin')).toThrow(
+      'Plugin "my-plugin" not found',
+    );
+  });
+
+  it.each([
+    {
+      name: 'Gemini',
+      gemini: true,
+      qoder: false,
+      expected: { source: 'Gemini' },
+    },
+    {
+      name: 'Qoder',
+      gemini: false,
+      qoder: true,
+      expected: { source: 'Qoder' },
+    },
+  ])(
+    'falls through to $name when Claude detection fails without pluginName',
+    ({ gemini, qoder, expected }) => {
+      mocks.isClaudePluginConfig.mockImplementation(() => {
+        throw new Error('Invalid plugin manifest');
+      });
+      mocks.isGeminiExtensionConfig.mockReturnValue(gemini);
+      mocks.existsSync.mockImplementation((p: string) =>
+        qoder ? p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)) : false,
+      );
+
+      expect(detectManifest('/dir')).toEqual(expected);
+    },
+  );
+});
+
+describe('convertCompatibleExtension', () => {
+  it('returns a native extension without probing converters', async () => {
     mocks.existsSync.mockReturnValue(true);
 
     const result = await convertCompatibleExtension('/dir');
@@ -167,25 +187,63 @@ describe('convertCompatibleExtension', () => {
     expect(mocks.isGeminiExtensionConfig).not.toHaveBeenCalled();
   });
 
-  it('throws when pluginName is not listed in an existing marketplace', async () => {
-    mocks.isClaudePluginConfig.mockImplementation(() => {
-      throw new Error('Plugin my-plugin not found in marketplace.json');
-    });
+  it('converts a detected Claude marketplace to its package', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue('marketplace');
 
-    await expect(
-      convertCompatibleExtension('/dir', 'my-plugin'),
-    ).rejects.toThrow('Plugin my-plugin not found in marketplace.json');
+    const result = await convertCompatibleExtension('/dir', 'my-plugin');
+
+    expect(result.originSource).toBe('Claude');
+    expect(result.extensionDir).toBe(convertedDir);
+    expect(mocks.convertClaudePluginPackage).toHaveBeenCalledWith(
+      '/dir',
+      'my-plugin',
+      undefined,
+      undefined,
+    );
   });
 
-  it('falls back to Gemini when the Claude manifest is defective', async () => {
-    mocks.isClaudePluginConfig.mockImplementation(() => {
-      throw new Error('defective claude manifest');
-    });
+  it('converts a detected Claude standalone plugin', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue('standalone');
+
+    const result = await convertCompatibleExtension('/dir');
+
+    expect(result.originSource).toBe('Claude');
+    expect(mocks.convertClaudePluginStandalone).toHaveBeenCalledWith('/dir');
+  });
+
+  it('converts a detected Gemini extension', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue(null);
     mocks.isGeminiExtensionConfig.mockReturnValue(true);
 
     const result = await convertCompatibleExtension('/dir');
 
     expect(result.originSource).toBe('Gemini');
     expect(mocks.convertGeminiExtensionPackage).toHaveBeenCalledWith('/dir');
+  });
+
+  it('converts a detected Qoder plugin', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue(null);
+    mocks.isGeminiExtensionConfig.mockReturnValue(false);
+    mocks.existsSync.mockImplementation((p: string) =>
+      p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)),
+    );
+
+    const result = await convertCompatibleExtension('/dir');
+
+    expect(result.originSource).toBe('Qoder');
+    expect(mocks.convertQoderPlugin).toHaveBeenCalledWith('/dir');
+  });
+
+  it('propagates a conversion failure for a matched manifest', async () => {
+    mocks.isClaudePluginConfig.mockReturnValue('marketplace');
+    mocks.convertClaudePluginPackage.mockRejectedValue(
+      new Error('clone failed'),
+    );
+    mocks.isGeminiExtensionConfig.mockReturnValue(true);
+
+    await expect(
+      convertCompatibleExtension('/dir', 'my-plugin'),
+    ).rejects.toThrow('clone failed');
+    expect(mocks.convertGeminiExtensionPackage).not.toHaveBeenCalled();
   });
 });

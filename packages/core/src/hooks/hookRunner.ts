@@ -231,18 +231,18 @@ export class HookRunner {
   ): ShellConfiguration {
     const globalConfig = getShellConfiguration();
 
+    // The powershell config is shared by the explicit-shell and the
+    // cmd-fallback branches below, so both stay in sync.
+    const powershellConfig: ShellConfiguration = {
+      shell: 'powershell',
+      executable: 'powershell',
+      argsPrefix: ['-NoProfile', '-Command'],
+    };
+
     // If hook specifies a shell, use it
     if (hookConfig.shell) {
-      const shellType: ShellType =
-        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
-
-      // Return configuration for the specified shell type
-      if (shellType === 'powershell') {
-        return {
-          shell: 'powershell',
-          executable: 'powershell',
-          argsPrefix: ['-NoProfile', '-Command'],
-        };
+      if (hookConfig.shell === 'powershell') {
+        return powershellConfig;
       }
 
       // For bash, use global config's executable path or fallback
@@ -257,11 +257,7 @@ export class HookRunner {
     // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
     // quoted path fails; powershell strips them natively.
     if (globalConfig.shell === 'cmd') {
-      return {
-        shell: 'powershell',
-        executable: 'powershell',
-        argsPrefix: ['-NoProfile', '-Command'],
-      };
+      return powershellConfig;
     }
     return globalConfig;
   }
@@ -595,6 +591,30 @@ export class HookRunner {
         shellConfig.shell,
       );
 
+      // PowerShell only runs a bare-quoted path via the call operator; the
+      // cmd→powershell fallback must `& ` it or the path is echoed and never
+      // runs. An explicit powershell shell with a bare-quoted command is a
+      // config error.
+      let resolvedCommand = command;
+      if (shellConfig.shell === 'powershell' && /^\s*"/.test(command)) {
+        if (hookConfig.shell === 'powershell') {
+          const errorMessage =
+            'Command is a bare-quoted path for an explicit powershell shell; prefix it with the call operator (&) or add arguments';
+          debugLogger.warn(
+            `Hook configuration error (non-fatal): ${errorMessage}`,
+          );
+          resolve({
+            hookConfig,
+            eventName,
+            success: false,
+            error: new Error(errorMessage),
+            duration: Date.now() - startTime,
+          });
+          return;
+        }
+        resolvedCommand = `& ${command}`;
+      }
+
       const env = {
         // Hook commands are child processes launched on the agent's behalf,
         // so they must not inherit Qwen-internal daemon secrets.
@@ -608,7 +628,7 @@ export class HookRunner {
 
       const child = spawn(
         shellConfig.executable,
-        [...shellConfig.argsPrefix, command],
+        [...shellConfig.argsPrefix, resolvedCommand],
         {
           env,
           cwd: input.cwd,

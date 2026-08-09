@@ -1092,7 +1092,11 @@ describe('HookRunner', () => {
       const spawnArgs = mockSpawn.mock.calls[0];
       // Should use powershell executable with -NoProfile
       expect(spawnArgs[0]).toBe('powershell');
-      expect(spawnArgs[1]).toEqual(['-NoProfile', '-Command', expect.any(String)]);
+      expect(spawnArgs[1]).toEqual([
+        '-NoProfile',
+        '-Command',
+        expect.any(String),
+      ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
 
@@ -1107,13 +1111,108 @@ describe('HookRunner', () => {
       try {
         mockSpawn.mockImplementation(() => createMockProcess(0));
         await hookRunner.executeHook(
-          { type: HookType.Command, command: 'echo test', source: HooksConfigSource.Project },
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
           HookEventName.PreToolUse,
           createMockInput(),
         );
         const spawnArgs = mockSpawn.mock.calls[0];
         expect(spawnArgs[0]).toBe('powershell');
-        expect(spawnArgs[1]).toEqual(['-NoProfile', '-Command', expect.any(String)]);
+        expect(spawnArgs[1]).toEqual([
+          '-NoProfile',
+          '-Command',
+          expect.any(String),
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('prefixes a bare-quoted command with the call operator on the cmd fallback', async () => {
+      const spy = vi
+        .spyOn(shellUtils, 'getShellConfiguration')
+        .mockReturnValue({
+          executable: 'cmd.exe',
+          argsPrefix: ['/d', '/s', '/c'],
+          shell: 'cmd',
+        });
+      try {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: '"C:/Program Files/My App/setup.cmd"',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const spawnArgs = mockSpawn.mock.calls[0];
+        expect(spawnArgs[0]).toBe('powershell');
+        expect(spawnArgs[1][0]).toBe('-NoProfile');
+        expect(spawnArgs[1][2]).toBe('& "C:/Program Files/My App/setup.cmd"');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('errors on a bare-quoted command with an explicit powershell shell', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess(0));
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: '"C:/Program Files/App/x.cmd"',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('bare-quoted path');
+    });
+
+    it('uses the same powershell config for explicit shell and cmd fallback', async () => {
+      const spy = vi
+        .spyOn(shellUtils, 'getShellConfiguration')
+        .mockReturnValue({
+          executable: 'cmd.exe',
+          argsPrefix: ['/d', '/s', '/c'],
+          shell: 'cmd',
+        });
+      try {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        // Explicit shell
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'Write-Output explicit',
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const explicitArgs = mockSpawn.mock.calls[0][1];
+        // cmd fallback
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'Write-Output fallback',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const fallbackArgs = mockSpawn.mock.calls[1][1];
+        // Both run the same executable with the same argsPrefix
+        // (-NoProfile -Command), differing only in the trailing command string.
+        expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
+        expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
       } finally {
         spy.mockRestore();
       }

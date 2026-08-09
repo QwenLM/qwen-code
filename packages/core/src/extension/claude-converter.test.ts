@@ -227,12 +227,14 @@ describe('isClaudePluginConfig', () => {
       plugins: [{ name: 'other', source: './' }],
     });
     expect(() => isClaudePluginConfig(testDir, 'missing')).toThrow(
-      'Plugin missing not found in marketplace.json',
+      /not found: marketplace\.json does not list "missing"/,
     );
   });
 
-  it('returns null when there is no Claude manifest', () => {
-    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBeNull();
+  it('throws when pluginName is given but no Claude manifest exists', () => {
+    expect(() => isClaudePluginConfig(testDir, 'test-plugin')).toThrow(
+      /Plugin "test-plugin" not found/,
+    );
   });
 
   it('classifies a standalone plugin via plugin.json without pluginName', () => {
@@ -247,16 +249,16 @@ describe('isClaudePluginConfig', () => {
     );
   });
 
-  it('returns null for unparseable manifests', () => {
+  it('throws for unparseable manifests', () => {
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
     fs.writeFileSync(
       path.join(testDir, '.claude-plugin', 'plugin.json'),
       '{',
     );
-    expect(isClaudePluginConfig(testDir)).toBeNull();
+    expect(() => isClaudePluginConfig(testDir)).toThrow(/Invalid/);
   });
 
-  it('returns null when a standalone manifest symlinks outside the package', () => {
+  it('throws when a standalone manifest symlinks outside the package', () => {
     const outside = path.join(
       path.dirname(testDir),
       `${path.basename(testDir)}-outside.json`,
@@ -265,7 +267,7 @@ describe('isClaudePluginConfig', () => {
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
     fs.symlinkSync(outside, path.join(testDir, '.claude-plugin', 'plugin.json'));
 
-    expect(isClaudePluginConfig(testDir)).toBeNull();
+    expect(() => isClaudePluginConfig(testDir)).toThrow(/symlink outside/);
     fs.rmSync(outside, { force: true });
   });
 });

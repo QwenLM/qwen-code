@@ -24,6 +24,9 @@ import type {
   ExtensionNetworkPolicy,
   ExtensionOriginSource,
 } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('Extension:converter');
 
 export const SUPPORTED_EXTENSION_MANIFESTS = [
   EXTENSIONS_CONFIG_FILENAME,
@@ -32,6 +35,50 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
   '.claude-plugin/plugin.json',
   QODER_PLUGIN_MANIFEST,
 ] as const;
+
+/**
+ * Detects the applicable manifest format so {@link convertCompatibleExtension}
+ * can route to the right converter. A specified pluginName that is defective
+ * or missing is a hard error (the user asked for a specific plugin); any other
+ * detection failure is logged and we fall through to the next format.
+ * @param extensionDir The extension directory to probe
+ * @param pluginName When provided, a specific marketplace/standalone plugin
+ * @returns The first matching manifest, or null when none applies
+ */
+export function detectManifest(
+  extensionDir: string,
+  pluginName?: string,
+):
+  | { source: 'Claude'; kind: 'standalone' | 'marketplace' }
+  | { source: 'Gemini' }
+  | { source: 'Qoder' }
+  | null {
+  let kind: 'standalone' | 'marketplace' | null = null;
+  try {
+    kind = isClaudePluginConfig(extensionDir, pluginName);
+  } catch (error) {
+    if (pluginName) throw error;
+    debugLogger.warn(
+      `Claude detection failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (kind) return { source: 'Claude', kind };
+  try {
+    if (isGeminiExtensionConfig(extensionDir)) return { source: 'Gemini' };
+  } catch (error) {
+    debugLogger.warn(
+      `Gemini detection failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    return { source: 'Qoder' };
+  }
+  return null;
+}
 
 export async function convertCompatibleExtension(
   extensionDir: string,
@@ -53,11 +100,14 @@ export async function convertCompatibleExtension(
     signal?.throwIfAborted();
     return { extensionDir, originSource: 'QwenCode', externalContent: false };
   }
-  // Try Claude first; a defective manifest is recorded and we fall back.
-  let claudeError: unknown;
-  try {
-    const kind = isClaudePluginConfig(extensionDir, pluginName);
-    if (kind === 'marketplace') {
+  const detected = detectManifest(extensionDir, pluginName);
+  if (!detected) {
+    signal?.throwIfAborted();
+    return { extensionDir, originSource: 'QwenCode', externalContent: false };
+  }
+  // A matched manifest that fails to convert (clone/network) propagates.
+  if (detected.source === 'Claude') {
+    if (detected.kind === 'marketplace') {
       signal?.throwIfAborted();
       const converted = await convertClaudePluginPackage(
         extensionDir,
@@ -71,20 +121,15 @@ export async function convertCompatibleExtension(
         externalContent: converted.externalContent,
       };
     }
-    if (kind === 'standalone') {
-      signal?.throwIfAborted();
-      return {
-        extensionDir: (await convertClaudePluginStandalone(extensionDir))
-          .convertedDir,
-        originSource: 'Claude',
-        externalContent: false,
-      };
-    }
-  } catch (error) {
-    claudeError = error;
+    signal?.throwIfAborted();
+    return {
+      extensionDir: (await convertClaudePluginStandalone(extensionDir))
+        .convertedDir,
+      originSource: 'Claude',
+      externalContent: false,
+    };
   }
-  // Fall back to Gemini (matches the pre-merge ordering where Gemini precedes Qoder).
-  if (isGeminiExtensionConfig(extensionDir)) {
+  if (detected.source === 'Gemini') {
     signal?.throwIfAborted();
     return {
       extensionDir: (await convertGeminiExtensionPackage(extensionDir))
@@ -93,17 +138,10 @@ export async function convertCompatibleExtension(
       externalContent: false,
     };
   }
-  // Fall back to Qoder.
-  if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
-    signal?.throwIfAborted();
-    return {
-      extensionDir: (await convertQoderPlugin(extensionDir)).convertedDir,
-      originSource: 'Qoder',
-      externalContent: false,
-    };
-  }
-  // Nothing matched: surface the Claude manifest error if one occurred.
-  if (claudeError) throw claudeError;
   signal?.throwIfAborted();
-  return { extensionDir, originSource: 'QwenCode', externalContent: false };
+  return {
+    extensionDir: (await convertQoderPlugin(extensionDir)).convertedDir,
+    originSource: 'Qoder',
+    externalContent: false,
+  };
 }

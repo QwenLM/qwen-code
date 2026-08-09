@@ -33,25 +33,43 @@ export function realPathWithin(target: string, root: string): boolean {
   }
 }
 
-/** Reads a package-relative JSON manifest, or null when absent/unparseable/escaping. */
+/**
+ * Reads a package-relative JSON manifest. Returns null when the file is
+ * absent; throws a precise error when it exists but is unparseable, is not a
+ * JSON object, or resolves through a symlink outside the package. Callers use
+ * null to mean "no such manifest" and rely on the throw to surface a defective
+ * one instead of silently treating it as absent.
+ * @param extensionDir The extension package directory
+ * @param filename The manifest filename relative to the package
+ * @returns The parsed manifest object, or null when absent
+ */
 export function readExtensionManifest(
   extensionDir: string,
   filename: string,
 ): Record<string, unknown> | null {
   const filePath = path.join(extensionDir, filename);
-  if (!fs.existsSync(filePath) || !realPathWithin(filePath, extensionDir)) {
+  if (!fs.existsSync(filePath)) {
     return null;
   }
+  if (!realPathWithin(filePath, extensionDir)) {
+    throw new Error(
+      `${filename} at ${filePath} resolves through a symlink outside the package`,
+    );
+  }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    return typeof parsed === 'object' &&
-      parsed !== null &&
-      !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (error) {
+    throw new Error(
+      `Invalid ${filename} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `Invalid ${filename} at ${filePath}: expected a JSON object`,
+    );
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /**

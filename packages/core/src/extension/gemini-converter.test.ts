@@ -166,7 +166,7 @@ describe('isGeminiExtensionConfig', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue('null');
 
-    expect(isGeminiExtensionConfig(mockDir)).toBe(false);
+    expect(() => isGeminiExtensionConfig(mockDir)).toThrow(/expected a JSON object/);
   });
 
   it('should return false for config missing required fields', () => {
@@ -200,10 +200,10 @@ describe('isGeminiExtensionConfig', () => {
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     // The config path resolves outside the extension dir (symlink escape);
-    // detection must refuse to read it and report "not a Gemini extension".
+    // detection must refuse to read it and report the escape.
     vi.mocked(fs.realpathSync).mockReturnValueOnce('/outside/path');
 
-    expect(isGeminiExtensionConfig(mockDir)).toBe(false);
+    expect(() => isGeminiExtensionConfig(mockDir)).toThrow(/symlink outside/);
   });
 });
 

@@ -935,22 +935,40 @@ export function isClaudePluginConfig(
   extensionDir: string,
   pluginName?: string,
 ): 'standalone' | 'marketplace' | null {
-  // pluginName given = user explicitly chose a marketplace plugin.
+  // pluginName given = user explicitly chose a plugin. Any miss is a hard
+  // error (never fall through to another manifest), so collect every reason
+  // and throw one precise diagnostic.
   if (pluginName) {
     const m = readExtensionManifest(
       extensionDir,
       '.claude-plugin/marketplace.json',
     );
-    if (m) {
-      if (
-        Array.isArray(m['plugins']) &&
-        m['plugins'].some((p) => (p as { name?: string }).name === pluginName)
-      ) {
-        return 'marketplace';
-      }
-      throw new Error(`Plugin ${pluginName} not found in marketplace.json`);
+    const reasons: string[] = [];
+    if (
+      m &&
+      Array.isArray(m['plugins']) &&
+      m['plugins'].some((p) => (p as { name?: string }).name === pluginName)
+    ) {
+      return 'marketplace';
     }
-    // No marketplace.json — fall through to the standalone probe.
+    reasons.push(
+      m
+        ? `marketplace.json does not list "${pluginName}"`
+        : 'marketplace.json is absent',
+    );
+
+    const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');
+    if (p) {
+      const actualName =
+        typeof p['name'] === 'string' ? p['name'] : '(missing "name")';
+      if (actualName === pluginName) {
+        return 'standalone';
+      }
+      reasons.push(`standalone plugin.json is named "${actualName}"`);
+    } else {
+      reasons.push('standalone plugin.json is absent');
+    }
+    throw new Error(`Plugin "${pluginName}" not found: ${reasons.join('; ')}`);
   }
   // No pluginName = probe a single-source standalone plugin.
   const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');
