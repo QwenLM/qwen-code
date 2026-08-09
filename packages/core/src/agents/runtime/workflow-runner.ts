@@ -273,8 +273,27 @@ export class WorkflowRunner {
       journal
         ? async () => {
             try {
+              // A failed checkpoint is deliberately NOT asserted here, unlike
+              // the initial transition. The terminal paths already tolerate
+              // the identical failed checkpoint — they flush and persist
+              // whatever comes back — so asserting only here meant a journal
+              // that had outgrown `MAX_WORKFLOW_JOURNAL_BYTES`, or had ever
+              // seen one transient append failure (the sticky `writeError`
+              // latch), turned the user's next pause into a hard kill of a
+              // healthy run: in-flight and queued agents aborted, the run
+              // lost to "Failed to persist workflow pause checkpoint". That
+              // also contradicted the cap's own documented contract, which
+              // promises resumability is lost while the journal stays intact
+              // on disk.
+              //
+              // `writeWorkflowManifest` turns a non-'complete' checkpoint
+              // into `canResume: false` plus the journal's own reason, so the
+              // pause still lands durably and advertises itself honestly.
+              // The kill below is reserved for the manifest write itself
+              // failing, which is the case that leaves no durable record of
+              // the pause at all — and for `flush()` throwing outright,
+              // where there is no checkpoint to degrade with.
               const checkpoint = await journal.flush();
-              assertCompleteCheckpoint(checkpoint, 'pause');
               await persistManifest('paused', checkpoint);
             } catch (error) {
               fatalPersistenceError = `Failed to persist workflow pause checkpoint: ${extractErrorMessage(error)}`;
@@ -501,9 +520,13 @@ function serializedArgs(args: unknown): string | undefined {
   }
 }
 
+// Only the initial transition asserts. The pause barrier and both terminal
+// paths degrade on a failed checkpoint instead (canResume: false plus the
+// journal's reason); registration is the one point with no manifest to
+// degrade into, so it is the one point that still refuses to start.
 function assertCompleteCheckpoint(
   checkpoint: JournalCheckpoint,
-  transition: 'initial' | 'pause',
+  transition: 'initial',
 ): void {
   if (checkpoint.integrity === 'complete') return;
   throw new Error(

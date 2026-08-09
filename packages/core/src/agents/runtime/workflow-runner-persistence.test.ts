@@ -347,6 +347,66 @@ describe('WorkflowRunner persistence', () => {
     expect((await fs.lstat(blockedManifest)).isDirectory()).toBe(true);
   });
 
+  it('degrades a pause to canResume:false instead of killing the run when the checkpoint fails', async () => {
+    // The contrast to the test above: there the manifest write itself failed,
+    // so there was no durable record of the pause and killing the run is right.
+    // Here the write is fine and only the checkpoint came back 'failed' — which
+    // is what both trigger classes look like, a journal grown past
+    // MAX_WORKFLOW_JOURNAL_BYTES and the sticky `writeError` latch left by one
+    // transient append failure, since flush() folds each into integrity
+    // 'failed' rather than throwing. The terminal paths already accept exactly
+    // this checkpoint, so asserting completeness only on the pause path turned
+    // the user's next pause into a hard kill of a healthy run — aborting its
+    // in-flight and queued agents — and contradicted the cap's own documented
+    // promise that resumability is lost while the journal stays intact.
+    const { config, registry } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: null,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    // Installed after start(), so the initial checkpoint — the one transition
+    // that legitimately still refuses — is untouched.
+    const originalFlush = WorkflowJournal.prototype.flush;
+    vi.spyOn(WorkflowJournal.prototype, 'flush').mockImplementation(
+      async function (this: WorkflowJournal) {
+        const checkpoint = await originalFlush.call(this);
+        return {
+          ...checkpoint,
+          integrity: 'failed' as const,
+          error: 'Workflow journal is too large',
+        };
+      },
+    );
+
+    expect(handle.pause()).toBe(true);
+    finishDispatch?.('done');
+
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.status).toBe('paused'),
+    );
+    expect(registry.get(handle.runId)?.error).toBeUndefined();
+
+    const manifest = await readWorkflowManifest(config, handle.runId);
+    expect(manifest).toMatchObject({ status: 'paused', canResume: false });
+    expect(manifest.resumeBlockedReason).toMatch(/too large/i);
+    expect(manifest.journal.integrity).toBe('failed');
+
+    // Drain the run so the suite leaves nothing pending.
+    vi.restoreAllMocks();
+    expect(handle.resume()).toBe(true);
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+  });
+
   it('does not publish success when the terminal manifest cannot be replaced', async () => {
     const { config, registry, storage } = await harness();
     let finishDispatch: ((value: string) => void) | undefined;

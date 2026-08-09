@@ -98,7 +98,9 @@ export class WorkflowDispatchScheduler {
   }
 
   resume(): boolean {
-    if (this.state !== 'paused' || this.signal?.aborted) return false;
+    if (this.state !== 'paused' || this.settling || this.signal?.aborted) {
+      return false;
+    }
     this.setState('running');
     while (this.gateWaiters.length > 0) {
       this.gateWaiters.shift()!.resolve();
@@ -129,10 +131,17 @@ export class WorkflowDispatchScheduler {
    * that exists at call time. Settlement then awaits an fsync + a manifest
    * write, and a `pause()` landing anywhere in that window would start a NEW
    * barrier whose 'paused' + canResume write races the terminal one. So the
-   * latch is set here — before the join — and `pause()`/`finishPause()` both
-   * refuse once it is set. A settling run is no longer pausable; `pause()`
-   * reporting false surfaces as "could not be paused because its state
-   * changed", which is exactly what happened.
+   * latch is set here — before the join — and `pause()`, `finishPause()` and
+   * `resume()` all refuse once it is set. A settling run is no longer
+   * pausable; `pause()` reporting false surfaces as "could not be paused
+   * because its state changed", which is exactly what happened.
+   *
+   * `resume()` is the third entrance and refuses for the mirror-image reason:
+   * a run already paused when settlement latches would otherwise flip back to
+   * 'running' inside the terminal write window and `pump()` would dispatch a
+   * queued agent that settlement has forbidden — real token spend and tool
+   * side effects, immediately aborted by the settling caller's `finally`, and
+   * a `true` ack handed to a client for a run that is going terminal.
    */
   beginSettling(): Promise<void> {
     this.settling = true;

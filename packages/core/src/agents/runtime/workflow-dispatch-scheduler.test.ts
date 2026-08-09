@@ -372,6 +372,46 @@ describe('WorkflowDispatchScheduler', () => {
     expect(scheduler.snapshot().state).toBe('pausing');
   });
 
+  it('refuses resume() once settlement has begun, leaving queued work undispatched', async () => {
+    // The third entrance to the latch. A run paused before settlement latched
+    // would otherwise flip back to 'running' inside the terminal write window,
+    // and pump() would dispatch a queued agent that settlement has already
+    // forbidden — real token spend and tool side effects, killed moments later
+    // by the settling caller's abort, plus a `true` ack for a terminal run.
+    let finish: (() => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      new AbortController().signal,
+      undefined,
+      async () => {},
+    );
+
+    const running = scheduler.run(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    // Second job stays queued behind the concurrency limit of 1.
+    const queued = vi.fn(async () => {});
+    void scheduler.run(queued);
+
+    expect(scheduler.pause()).toBe(true);
+    finish?.();
+    await running;
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    expect(scheduler.snapshot().queued).toBe(1);
+
+    await scheduler.beginSettling();
+
+    expect(scheduler.resume()).toBe(false);
+    expect(scheduler.snapshot().state).toBe('paused');
+    expect(scheduler.snapshot().queued).toBe(1);
+    expect(queued).not.toHaveBeenCalled();
+  });
+
   it('refuses pause() after the abort signal fired on a running scheduler', async () => {
     // Symmetric guard: an aborted running run must not transition into
     // pausing/paused.
