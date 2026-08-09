@@ -19,7 +19,10 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type {
+  BaseLlmClient,
+  GenerateTextOptions,
+} from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -2200,6 +2203,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     enableCacheControl?: boolean;
     contextWindowSize?: number | null;
     lastPromptTokenCount?: number;
+    lastPromptTokenCountIsEstimated?: boolean;
     lastOutputTokenCount?: number;
   }): {
     chat: GeminiChat;
@@ -2230,6 +2234,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
       getLastPromptTokenCount: vi
         .fn()
         .mockReturnValue(options?.lastPromptTokenCount ?? 180_000),
+      isLastPromptTokenCountEstimated: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCountIsEstimated ?? false),
       getLastOutputTokenCount: vi
         .fn()
         .mockReturnValue(options?.lastOutputTokenCount ?? 0),
@@ -2277,19 +2284,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(generateText).toHaveBeenCalledTimes(1);
-    const request = generateText.mock.calls[0]![0] as {
-      contents: Content[];
-      systemInstruction?: string;
-      config?: {
-        tools?: unknown;
-        thinkingConfig?: {
-          includeThoughts?: boolean;
-          thinkingBudget?: number;
-        };
-        maxOutputTokens?: number;
-      };
-    };
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
     expect(request.systemInstruction).toBe(mainSystemInstruction);
+    expect(request.promptCacheSharing).toBe(true);
     expect(request.config?.tools).toBe(tools);
     expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
     expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
@@ -2380,6 +2377,76 @@ describe('ChatCompressionService.compress cache sharing', () => {
     },
   );
 
+  it.each([AuthType.USE_GEMINI, AuthType.USE_VERTEX_AI])(
+    'uses cache sharing for Google GenAI through %s',
+    async (authType) => {
+      const { chat, config, generateText } = makeFixture({ authType });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as {
+        config?: { thinkingConfig?: { includeThoughts?: boolean } };
+      };
+      expect(request.config?.thinkingConfig?.includeThoughts).toBe(false);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps implicit Google cache sharing enabled when explicit cache control is disabled', async () => {
+    const { chat, config, generateText } = makeFixture({
+      authType: AuthType.USE_GEMINI,
+      enableCacheControl: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'https://api.openai.com/v1',
+    'https://api.deepseek.com/v1',
+    'https://proxy.example/v1',
+  ])(
+    'uses cache sharing for OpenAI-compatible endpoint %s',
+    async (baseUrl) => {
+      const { chat, config, generateText } = makeFixture({
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+      });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+      expect(request.promptCacheSharing).toBe(true);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
   it('appends a pending tool result after the cached history and before the directive', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'read the file' }] },
@@ -2445,6 +2512,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCountIsEstimated).toBe(true);
     expect(result.info.newTokenCount).toBeGreaterThan(100_000);
   });
 
@@ -2802,21 +2870,38 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(coldSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('skips cache sharing when the token-count anchor is estimate-derived', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 180_000,
+      lastPromptTokenCountIsEstimated: true,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       name: 'a distinct compaction model',
       options: { compactionModel: 'compact-model' },
-    },
-    {
-      name: 'a provider without explicit cache support',
-      options: { authType: AuthType.USE_GEMINI },
-    },
-    {
-      name: 'a non-DashScope OpenAI-compatible provider',
-      options: {
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://api.openai.com/v1',
-      },
     },
     {
       name: 'disabled cache control',

@@ -276,6 +276,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     Buffer.from(JSON.stringify(state), 'utf8').toString('base64url'),
   ),
   SessionTranscriptReader: vi.fn(),
+  isReplayTurnStartType: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isReplayTurnStartType,
+  findBoundaryAtOrBefore: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).findBoundaryAtOrBefore,
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -827,13 +833,19 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
     .fn()
     .mockReturnValue('## Context Usage\nformatted'),
 }));
-vi.mock('./session/Session.js', () => ({
-  Session: vi.fn(),
-  buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
-    availableCommands: [],
-    availableSkills: [],
-  }),
-}));
+vi.mock('./session/Session.js', () => {
+  const SessionMock = vi.fn();
+  // The agent's active-work reporter walks every live Session on a timer, so
+  // even tests that never look at reporting need this to exist on instances.
+  SessionMock.prototype.collectActiveWorkHolds = () => [];
+  return {
+    Session: SessionMock,
+    buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    }),
+  };
+});
 vi.mock('../utils/languageUtils.js', () => ({
   updateOutputLanguageFile: vi.fn(),
   writeOutputLanguageAndRegisterPath: vi.fn(
@@ -925,7 +937,7 @@ import type {
   McpServer,
   ResumeSessionResponse,
 } from '@agentclientprotocol/sdk';
-import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
+import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { resetTrustedFoldersForTesting } from '../config/trustedFolders.js';
 import {
@@ -952,6 +964,10 @@ import {
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
@@ -2560,6 +2576,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('merges active-work negotiation and enables Session reporting', async () => {
+    await setupSessionMocks('active-work-session');
+    initializeAcpStartupProfiler();
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+          v: CHANNEL_STARTUP_PROFILE_VERSION,
+        },
+        [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          // Absurd cadence: the child must answer with the clamped value it
+          // will actually use, not echo this back.
+          intervalMs: 1,
+        },
+      },
+    })) as { _meta?: Record<string, unknown> };
+
+    expect(response._meta).toMatchObject({
+      [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+        v: CHANNEL_STARTUP_PROFILE_VERSION,
+      },
+      [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+        v: ACTIVE_WORK_HEARTBEAT_VERSION,
+        intervalMs: ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
+        categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // The Session gets a change callback, not a cadence: one reporter per
+    // channel owns the timing.
+    expect(typeof vi.mocked(Session).mock.calls.at(-1)?.[4]).toBe('function');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('runs text workspace generation through the shared transport', async () => {
     mockExecuteGeneration.mockImplementation(
       async (
@@ -2994,6 +3059,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects invalid sessionId meta before settings access without closing the child', async () => {
+    await setupSessionMocks('meta-session');
+    const { agent, agentPromise } = await bootAcpAgent();
+    vi.mocked(loadSettings).mockClear();
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: { 'qwen-code/sessionId': '../../escape' },
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'invalid_session_id', httpStatus: 400 },
+    });
+    expect(loadSettings).not.toHaveBeenCalled();
+    expect(loadCliConfig).not.toHaveBeenCalled();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(loadCliConfig).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a concurrent duplicate requested sessionId without closing the child', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(loadCliConfig)
+      .mockImplementationOnce(async () => {
+        await firstGate;
+        return innerConfig as unknown as Config;
+      })
+      .mockResolvedValue(innerConfig as unknown as Config);
+    const { agent, agentPromise } = await bootAcpAgent();
+    const request = {
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: { 'qwen-code/sessionId': sessionId },
+    };
+
+    const first = agent.newSession(request);
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+    await expect(agent.newSession(request)).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_id_conflict', sessionId },
+    });
+    expect(loadCliConfig).toHaveBeenCalledOnce();
+
+    releaseFirst();
+    await expect(first).resolves.toMatchObject({ sessionId });
+    vi.mocked(innerConfig.getSessionId).mockReturnValue(
+      '550e8400-e29b-41d4-a716-446655440002',
+    );
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).resolves.toBeDefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('maps a duplicate sessionId conflict to a RequestError instead of crashing the child', async () => {
     const conflict = new SessionIdConflictError(
       '550e8400-e29b-41d4-a716-446655440000',
@@ -3014,8 +3145,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await expect(
       agent.newSession({ cwd: '/tmp', mcpServers: [] }),
-    ).rejects.toThrow('already exists');
-    expect(RequestError.invalidParams).toHaveBeenCalled();
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: {
+        errorKind: 'session_id_conflict',
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14373,6 +14509,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         unstable_resumeSession: (
           args: Record<string, unknown>,
         ) => Promise<unknown>;
+        cancel: (args: Record<string, unknown>) => Promise<unknown>;
       })
     | undefined;
 
@@ -14399,6 +14536,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForCloseGateToRelease: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelPendingPrompt: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
       }
@@ -14632,6 +14770,85 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       code: -32002,
       data: { uri: 'session:persisted-missing' },
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each(['load', 'resume'] as const)(
+    '%s normalizes mixed-case caller UUIDs before persisted lookup',
+    async (action) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      innerConfig.getSessionId.mockReturnValue(sessionId);
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: sessionId.toUpperCase(),
+          mcpServers: [],
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        const sessionService = vi.mocked(SessionService).mock.results[0]?.value;
+        expect(sessionService).toBeDefined();
+        expect(sessionService!.sessionExists).toHaveBeenCalledWith(sessionId);
+
+        await agent.cancel({ sessionId: params.sessionId });
+        expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('serializes non-live load and resume before settings or disk work', async () => {
+    const innerConfig = bindRestoreMocks({ sessionExists: true });
+    let releaseExists!: () => void;
+    const existsGate = new Promise<void>((resolve) => {
+      releaseExists = resolve;
+    });
+    const sessionExists = vi.fn(async () => {
+      await existsGate;
+      return true;
+    });
+    const loadSession = vi
+      .fn()
+      .mockImplementation(() => innerConfig.getResumedSessionData());
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({ sessionExists, loadSession }) as unknown as InstanceType<
+          typeof SessionService
+        >,
+    );
+    const { agent, agentPromise } = await spawnAgent();
+    vi.mocked(loadSettings).mockClear();
+    const params = {
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    };
+
+    const first = agent.loadSession(params);
+    await vi.waitFor(() => expect(sessionExists).toHaveBeenCalledOnce());
+    await expect(agent.unstable_resumeSession(params)).rejects.toMatchObject({
+      code: -32602,
+      data: {
+        errorKind: 'session_id_conflict',
+        sessionId: 'persisted-1',
+      },
+    });
+    expect(loadSettings).toHaveBeenCalledOnce();
+    expect(sessionExists).toHaveBeenCalledOnce();
+
+    releaseExists();
+    await expect(first).resolves.toBeDefined();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -15418,6 +15635,184 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
       messages,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession bounds bulk replay expansion inside one long turn', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant',
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-bounded',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      cwd: '/tmp',
+      version: 'test',
+      message: { role: type === 'user' ? 'user' : 'model', parts: [] },
+    });
+    const messages = [makeMessage('u1', null, 'user')];
+    let parent = 'u1';
+    for (let i = 1; i <= 20; i++) {
+      messages.push(makeMessage(`a${i}`, parent, 'assistant'));
+      parent = `a${i}`;
+    }
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      // The alignment walk stays bounded to one extra window instead of
+      // expanding the single long turn into the whole history, and the
+      // client can still page backward.
+      expect(history).toEqual(messages.slice(19));
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-bounded',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<string, { hasMore?: boolean }>;
+    };
+
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession bulk replay extends a mid-pair window to the owning call', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant' | 'tool_result',
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-midpair',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      cwd: '/tmp',
+      version: 'test',
+      message: {
+        role: type === 'assistant' ? ('model' as const) : ('user' as const),
+        parts: [],
+      },
+    });
+    // One call owning a result run; the requested window lands mid-run, so
+    // without pair extension the page would start on an orphaned
+    // tool_result (replaying the completed call as failed).
+    const messages = [
+      makeMessage('u1', null, 'user'),
+      makeMessage('ac1', 'u1', 'assistant'),
+      makeMessage('ar1', 'ac1', 'tool_result'),
+      makeMessage('ar2', 'ar1', 'tool_result'),
+      makeMessage('ar3', 'ar2', 'tool_result'),
+    ];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    let capturedHistory: unknown;
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      capturedHistory = history;
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-midpair',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<
+        string,
+        { hasMore?: boolean; partial?: boolean; replayError?: string }
+      >;
+    };
+
+    // The pageSize-2 window lands on ar2/ar3; pair extension pulls the page
+    // down to the owning call ac1 so it does not start mid-pair.
+    expect(capturedHistory).toEqual(messages.slice(1));
+    expect(
+      response._meta?.['qwen.session.loadReplay']?.partial,
+    ).toBeUndefined();
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession bulk replay passes over mid-turn notification records', async () => {
+    const makeMessage = (
+      uuid: string,
+      parentUuid: string | null,
+      type: 'user' | 'assistant',
+      subtype?: string,
+    ) => ({
+      uuid,
+      parentUuid,
+      sessionId: 'persisted-notification',
+      timestamp: '2026-07-16T00:00:00.000Z',
+      type,
+      ...(subtype !== undefined ? { subtype } : {}),
+      cwd: '/tmp',
+      version: 'test',
+      message: { role: type === 'user' ? 'user' : 'model', parts: [] },
+    });
+    const messages = [
+      makeMessage('u1', null, 'user'),
+      makeMessage('a1', 'u1', 'assistant'),
+      makeMessage('notif', 'a1', 'user', 'notification'),
+      makeMessage('a2', 'notif', 'assistant'),
+      makeMessage('a3', 'a2', 'assistant'),
+    ];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    let capturedHistory: unknown;
+    mockHistoryReplay.mockImplementation(async (_context, history) => {
+      capturedHistory = history;
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-notification',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 2,
+      },
+    })) as {
+      _meta?: Record<
+        string,
+        { hasMore?: boolean; partial?: boolean; replayError?: string }
+      >;
+    };
+
+    // A notification is a mid-turn record, not a turn start: the bounded
+    // alignment passes over it and keeps the trailing window instead of
+    // realigning the page onto it.
+    expect(capturedHistory).toEqual(messages.slice(3));
+    expect(
+      response._meta?.['qwen.session.loadReplay']?.partial,
+    ).toBeUndefined();
+    expect(response._meta?.['qwen.session.loadReplay']?.hasMore).toBe(true);
 
     mockConnectionState.resolve();
     await agentPromise;

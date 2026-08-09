@@ -11,7 +11,11 @@ import {
 import { CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
-import type { DaemonTransport } from './DaemonTransport.js';
+import type {
+  DaemonSseConnectReason,
+  DaemonTransport,
+} from './DaemonTransport.js';
+export type { DaemonSseConnectReason } from './DaemonTransport.js';
 import { RestSseTransport } from './RestSseTransport.js';
 import { DaemonCapabilityMissingError } from './types.js';
 import type {
@@ -157,6 +161,7 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
   DaemonSkillInstallRequest,
   DaemonSkillMutationResult,
@@ -171,6 +176,7 @@ import type {
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
   ExtensionCatalog,
@@ -457,9 +463,23 @@ export class DaemonPendingPromptLimitError extends Error {
   }
 }
 
+export class DaemonSessionIdProtocolError extends Error {
+  constructor(
+    readonly requestedSessionId: string,
+    readonly actualSessionId: string,
+  ) {
+    super(
+      `Daemon returned session "${actualSessionId}" instead of requested session "${requestedSessionId}".`,
+    );
+    this.name = 'DaemonSessionIdProtocolError';
+  }
+}
+
 export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
+
+export const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
 
 export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   return (
@@ -481,6 +501,11 @@ export interface CreateSessionRequest {
    * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
+  /**
+   * UUID v1-v5 to assign to a new thread session. This is creation, not an
+   * idempotent attach; use load/resume after an ambiguous response.
+   */
+  sessionId?: string;
   modelServiceId?: string;
   /**
    * Per-request session-scope override. The production daemon defaults
@@ -604,6 +629,17 @@ export interface SubscribeOptions {
    * frames don't trip the warn / eviction path on the first publish.
    */
   maxQueued?: number;
+  /** Client identity forwarded on REST/SSE subscriptions. */
+  clientId?: string;
+  /** Diagnostic-only reason for opening this REST/SSE connection. */
+  sseConnectReason?: DaemonSseConnectReason;
+  /** Diagnostic-only predecessor of this REST/SSE connection. */
+  previousSseStreamId?: string;
+  /**
+   * Called after a REST/SSE handshake is accepted. The id is undefined when
+   * an older daemon or intermediary omits a valid stream-id response header.
+   */
+  onSseStreamAccepted?: (streamId: string | undefined) => void;
 }
 
 export class DaemonClient {
@@ -1026,7 +1062,7 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     const caps = await this.capabilities();
-    if (!caps.features.includes(capability)) {
+    if (!Array.isArray(caps.features) || !caps.features.includes(capability)) {
       throw new DaemonCapabilityMissingError(
         capability,
         `daemon does not advertise the ${capability} feature`,
@@ -1360,6 +1396,38 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId, mode: 'rest' },
+    );
+  }
+
+  async installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    const query = new URLSearchParams({
+      filename: params.filename,
+      consent: String(params.consent === true),
+    });
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/extensions/install-archive?${query}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/octet-stream' },
+          clientId,
+        ),
+        body: params.archive,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/extensions/install-archive',
+          );
+        }
+        return (await res.json()) as ExtensionInstallResponse;
+      },
+      EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+      'rest',
     );
   }
 
@@ -2219,6 +2287,9 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    if (req.sessionId !== undefined && req.sessionId !== null) {
+      await this.requireCapability('session_id_override');
+    }
     if (req.sourceType !== undefined || req.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -2241,6 +2312,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
           // `sessionScope: '' | null` doesn't get the field silently
@@ -2264,7 +2336,17 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
-        return (await res.json()) as DaemonSession;
+        const session = (await res.json()) as DaemonSession;
+        if (
+          typeof req.sessionId === 'string' &&
+          session.sessionId !== req.sessionId.toLowerCase()
+        ) {
+          throw new DaemonSessionIdProtocolError(
+            req.sessionId.toLowerCase(),
+            session.sessionId,
+          );
+        }
+        return session;
       },
     );
   }
@@ -3123,6 +3205,36 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSkillToggleResult;
+      },
+    );
+  }
+
+  /**
+   * Toggle up to 100 user-invocable skills and return every target outcome.
+   *
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
+   */
+  async setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ skillNames, enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/skills/enable');
+        }
+        return (await res.json()) as DaemonSkillBatchToggleResult;
       },
     );
   }
@@ -4263,6 +4375,10 @@ export class DaemonClient {
       epoch: opts.epoch,
       onEpoch: opts.onEpoch,
       maxQueued: opts.maxQueued,
+      clientId: opts.clientId,
+      sseConnectReason: opts.sseConnectReason,
+      previousSseStreamId: opts.previousSseStreamId,
+      onSseStreamAccepted: opts.onSseStreamAccepted,
       signal: opts.signal,
       connectTimeoutMs: this.fetchTimeoutMs || undefined,
     });
@@ -5813,6 +5929,19 @@ export class WorkspaceDaemonClient {
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
       { enabled },
+      opts?.clientId,
+    );
+  }
+
+  setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return this.post(
+      '/skills/enable',
+      'POST /workspaces/:workspace/skills/enable',
+      { skillNames, enabled },
       opts?.clientId,
     );
   }
