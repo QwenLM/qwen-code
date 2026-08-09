@@ -94,10 +94,16 @@ jobs:
             # succeeded: an API failure must not look like "no self-reported link".
             # The label name is a PATH SEGMENT here, and it contains a slash —
             # unencoded, the request hits …/labels/review/self-reported (404).
-            # `|| true`: the presence check above is not atomic with this
-            # DELETE — if the label was removed in the gap, the 404 only says
-            # the desired end state already holds and must not fail the step.
-            gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" > /dev/null || true
+            # The presence check above is not atomic with this DELETE: if the
+            # label was removed in the gap, the 404 only says the desired end
+            # state already holds and must not fail the step. Any other
+            # failure (403 rate limit, 5xx, network) also keeps the step
+            # green — the job only re-runs on the next PR event — but must
+            # not disappear: without the warning, the log claims "removed"
+            # while the label stays on the PR.
+            if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" 2>&1)"; then
+              [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${LABEL} removal failed — ${REMOVE_ERR}"
+            fi
             echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
           else
             echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL}, api=${API_OK})"

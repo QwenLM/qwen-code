@@ -3288,6 +3288,8 @@ describe('qwen-autofix workflow', () => {
       state = 'OPEN',
       base = 'main',
       author = 'fork-owner',
+      postFails = '',
+      deleteFails = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3307,7 +3309,11 @@ describe('qwen-autofix workflow', () => {
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
             // Label mutations are REST gh api calls (gh pr edit's
             // projectCards lookup errors on older gh builds); record them.
-            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}';`,
+            // The TOGGLE_*_FAILS knobs make the matching call exit 1 with
+            // the knob value on stderr (like a real gh HTTP error), pinning
+            // the block's two failure policies instead of the stub
+            // universally exiting 0.
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3316,7 +3322,16 @@ describe('qwen-autofix workflow', () => {
         writeFileSync(join(dir, 'writes.log'), '');
         const stdout = execFileSync(
           'bash',
-          ['-c', `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`],
+          // -eo pipefail like the runner's bash default: the replay must
+          // reproduce the step's failure semantics — the engage POST is
+          // deliberately loud, and plain `bash -c` would swallow its exit
+          // status.
+          [
+            '-eo',
+            'pipefail',
+            '-c',
+            `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
+          ],
           {
             env: {
               ...process.env,
@@ -3329,6 +3344,8 @@ describe('qwen-autofix workflow', () => {
               TAKEOVER_COMMAND: '@qwen-code /takeover',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
+              TOGGLE_POST_FAILS: postFails,
+              TOGGLE_DELETE_FAILS: deleteFails,
             },
             encoding: 'utf8',
           },
@@ -3464,6 +3481,37 @@ describe('qwen-autofix workflow', () => {
     const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
     expect(closed.writes.trim()).toBe('');
     expect(closed.log).toContain('no longer an open PR');
+    // Failure policies, pinned like the pr-self-report-label suite: the
+    // engage POST is deliberately LOUD — under the runner's -e a failing
+    // apply aborts the step BEFORE the engage ack, so no comment can claim
+    // "engaged" for an unlabeled PR.
+    expect(() => runToggle({ cmd: 'add', postFails: 'HTTP 500' })).toThrow();
+    // The release DELETE tolerates the 404 race (a concurrent removal
+    // already reached the end state): the release ack still posts, no
+    // warning.
+    const releaseRace = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 404: Not Found',
+    });
+    expect(releaseRace.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
+    expect(releaseRace.writes).toContain('takeover-ack released');
+    expect(releaseRace.log).not.toContain('::warning::');
+    // Any other DELETE failure must not drop the release ack either — a
+    // later `/takeover stop` retries the removal — but it MUST warn:
+    // masked, the ack reads "released" while the loop keeps managing the
+    // PR.
+    const releaseFailed = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 500',
+    });
+    expect(releaseFailed.writes).toContain('takeover-ack released');
+    expect(releaseFailed.log).toContain('::warning::');
+    expect(releaseFailed.log).toContain('removal failed');
+    expect(releaseFailed.log).toContain('HTTP 500');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A

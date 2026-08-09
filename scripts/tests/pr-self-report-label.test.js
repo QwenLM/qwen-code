@@ -27,13 +27,19 @@ const runBlock = workflow.jobs.label.steps[0].run;
 
 // The step decides label state from two inputs: the logins that opened the PR's
 // closed issues (gh api graphql) and whether the label is already present (gh pr
-// view). Stub both and record which mutation, if any, it makes.
+// view). Stub both and record which mutation, if any, it makes. The
+// GH_DELETE_FAILS / GH_POST_FAILS knobs make the matching REST call exit 1
+// with the knob value on stderr (shaped like a real gh HTTP error), so BOTH
+// failure policies the workflow introduces are pinned — DELETE tolerance and
+// POST loudness — instead of the catch-all silently exiting 0.
 const GH_STUB = [
   '#!/usr/bin/env bash',
   'echo "gh $*" >> "${CALLS_LOG}"',
   'case "$*" in',
   "  *'api graphql'*) [ \"${GH_API_FAILS:-false}\" = true ] && exit 1; printf '%s\\n' ${GH_ISSUE_AUTHORS:-} ;;",
   "  *'pr view'*labels*) { [ \"${GH_HAS_LABEL:-false}\" = true ] && printf 'true' || printf 'false'; } ;;",
+  '  *\'api -X DELETE\'*) [ -z "${GH_DELETE_FAILS:-}" ] || { printf \'%s\' "${GH_DELETE_FAILS}" >&2; exit 1; } ;;',
+  '  *\'api -X POST\'*) [ -z "${GH_POST_FAILS:-}" ] || { printf \'%s\' "${GH_POST_FAILS}" >&2; exit 1; } ;;',
   '  *) : ;;',
   'esac',
   'exit 0',
@@ -42,13 +48,18 @@ const GH_STUB = [
 // The replayed DELETE URI-encodes the slashed label with a REAL jq — stub it
 // on PATH like gh so the suite never depends on the host having jq (a fresh
 // macOS has none, and the %2F assertion would fail opaquely). Supports only
-// the one form the workflow executes: jq -rn --arg NAME VALUE '$NAME|@uri'.
+// the one form the workflow executes — and ENFORCES it, program included:
+// jq -rn --arg NAME VALUE '$NAME|@uri'. Any other program exits 1, so a
+// mutation of the workflow's filter (e.g. dropping `|@uri`) fails the suite
+// instead of riding the stub's unconditional percent-encoding.
 const JQ_STUB = [
   '#!/usr/bin/env bash',
   'value=""',
+  'prog=""',
   'while [[ $# -gt 0 ]]; do',
-  '  if [[ "$1" == "--arg" ]]; then value="$3"; shift 3; else shift; fi',
+  '  if [[ "$1" == "--arg" ]]; then value="$3"; shift 3; else prog="$1"; shift; fi',
   'done',
+  '[[ "$prog" == \'$l|@uri\' ]] || exit 1',
   'out=""',
   'for ((i = 0; i < ${#value}; i++)); do',
   '  c="${value:i:1}"',
@@ -63,6 +74,8 @@ describe('pr-self-report-label', () => {
     issueAuthors = '',
     hasLabel = false,
     apiFails = false,
+    deleteFails = '',
+    postFails = '',
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'lbl-'));
     const bin = join(dir, 'bin');
@@ -84,6 +97,8 @@ describe('pr-self-report-label', () => {
         GH_ISSUE_AUTHORS: issueAuthors,
         GH_HAS_LABEL: String(hasLabel),
         GH_API_FAILS: String(apiFails),
+        GH_DELETE_FAILS: deleteFails,
+        GH_POST_FAILS: postFails,
       },
       encoding: 'utf8',
     });
@@ -158,12 +173,67 @@ describe('pr-self-report-label', () => {
     ).toMatchObject({ added: false, removed: false });
   });
 
+  it('pins the REST failure policies: 404 race silent, other DELETEs warned, POST loud', () => {
+    // DELETE: the presence check is not atomic with the DELETE — a 404 race
+    // means the desired end state already holds: green, no warning, and the
+    // removal is logged.
+    const race = run({
+      prAuthor: 'alice',
+      issueAuthors: 'bob',
+      hasLabel: true,
+      deleteFails: 'HTTP 404: Not Found (https://api.github.com/…)',
+    });
+    expect(race.removed).toBe(true);
+    expect(race.out).not.toContain('::warning::');
+    // Any other DELETE failure keeps the step green (the job only re-runs
+    // on the next PR event) but MUST surface — a silent run would claim
+    // "removed" while the label stays on the PR.
+    const failed = run({
+      prAuthor: 'alice',
+      issueAuthors: 'bob',
+      hasLabel: true,
+      deleteFails: 'HTTP 500',
+    });
+    expect(failed.removed).toBe(true);
+    expect(failed.out).toContain('::warning::');
+    expect(failed.out).toContain('removal failed');
+    expect(failed.out).toContain('HTTP 500');
+    // POST carries NO tolerance: a label that fails to apply must fail the
+    // step (the runBlock sets -e), not leave the PR unlabeled behind green.
+    expect(() =>
+      run({ prAuthor: 'alice', issueAuthors: 'alice', postFails: 'HTTP 500' }),
+    ).toThrow();
+  });
+
   it('never interpolates PR-controlled data into the run body (env only)', () => {
     // pull_request_target hardening: the author/number/label reach the script
     // only through env, so a crafted title or body cannot inject shell.
     expect(runBlock).not.toMatch(/\$\{\{/);
   });
 });
+
+// Scans one workflow file for `gh pr edit` label mutations. Comments are
+// stripped before matching — a comment QUOTING the banned pattern documents
+// the ban, it does not run it. Backslash continuations are joined so a
+// wrapped flag still counts, and the reported line is the PHYSICAL line
+// where the command starts: indices into the joined text no longer
+// correspond to file lines (every benign join above an offender shifts
+// them).
+function ghPrEditLabelOffenders(file, raw) {
+  const banned = /gh pr edit .*(--add-label|--remove-label)/;
+  const offenders = [];
+  let joined = '';
+  let start = 0;
+  for (const [i, line] of raw.split('\n').entries()) {
+    if (joined === '') start = i + 1;
+    const text = line.replace(/#.*$/, '');
+    joined += ` ${text}`;
+    if (text.endsWith('\\')) continue;
+    if (banned.test(joined)) offenders.push(`${file}:${start}`);
+    joined = '';
+  }
+  return offenders;
+}
 
 describe('gh pr edit label mutations are banned in workflow files', () => {
   // `gh pr edit` label mutations fail wherever the gh build still requests
@@ -176,24 +246,46 @@ describe('gh pr edit label mutations are banned in workflow files', () => {
   // Scope is workflow YAML: .github/scripts/classify-release-notes.mjs still
   // toggles skip-changelog-auto through `gh pr edit` on the release path and
   // needs its own conversion.
+  it('ignores comments and reports the command start line', () => {
+    // A comment quoting the banned pattern documents the ban — it must not
+    // fail CI (the house style is dense why-comments; two of the guarded
+    // workflows name `gh pr edit` in comments already).
+    expect(
+      ghPrEditLabelOffenders(
+        'w.yml',
+        '# do not revert to gh pr edit --add-label here\n',
+      ),
+    ).toEqual([]);
+    // An executable violation is still caught…
+    expect(
+      ghPrEditLabelOffenders(
+        'w.yml',
+        'gh pr edit "${PR}" --add-label "${LABEL}"\n',
+      ),
+    ).toEqual(['w.yml:1']);
+    // …even wrapped across continuations, and at the PHYSICAL line where
+    // the command starts: line 5 here, where the two benign joins above
+    // would shift any index computed from the joined text.
+    const wrapped = [
+      'gh label create x \\',
+      '  --color BFD4F2',
+      'echo hi \\',
+      '  there',
+      'gh pr edit "${PR}" \\',
+      '  --add-label "${LABEL}"',
+    ].join('\n');
+    expect(ghPrEditLabelOffenders('w.yml', wrapped)).toEqual(['w.yml:5']);
+  });
+
   it('no workflow mutates labels through gh pr edit', () => {
     const dir = '.github/workflows';
     const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
     expect(files.length).toBeGreaterThan(0);
     const offenders = [];
     for (const file of files) {
-      // Join backslash continuations first: `.` does not span newlines, so a
-      // wrapped `gh pr edit … \` with the label flag on the next line would
-      // otherwise slip past the per-line scan.
-      const text = readFileSync(join(dir, file), 'utf8').replace(
-        /\\\n\s*/g,
-        ' ',
+      offenders.push(
+        ...ghPrEditLabelOffenders(file, readFileSync(join(dir, file), 'utf8')),
       );
-      for (const [i, line] of text.split('\n').entries()) {
-        if (/gh pr edit .*(--add-label|--remove-label)/.test(line)) {
-          offenders.push(`${file}:${i + 1}`);
-        }
-      }
     }
     expect(offenders).toEqual([]);
   });
