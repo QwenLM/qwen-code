@@ -4502,7 +4502,7 @@ describe('Session', () => {
         expect(payload.resultTruncated).toBe(true);
       });
 
-      it('bounds the number of captured result segments', async () => {
+      it('captures streamed chunks until the character cap', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks(
             Array.from({ length: 257 }, () => ({
@@ -4524,8 +4524,8 @@ describe('Session', () => {
 
         const payload =
           mockChatRecordingService.recordTurnResult.mock.calls[0][0];
-        expect(payload.resultText).toBe('x'.repeat(256));
-        expect(payload.resultTruncated).toBe(true);
+        expect(payload.resultText).toBe('x'.repeat(257));
+        expect(payload.resultTruncated).toBeUndefined();
       });
 
       it('records a cancelled turn when admission aborts before dispatch', async () => {

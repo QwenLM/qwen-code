@@ -809,7 +809,6 @@ type InFlightTurnRecording = {
   >;
   resultCapturedChars: number;
   resultSegmentsTruncated: boolean;
-  nextDirectResultSegmentId: number;
 };
 
 // Hold a raw candidate and its possible replacement without allowing a
@@ -5064,7 +5063,6 @@ export class Session implements SessionContext {
       resultSegments: new Map(),
       resultCapturedChars: 0,
       resultSegmentsTruncated: false,
-      nextDirectResultSegmentId: 0,
     };
   }
 
@@ -5105,7 +5103,7 @@ export class Session implements SessionContext {
 
     const segmentKey = rewriteContext?.replacesMessageText
       ? `rewrite:${rewriteContext.turnIndex}`
-      : `direct:${recording.nextDirectResultSegmentId++}`;
+      : 'direct';
     let segment = recording.resultSegments.get(segmentKey);
     if (!segment) {
       if (recording.resultSegments.size >= TURN_RESULT_CAPTURE_MAX_SEGMENTS) {
