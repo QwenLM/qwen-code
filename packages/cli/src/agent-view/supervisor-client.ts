@@ -8,6 +8,10 @@ import type { Readable, Writable } from 'node:stream';
 import * as net from 'node:net';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
+  AgentViewCoordinationDispatchAck,
+  AgentViewCoordinationDispatchRequest,
+  AgentViewCoordinationReassignRequest,
+  AgentViewCoordinationSnapshot,
   AgentViewSessionSnapshot,
   AgentViewWorkerControlEvent,
   AgentViewWorkerEvent,
@@ -21,6 +25,9 @@ export type AgentViewSupervisorOperation =
   | 'subscribe'
   | 'shutdown'
   | 'dispatch'
+  | 'dispatchCoordination'
+  | 'reassignCoordination'
+  | 'collect'
   | 'adopt'
   | 'workerEvent'
   | 'workerControl'
@@ -89,9 +96,17 @@ export interface AgentViewSupervisorRequestMap {
   subscribe: undefined;
   shutdown: { keepWorkers?: boolean } | undefined;
   dispatch: { prompt: string; cwd: string };
+  dispatchCoordination: AgentViewCoordinationDispatchRequest;
+  reassignCoordination: AgentViewCoordinationReassignRequest;
+  collect: { coordinationId: string };
   adopt: AgentViewSupervisorAdoptParams;
   workerEvent: AgentViewWorkerEvent & { token?: string };
-  workerControl: { sessionId: string; token?: string };
+  workerControl: {
+    sessionId: string;
+    token?: string;
+    generation: number;
+    ackSequence: number;
+  };
   attachStream: { sessionId: string };
   resize: { sessionId: string; columns: number; rows: number };
   peek: { sessionId: string };
@@ -112,10 +127,14 @@ export interface AgentViewSupervisorResponseMap {
   subscribe: { subscribed: true };
   shutdown: unknown;
   dispatch: unknown;
+  dispatchCoordination: AgentViewCoordinationDispatchAck[];
+  reassignCoordination: AgentViewCoordinationDispatchAck;
+  collect: AgentViewCoordinationSnapshot;
   adopt: unknown;
   workerEvent: unknown;
   workerControl: {
     sessionId: string;
+    generation: number;
     events: AgentViewWorkerControlEvent[];
   };
   attachStream: unknown;

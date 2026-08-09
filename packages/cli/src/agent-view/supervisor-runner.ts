@@ -16,12 +16,19 @@ import {
 } from './supervisor-client.js';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
+  AgentViewCoordinationDispatchAck,
+  AgentViewCoordinationDispatchRequest,
+  AgentViewCoordinationReassignRequest,
+  AgentViewCoordinationSnapshot,
+} from './protocol.js';
+import type {
   AgentViewSupervisorAdoptParams,
   AgentViewSupervisorEvent,
   AgentViewSupervisorResponse,
   AgentViewSupervisorSubscription,
 } from './supervisor-client.js';
 import {
+  authorizeAgentViewWorkerSideband,
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
@@ -52,6 +59,15 @@ export interface AgentViewSupervisorClientHandle {
     onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
   dispatch(prompt: string, cwd: string): Promise<unknown>;
+  dispatchCoordination(
+    request: AgentViewCoordinationDispatchRequest,
+  ): Promise<AgentViewCoordinationDispatchAck[]>;
+  collectCoordination(
+    coordinationId: string,
+  ): Promise<AgentViewCoordinationSnapshot>;
+  reassignCoordination(
+    request: AgentViewCoordinationReassignRequest,
+  ): Promise<AgentViewCoordinationDispatchAck>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
   attach(sessionId: string): Promise<unknown>;
   peek(sessionId: string): Promise<unknown>;
@@ -153,6 +169,8 @@ export async function runAgentViewSupervisor(
   const server = createAgentViewSupervisorServer(handler, {
     socketPath,
     authToken,
+    authorizeSideband: (_op, params) =>
+      authorizeAgentViewWorkerSideband(params, options),
   });
 
   await server.listen();
@@ -242,6 +260,23 @@ function createSupervisorHandle(
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
         },
       ),
+    dispatchCoordination: (request) =>
+      callAgentViewSupervisor(socketPath, 'dispatchCoordination', request, {
+        ...authOptions,
+        timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+      }),
+    collectCoordination: (coordinationId) =>
+      callAgentViewSupervisor(
+        socketPath,
+        'collect',
+        { coordinationId },
+        authOptions,
+      ),
+    reassignCoordination: (request) =>
+      callAgentViewSupervisor(socketPath, 'reassignCoordination', request, {
+        ...authOptions,
+        timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+      }),
     adopt: (params) =>
       callAgentViewSupervisor(socketPath, 'adopt', params, {
         ...authOptions,

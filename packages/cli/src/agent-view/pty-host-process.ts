@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AgentViewLaunchFile } from './protocol.js';
+import type { AgentViewPtyHostReceipt } from './protocol.js';
 import {
   BoundedOutputRing,
   launchAgentViewPtyHost,
@@ -18,9 +19,16 @@ import {
   type AgentViewPtyHostExit,
   type AgentViewPtyHostHandle,
 } from './pty-host.js';
-import { getAgentViewSessionPaths } from './supervisor-store.js';
+import {
+  getAgentViewSessionPaths,
+  getAgentViewStorePaths,
+  readAgentViewPtyHostReceipt,
+  removeAgentViewPtyHostReceipt,
+  writeAgentViewPtyHostReceipt,
+} from './supervisor-store.js';
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { QWEN_AGENT_VIEW_GENERATION } from './worker-sideband.js';
 
 export const INTERNAL_AGENT_VIEW_PTY_HOST_ARG =
   '--internal-agent-view-pty-host';
@@ -31,6 +39,7 @@ const CONNECT_HOST_READY_RETRIES = 10;
 const HOST_READY_DELAY_MS = 50;
 const HOST_READY_REQUEST_TIMEOUT_MS = 250;
 const REMOTE_HOST_EXIT_POLL_MS = 5000;
+const REMOTE_HOST_STOP_POLL_MS = 100;
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
 // JSON escaping inflates control bytes up to 6x, so a full 1 MiB
@@ -71,6 +80,12 @@ interface AgentViewPtyHostRequest {
   params?: Record<string, unknown>;
 }
 
+interface AgentViewPtyHostStatus {
+  pid: number;
+  workerPid: number;
+  generation: number;
+}
+
 export interface AgentViewPtyHostProcessOptions {
   globalDir?: string;
   spawnProcess?: (
@@ -83,6 +98,7 @@ export interface RunAgentViewPtyHostProcessOptions {
   launchPath: string;
   socketPath: string;
   authToken?: string;
+  globalDir?: string;
 }
 
 export async function launchAgentViewPtyHostProcess(
@@ -92,20 +108,42 @@ export async function launchAgentViewPtyHostProcess(
   const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, options);
   // Ephemeral per-host token for local socket control; not a user credential.
   const authToken = randomUUID();
-  const launchPath = getAgentViewSessionPaths(launch.sessionId, {
-    ...(options.globalDir ? { globalDir: options.globalDir } : {}),
-  }).launchPath;
+  const store = {
+    globalDir: getAgentViewStorePaths({
+      ...(options.globalDir ? { globalDir: options.globalDir } : {}),
+    }).globalDir,
+  };
+  const launchPath = getAgentViewSessionPaths(
+    launch.sessionId,
+    store,
+  ).launchPath;
+  await removeAgentViewPtyHostReceipt(launch.sessionId, store);
   const child = (options.spawnProcess ?? defaultSpawnPtyHost)(
-    [INTERNAL_AGENT_VIEW_PTY_HOST_ARG, launchPath, socketPath],
+    [INTERNAL_AGENT_VIEW_PTY_HOST_ARG, launchPath, socketPath, store.globalDir],
     { [PTY_HOST_AUTH_TOKEN_ENV]: authToken },
   );
   child.unref?.();
 
-  let status: { pid: number; workerPid: number };
+  let status: AgentViewPtyHostStatus;
   try {
     status = await waitForSpawnedPtyHost(socketPath, child, authToken);
+    const receipt = await waitForPtyHostReceipt(launch.sessionId, store);
+    requireMatchingPtyHostReceipt(
+      receipt,
+      launch,
+      socketPath,
+      authToken,
+      child.pid,
+      status,
+    );
   } catch (error) {
-    child.kill?.('SIGKILL');
+    await terminateFailedPtyHostLaunch(
+      launch,
+      child,
+      socketPath,
+      authToken,
+      store,
+    );
     throw error;
   }
   return createRemotePtyHostHandle({
@@ -138,6 +176,9 @@ export async function connectAgentViewPtyHostProcess(
         options.requestTimeoutMs ?? HOST_READY_REQUEST_TIMEOUT_MS,
     },
   );
+  if (status.generation !== requireLaunchGeneration(launch)) {
+    throw new Error('Agent View PTY host generation did not match.');
+  }
   return createRemotePtyHostHandle({
     socketPath,
     launch,
@@ -165,8 +206,14 @@ function createRemotePtyHostHandle({
   const output = new BoundedOutputRing();
   let attachSocket: net.Socket | undefined;
   const exitTracker = child
-    ? createChildExitTracker(child)
-    : createRemoteExitTracker(socketPath, authToken);
+    ? createChildExitTracker(child, workerPid)
+    : createRemoteExitTracker(
+        socketPath,
+        authToken,
+        pid,
+        workerPid,
+        requireLaunchGeneration(launch),
+      );
 
   return {
     pid,
@@ -266,100 +313,318 @@ function createRemotePtyHostHandle({
     },
     kill(signal?: string): void {
       const allowedSignal = killSignalValue(signal);
+      exitTracker.beginExitMonitoring();
       void callAgentViewPtyHost(socketPath, authToken, 'kill', {
         signal: allowedSignal,
       }).catch(() => {
         child?.kill(allowedSignal);
       });
-      if (!child) {
-        exitTracker.resolve({ exitCode: 1 });
-      }
     },
-    shutdown(): void {
-      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
-        child?.kill('SIGTERM');
-      });
+    async shutdown(): Promise<void> {
+      exitTracker.beginExitMonitoring();
+      await callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(
+        () => {
+          child?.kill('SIGTERM');
+        },
+      );
       attachSocket?.destroy();
-      if (!child) {
-        exitTracker.resolve({ exitCode: 0 });
-      }
     },
     dispose(): void {
+      exitTracker.beginExitMonitoring();
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
         child?.kill('SIGTERM');
       });
       attachSocket?.destroy();
-      exitTracker.resolve({ exitCode: 1 });
     },
   };
 }
 
-function createChildExitTracker(child: ChildProcess): {
+function createChildExitTracker(
+  child: ChildProcess,
+  workerPid: number,
+): {
   exited: Promise<AgentViewPtyHostExit>;
-  resolve(exit: AgentViewPtyHostExit): void;
+  beginExitMonitoring(): void;
 } {
-  let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
-    resolveExit = resolve;
     child.once('exit', (code, signal) => {
       const signalNumber = signal ? os.constants.signals[signal] : undefined;
-      resolve({
+      const exit = {
         exitCode: typeof code === 'number' ? code : 1,
         ...(signalNumber ? { signal: signalNumber } : {}),
-      });
+      };
+      if (!isProcessRunning(workerPid)) {
+        resolve(exit);
+        return;
+      }
+      const interval = setInterval(() => {
+        if (isProcessRunning(workerPid)) return;
+        clearInterval(interval);
+        resolve(exit);
+      }, REMOTE_HOST_STOP_POLL_MS);
+      interval.unref?.();
     });
   });
-  return { exited, resolve: resolveExit };
+  return { exited, beginExitMonitoring() {} };
 }
 
 function createRemoteExitTracker(
   socketPath: string,
   authToken: string | undefined,
+  hostPid: number,
+  workerPid: number,
+  generation: number,
 ): {
   exited: Promise<AgentViewPtyHostExit>;
-  resolve(exit: AgentViewPtyHostExit): void;
+  beginExitMonitoring(): void;
 } {
   let settled = false;
+  let probing = false;
+  let idleInterval: NodeJS.Timeout | undefined;
+  let stopInterval: NodeJS.Timeout | undefined;
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
   });
-  const interval = setInterval(() => {
-    void callAgentViewPtyHost(socketPath, authToken, 'status').catch(() => {
-      resolveExitOnce({ exitCode: 1 });
-    });
-  }, REMOTE_HOST_EXIT_POLL_MS);
-  interval.unref?.();
-
   const resolveExitOnce = (exit: AgentViewPtyHostExit) => {
     if (settled) return;
     settled = true;
-    clearInterval(interval);
+    if (idleInterval) clearInterval(idleInterval);
+    if (stopInterval) clearInterval(stopInterval);
     resolveExit(exit);
   };
-  return { exited, resolve: resolveExitOnce };
+
+  const probe = async () => {
+    if (settled || probing) return;
+    probing = true;
+    try {
+      const status = await callAgentViewPtyHost(
+        socketPath,
+        authToken,
+        'status',
+        undefined,
+        HOST_READY_REQUEST_TIMEOUT_MS,
+      );
+      const identityMatches =
+        isRecord(status) &&
+        status['pid'] === hostPid &&
+        status['workerPid'] === workerPid &&
+        status['generation'] === generation;
+      if (identityMatches && status['workerExited'] === true) {
+        resolveExitOnce({
+          exitCode: Number.isInteger(status['workerExitCode'])
+            ? Number(status['workerExitCode'])
+            : 1,
+        });
+      } else if (
+        !identityMatches &&
+        !isProcessRunning(hostPid) &&
+        !isProcessRunning(workerPid)
+      ) {
+        resolveExitOnce({ exitCode: 1 });
+      }
+    } catch {
+      if (!isProcessRunning(hostPid) && !isProcessRunning(workerPid)) {
+        resolveExitOnce({ exitCode: 1 });
+      }
+    } finally {
+      probing = false;
+    }
+  };
+
+  idleInterval = setInterval(() => {
+    void probe();
+  }, REMOTE_HOST_EXIT_POLL_MS);
+  idleInterval.unref?.();
+
+  return {
+    exited,
+    beginExitMonitoring() {
+      if (settled || stopInterval) return;
+      void probe();
+      stopInterval = setInterval(() => void probe(), REMOTE_HOST_STOP_POLL_MS);
+      stopInterval.unref?.();
+    },
+  };
 }
 
 export async function runAgentViewPtyHostProcess({
   launchPath,
   socketPath,
   authToken,
+  globalDir,
 }: RunAgentViewPtyHostProcessOptions): Promise<void> {
   const launch = JSON.parse(await fs.readFile(launchPath, 'utf8')) as unknown;
   const host = await launchAgentViewPtyHost(launch);
-  const server = createAgentViewPtyHostServer(host, socketPath, {
-    authToken: authToken ?? process.env[PTY_HOST_AUTH_TOKEN_ENV],
-  });
+  const validatedLaunch = launch as AgentViewLaunchFile;
+  const resolvedAuthToken =
+    authToken ?? process.env[PTY_HOST_AUTH_TOKEN_ENV] ?? '';
+  const generation = requireLaunchGeneration(validatedLaunch);
+  const terminate = () => host.shutdown?.();
+  process.once('SIGTERM', terminate);
+  process.once('SIGINT', terminate);
+  let server: ReturnType<typeof createAgentViewPtyHostServer> | undefined;
   try {
+    await writeAgentViewPtyHostReceipt(
+      {
+        schemaVersion: 1,
+        sessionId: validatedLaunch.sessionId,
+        hostPid: process.pid,
+        workerPid: host.workerPid,
+        hostEndpoint: socketPath,
+        hostAuthToken: resolvedAuthToken,
+        generation,
+      },
+      { ...(globalDir ? { globalDir } : {}) },
+    );
+    server = createAgentViewPtyHostServer(host, socketPath, {
+      authToken: resolvedAuthToken,
+      generation,
+    });
     await server.listen();
-  } catch (error) {
+    await host.exited;
+  } finally {
+    process.off('SIGTERM', terminate);
+    process.off('SIGINT', terminate);
     host.dispose();
-    throw error;
+    await server?.close().catch(() => {});
   }
-  await host.exited.finally(async () => {
-    host.dispose();
-    await server.close();
-  });
+}
+
+function requireLaunchGeneration(launch: AgentViewLaunchFile): number {
+  const generation = Number(launch.env[QWEN_AGENT_VIEW_GENERATION]);
+  if (!Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error('Agent View PTY host launch is missing its generation.');
+  }
+  return generation;
+}
+
+async function waitForPtyHostReceipt(
+  sessionId: string,
+  store: { globalDir: string },
+): Promise<AgentViewPtyHostReceipt | undefined> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const receipt = await readAgentViewPtyHostReceipt(sessionId, store);
+    if (receipt) return receipt;
+    await delay(10);
+  }
+  return undefined;
+}
+
+function requireMatchingPtyHostReceipt(
+  receipt: AgentViewPtyHostReceipt | undefined,
+  launch: AgentViewLaunchFile,
+  socketPath: string,
+  authToken: string,
+  childPid: number | undefined,
+  status: AgentViewPtyHostStatus,
+): asserts receipt is AgentViewPtyHostReceipt {
+  if (
+    !isMatchingPtyHostReceipt(
+      receipt,
+      launch,
+      socketPath,
+      authToken,
+      childPid,
+    ) ||
+    receipt.hostPid !== status.pid ||
+    receipt.workerPid !== status.workerPid ||
+    receipt.generation !== status.generation
+  ) {
+    throw new Error('Agent View PTY host bootstrap identity did not match.');
+  }
+}
+
+function isMatchingPtyHostReceipt(
+  receipt: AgentViewPtyHostReceipt | undefined,
+  launch: AgentViewLaunchFile,
+  socketPath: string,
+  authToken: string,
+  childPid: number | undefined,
+): receipt is AgentViewPtyHostReceipt {
+  return Boolean(
+    receipt &&
+      Number.isSafeInteger(childPid) &&
+      Number(childPid) > 0 &&
+      receipt.sessionId === launch.sessionId &&
+      receipt.hostPid === childPid &&
+      receipt.hostEndpoint === socketPath &&
+      receipt.hostAuthToken === authToken &&
+      receipt.generation === requireLaunchGeneration(launch),
+  );
+}
+
+async function terminateFailedPtyHostLaunch(
+  launch: AgentViewLaunchFile,
+  child: ChildProcess,
+  socketPath: string,
+  authToken: string,
+  store: { globalDir: string },
+): Promise<void> {
+  const receipt = await readAgentViewPtyHostReceipt(
+    launch.sessionId,
+    store,
+  ).catch(() => undefined);
+  if (
+    isMatchingPtyHostReceipt(receipt, launch, socketPath, authToken, child.pid)
+  ) {
+    sendProcessSignal(receipt.workerPid, 'SIGTERM');
+  }
+  child.kill?.('SIGTERM');
+  if (
+    await waitForProcessExit(
+      child.pid,
+      receipt &&
+        isMatchingPtyHostReceipt(
+          receipt,
+          launch,
+          socketPath,
+          authToken,
+          child.pid,
+        )
+        ? receipt.workerPid
+        : undefined,
+      1_000,
+    )
+  ) {
+    return;
+  }
+  if (
+    receipt &&
+    isMatchingPtyHostReceipt(receipt, launch, socketPath, authToken, child.pid)
+  ) {
+    sendProcessSignal(receipt.workerPid, 'SIGKILL');
+  }
+  child.kill?.('SIGKILL');
+  await waitForProcessExit(child.pid, receipt?.workerPid, 1_000);
+}
+
+function sendProcessSignal(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ESRCH') throw error;
+  }
+}
+
+async function waitForProcessExit(
+  hostPid: number | undefined,
+  workerPid: number | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (
+      !isProcessRunning(Number(hostPid)) &&
+      !isProcessRunning(Number(workerPid))
+    ) {
+      return true;
+    }
+    await delay(25);
+  }
+  return (
+    !isProcessRunning(Number(hostPid)) && !isProcessRunning(Number(workerPid))
+  );
 }
 
 export function getAgentViewPtyHostSocketPath(
@@ -502,8 +767,15 @@ async function requestAgentViewPtyHost(
 export function createAgentViewPtyHostServer(
   host: AgentViewPtyHostHandle,
   socketPath: string,
-  options: { authToken?: string } = {},
+  options: { authToken?: string; generation?: number } = {},
 ): { listen(): Promise<void>; close(): Promise<void> } {
+  let workerExit: AgentViewPtyHostExit | undefined;
+  void host.exited.then(
+    (exit) => {
+      workerExit = exit;
+    },
+    () => {},
+  );
   const attachState: {
     activeAttachSocket: net.Socket | undefined;
   } = {
@@ -540,6 +812,8 @@ export function createAgentViewPtyHostServer(
         attachState,
         leftover,
         options.authToken,
+        options.generation ?? 1,
+        () => workerExit,
       ).catch(() => {
         socket.destroy();
       });
@@ -588,6 +862,8 @@ async function respondToHostLine(
   },
   leftover = '',
   authToken?: string,
+  generation = 1,
+  getWorkerExit: () => AgentViewPtyHostExit | undefined = () => undefined,
 ): Promise<void> {
   const request = parseHostRequest(line);
   if (!request) {
@@ -659,7 +935,12 @@ async function respondToHostLine(
   }
 
   try {
-    const result = await handleHostRequest(host, request);
+    const result = await handleHostRequest(
+      host,
+      request,
+      generation,
+      getWorkerExit(),
+    );
     socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
   } catch (error) {
     socket.end(
@@ -677,12 +958,17 @@ async function respondToHostLine(
 async function handleHostRequest(
   host: AgentViewPtyHostHandle,
   request: AgentViewPtyHostRequest,
+  generation: number,
+  workerExit?: AgentViewPtyHostExit,
 ): Promise<unknown> {
   switch (request.op) {
     case 'status':
       return {
         pid: process.pid,
         workerPid: host.workerPid,
+        generation,
+        workerExited: Boolean(workerExit),
+        ...(workerExit ? { workerExitCode: workerExit.exitCode } : {}),
       };
     case 'logs':
       return { output: host.output.toString() };
@@ -719,7 +1005,7 @@ async function waitForSpawnedPtyHost(
   socketPath: string,
   child: ChildProcess,
   authToken: string,
-): Promise<{ pid: number; workerPid: number }> {
+): Promise<AgentViewPtyHostStatus> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const abortController = new AbortController();
@@ -728,7 +1014,7 @@ async function waitForSpawnedPtyHost(
       child.off('exit', onExit);
       child.off('error', onError);
     };
-    const finishResolve = (value: { pid: number; workerPid: number }) => {
+    const finishResolve = (value: AgentViewPtyHostStatus) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -769,7 +1055,7 @@ async function waitForPtyHost(
   retries = HOST_READY_RETRIES,
   authToken?: string,
   options: { requestTimeoutMs?: number; signal?: AbortSignal } = {},
-): Promise<{ pid: number; workerPid: number }> {
+): Promise<AgentViewPtyHostStatus> {
   const requestTimeoutMs = options.requestTimeoutMs ?? 5000;
   // Model the deadline as a wall-clock budget covering each probe's delay
   // and request timeout, so slow probes cannot silently exhaust retries.
@@ -785,12 +1071,19 @@ async function waitForPtyHost(
         undefined,
         requestTimeoutMs,
       );
-      if (isRecord(result) && Number.isInteger(result['workerPid'])) {
+      if (
+        isRecord(result) &&
+        Number.isSafeInteger(result['pid']) &&
+        Number(result['pid']) > 0 &&
+        Number.isSafeInteger(result['workerPid']) &&
+        Number(result['workerPid']) > 0 &&
+        Number.isSafeInteger(result['generation']) &&
+        Number(result['generation']) > 0
+      ) {
         return {
-          pid: Number.isInteger(result['pid'])
-            ? Number(result['pid'])
-            : process.pid,
+          pid: Number(result['pid']),
           workerPid: Number(result['workerPid']),
+          generation: Number(result['generation']),
         };
       }
     } catch (error) {
@@ -1007,6 +1300,21 @@ function killSignalValue(value: unknown): NodeJS.Signals | undefined {
     return value as NodeJS.Signals;
   }
   throw new Error('Agent View PTY host signal is not allowed.');
+}
+
+function isProcessRunning(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'EPERM'
+    );
+  }
 }
 
 function isValidAuthToken(

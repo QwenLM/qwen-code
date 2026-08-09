@@ -5,7 +5,10 @@
  */
 
 import { callAgentViewSupervisor } from './supervisor-client.js';
+import * as path from 'node:path';
 import type {
+  AgentViewCoordinationOutcome,
+  AgentViewCoordinationWriteMode,
   AgentViewInputKind,
   AgentViewWorkerControlEvent,
   AgentViewSessionState,
@@ -17,6 +20,13 @@ export const QWEN_AGENT_VIEW_SESSION_ID = 'QWEN_AGENT_VIEW_SESSION_ID';
 export const QWEN_AGENT_VIEW_SIDEBAND = 'QWEN_AGENT_VIEW_SIDEBAND';
 export const QWEN_AGENT_VIEW_TOKEN = 'QWEN_AGENT_VIEW_TOKEN';
 export const QWEN_AGENT_VIEW_ACTIVE_CWD = 'QWEN_AGENT_VIEW_ACTIVE_CWD';
+export const QWEN_AGENT_VIEW_PROJECT_CWD = 'QWEN_AGENT_VIEW_PROJECT_CWD';
+export const QWEN_AGENT_VIEW_GENERATION = 'QWEN_AGENT_VIEW_GENERATION';
+export const QWEN_AGENT_VIEW_COORDINATION_MODE =
+  'QWEN_AGENT_VIEW_COORDINATION_MODE';
+export const QWEN_AGENT_VIEW_TASK_PATH = 'QWEN_AGENT_VIEW_TASK_PATH';
+export const QWEN_AGENT_VIEW_PROMPT_ID = 'QWEN_AGENT_VIEW_PROMPT_ID';
+export const QWEN_AGENT_VIEW_ATTEMPT_ID = 'QWEN_AGENT_VIEW_ATTEMPT_ID';
 
 export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_WORKER,
@@ -24,6 +34,12 @@ export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_SIDEBAND,
   QWEN_AGENT_VIEW_TOKEN,
   QWEN_AGENT_VIEW_ACTIVE_CWD,
+  QWEN_AGENT_VIEW_PROJECT_CWD,
+  QWEN_AGENT_VIEW_GENERATION,
+  QWEN_AGENT_VIEW_COORDINATION_MODE,
+  QWEN_AGENT_VIEW_TASK_PATH,
+  QWEN_AGENT_VIEW_PROMPT_ID,
+  QWEN_AGENT_VIEW_ATTEMPT_ID,
 ] as const;
 
 export type AgentViewWorkerEnvKey = (typeof AGENT_VIEW_WORKER_ENV_KEYS)[number];
@@ -33,15 +49,42 @@ export interface AgentViewWorkerSidebandEnv {
   sidebandEndpoint: string;
   token: string;
   activeCwd: string;
+  generation: number;
+}
+
+export interface AgentViewCoordinationWorkerEnv {
+  sideband: AgentViewWorkerSidebandEnv & { generation: number };
+  projectCwd: string;
+  writeMode: AgentViewCoordinationWriteMode;
+  taskPath: string;
+  promptId: string;
+  attemptId: string;
 }
 
 type AgentViewWorkerEventWithoutSession =
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'ready' }>, 'sessionId'>
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'heartbeat' }>, 'sessionId'>
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'detach' }>, 'sessionId'>
-  | Omit<Extract<AgentViewWorkerEvent, { type: 'state' }>, 'sessionId'>;
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'ready' }>,
+      'sessionId' | 'generation' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'heartbeat' }>,
+      'sessionId' | 'generation' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'detach' }>,
+      'sessionId' | 'generation' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'state' }>,
+      'sessionId' | 'generation' | 'sequence'
+    >
+  | Omit<
+      Extract<AgentViewWorkerEvent, { type: 'result' }>,
+      'sessionId' | 'generation' | 'sequence'
+    >;
 
 export interface AgentViewWorkerStateReport {
+  promptId?: string;
   sessionState: AgentViewSessionState;
   cwd?: string;
   summary?: string;
@@ -55,16 +98,22 @@ export interface AgentViewWorkerHeartbeat {
 }
 
 const lastStateReportKeys = new Map<string, string>();
+const nextEventSequences = new Map<string, number>();
+const acknowledgedControlSequences = new Map<string, number>();
+const eventSendQueues = new Map<string, Promise<unknown>>();
 
 export function createAgentViewWorkerSidebandEnv(
-  config: AgentViewWorkerSidebandEnv,
-): Record<AgentViewWorkerEnvKey, string> {
+  config: Omit<AgentViewWorkerSidebandEnv, 'generation'> & {
+    generation?: number;
+  },
+): Record<string, string> {
   return {
     [QWEN_AGENT_VIEW_WORKER]: '1',
     [QWEN_AGENT_VIEW_SESSION_ID]: config.sessionId,
     [QWEN_AGENT_VIEW_SIDEBAND]: config.sidebandEndpoint,
     [QWEN_AGENT_VIEW_TOKEN]: config.token,
     [QWEN_AGENT_VIEW_ACTIVE_CWD]: config.activeCwd,
+    [QWEN_AGENT_VIEW_GENERATION]: String(config.generation ?? 1),
   };
 }
 
@@ -85,8 +134,16 @@ export function readAgentViewWorkerSidebandEnv(
   const sidebandEndpoint = env[QWEN_AGENT_VIEW_SIDEBAND];
   const token = env[QWEN_AGENT_VIEW_TOKEN];
   const activeCwd = env[QWEN_AGENT_VIEW_ACTIVE_CWD];
+  const generation = Number(env[QWEN_AGENT_VIEW_GENERATION]);
 
-  if (!sessionId || !sidebandEndpoint || !token || !activeCwd) {
+  if (
+    !sessionId ||
+    !sidebandEndpoint ||
+    !token ||
+    !activeCwd ||
+    !Number.isSafeInteger(generation) ||
+    generation < 1
+  ) {
     return undefined;
   }
 
@@ -95,6 +152,38 @@ export function readAgentViewWorkerSidebandEnv(
     sidebandEndpoint,
     token,
     activeCwd,
+    generation,
+  };
+}
+
+export function readAgentViewCoordinationWorkerEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): AgentViewCoordinationWorkerEnv | undefined {
+  const sideband = readAgentViewWorkerSidebandEnv(env);
+  const writeMode = env[QWEN_AGENT_VIEW_COORDINATION_MODE];
+  const projectCwd = env[QWEN_AGENT_VIEW_PROJECT_CWD];
+  const taskPath = env[QWEN_AGENT_VIEW_TASK_PATH];
+  const promptId = env[QWEN_AGENT_VIEW_PROMPT_ID];
+  const attemptId = env[QWEN_AGENT_VIEW_ATTEMPT_ID];
+  if (
+    !sideband ||
+    !projectCwd ||
+    !path.isAbsolute(projectCwd) ||
+    (writeMode !== 'read-only' && writeMode !== 'isolated-writer') ||
+    !taskPath ||
+    !path.isAbsolute(taskPath) ||
+    !promptId ||
+    !attemptId
+  ) {
+    return undefined;
+  }
+  return {
+    sideband,
+    projectCwd,
+    writeMode,
+    taskPath,
+    promptId,
+    attemptId,
   };
 }
 
@@ -104,11 +193,30 @@ export async function sendAgentViewWorkerEvent(
 ): Promise<unknown> {
   const sideband = readAgentViewWorkerSidebandEnv(env);
   if (!sideband) return undefined;
-  return callAgentViewSupervisor(sideband.sidebandEndpoint, 'workerEvent', {
-    ...event,
-    sessionId: sideband.sessionId,
-    token: sideband.token,
-  });
+  const sequenceKey = sidebandKey(sideband);
+  const sequence = (nextEventSequences.get(sequenceKey) ?? 0) + 1;
+  nextEventSequences.set(sequenceKey, sequence);
+  const previous = eventSendQueues.get(sequenceKey) ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(() =>
+      callAgentViewSupervisor(sideband.sidebandEndpoint, 'workerEvent', {
+        ...event,
+        sessionId: sideband.sessionId,
+        token: sideband.token,
+        generation: sideband.generation,
+        sequence,
+      }),
+    );
+  eventSendQueues.set(sequenceKey, current);
+  void current
+    .finally(() => {
+      if (eventSendQueues.get(sequenceKey) === current) {
+        eventSendQueues.delete(sequenceKey);
+      }
+    })
+    .catch(() => {});
+  return current;
 }
 
 export async function readAgentViewWorkerControlEvents(
@@ -116,6 +224,7 @@ export async function readAgentViewWorkerControlEvents(
 ): Promise<AgentViewWorkerControlEvent[]> {
   const sideband = readAgentViewWorkerSidebandEnv(env);
   if (!sideband) return [];
+  const key = sidebandKey(sideband);
 
   const result = await callAgentViewSupervisor(
     sideband.sidebandEndpoint,
@@ -123,14 +232,44 @@ export async function readAgentViewWorkerControlEvents(
     {
       sessionId: sideband.sessionId,
       token: sideband.token,
+      generation: sideband.generation,
+      ackSequence: acknowledgedControlSequences.get(key) ?? 0,
     },
     { timeoutMs: 1000 },
   );
 
-  if (!isRecord(result)) return [];
+  if (!isRecord(result) || result['generation'] !== sideband.generation) {
+    return [];
+  }
   const events = result['events'];
   if (!Array.isArray(events)) return [];
   return events.filter(isAgentViewWorkerControlEvent);
+}
+
+export function acknowledgeAgentViewWorkerControlEvents(
+  sequence: number,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const sideband = readAgentViewWorkerSidebandEnv(env);
+  if (!sideband || !Number.isSafeInteger(sequence) || sequence < 0) return;
+  const key = sidebandKey(sideband);
+  acknowledgedControlSequences.set(
+    key,
+    Math.max(acknowledgedControlSequences.get(key) ?? 0, sequence),
+  );
+}
+
+export async function reportAgentViewWorkerResult(
+  result: {
+    promptId: string;
+    attemptId: string;
+    outcome: AgentViewCoordinationOutcome;
+    summary: string;
+    artifacts?: string[];
+  },
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  await sendAgentViewWorkerEvent({ type: 'result', ...result }, env);
 }
 
 export async function reportAgentViewWorkerState(
@@ -174,6 +313,9 @@ export function startAgentViewWorkerHeartbeat(
 
 export function resetAgentViewWorkerStateReportForTests(): void {
   lastStateReportKeys.clear();
+  nextEventSequences.clear();
+  acknowledgedControlSequences.clear();
+  eventSendQueues.clear();
 }
 
 function isAgentViewWorkerControlEvent(
@@ -193,7 +335,9 @@ function isAgentViewWorkerControlEvent(
     return true;
   }
   if (value['type'] === 'prompt') {
-    return typeof value['text'] === 'string';
+    return (
+      typeof value['promptId'] === 'string' && typeof value['text'] === 'string'
+    );
   }
   return (
     value['type'] === 'answer' &&
@@ -203,6 +347,10 @@ function isAgentViewWorkerControlEvent(
       isAgentViewWorkerAnswerOutcome(value['outcome'])) &&
     (value['payload'] === undefined || isRecord(value['payload']))
   );
+}
+
+function sidebandKey(sideband: AgentViewWorkerSidebandEnv): string {
+  return `${sideband.sessionId}:${sideband.generation ?? 1}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

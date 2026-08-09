@@ -9,13 +9,18 @@ import * as path from 'node:path';
 import { atomicWriteFile, Storage } from '@qwen-code/qwen-code-core';
 import type {
   AgentViewActivityFile,
+  AgentViewCoordinationManifest,
+  AgentViewCoordinationManifestAttempt,
+  AgentViewCoordinationResult,
   AgentViewLaunchFile,
+  AgentViewPtyHostReceipt,
   AgentViewRosterEntry,
   AgentViewRosterFile,
   AgentViewSessionStateFile,
   AgentViewSessionSnapshot,
   AgentViewSupervisorFile,
   AgentViewWorkerFile,
+  AgentViewWorkerControlsFile,
 } from './protocol.js';
 
 type JsonRecord = Record<string, unknown>;
@@ -27,6 +32,7 @@ export interface AgentViewStorePaths {
   supervisorPath: string;
   daemonLogPath: string;
   jobsDir: string;
+  coordinationsDir: string;
 }
 
 export interface AgentViewSessionPaths {
@@ -35,7 +41,16 @@ export interface AgentViewSessionPaths {
   launchPath: string;
   activityPath: string;
   workerPath: string;
+  ptyHostReceiptPath: string;
+  controlsPath: string;
+  taskPath: string;
+  resultPath: string;
   tmpDir: string;
+}
+
+export interface AgentViewCoordinationRecord {
+  snapshot: AgentViewSessionSnapshot;
+  result: AgentViewCoordinationResult | undefined;
 }
 
 interface StoreOptions {
@@ -43,6 +58,7 @@ interface StoreOptions {
 }
 
 const rosterMutationQueues = new Map<string, Promise<void>>();
+const sessionMutationQueues = new Map<string, Promise<void>>();
 
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
@@ -56,6 +72,7 @@ export function getAgentViewStorePaths(
     supervisorPath: path.join(daemonDir, 'supervisor.json'),
     daemonLogPath: path.join(daemonDir, 'daemon.log'),
     jobsDir: path.join(globalDir, 'jobs'),
+    coordinationsDir: path.join(globalDir, 'coordinations'),
   };
 }
 
@@ -71,6 +88,10 @@ export function getAgentViewSessionPaths(
     launchPath: path.join(sessionDir, 'launch.json'),
     activityPath: path.join(sessionDir, 'activity.json'),
     workerPath: path.join(sessionDir, 'worker.json'),
+    ptyHostReceiptPath: path.join(sessionDir, 'pty-host.json'),
+    controlsPath: path.join(sessionDir, 'controls.json'),
+    taskPath: path.join(sessionDir, 'task.md'),
+    resultPath: path.join(sessionDir, 'result.json'),
     tmpDir: path.join(sessionDir, 'tmp'),
   };
 }
@@ -310,6 +331,178 @@ export async function writeAgentViewWorker(
   });
 }
 
+export async function readAgentViewCoordinationManifest(
+  coordinationId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewCoordinationManifest | undefined> {
+  const raw = await readJsonRecord(
+    getCoordinationManifestPath(coordinationId, options),
+  );
+  return normalizeCoordinationManifest(raw, coordinationId);
+}
+
+export async function writeAgentViewCoordinationManifest(
+  manifest: AgentViewCoordinationManifest,
+  options: StoreOptions = {},
+): Promise<void> {
+  await writeJsonFile(
+    getCoordinationManifestPath(manifest.coordinationId, options),
+    {
+      ...manifest,
+    },
+  );
+}
+
+export async function readAgentViewPtyHostReceipt(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewPtyHostReceipt | undefined> {
+  const receiptPath = getAgentViewSessionPaths(
+    sessionId,
+    options,
+  ).ptyHostReceiptPath;
+  let stat;
+  try {
+    stat = await fs.lstat(receiptPath);
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+  return normalizePtyHostReceipt(await readJsonRecord(receiptPath), sessionId);
+}
+
+export async function writeAgentViewPtyHostReceipt(
+  receipt: AgentViewPtyHostReceipt,
+  options: StoreOptions = {},
+): Promise<void> {
+  await writeJsonFile(
+    getAgentViewSessionPaths(receipt.sessionId, options).ptyHostReceiptPath,
+    { ...receipt },
+  );
+}
+
+export async function removeAgentViewPtyHostReceipt(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<void> {
+  await fs
+    .unlink(getAgentViewSessionPaths(sessionId, options).ptyHostReceiptPath)
+    .catch((error: unknown) => {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+    });
+}
+
+export async function readAgentViewWorkerControls(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewWorkerControlsFile> {
+  const raw = await readJsonRecord(
+    getAgentViewSessionPaths(sessionId, options).controlsPath,
+  );
+  return normalizeWorkerControls(raw);
+}
+
+export async function writeAgentViewWorkerControls(
+  sessionId: string,
+  controls: AgentViewWorkerControlsFile,
+  options: StoreOptions = {},
+): Promise<void> {
+  await writeJsonFile(
+    getAgentViewSessionPaths(sessionId, options).controlsPath,
+    controls,
+  );
+}
+
+export async function writeAgentViewCoordinationTask(
+  sessionId: string,
+  content: Buffer,
+  options: StoreOptions = {},
+): Promise<string> {
+  const taskPath = getAgentViewSessionPaths(sessionId, options).taskPath;
+  await fs.mkdir(path.dirname(taskPath), { recursive: true });
+  await atomicWriteFile(taskPath, content, {
+    mode: 0o600,
+    forceMode: true,
+    noFollow: true,
+  });
+  return taskPath;
+}
+
+export async function writeAgentViewCoordinationResult(
+  result: AgentViewCoordinationResult,
+  options: StoreOptions = {},
+): Promise<void> {
+  await writeJsonFile(
+    getAgentViewSessionPaths(result.sessionId, options).resultPath,
+    { ...result },
+  );
+}
+
+export async function readAgentViewCoordinationResult(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewCoordinationResult | undefined> {
+  return normalizeCoordinationResult(
+    await readJsonRecord(
+      getAgentViewSessionPaths(sessionId, options).resultPath,
+    ),
+  );
+}
+
+export async function listAgentViewCoordinationRecords(
+  coordinationId: string,
+  options: StoreOptions = {},
+): Promise<AgentViewCoordinationRecord[]> {
+  const states = (await listAgentViewSessionStates(options))
+    .filter((state) => state.coordination?.coordinationId === coordinationId)
+    .sort(compareCoordinationStates);
+  return Promise.all(
+    states.map(async (state) => ({
+      snapshot: {
+        sessionId: state.sessionId,
+        state,
+        launch: await readAgentViewLaunch(state.sessionId, options),
+        activity: await readAgentViewActivity(state.sessionId, options),
+        worker: await readAgentViewWorker(state.sessionId, options),
+      },
+      result: await readAgentViewCoordinationResult(state.sessionId, options),
+    })),
+  );
+}
+
+export async function removeAgentViewSessionFiles(
+  sessionId: string,
+  options: StoreOptions = {},
+): Promise<void> {
+  await fs.rm(getAgentViewSessionPaths(sessionId, options).sessionDir, {
+    recursive: true,
+    force: true,
+  });
+}
+
+export async function withAgentViewSessionMutation<T>(
+  sessionId: string,
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const sessionDir = getAgentViewSessionPaths(sessionId, options).sessionDir;
+  const previous = sessionMutationQueues.get(sessionDir) ?? Promise.resolve();
+  const current = previous.then(action, action);
+  const queued = current
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      if (sessionMutationQueues.get(sessionDir) === queued) {
+        sessionMutationQueues.delete(sessionDir);
+      }
+    });
+  sessionMutationQueues.set(sessionDir, queued);
+  return current;
+}
+
 export async function readAgentViewSupervisor(
   options: StoreOptions = {},
 ): Promise<AgentViewSupervisorFile | undefined> {
@@ -350,6 +543,21 @@ function compareRosterEntries(
     return left.pinned ? -1 : 1;
   }
   return right.updatedAt.localeCompare(left.updatedAt);
+}
+
+function compareCoordinationStates(
+  left: AgentViewSessionStateFile,
+  right: AgentViewSessionStateFile,
+): number {
+  return (
+    (left.coordination?.taskId ?? '').localeCompare(
+      right.coordination?.taskId ?? '',
+    ) ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    (left.coordination?.attemptId ?? '').localeCompare(
+      right.coordination?.attemptId ?? '',
+    )
+  );
 }
 
 async function readJsonRecord(
@@ -563,6 +771,8 @@ function normalizeActivity(
     waitingFor: stringValue(raw['waitingFor']),
     inputKind: inputKindValue(raw['inputKind']),
     lastResult: stringValue(raw['lastResult']),
+    activePromptId: stringValue(raw['activePromptId']),
+    lastCompletedPromptId: stringValue(raw['lastCompletedPromptId']),
     queuedPromptCount: numberValue(raw['queuedPromptCount']),
     queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
     lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
@@ -591,33 +801,243 @@ function normalizeWorker(
   raw: JsonRecord | undefined,
 ): AgentViewWorkerFile | undefined {
   if (!raw) return undefined;
-  return {
+  return stripUndefined({
     ...raw,
     schemaVersion: 1,
-    ...(numberValue(raw['hostPid'])
-      ? { hostPid: numberValue(raw['hostPid']) }
-      : {}),
-    ...(numberValue(raw['workerPid'])
-      ? { workerPid: numberValue(raw['workerPid']) }
-      : {}),
-    ...(stringValue(raw['endpoint'])
-      ? { endpoint: stringValue(raw['endpoint']) }
-      : {}),
-    ...(stringValue(raw['hostEndpoint'])
-      ? { hostEndpoint: stringValue(raw['hostEndpoint']) }
-      : {}),
-    ...(stringValue(raw['hostAuthToken'])
-      ? { hostAuthToken: stringValue(raw['hostAuthToken']) }
-      : {}),
-    ...(stringValue(raw['tokenDigest'])
-      ? { tokenDigest: stringValue(raw['tokenDigest']) }
-      : {}),
-    ...(stringValue(raw['lastHeartbeatAt'])
-      ? { lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']) }
-      : {}),
+    hostPid: numberValue(raw['hostPid']),
+    workerPid: numberValue(raw['workerPid']),
+    endpoint: stringValue(raw['endpoint']),
+    hostEndpoint: stringValue(raw['hostEndpoint']),
+    hostAuthToken: stringValue(raw['hostAuthToken']),
+    tokenDigest: stringValue(raw['tokenDigest']),
+    lastHeartbeatAt: stringValue(raw['lastHeartbeatAt']),
+    generation: nonNegativeIntegerValue(raw['generation']),
+    lastEventSequence: nonNegativeIntegerValue(raw['lastEventSequence']),
     protocolVersion: numberValue(raw['protocolVersion']) ?? 1,
     platform: platformValue(raw['platform']),
     recentOutputBytes: numberValue(raw['recentOutputBytes']) ?? 0,
+  }) as AgentViewWorkerFile;
+}
+
+function normalizeCoordinationManifest(
+  raw: JsonRecord | undefined,
+  coordinationId: string,
+): AgentViewCoordinationManifest | undefined {
+  if (
+    !raw ||
+    raw['schemaVersion'] !== 1 ||
+    raw['coordinationId'] !== coordinationId ||
+    typeof raw['projectCwd'] !== 'string' ||
+    typeof raw['createdAt'] !== 'string' ||
+    typeof raw['updatedAt'] !== 'string' ||
+    !Array.isArray(raw['attempts'])
+  ) {
+    return undefined;
+  }
+  const attempts = raw['attempts']
+    .map(normalizeCoordinationManifestAttempt)
+    .filter(
+      (attempt): attempt is AgentViewCoordinationManifestAttempt =>
+        attempt !== undefined,
+    );
+  if (attempts.length !== raw['attempts'].length) return undefined;
+  return {
+    schemaVersion: 1,
+    coordinationId,
+    projectCwd: path.resolve(raw['projectCwd']),
+    createdAt: raw['createdAt'],
+    updatedAt: raw['updatedAt'],
+    attempts,
+  };
+}
+
+function normalizeCoordinationManifestAttempt(
+  value: unknown,
+): AgentViewCoordinationManifestAttempt | undefined {
+  if (!isRecord(value) || !isRecord(value['lineage'])) return undefined;
+  const lineage = value['lineage'];
+  const worktreePhase = value['worktreePhase'];
+  const worktree = value['worktree'];
+  if (
+    typeof lineage['coordinationId'] !== 'string' ||
+    typeof lineage['taskId'] !== 'string' ||
+    typeof lineage['attemptId'] !== 'string' ||
+    typeof value['sessionId'] !== 'string' ||
+    typeof value['promptId'] !== 'string' ||
+    (value['writeMode'] !== 'read-only' &&
+      value['writeMode'] !== 'isolated-writer') ||
+    typeof value['inputSnapshot'] !== 'string' ||
+    !value['inputSnapshot'].startsWith('sha256:') ||
+    (worktreePhase !== undefined &&
+      worktreePhase !== 'planned' &&
+      worktreePhase !== 'provisioned') ||
+    (worktreePhase !== undefined &&
+      (!isRecord(worktree) ||
+        worktree['mode'] !== 'worktree' ||
+        typeof worktree['path'] !== 'string' ||
+        !path.isAbsolute(worktree['path']) ||
+        typeof worktree['slug'] !== 'string' ||
+        typeof worktree['branch'] !== 'string' ||
+        typeof worktree['baseCommit'] !== 'string' ||
+        worktree['owner'] !== 'agent-view'))
+  ) {
+    return undefined;
+  }
+  return {
+    lineage: {
+      coordinationId: lineage['coordinationId'],
+      taskId: lineage['taskId'],
+      attemptId: lineage['attemptId'],
+    },
+    sessionId: value['sessionId'],
+    promptId: value['promptId'],
+    writeMode: value['writeMode'],
+    inputSnapshot: value[
+      'inputSnapshot'
+    ] as AgentViewCoordinationManifestAttempt['inputSnapshot'],
+    ...(isRecord(worktree)
+      ? {
+          worktree: {
+            ...worktree,
+            mode: worktreeModeValue(worktree['mode']),
+          },
+        }
+      : {}),
+    ...(worktreePhase === 'planned' || worktreePhase === 'provisioned'
+      ? { worktreePhase }
+      : {}),
+  };
+}
+
+function getCoordinationManifestPath(
+  coordinationId: string,
+  options: StoreOptions,
+): string {
+  return path.join(
+    getAgentViewStorePaths(options).coordinationsDir,
+    `${sanitizeSessionId(coordinationId)}.json`,
+  );
+}
+
+function normalizePtyHostReceipt(
+  raw: JsonRecord | undefined,
+  sessionId: string,
+): AgentViewPtyHostReceipt | undefined {
+  if (
+    !raw ||
+    raw['schemaVersion'] !== 1 ||
+    raw['sessionId'] !== sessionId ||
+    !isPositiveSafeInteger(raw['hostPid']) ||
+    !isPositiveSafeInteger(raw['workerPid']) ||
+    typeof raw['hostEndpoint'] !== 'string' ||
+    !raw['hostEndpoint'] ||
+    typeof raw['hostAuthToken'] !== 'string' ||
+    !raw['hostAuthToken'] ||
+    !isPositiveSafeInteger(raw['generation'])
+  ) {
+    return undefined;
+  }
+  return raw as unknown as AgentViewPtyHostReceipt;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function normalizeWorkerControls(
+  raw: JsonRecord | undefined,
+): AgentViewWorkerControlsFile {
+  const rawEvents = raw?.['events'];
+  const events = Array.isArray(rawEvents)
+    ? rawEvents.filter(isWorkerControlEvent)
+    : [];
+  const nextSequence = Math.max(
+    nonNegativeIntegerValue(raw?.['nextSequence']) ?? 0,
+    ...events.map((event) => event.sequence),
+  );
+  return { schemaVersion: 1, nextSequence, events };
+}
+
+function isWorkerControlEvent(
+  value: unknown,
+): value is AgentViewWorkerControlsFile['events'][number] {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value['sequence']) ||
+    Number(value['sequence']) < 1 ||
+    typeof value['at'] !== 'string'
+  ) {
+    return false;
+  }
+  if (value['type'] === 'redraw' || value['type'] === 'stop') return true;
+  if (value['type'] === 'prompt') {
+    return (
+      typeof value['promptId'] === 'string' && typeof value['text'] === 'string'
+    );
+  }
+  return (
+    value['type'] === 'answer' &&
+    (value['text'] === undefined || typeof value['text'] === 'string') &&
+    (value['callId'] === undefined || typeof value['callId'] === 'string') &&
+    (value['outcome'] === undefined ||
+      isWorkerAnswerOutcome(value['outcome'])) &&
+    (value['payload'] === undefined || isRecord(value['payload']))
+  );
+}
+
+function isWorkerAnswerOutcome(value: unknown): boolean {
+  return (
+    value === 'proceed_once' ||
+    value === 'proceed_always' ||
+    value === 'proceed_always_project' ||
+    value === 'proceed_always_user' ||
+    value === 'modify_with_editor' ||
+    value === 'restore_previous' ||
+    value === 'cancel'
+  );
+}
+
+function normalizeCoordinationResult(
+  raw: JsonRecord | undefined,
+): AgentViewCoordinationResult | undefined {
+  if (!raw || raw['schemaVersion'] !== 1 || !isRecord(raw['lineage'])) {
+    return undefined;
+  }
+  const coordinationId = stringValue(raw['lineage']['coordinationId']);
+  const taskId = stringValue(raw['lineage']['taskId']);
+  const attemptId = stringValue(raw['lineage']['attemptId']);
+  const sessionId = stringValue(raw['sessionId']);
+  const promptId = stringValue(raw['promptId']);
+  const generation = nonNegativeIntegerValue(raw['generation']);
+  const outcome = raw['outcome'];
+  const summary = stringValue(raw['summary']);
+  const completedAt = stringValue(raw['completedAt']);
+  if (
+    !coordinationId ||
+    !taskId ||
+    !attemptId ||
+    !sessionId ||
+    !promptId ||
+    generation === undefined ||
+    generation < 1 ||
+    (outcome !== 'completed' &&
+      outcome !== 'failed' &&
+      outcome !== 'handback') ||
+    !summary ||
+    !completedAt
+  ) {
+    return undefined;
+  }
+  return {
+    schemaVersion: 1,
+    lineage: { coordinationId, taskId, attemptId },
+    sessionId,
+    promptId,
+    generation,
+    outcome,
+    summary,
+    artifacts: stringArrayValue(raw['artifacts']),
+    completedAt,
   };
 }
 
@@ -733,6 +1153,12 @@ function stringValue(value: unknown): string | undefined {
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value)
     ? value
+    : undefined;
+}
+
+function nonNegativeIntegerValue(value: unknown): number | undefined {
+  return Number.isInteger(value) && Number(value) >= 0
+    ? Number(value)
     : undefined;
 }
 

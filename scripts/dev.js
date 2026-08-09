@@ -19,15 +19,12 @@ import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  writeFileSync,
-  mkdtempSync,
-  rmSync,
   existsSync,
   symlinkSync,
   mkdirSync,
   readFileSync,
 } from 'node:fs';
-import { tmpdir, platform } from 'node:os';
+import { platform } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -61,42 +58,7 @@ if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
 // Entry point for the CLI
 const cliEntry = join(cliPackageDir, 'index.ts');
 
-// Create a temporary loader file
-const tmpDir = mkdtempSync(join(tmpdir(), 'qwen-dev-'));
-const loaderPath = join(tmpDir, 'loader.mjs');
-
-const coreSourcePath = join(root, 'packages', 'core', 'index.ts');
-const coreSourceUrl = pathToFileURL(coreSourcePath).href;
-
-const loaderCode = `
-import { pathToFileURL } from 'node:url';
-
-const coreSourceUrl = '${coreSourceUrl}';
-
-export function resolve(specifier, context, nextResolve) {
-  if (specifier === '@qwen-code/qwen-code-core') {
-    return {
-      shortCircuit: true,
-      url: coreSourceUrl,
-      format: 'module',
-    };
-  }
-  return nextResolve(specifier, context);
-}
-`;
-
-writeFileSync(loaderPath, loaderCode);
-
-// Create the register script that uses the new register() API
-const registerPath = join(tmpDir, 'register.mjs');
-const loaderUrl = pathToFileURL(loaderPath).href;
-const registerCode = `
-import { register } from 'node:module';
-import { pathToFileURL } from 'node:url';
-
-register('${loaderUrl}', pathToFileURL('./'));
-`;
-writeFileSync(registerPath, registerCode);
+const registerPath = join(__dirname, 'dev-source-register.mjs');
 
 // Preserve existing NODE_OPTIONS (e.g. VS Code debugger injects --inspect flags via NODE_OPTIONS)
 const existingNodeOptions = process.env.NODE_OPTIONS || '';
@@ -150,21 +112,10 @@ const child = spawn(tsxCmd, tsxArgs, {
 
 child.on('error', (err) => {
   console.error('Failed to start dev server:', err.message);
-  try {
-    rmSync(tmpDir, { recursive: true, force: true });
-  } catch {
-    // Ignore cleanup errors
-  }
   process.exit(1);
 });
 
 child.on('close', (code, signal) => {
-  // Cleanup temp directory
-  try {
-    rmSync(tmpDir, { recursive: true, force: true });
-  } catch {
-    // Ignore cleanup errors
-  }
   // A signal-killed child reports `code === null`, and `code ?? 0` read that as
   // success. This launcher is a QWEN_CODE_CLI entry now: a review gate command
   // OOM-killed mid-run must not come back green. Re-raise the signal the way

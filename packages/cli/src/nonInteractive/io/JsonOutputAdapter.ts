@@ -5,7 +5,11 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { CLIAssistantMessage, CLIMessage } from '../types.js';
+import type {
+  CLIAssistantMessage,
+  CLIMessage,
+  CLIResultMessage,
+} from '../types.js';
 import {
   BaseJsonOutputAdapter,
   type JsonOutputAdapterInterface,
@@ -23,7 +27,10 @@ export class JsonOutputAdapter
 {
   private readonly messages: CLIMessage[] = [];
 
-  constructor(config: Config) {
+  constructor(
+    config: Config,
+    private readonly onResult?: (result: CLIResultMessage) => void,
+  ) {
     super(config);
   }
 
@@ -63,6 +70,7 @@ export class JsonOutputAdapter
       options,
       this.lastAssistantMessage,
     );
+    this.onResult?.(resultMessage);
     this.messages.push(resultMessage);
 
     if (this.config.getOutputFormat() === 'text') {

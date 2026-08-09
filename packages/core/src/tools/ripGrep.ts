@@ -489,6 +489,9 @@ class GrepToolInvocation extends BaseToolInvocation<
     const { pattern, paths, glob } = options;
 
     const rgArgs: string[] = [
+      ...(this.config.getStrictRipgrepIgnorePolicy()
+        ? ['--no-config', '--no-ignore-dot']
+        : []),
       '--json',
       '--no-messages',
       '--path-separator',
@@ -558,11 +561,13 @@ class GrepToolInvocation extends BaseToolInvocation<
     // Pass all search paths to ripgrep (it supports multiple paths natively)
     rgArgs.push(...paths);
 
-    const result = await runRipgrep(
-      rgArgs,
-      options.signal,
-      this.config.getUseBuiltinRipgrep(),
-    );
+    const result = this.config.getRequireBuiltinRipgrep()
+      ? await runRipgrep(rgArgs, options.signal, true, true)
+      : await runRipgrep(
+          rgArgs,
+          options.signal,
+          this.config.getUseBuiltinRipgrep(),
+        );
     this.logRipgrepRuntimeRecovery(result);
     if (result.error && !result.stdout.trim()) {
       throw result.error;

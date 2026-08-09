@@ -245,6 +245,7 @@ import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
 import {
+  acknowledgeAgentViewWorkerControlEvents,
   isAgentViewWorkerEnv,
   readAgentViewWorkerControlEvents,
   reportAgentViewWorkerState,
@@ -477,11 +478,11 @@ export function getAgentViewAnswerableToolCalls(
 export async function applyAgentViewWorkerControlEventForUi(
   event: AgentViewWorkerControlEvent,
   pendingToolCalls: readonly unknown[],
-  enqueuePrompt: (text: string) => void,
+  enqueuePrompt: (text: string, promptId?: string) => void,
   stopCurrentTurn?: () => void,
 ): Promise<void> {
   if (event.type === 'prompt') {
-    enqueuePrompt(event.text);
+    enqueuePrompt(event.text, event.promptId);
     return;
   }
 
@@ -1444,6 +1445,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  const activeAgentViewPromptIdRef = useRef<string | undefined>(undefined);
   const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
@@ -1756,6 +1758,7 @@ export const AppContainer = (props: AppContainerProps) => {
           setSessionName(customTitle);
           if (isAgentViewWorkerEnv()) {
             void reportAgentViewWorkerState({
+              promptId: activeAgentViewPromptIdRef.current,
               sessionState: isIdleRef.current ? 'idle' : 'working',
               summary: customTitle,
             });
@@ -2419,8 +2422,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     if (!isAgentViewWorkerEnv()) return;
-    void reportAgentViewWorkerState(
-      getAgentViewWorkerStateForUi({
+    void reportAgentViewWorkerState({
+      ...getAgentViewWorkerStateForUi({
         initError,
         streamingState,
         pendingToolCalls,
@@ -2429,7 +2432,8 @@ export const AppContainer = (props: AppContainerProps) => {
           ...pendingGeminiHistoryItems,
         ]),
       }),
-    );
+      promptId: activeAgentViewPromptIdRef.current,
+    });
   }, [
     historyManager.history,
     initError,
@@ -3017,7 +3021,9 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const pendingAgentViewControlPromptsRef = useRef<string[]>([]);
+  const pendingAgentViewControlPromptsRef = useRef<
+    Array<{ text: string; promptId?: string }>
+  >([]);
   useEffect(() => {
     if (!isAgentViewWorkerEnv()) return undefined;
 
@@ -3032,32 +3038,38 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
       if (nextPrompt) {
-        handleFinalSubmit(nextPrompt);
+        activeAgentViewPromptIdRef.current = nextPrompt.promptId;
+        handleFinalSubmit(nextPrompt.text);
       }
     };
     const poll = async () => {
       try {
         const events = await readAgentViewWorkerControlEvents();
-        if (!disposed && events.some((event) => event.type === 'redraw')) {
-          refreshStatic();
-        }
         for (const event of events) {
+          if (!disposed && event.type === 'redraw') {
+            refreshStatic();
+          }
           await applyAgentViewWorkerControlEventForUi(
             event,
             pendingToolCallsRef.current,
-            (text) => {
-              pendingAgentViewControlPromptsRef.current.push(text);
+            (text, promptId) => {
+              pendingAgentViewControlPromptsRef.current.push({
+                text,
+                promptId,
+              });
             },
             () => {
               if (streamingStateRef.current === StreamingState.Responding) {
                 cancelOngoingRequestRef.current();
               }
               void reportAgentViewWorkerState({
+                promptId: activeAgentViewPromptIdRef.current,
                 sessionState: 'stopped',
                 lastResult: 'Stopped by user',
               });
             },
           );
+          acknowledgeAgentViewWorkerControlEvents(event.sequence);
         }
         if (!disposed) {
           flushPrompt();
@@ -3066,7 +3078,7 @@ export const AppContainer = (props: AppContainerProps) => {
         // Supervisor sideband is best-effort; normal TUI rendering continues.
       } finally {
         if (!disposed) {
-          timer = setTimeout(poll, 250);
+          timer = setTimeout(poll, 1_000);
         }
       }
     };
@@ -4326,6 +4338,7 @@ export const AppContainer = (props: AppContainerProps) => {
       if (streamingState === StreamingState.Responding) {
         if (isAgentViewWorkerEnv()) {
           void reportAgentViewWorkerState({
+            promptId: activeAgentViewPromptIdRef.current,
             sessionState: 'stopped',
             lastResult: 'Stopped by user',
           });
@@ -4474,6 +4487,7 @@ export const AppContainer = (props: AppContainerProps) => {
           }
           if (isAgentViewWorkerEnv()) {
             void reportAgentViewWorkerState({
+              promptId: activeAgentViewPromptIdRef.current,
               sessionState: 'stopped',
               lastResult: 'Stopped by user',
             });
@@ -5251,13 +5265,17 @@ export function runAgentViewRosterCommand(
   if (!entrypoint) {
     return 1;
   }
-  const result = spawn(process.execPath, [entrypoint, 'agents', '--cwd', cwd], {
-    stdio: 'inherit',
-    env: {
-      ...process.env,
-      QWEN_CODE_NO_RELAUNCH: '1',
+  const result = spawn(
+    process.execPath,
+    [entrypoint, 'agent-view', 'list', '--cwd', cwd],
+    {
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        QWEN_CODE_NO_RELAUNCH: '1',
+      },
     },
-  });
+  );
   if (result.signal) {
     return 1;
   }

@@ -17,6 +17,8 @@ import type { SubagentConfig } from './types.js';
  */
 export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
 export const COORDINATOR_EXPLORE_SUBAGENT_TYPE = 'coordinator-explore';
+export const COORDINATOR_EXPLORE_MAX_INVESTIGATORS = 3;
+export const COORDINATOR_EXPLORE_MAX_RESULT_CHARS = 8_000;
 
 /**
  * Registry of built-in subagents that are always available to all users.
@@ -51,6 +53,7 @@ Notes:
       description:
         'Strictly read-only investigator used by the explicit /coordinate workflow.',
       tools: [...READ_ONLY_REPOSITORY_TOOLS],
+      runConfig: { max_time_minutes: 5, max_turns: 8 },
       systemPrompt: `You are a read-only investigator working for a Qwen Code Leader. Complete only the assigned investigation and return concise, verifiable evidence.
 
 Rules:
@@ -58,6 +61,7 @@ Rules:
 - Do not delegate, ask questions, or expand the assignment.
 - Cite relevant absolute file paths and line numbers when available.
 - Distinguish verified facts, inferences, disagreements, and blockers.
+- Keep the final report within ${COORDINATOR_EXPLORE_MAX_RESULT_CHARS} characters.
 - Return only the findings the Leader needs to synthesize or implement the task.`,
     },
     {

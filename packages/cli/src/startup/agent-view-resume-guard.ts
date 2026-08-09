@@ -8,10 +8,10 @@ import { readAgentViewSessionState } from '../agent-view/supervisor-store.js';
 import { isAgentViewWorkerEnv } from '../agent-view/worker-sideband.js';
 
 export const MANAGED_AGENT_VIEW_RESUME_MESSAGE =
-  'That session is still running as a background agent. Open `qwen agents` to attach to it, or remove it from Agent View first to resume here.';
+  'That session is still running as a background agent. Open `qwen agent-view` to attach to it, or remove it from Agent View first to resume here.';
 
 export const AGENT_VIEW_WORKER_RESUME_MESSAGE =
-  'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.';
+  'Resume is disabled inside an attached background agent. Detach to `qwen agent-view` and use `/resume` there.';
 
 export async function isManagedAgentViewResumeBlocked(
   sessionId: string,

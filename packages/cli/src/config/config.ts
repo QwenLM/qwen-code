@@ -73,16 +73,7 @@ import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
 import { isValidSessionId } from './session-id.js';
-import { agentsCommand } from '../commands/agents.js';
-import { agentDaemonCommand } from '../commands/agent-daemon.js';
-import {
-  attachCommand,
-  killCommand,
-  logsCommand,
-  respawnCommand,
-  rmCommand,
-  stopCommand,
-} from '../commands/agent-session.js';
+import { agentViewCommand } from '../commands/agent-view.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -1129,15 +1120,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
-    // Register Agent View Phase 1 command surface
-    .command(agentsCommand)
-    .command(agentDaemonCommand)
-    .command(attachCommand)
-    .command(logsCommand)
-    .command(stopCommand)
-    .command(killCommand)
-    .command(respawnCommand)
-    .command(rmCommand)
+    // Register Agent View command surface
+    .command(agentViewCommand)
     // Register update command
     .command(updateCommand);
 
@@ -1165,14 +1149,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
-      result._[0] === 'agents' ||
-      result._[0] === 'daemon' ||
-      result._[0] === 'attach' ||
-      result._[0] === 'logs' ||
-      result._[0] === 'stop' ||
-      result._[0] === 'kill' ||
-      result._[0] === 'respawn' ||
-      result._[0] === 'rm' ||
+      result._[0] === 'agent-view' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1608,10 +1585,14 @@ export async function loadCliConfig(
   /**
    * Runtime-only host policy. This is deliberately not sourced from argv,
    * settings, or the environment: only an embedding host that owns the Config
-   * construction may install the executor-boundary callback.
+   * construction may install these executor-boundary restrictions.
    */
   hostPolicy?: {
+    exactToolInventory?: readonly string[];
     toolInvocationGuard?: ToolInvocationGuard;
+    requireRipgrep?: boolean;
+    requireBuiltinRipgrep?: boolean;
+    strictRipgrepIgnorePolicy?: boolean;
   },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
@@ -2200,7 +2181,11 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
+    exactToolInventory: hostPolicy?.exactToolInventory,
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
+    requireRipgrep: hostPolicy?.requireRipgrep,
+    requireBuiltinRipgrep: hostPolicy?.requireBuiltinRipgrep,
+    strictRipgrepIgnorePolicy: hostPolicy?.strictRipgrepIgnorePolicy,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);

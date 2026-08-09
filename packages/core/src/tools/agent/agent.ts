@@ -98,6 +98,8 @@ import type {
 } from '../../agents/runtime/agent-events.js';
 import {
   BuiltinAgentRegistry,
+  COORDINATOR_EXPLORE_MAX_INVESTIGATORS,
+  COORDINATOR_EXPLORE_MAX_RESULT_CHARS,
   COORDINATOR_EXPLORE_SUBAGENT_TYPE,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
 } from '../../subagents/builtin-agents.js';
@@ -146,6 +148,15 @@ function getCachedGitBranch(cwd: string): string | undefined {
   const branch = getGitBranch(cwd);
   gitBranchCache.set(cwd, branch);
   return branch;
+}
+
+function capCoordinatorExploreResult(result: string): string {
+  if (result.length <= COORDINATOR_EXPLORE_MAX_RESULT_CHARS) return result;
+
+  const marker = '\n\n[Coordinator investigator result truncated]\n\n';
+  const retained = COORDINATOR_EXPLORE_MAX_RESULT_CHARS - marker.length;
+  const headLength = Math.ceil(retained / 2);
+  return `${result.slice(0, headLength)}${marker}${result.slice(-Math.floor(retained / 2))}`;
 }
 
 function persistBackgroundCancellation(
@@ -795,6 +806,20 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   private availableSubagents: SubagentConfig[] =
     BuiltinAgentRegistry.getBuiltinAgents();
   private readonly removeChangeListener: () => void;
+  private readonly coordinatorLaunchCounts = new Map<string, number>();
+
+  private tryReserveCoordinatorLaunch(promptId?: string): boolean {
+    const key = promptId ?? '<unscoped>';
+    const count = this.coordinatorLaunchCounts.get(key) ?? 0;
+    if (count >= COORDINATOR_EXPLORE_MAX_INVESTIGATORS) return false;
+
+    if (count === 0 && this.coordinatorLaunchCounts.size >= 64) {
+      const oldest = this.coordinatorLaunchCounts.keys().next().value;
+      if (oldest !== undefined) this.coordinatorLaunchCounts.delete(oldest);
+    }
+    this.coordinatorLaunchCounts.set(key, count + 1);
+    return true;
+  }
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -1337,6 +1362,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       this.subagentManager,
       invocationParams,
       forkProfile,
+      (promptId) => this.tryReserveCoordinatorLaunch(promptId),
     );
   }
 
@@ -1446,12 +1472,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
   private callId?: string;
+  private promptId?: string;
 
   constructor(
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
     private readonly forkProfile?: ForkProfile,
+    private readonly reserveCoordinatorLaunch?: (promptId?: string) => boolean,
   ) {
     super(params);
   }
@@ -1459,6 +1487,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   // Background agents carry the tool-use id through to completion notifications.
   setCallId(callId: string): void {
     this.callId = callId;
+  }
+
+  setPromptId(promptId: string): void {
+    this.promptId = promptId;
   }
 
   /**
@@ -2300,6 +2332,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (
+      this.params.subagent_type?.toLowerCase() ===
+        COORDINATOR_EXPLORE_SUBAGENT_TYPE &&
+      this.reserveCoordinatorLaunch?.(this.promptId) === false
+    ) {
+      return this.buildSpawnBlockedResult(
+        `Error: /coordinate allows at most ${COORDINATOR_EXPLORE_MAX_INVESTIGATORS} investigators per user request. Synthesize the results already returned instead of launching another investigator.`,
+        'Coordinator investigator limit reached',
+      );
+    }
+
     if (this.params.plan_mode_required === true) {
       if (
         !this.params.name ||
@@ -4134,10 +4177,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const stopHookWarning = await runFramed();
         const terminateMode = subagent.getTerminateMode();
-        const finalText = appendStopHookBlockingCapWarning(
+        const uncappedFinalText = appendStopHookBlockingCapWarning(
           toModelVisibleSubagentResult(subagent.getFinalText(), terminateMode),
           stopHookWarning,
         );
+        const finalText =
+          this.params.subagent_type?.toLowerCase() ===
+          COORDINATOR_EXPLORE_SUBAGENT_TYPE
+            ? capCoordinatorExploreResult(uncappedFinalText)
+            : uncappedFinalText;
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {

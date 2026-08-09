@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
@@ -24,9 +24,9 @@ import {
   type SlashCommand,
 } from '../commands/types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import type { AgentRosterGroupMode, AgentRosterRow } from './roster-model.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
+import { stripUnsafeCharacters } from '../utils/textUtils.js';
 
 export interface AgentViewHeaderInfo {
   version: string;
@@ -51,7 +51,7 @@ export interface AgentViewRosterProps {
   slashCommands?: readonly SlashCommand[];
   onPromptChange: (prompt: string) => void;
   onPeekPromptChange: (prompt: string) => void;
-  onDispatch: (attach: boolean, prompt: string) => void;
+  onDispatch: (prompt: string) => void;
   onSubmitPeekPrompt: (promptOverride?: string) => void;
   onAttachSelected: () => void;
   onPeekSelected: () => void;
@@ -133,10 +133,9 @@ export function AgentViewRoster({
   onMoveSelection,
   onCancel,
 }: AgentViewRosterProps) {
-  const loadedSlashCommands = useAgentViewSlashCommands(slashCommands);
   const promptInput = useAgentViewPromptInput({
     prompt,
-    slashCommands: loadedSlashCommands,
+    slashCommands,
     onPromptChange,
   });
   const currentPrompt = promptInput.buffer.text;
@@ -210,7 +209,7 @@ export function AgentViewRoster({
       !peekInputActive &&
       !(
         isReturnInput(input, key) &&
-        isExactSlashCommand(currentPrompt, loadedSlashCommands)
+        isExactSlashCommand(currentPrompt, slashCommands)
       ) &&
       promptInput.handleCompletionKey(input, key)
     ) {
@@ -252,7 +251,7 @@ export function AgentViewRoster({
         if (submittedPrompt.trim()) {
           promptInput.buffer.setText('');
           onPromptChange('');
-          onDispatch(Boolean(key.shift), submittedPrompt);
+          onDispatch(submittedPrompt);
         } else if (rows.length > 0) {
           onAttachSelected();
         }
@@ -309,7 +308,7 @@ export function AgentViewRoster({
         ) : (
           getRosterSections(rows, groupMode).map((section) => (
             <Box key={section.label} flexDirection="column">
-              <Text dimColor>{section.label}</Text>
+              <Text dimColor>{cleanRowText(section.label)}</Text>
               {section.rows.map(({ row, index }) => (
                 <RosterRow
                   key={row.sessionId}
@@ -333,10 +332,10 @@ export function AgentViewRoster({
             />
           ) : (
             <>
-              <Text bold>{peekPanel.title}</Text>
-              {peekPanel.lines.map((line) => (
-                <Text key={line} dimColor>
-                  {line}
+              <Text bold>{cleanRowText(peekPanel.title)}</Text>
+              {peekPanel.lines.map((line, index) => (
+                <Text key={`${index}:${line}`} dimColor>
+                  {cleanRowText(line)}
                 </Text>
               ))}
             </>
@@ -345,10 +344,10 @@ export function AgentViewRoster({
       ) : null}
       {notice ? (
         <Box flexDirection="column" marginBottom={1}>
-          {notice.title ? <Text bold>{notice.title}</Text> : null}
-          {notice.lines.map((line) => (
-            <Text key={line} color={theme.text.secondary}>
-              {line}
+          {notice.title ? <Text bold>{cleanRowText(notice.title)}</Text> : null}
+          {notice.lines.map((line, index) => (
+            <Text key={`${index}:${line}`} color={theme.text.secondary}>
+              {cleanRowText(line)}
             </Text>
           ))}
         </Box>
@@ -383,41 +382,8 @@ function getReturnInputPrefix(
   input: string,
   key: RosterInputKey,
 ): string | undefined {
-  if (key.return) {
-    return '';
-  }
-  const returnIndex = input.search(/[\r\n]/);
-  return returnIndex >= 0 ? input.slice(0, returnIndex) : undefined;
-}
-
-function useAgentViewSlashCommands(
-  fallbackCommands: readonly SlashCommand[],
-): readonly SlashCommand[] {
-  const [commands, setCommands] =
-    useState<readonly SlashCommand[]>(fallbackCommands);
-
-  useEffect(() => {
-    if (fallbackCommands !== AGENT_VIEW_SLASH_COMMANDS) {
-      setCommands(fallbackCommands);
-      return undefined;
-    }
-    let disposed = false;
-    const abortController = new AbortController();
-    void new BuiltinCommandLoader(null)
-      .loadCommands(abortController.signal)
-      .then((loadedCommands) => {
-        if (!disposed && loadedCommands.length > 0) {
-          setCommands(loadedCommands);
-        }
-      })
-      .catch(() => undefined);
-    return () => {
-      disposed = true;
-      abortController.abort();
-    };
-  }, [fallbackCommands]);
-
-  return commands;
+  if (key.return && input === '') return '';
+  return input.match(/^([^\r\n]*)(?:\r\n|\r|\n)$/)?.[1];
 }
 
 function AgentViewHeader({
@@ -434,10 +400,10 @@ function AgentViewHeader({
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Header
-        version={version}
-        authDisplayType={header?.authLabel}
+        version={cleanRowText(version) ?? 'unknown'}
+        authDisplayType={cleanRowText(header?.authLabel)}
         model={model}
-        workingDirectory={cwd}
+        workingDirectory={cleanRowText(cwd) ?? ''}
       />
       <Tips />
       <Text dimColor>{summary}</Text>
@@ -491,6 +457,7 @@ function useAgentViewPromptInput({
     }
     lastSeenPromptPropRef.current = prompt;
     if (prompt === lastPromptRef.current) {
+      emittedPromptsRef.current.clear();
       return;
     }
     if (emittedPromptsRef.current.delete(prompt)) {
@@ -501,6 +468,7 @@ function useAgentViewPromptInput({
       return;
     }
     lastPromptRef.current = prompt;
+    emittedPromptsRef.current.clear();
     if (prompt !== buffer.text) {
       buffer.setText(prompt);
     }
@@ -575,7 +543,7 @@ function toTextBufferKey(input: string, key: RosterInputKey): Key {
     ctrl: Boolean(key.ctrl),
     meta: Boolean(key.meta),
     shift: Boolean(key.shift),
-    paste: false,
+    paste: /[\r\n]/.test(input),
     sequence: input,
   };
 }
@@ -676,17 +644,18 @@ const AGENT_VIEW_SLASH_COMMANDS: readonly SlashCommand[] = [
     action: () => undefined,
   },
   {
-    name: 'quit',
-    altNames: ['exit'],
-    description: 'Exit Agent View',
+    name: 'resume',
+    altNames: ['continue'],
+    description: 'Add a previous session to Agent View',
     kind: CommandKind.BUILT_IN,
     action: () => undefined,
   },
 ];
 
 function formatHeaderModel(header: AgentViewHeaderInfo | undefined): string {
-  const model = header?.model ?? 'unknown model';
-  return header?.providerLabel ? `[${header.providerLabel}] ${model}` : model;
+  const model = cleanRowText(header?.model) ?? 'unknown model';
+  const provider = cleanRowText(header?.providerLabel);
+  return provider ? `[${provider}] ${model}` : model;
 }
 
 function formatRosterSummary(rows: AgentRosterRow[]): string {
@@ -761,9 +730,12 @@ function getPeekFooter(
   queuedPrompts: string[] | undefined,
 ): string {
   if (queuedPrompts?.length) {
-    return 'waiting for response · space to close · ctrl+x to delete';
+    return 'waiting for response · space close · ctrl+x stop/remove';
   }
-  return 'enter to open · space to close · ctrl+x to delete';
+  if (inputMode) {
+    return 'enter send · space close when empty · ctrl+x stop/remove';
+  }
+  return 'enter attach · space close · ctrl+x stop/remove';
 }
 
 function AgentViewPromptBox({
@@ -801,7 +773,7 @@ function AgentViewPromptBox({
         </Box>
       ) : null}
       <Text color={theme.text.secondary}>
-        {'enter to open · space to reply · ctrl+x to delete ·'}
+        {'enter attach/dispatch · space peek · ctrl+x stop/remove · ? help'}
       </Text>
     </Box>
   );
@@ -825,10 +797,11 @@ function getPanelDisplayLines(
 }
 
 function formatWaitingLine(waitingFor: string | undefined): string | undefined {
-  if (!waitingFor || waitingFor === 'response') {
+  const safeWaitingFor = cleanRowText(waitingFor);
+  if (!safeWaitingFor || safeWaitingFor === 'response') {
     return undefined;
   }
-  return `Waiting: ${waitingFor}`;
+  return `Waiting: ${safeWaitingFor}`;
 }
 
 function parsePanelLines(lines: readonly string[]): {
@@ -837,8 +810,8 @@ function parsePanelLines(lines: readonly string[]): {
   other: string[];
 } {
   return lines
-    .map((line) => line.trim())
-    .filter(Boolean)
+    .map(cleanRowText)
+    .filter((line): line is string => Boolean(line))
     .reduce<{
       result?: string;
       summary?: string;
@@ -874,7 +847,7 @@ function getQueuedPromptLine(
   if (!queuedPrompts || queuedPrompts.length === 0) {
     return undefined;
   }
-  const latest = queuedPrompts.at(-1)?.trim();
+  const latest = cleanRowText(queuedPrompts.at(-1));
   if (!latest) {
     return undefined;
   }
@@ -992,7 +965,9 @@ function formatRowOutput(row: AgentRosterRow): string {
 }
 
 function cleanRowText(value: string | undefined): string | undefined {
-  const text = value?.trim();
+  const text = stripUnsafeCharacters(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
   return text ? text : undefined;
 }
 

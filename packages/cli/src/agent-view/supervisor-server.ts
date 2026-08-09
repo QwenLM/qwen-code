@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
+import { AGENT_VIEW_MAX_COORDINATION_WORKERS } from './protocol.js';
 import type {
   AgentViewSupervisorOperation,
   AgentViewSupervisorRequestMap,
@@ -29,6 +30,9 @@ export interface AgentViewSupervisorHandler {
     requestId: string,
   ): Promise<void> | void;
   dispatch?: AgentViewSupervisorHandlerMethod<'dispatch'>;
+  dispatchCoordination?: AgentViewSupervisorHandlerMethod<'dispatchCoordination'>;
+  reassignCoordination?: AgentViewSupervisorHandlerMethod<'reassignCoordination'>;
+  collect?: AgentViewSupervisorHandlerMethod<'collect'>;
   adopt?: AgentViewSupervisorHandlerMethod<'adopt'>;
   workerEvent?: AgentViewSupervisorHandlerMethod<'workerEvent'>;
   workerControl?: AgentViewSupervisorHandlerMethod<'workerControl'>;
@@ -205,7 +209,10 @@ export async function handleAgentViewSupervisorRequest(
           params: Record<string, unknown> | undefined,
         ) => Promise<unknown> | unknown)
       | undefined;
-    const result = await method?.call(handler, params);
+    const result = await method?.call(
+      handler,
+      params as unknown as Record<string, unknown> | undefined,
+    );
     return {
       id: request['id'],
       ok: true,
@@ -395,9 +402,80 @@ function errorResponse(
 }
 
 function parseSupervisorParams<Op extends AgentViewSupervisorOperation>(
-  _op: Op,
+  op: Op,
   params: unknown,
 ): AgentViewSupervisorRequestMap[Op] {
+  if (op === 'dispatchCoordination') {
+    if (!isRecord(params) || typeof params['cwd'] !== 'string') {
+      throw new Error('Coordination dispatch requires an absolute cwd.');
+    }
+    if (!path.isAbsolute(params['cwd'])) {
+      throw new Error('Coordination dispatch cwd must be absolute.');
+    }
+    const tasks = params['tasks'];
+    if (
+      !Array.isArray(tasks) ||
+      tasks.length < 1 ||
+      tasks.length > AGENT_VIEW_MAX_COORDINATION_WORKERS
+    ) {
+      throw new Error(
+        `Coordination dispatch requires 1-${AGENT_VIEW_MAX_COORDINATION_WORKERS} tasks.`,
+      );
+    }
+    let writerCount = 0;
+    for (const task of tasks) {
+      if (
+        !isRecord(task) ||
+        typeof task['taskFile'] !== 'string' ||
+        !path.isAbsolute(task['taskFile']) ||
+        (task['writeMode'] !== 'read-only' &&
+          task['writeMode'] !== 'isolated-writer')
+      ) {
+        throw new Error(
+          'Each coordination task requires an absolute taskFile and a valid writeMode.',
+        );
+      }
+      if (task['writeMode'] === 'isolated-writer') writerCount++;
+    }
+    if (writerCount > 1) {
+      throw new Error(
+        'A coordination dispatch can contain at most one writer.',
+      );
+    }
+  }
+  if (op === 'reassignCoordination') {
+    if (
+      !isRecord(params) ||
+      !isFullUuid(params['coordinationId']) ||
+      !isFullUuid(params['taskId']) ||
+      typeof params['taskFile'] !== 'string' ||
+      !path.isAbsolute(params['taskFile']) ||
+      (params['writeMode'] !== 'read-only' &&
+        params['writeMode'] !== 'isolated-writer')
+    ) {
+      throw new Error(
+        'Reassignment requires full coordination/task IDs, an absolute taskFile, and a valid writeMode.',
+      );
+    }
+  }
+  if (op === 'collect') {
+    if (!isRecord(params) || !isFullUuid(params['coordinationId'])) {
+      throw new Error('Collect requires a full coordination ID.');
+    }
+  }
+  if (op === 'workerControl') {
+    if (
+      !isRecord(params) ||
+      !Number.isSafeInteger(params['generation']) ||
+      Number(params['generation']) < 1 ||
+      !Number.isSafeInteger(params['ackSequence']) ||
+      Number(params['ackSequence']) < 0
+    ) {
+      throw new Error(
+        'Worker control requires a positive generation and non-negative ackSequence.',
+      );
+    }
+  }
   return (
     isRecord(params) ? params : undefined
   ) as AgentViewSupervisorRequestMap[Op];
@@ -412,6 +490,9 @@ function isSupervisorOperation(
     value === 'subscribe' ||
     value === 'shutdown' ||
     value === 'dispatch' ||
+    value === 'dispatchCoordination' ||
+    value === 'reassignCoordination' ||
+    value === 'collect' ||
     value === 'adopt' ||
     value === 'workerEvent' ||
     value === 'workerControl' ||
@@ -427,6 +508,15 @@ function isSupervisorOperation(
     value === 'remove' ||
     value === 'pin' ||
     value === 'rename'
+  );
+}
+
+function isFullUuid(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
   );
 }
 

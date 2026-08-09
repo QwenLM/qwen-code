@@ -103,6 +103,10 @@ export * from './core/turn-interruption.js';
 
 // Tool names and registry
 export * from './tools/tool-names.js';
+export {
+  ISOLATED_COORDINATION_WRITER_TOOLS,
+  READ_ONLY_REPOSITORY_TOOLS,
+} from './agents/runtime/subagent-plan-tool-policy.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
 export * from './tools/tools.js';

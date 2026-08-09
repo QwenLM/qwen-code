@@ -18,7 +18,7 @@ import { filterAgentRosterRows } from './roster-model.js';
 import type { AgentRosterGroupMode, AgentRosterRow } from './roster-model.js';
 
 export interface AgentViewAppActions {
-  dispatchPrompt(prompt: string, attach: boolean): Promise<unknown>;
+  dispatchPrompt(prompt: string): Promise<unknown>;
   peekSelected(sessionId: string): Promise<AgentViewPeekPanel>;
   sendToSession(sessionId: string, text: string): Promise<unknown>;
   answerSession(sessionId: string, text: string): Promise<unknown>;
@@ -43,7 +43,6 @@ export interface AgentViewAppProps {
   onResumeRequested?: () => void;
   header?: AgentViewHeaderInfo;
   initialPeekPanel?: AgentViewPeekPanel;
-  refreshIntervalMs?: number;
 }
 
 interface ReplyTarget {
@@ -66,7 +65,6 @@ export function AgentViewApp({
   onResumeRequested,
   header,
   initialPeekPanel,
-  refreshIntervalMs,
 }: AgentViewAppProps) {
   const [currentRows, setCurrentRows] = useState(rows);
   const [prompt, setPrompt] = useState('');
@@ -139,16 +137,6 @@ export function AgentViewApp({
   }, [actions]);
 
   useEffect(() => {
-    if (!refreshIntervalMs || refreshIntervalMs <= 0) return undefined;
-    const interval = setInterval(() => {
-      void refreshRows();
-    }, refreshIntervalMs);
-    return () => {
-      clearInterval(interval);
-    };
-  }, [refreshIntervalMs, refreshRows]);
-
-  useEffect(() => {
     const subscription = actions.subscribeToChanges?.(() => {
       void refreshRows();
     });
@@ -182,7 +170,7 @@ export function AgentViewApp({
   );
 
   const dispatch = useCallback(
-    (attach: boolean, promptOverride?: string) => {
+    (promptOverride?: string) => {
       if (dispatchInFlightRef.current) {
         setNotice({
           lines: ['Starting session...'],
@@ -227,22 +215,8 @@ export function AgentViewApp({
 
       void (async () => {
         try {
-          const result = await actions.dispatchPrompt(submitted, attach);
+          await actions.dispatchPrompt(submitted);
           dispatchInFlightRef.current = false;
-          if (attach) {
-            const sessionId = getDispatchedSessionId(result);
-            if (!sessionId) {
-              setPrompt(submitted);
-              setNotice({
-                lines: ['Agent dispatch did not return a session id.'],
-              });
-              setPeekReplyTarget(undefined);
-              setPeekPrompt('');
-              return;
-            }
-            onAttachRequested?.(sessionId);
-            return;
-          }
           await refreshRows();
           setNotice({
             lines: ['Dispatched.'],
@@ -260,15 +234,7 @@ export function AgentViewApp({
         }
       })();
     },
-    [
-      actions,
-      currentRows,
-      onAttachRequested,
-      onExit,
-      onResumeRequested,
-      prompt,
-      refreshRows,
-    ],
+    [actions, currentRows, onExit, onResumeRequested, prompt, refreshRows],
   );
 
   const submitPeekPrompt = useCallback(
@@ -474,7 +440,6 @@ export function AgentViewApp({
       lines: [
         'Enter/Right: attach',
         'Prompt + Enter: dispatch',
-        'Shift+Enter: dispatch and attach',
         'Space: peek',
         'Ctrl+S: toggle grouping',
         'Ctrl+T: pin/unpin',
@@ -489,12 +454,14 @@ export function AgentViewApp({
   const interrupt = useCallback(() => {
     if (peekReplyTarget && peekPrompt) {
       setPeekPrompt('');
-      setLastInterruptAt(Date.now());
+      setLastInterruptAt(0);
+      setNotice(undefined);
       return;
     }
     if (prompt) {
       setPrompt('');
-      setLastInterruptAt(Date.now());
+      setLastInterruptAt(0);
+      setNotice(undefined);
       return;
     }
     const now = Date.now();
@@ -630,18 +597,6 @@ function isRosterResumeCommand(prompt: string): boolean {
   return ['/resume', '/continue'].includes(prompt.trim().toLowerCase());
 }
 
-function getDispatchedSessionId(value: unknown): string | undefined {
-  if (
-    typeof value === 'object' &&
-    value !== null &&
-    'sessionId' in value &&
-    typeof value.sessionId === 'string'
-  ) {
-    return value.sessionId;
-  }
-  return undefined;
-}
-
 export async function runAgentViewRosterApp(
   rows: AgentRosterRow[],
   actions: AgentViewAppActions,
@@ -678,7 +633,6 @@ export async function runAgentViewRosterApp(
             finish({ type: 'attach', sessionId })
           }
           onResumeRequested={() => finish({ type: 'resume' })}
-          refreshIntervalMs={1000}
         />
       </KeypressProvider>,
       { exitOnCtrlC: false },

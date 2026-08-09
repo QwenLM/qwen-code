@@ -5,7 +5,6 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { writeStderrLineSafe, writeStdoutLine } from '../utils/stdioHelpers.js';
 
 interface SessionArgs {
@@ -17,8 +16,15 @@ interface RespawnArgs {
   all?: boolean;
 }
 
+interface SessionTextArgs extends SessionArgs {
+  text: string;
+}
+
 interface AgentSessionSupervisor {
   attach(id: string): Promise<unknown>;
+  peek(id: string): Promise<unknown>;
+  send(id: string, text: string): Promise<unknown>;
+  answer(id: string, text: string): Promise<unknown>;
   logs(id: string): Promise<unknown>;
   stop(id: string): Promise<unknown>;
   kill(id: string): Promise<unknown>;
@@ -27,6 +33,9 @@ interface AgentSessionSupervisor {
 }
 
 async function getSessionSupervisor(): Promise<AgentSessionSupervisor> {
+  const { ensureAgentViewSupervisor } = await import(
+    '../agent-view/supervisor-runner.js'
+  );
   const supervisor = await ensureAgentViewSupervisor();
   return supervisor as unknown as AgentSessionSupervisor;
 }
@@ -38,7 +47,7 @@ function writeJsonResult(result: unknown): void {
 function sessionCommand(
   command: string,
   describe: string,
-  method: keyof Omit<AgentSessionSupervisor, 'respawn'>,
+  method: 'peek' | 'logs' | 'stop' | 'kill' | 'remove',
   formatResult: (result: unknown) => string = (result) =>
     JSON.stringify(result, null, 2),
 ): CommandModule<unknown, SessionArgs> {
@@ -87,6 +96,53 @@ export const logsCommand = sessionCommand(
   getLogsOutput,
 );
 
+export const peekCommand = sessionCommand(
+  'peek <id>',
+  'Show structured Agent View session state',
+  'peek',
+);
+
+function sessionTextCommand(
+  command: string,
+  describe: string,
+  method: 'send' | 'answer',
+): CommandModule<unknown, SessionTextArgs> {
+  return {
+    command,
+    describe,
+    builder: (yargs: Argv) =>
+      yargs
+        .positional('id', {
+          type: 'string',
+          demandOption: true,
+          description: 'Agent View session ID',
+        })
+        .option('text', {
+          type: 'string',
+          demandOption: true,
+          description: 'Message text',
+        }),
+    handler: async (argv) => {
+      const text = argv.text.trim();
+      if (!text) throw new Error('Message text cannot be empty.');
+      const supervisor = await getSessionSupervisor();
+      writeJsonResult(await supervisor[method](argv.id, text));
+    },
+  };
+}
+
+export const sendCommand = sessionTextCommand(
+  'send <id>',
+  'Send a follow-up prompt to an Agent View session',
+  'send',
+);
+
+export const answerCommand = sessionTextCommand(
+  'answer <id>',
+  'Answer an Agent View session waiting for input',
+  'answer',
+);
+
 export const stopCommand = sessionCommand(
   'stop <id>',
   'Stop an Agent View session',
@@ -111,7 +167,7 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
       })
       .check((argv) => {
         if (argv.all === true || typeof argv['id'] === 'string') return true;
-        return 'qwen respawn requires <id> or --all.';
+        return 'qwen agent-view respawn requires <id> or --all.';
       }),
   handler: async (argv) => {
     const supervisor = await getSessionSupervisor();
@@ -120,7 +176,7 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
       return;
     }
     if (typeof argv['id'] !== 'string') {
-      throw new Error('qwen respawn requires <id> or --all.');
+      throw new Error('qwen agent-view respawn requires <id> or --all.');
     }
     writeJsonResult(await supervisor.respawn(argv['id']));
   },

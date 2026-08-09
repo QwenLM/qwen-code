@@ -5,8 +5,14 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { connectExistingAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
+
+async function connectToSupervisor() {
+  const { connectExistingAgentViewSupervisor } = await import(
+    '../agent-view/supervisor-runner.js'
+  );
+  return connectExistingAgentViewSupervisor();
+}
 
 interface DaemonStopArgs {
   any?: boolean;
@@ -17,7 +23,7 @@ const daemonStatusCommand: CommandModule = {
   command: 'status',
   describe: 'Show Agent View daemon status',
   handler: async () => {
-    const supervisor = await connectExistingAgentViewSupervisor();
+    const supervisor = await connectToSupervisor();
     if (!supervisor) {
       writeStdoutLine(
         JSON.stringify(
@@ -67,10 +73,12 @@ const daemonStopCommand: CommandModule<unknown, DaemonStopArgs> = {
         description: 'Leave worker processes running when stopping the daemon',
       })
       .check((argv) =>
-        argv.any === true ? true : 'qwen daemon stop requires --any.',
+        argv.any === true
+          ? true
+          : 'qwen agent-view daemon stop requires --any.',
       ),
   handler: async (argv) => {
-    const supervisor = await connectExistingAgentViewSupervisor();
+    const supervisor = await connectToSupervisor();
     if (!supervisor) {
       writeStdoutLine(
         JSON.stringify({ shuttingDown: false, reason: 'not_running' }, null, 2),

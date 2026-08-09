@@ -724,6 +724,7 @@ export const CORRUPTED_SUFFIX = '.corrupted';
  */
 export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
+  readOnly?: boolean;
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
@@ -797,6 +798,13 @@ export function loadSettings(
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
         } catch (parseError: unknown) {
+          if (opts.readOnly) {
+            settingsErrors.push({
+              message: getErrorMessage(parseError),
+              path: filePath,
+            });
+            return { settings: {} };
+          }
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
@@ -888,6 +896,10 @@ export function loadSettings(
         let migrationWarnings: string[] | undefined;
 
         const persistSettingsObject = (warningPrefix: string) => {
+          if (opts.readOnly) {
+            migratedInMemoryScopes.add(scope);
+            return;
+          }
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.

@@ -5,6 +5,106 @@
  */
 
 export const AGENT_VIEW_PROTOCOL_VERSION = 1;
+export const AGENT_VIEW_MAX_COORDINATION_WORKERS = 3;
+export const AGENT_VIEW_MAX_TASK_BYTES = 64 * 1024;
+export const AGENT_VIEW_MAX_RESULT_BYTES = 256 * 1024;
+
+export type AgentViewInputSnapshot = `sha256:${string}`;
+export type AgentViewCoordinationWriteMode = 'read-only' | 'isolated-writer';
+export type AgentViewCoordinationOutcome = 'completed' | 'failed' | 'handback';
+
+export interface AgentViewCoordinationLineage {
+  coordinationId: string;
+  taskId: string;
+  attemptId: string;
+}
+
+export interface AgentViewCoordinationBudgets {
+  maxSessionTurns: number;
+  maxWallTime: string;
+  maxToolCalls: number;
+}
+
+export interface AgentViewCoordinationTaskRequest {
+  taskFile: string;
+  writeMode: AgentViewCoordinationWriteMode;
+}
+
+export interface AgentViewCoordinationDispatchRequest {
+  coordinationId: string;
+  cwd: string;
+  tasks: AgentViewCoordinationTaskRequest[];
+}
+
+export interface AgentViewCoordinationReassignRequest {
+  coordinationId: string;
+  taskId: string;
+  taskFile: string;
+  writeMode: AgentViewCoordinationWriteMode;
+}
+
+export interface AgentViewCoordinationDispatchAck {
+  type: 'dispatch_ack';
+  coordinationId: string;
+  taskId: string;
+  attemptId: string;
+  sessionId: string;
+  promptId: string;
+  inputSnapshot: AgentViewInputSnapshot;
+  writeMode: AgentViewCoordinationWriteMode;
+  state: 'starting';
+  worktree?: AgentViewWorktreeState;
+}
+
+export interface AgentViewCoordinationResult {
+  schemaVersion: 1;
+  lineage: AgentViewCoordinationLineage;
+  sessionId: string;
+  promptId: string;
+  generation: number;
+  outcome: AgentViewCoordinationOutcome;
+  summary: string;
+  artifacts: string[];
+  completedAt: string;
+}
+
+export interface AgentViewCoordinationSessionSnapshot {
+  lineage: AgentViewCoordinationLineage;
+  sessionId: string;
+  promptId: string;
+  writeMode: AgentViewCoordinationWriteMode;
+  inputSnapshot: AgentViewInputSnapshot;
+  state: AgentViewSessionState;
+  staleReason?: 'checkout_changed';
+  result?: AgentViewCoordinationResult;
+  worktree?: AgentViewWorktreeState;
+}
+
+export interface AgentViewCoordinationSnapshot {
+  type: 'coordination_snapshot';
+  coordinationId: string;
+  state: 'running' | 'completed' | 'partial' | 'failed' | 'stale';
+  sessions: AgentViewCoordinationSessionSnapshot[];
+}
+
+export interface AgentViewCoordinationManifestAttempt {
+  lineage: AgentViewCoordinationLineage;
+  sessionId: string;
+  promptId: string;
+  writeMode: AgentViewCoordinationWriteMode;
+  inputSnapshot: AgentViewInputSnapshot;
+  worktree?: AgentViewWorktreeState;
+  worktreePhase?: 'planned' | 'provisioned';
+}
+
+export interface AgentViewCoordinationManifest {
+  schemaVersion: 1;
+  coordinationId: string;
+  projectCwd: string;
+  createdAt: string;
+  updatedAt: string;
+  attempts: AgentViewCoordinationManifestAttempt[];
+}
 
 export type AgentViewOwnership =
   | 'unmanaged'
@@ -42,6 +142,9 @@ export type AgentViewInputKind = 'blocking' | 'soft';
 export interface AgentViewWorktreeState {
   mode: 'none' | 'worktree' | 'shared-unisolated';
   path?: string;
+  slug?: string;
+  branch?: string;
+  baseCommit?: string;
   owner?: 'agent-view' | 'user';
   dirtySnapshot?: 'copied' | 'blocked' | 'not-needed';
   warning?: string;
@@ -61,6 +164,7 @@ export interface AgentViewSessionStateFile {
   createdAt: string;
   updatedAt: string;
   lastError?: AgentViewLastError;
+  coordination?: AgentViewCoordinationLineage;
   worktree: AgentViewWorktreeState;
 }
 
@@ -80,6 +184,13 @@ export interface AgentViewLaunchFile {
   mcpDigest?: string;
   includeDirectories: string[];
   initialPrompt?: string;
+  coordination?: AgentViewCoordinationLineage;
+  promptId?: string;
+  taskPath?: string;
+  resultPath?: string;
+  inputSnapshot?: AgentViewInputSnapshot;
+  writeMode?: AgentViewCoordinationWriteMode;
+  budgets?: AgentViewCoordinationBudgets;
   terminal: {
     columns: number;
     rows: number;
@@ -93,6 +204,9 @@ export interface AgentViewActivityFile {
   waitingFor?: string;
   inputKind?: AgentViewInputKind;
   lastResult?: string;
+  activePromptId?: string;
+  lastCompletedPromptId?: string;
+  staleReason?: 'checkout_changed';
   queuedPromptCount?: number;
   queuedPromptPreview?: string;
   lastQueuedPromptAt?: string;
@@ -109,10 +223,29 @@ export interface AgentViewWorkerFile {
   hostEndpoint?: string;
   hostAuthToken?: string;
   tokenDigest?: string;
+  generation?: number;
+  lastEventSequence?: number;
   lastHeartbeatAt?: string;
   protocolVersion: number;
   platform: NodeJS.Platform;
   recentOutputBytes: number;
+}
+
+export interface AgentViewPtyHostReceipt {
+  schemaVersion: 1;
+  sessionId: string;
+  hostPid: number;
+  workerPid: number;
+  hostEndpoint: string;
+  hostAuthToken: string;
+  generation: number;
+}
+
+export interface AgentViewWorkerControlsFile {
+  [key: string]: unknown;
+  schemaVersion: 1;
+  nextSequence: number;
+  events: AgentViewWorkerControlEvent[];
 }
 
 export interface AgentViewRosterEntry {
@@ -153,7 +286,7 @@ export interface AgentViewSessionSnapshot {
   rosterEntry?: AgentViewRosterEntry;
 }
 
-export type AgentViewWorkerEvent =
+export type AgentViewWorkerEvent = (
   | {
       type: 'ready';
       sessionId: string;
@@ -175,6 +308,7 @@ export type AgentViewWorkerEvent =
   | {
       type: 'state';
       sessionId: string;
+      promptId?: string;
       sessionState: AgentViewSessionState;
       cwd?: string;
       summary?: string;
@@ -182,7 +316,21 @@ export type AgentViewWorkerEvent =
       inputKind?: AgentViewInputKind;
       lastResult?: string;
       at?: string;
-    };
+    }
+  | {
+      type: 'result';
+      sessionId: string;
+      promptId: string;
+      attemptId: string;
+      outcome: AgentViewCoordinationOutcome;
+      summary: string;
+      artifacts?: string[];
+      at?: string;
+    }
+) & {
+  generation: number;
+  sequence: number;
+};
 
 export type AgentViewWorkerControlEvent =
   | {
@@ -193,6 +341,7 @@ export type AgentViewWorkerControlEvent =
   | {
       type: 'prompt';
       sequence: number;
+      promptId: string;
       text: string;
       at: string;
     }

@@ -23,6 +23,12 @@ export const READ_ONLY_REPOSITORY_TOOLS = [
   ToolNames.LS,
 ] as const;
 
+export const ISOLATED_COORDINATION_WRITER_TOOLS = [
+  ...READ_ONLY_REPOSITORY_TOOLS,
+  ToolNames.EDIT,
+  ToolNames.WRITE_FILE,
+] as const;
+
 const PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.EXIT_PLAN_MODE,
   ...READ_ONLY_REPOSITORY_TOOLS,

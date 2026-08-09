@@ -1,39 +1,67 @@
 ---
 name: coordinate
-description: Coordinate up to three homogeneous Qwen investigators, synthesize their evidence, and complete requested changes through the Leader. Invoke explicitly with /coordinate.
+description: Coordinate up to three homogeneous Qwen agents, synthesize their evidence, and complete requested changes through one Leader. Invoke explicitly with /coordinate.
 argument-hint: '<goal or tasks>'
 disable-model-invocation: true
 ---
 
 # Coordinate Qwen Agents
 
-You are the Leader. Own the task from decomposition through the final answer.
+You are the Leader. Own decomposition, admission, evidence review, source-workspace writes, verification, and the final answer.
 
-## 1. Decide whether to fan out
+## 1. Choose the smallest execution path
 
-Use one investigator for a narrow question and up to three only when independent investigation will materially improve the result. If the task is not meaningfully decomposable, handle it directly without launching an agent.
+Use the foreground path for ordinary parallel investigation. Use durable Agent View coordination only when the user asks for background/reconnectable work, reassignment, or an isolated writer. If the task is not meaningfully decomposable, handle it directly.
 
-Each assignment must be self-contained and name its objective, scope, completion condition, and expected evidence. All investigators inherit the current Qwen model; do not set or vary models.
+All agents must use the current Qwen model. Use one agent for a narrow question and at most three agents total. Never use Agent Team, Workflow, Arena, heterogeneous models, or nested delegation.
 
-## 2. Investigate in parallel
+## 2. Foreground investigation
 
-Launch all independent investigators in one response with:
+Give every investigator a self-contained objective, scope, completion condition, and expected evidence. Launch all independent investigators in one response with:
 
 ```text
 subagent_type: "coordinator-explore"
 run_in_background: false
 ```
 
-Do not use Agent Team, Workflow, forks, background agents, Arena, nested agents, or a writer agent. Do not duplicate an investigator's work while it runs.
+Investigators are read-only. After they return, verify cited evidence, reconcile disagreements, and identify any gap. Do not duplicate their work while they run. A failed investigator does not discard successful results.
 
-After the calls return, verify the cited evidence, reconcile disagreements, and identify any remaining gap. A failed investigator does not discard successful results.
+If changes are requested, implement the smallest correct change in the current workspace yourself. The Leader remains the only writer.
 
-## 3. Complete the task as Leader
+## 3. Durable Agent View coordination
 
-If the user requested changes, implement the smallest correct change in the current workspace yourself after synthesis. Investigators are always read-only and no other writer may run concurrently.
+Create one concise task file per assignment under `.qwen/coordination-tasks/`. Do not put secrets in a task file. Each file must state the objective, allowed scope, completion condition, and required evidence.
 
-Run the smallest relevant verification after the implementation is complete. Do not run a separate test cycle after each investigator result.
+Dispatch one to three tasks atomically. Use `--task` for read-only investigators and at most one `--writer` for an isolated implementation attempt:
 
-## 4. Report
+```bash
+qwen agent-view dispatch --task <absolute-task-file> --task <absolute-task-file> --json
+qwen agent-view dispatch --task <absolute-task-file> --writer <absolute-task-file> --json
+```
 
-Return one concise result containing the outcome, material evidence or disagreements, changes made, final verification, and remaining risks or blockers.
+Preserve the full IDs from the acknowledgement. Collect only with the full coordination ID:
+
+```bash
+qwen agent-view collect <full-coordination-id> --json
+```
+
+Managed coordination attempts are one-shot. Inspect state or retained output with:
+
+```bash
+qwen agent-view peek <session-id>
+qwen agent-view logs <session-id>
+```
+
+Do not use `send`, `answer`, `attach`, or generic `respawn` for a managed attempt; those commands fail closed because a headless attempt has no interactive continuation consumer. If the latest attempt is `handback`, failed, or stale, reassign the same task instead of erasing its lineage:
+
+```bash
+qwen agent-view reassign <full-coordination-id> <full-task-id> --task <absolute-task-file> --json
+```
+
+Never treat `checkout_changed` as current evidence. A writer result is an ownership receipt, not an automatic merge. Review the returned worktree diff and base commit, then apply only the accepted changes to the source workspace as Leader. Never delete a preserved dirty worktree on the user's behalf.
+
+## 4. Finish once
+
+Verify the accepted evidence and the complete final diff. Run the smallest relevant verification after implementation is complete, not after every agent result.
+
+Return one concise result containing the outcome, material evidence or disagreements, source changes, verification, preserved writer receipts, and remaining risks or blockers.

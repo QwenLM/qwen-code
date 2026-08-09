@@ -29,6 +29,7 @@ import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
 export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   'QWEN_SERVER_TOKEN',
   'QWEN_DAEMON_TOKEN',
+  'QWEN_AGENT_VIEW_TOKEN',
   PRIVATE_ACP_CAPABILITY_ENV,
 ];
 
