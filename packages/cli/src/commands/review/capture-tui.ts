@@ -99,10 +99,13 @@ type ProbeResult =
   // operator told "not installed" for a wedged binary goes to fix an
   // installation that exists (the freeze render path names its belt kill
   // for the same reason).
-  // `code` is set when the SPAWN itself failed for a reason that is not
-  // absence (EMFILE/ENFILE/EACCES): the binary may be perfectly installed,
-  // and the messages below say so rather than claiming it is missing.
-  | { status: 'hung'; code?: string };
+  // `code` is set when the probe answered neither cleanly nor with
+  // absence. `spawned` distinguishes the two ways that happens: false when
+  // the spawn itself failed (EMFILE/ENFILE/EACCES — the binary may be
+  // perfectly installed and this host could not start it), true when the
+  // binary RAN and failed (a non-zero exit, a signal). The messages say
+  // which, because "could not spawn it" is a false claim about the second.
+  | { status: 'hung'; code?: string; spawned?: boolean };
 
 /** Probe the binary itself (`tmux -V` / `freeze --help`), not `which`: a
  * host without `which` would otherwise misdiagnose an installed binary as
@@ -128,14 +131,18 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   // both probes reported 'not installed', and that false environment claim
   // then persisted into the manifest's degradedBecause. ENOENT is the only
   // answer that means absent; the rest are this host, right now.
-  if (code && code !== 'ENOENT') return { status: 'hung', code };
+  if (code && code !== 'ENOENT') {
+    return { status: 'hung', code, spawned: false };
+  }
   // Nor is a binary that RAN and failed: an installed freeze whose --help
   // exits non-zero, or dies on a signal, spawned fine — reporting it as not
   // installed sends an operator to install something already present.
   if (r.status !== null && r.status !== 0) {
-    return { status: 'hung', code: `exit ${String(r.status)}` };
+    return { status: 'hung', code: `exit ${String(r.status)}`, spawned: true };
   }
-  if (r.signal) return { status: 'hung', code: `signal ${r.signal}` };
+  if (r.signal) {
+    return { status: 'hung', code: `signal ${r.signal}`, spawned: true };
+  }
   return { status: 'absent' };
 }
 
@@ -273,16 +280,24 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // Exit code FIRST: it is the disposition a harness reads, and the
     // writes below can throw synchronously on a closed fd.
     process.exitCode = 3;
+    // TWO try blocks, not one: a synchronous throw from the stderr write —
+    // a file-backed stderr under ENOSPC throws sync in Node — used to skip
+    // the stdout JSON entirely, so a HEALTHY stdout got nothing (measured:
+    // exit 3 with empty stdout). The consumer is an agent that must tell an
+    // environment refusal from a caller mistake without scraping stderr, so
+    // the machine-readable half must not depend on the human-readable one.
     try {
       writeStderrLine(`capture-tui: refused — ${reason}`);
-      // The reason rides on stdout too: the consumer is an agent that must
-      // tell an environment refusal from a caller mistake without scraping
-      // stderr, and `evidence: 'none'` names the ladder's bottom rung.
+    } catch {
+      // A gone reader cannot un-refuse: the exit code already carries it.
+    }
+    try {
+      // `evidence: 'none'` names the ladder's bottom rung.
       writeStdoutLine(
         JSON.stringify({ captured: false, evidence: 'none', reason }),
       );
     } catch {
-      // A gone reader cannot un-refuse: the exit code already carries it.
+      // Same.
     }
   };
 
@@ -582,10 +597,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   if (tmuxProbe.status === 'hung') {
     refuse(
       tmuxProbe.code
-        ? `tmux could not be probed (${tmuxProbe.code}) — the binary may be ` +
-            'installed; this host could not spawn it. Retry once the ' +
-            'condition clears; rendering claims stay argued from the code ' +
-            'until it answers.'
+        ? `tmux could not be probed (${tmuxProbe.code}) — ` +
+            (tmuxProbe.spawned
+              ? 'the binary ran and failed, so it is installed but not ' +
+                'usable here. Fix the installation; rendering claims stay ' +
+                'argued from the code until it answers.'
+              : 'the binary may be installed; this host could not spawn ' +
+                'it. Retry once the condition clears; rendering claims ' +
+                'stay argued from the code until it answers.')
         : `tmux did not answer -V within ${probeBudget.timeoutMs}ms — present ` +
             'but wedged, not absent. Fix or restart the tmux binary; rendering ' +
             'claims stay argued from the code until it answers.',
@@ -1089,7 +1108,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           ? // The SPAWN failed, which says nothing about installation: a
             // false 'not installed' would persist in the manifest as an
             // environment claim this run never established.
-            `freeze could not be probed (${freezeProbe.code}) — it may be installed; this host could not spawn it. .ans text captured, no image rendered`
+            `freeze could not be probed (${freezeProbe.code}) — ${
+              freezeProbe.spawned
+                ? 'it ran and failed, so it is installed but not usable here'
+                : 'it may be installed; this host could not spawn it'
+            }. .ans text captured, no image rendered`
           : `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
         : 'freeze is not installed — .ans text captured, no image rendered',
     );

@@ -540,11 +540,13 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it('write-probes the artifact paths WITHOUT truncating them', async () => {
-    // The probe opens each existing artifact path to prove it writable;
-    // append mode is what keeps it from truncating a file this run is not
-    // yet authorized to replace. Existence assertions alone let a `w`-mode
-    // regression empty every file it touched and stay green.
+  it('leaves an occupant BYTE-FOR-BYTE intact when it refuses', async () => {
+    // What pins this now is the collision gate, not a per-path write probe:
+    // that probe is gone (an append-mode open passes on a `chattr +a` file
+    // the truncating final write then fails on), and the gate refuses on
+    // any occupant before anything opens it. Content, not existence — a
+    // regression that truncates on the way to refusing stays green
+    // otherwise.
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-notrunc-'));
     try {
@@ -2385,6 +2387,48 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
   });
 
+  it('still prints the refusal JSON when STDERR throws', async () => {
+    // The two writes lived in one try, so a synchronous stderr failure — a
+    // file-backed stderr under ENOSPC throws sync in Node — skipped the
+    // stdout JSON entirely and left a healthy stdout with nothing. The
+    // consumer is an agent that must tell an environment refusal from a
+    // caller mistake WITHOUT scraping stderr.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const sinks = { stdout: '' };
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      sinks.stdout += String(chunk);
+      return true;
+    }) as never);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((() => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), {
+        code: 'ENOSPC',
+      });
+    }) as never);
+    try {
+      await runCaptureTui({
+        command: 'printf hi',
+        cwd: undefined,
+        cols: 0,
+        rows: 24,
+        settleMs: 0,
+        until: undefined,
+        keys: undefined,
+        out: join(dir, 'stderr-throws'),
+        timeoutMs: 1000,
+      } as never);
+    } finally {
+      outSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+    expect(process.exitCode).toBe(3);
+    expect(JSON.parse(sinks.stdout.trim())).toMatchObject({
+      captured: false,
+      evidence: 'none',
+    });
+  });
+
   it('refuses a DANGLING SYMLINK at a mandatory path — writes must not escape', async () => {
     // existsSync and statSync follow links, so a dangling one read as
     // "nothing here": the collision gate never fired and writeFileSync's
@@ -3013,7 +3057,19 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           if ((r.stdout ?? '').trim() !== '') seen = true;
           else await sleep(50);
         }
-        expect(seen).toBe(true);
+        // Kill on ANY exit from here, including a thrown assertion: the
+        // regression this test polices is exactly "the child did not do
+        // what it should", and leaving it inside a 60s capture orphaned a
+        // node process (and its tmux server) on every such failure.
+        const orphanGuard = setTimeout(() => child.kill('SIGKILL'), 90_000);
+        try {
+          expect(seen).toBe(true);
+        } catch (e) {
+          child.kill('SIGKILL');
+          clearTimeout(orphanGuard);
+          throw e;
+        }
+        clearTimeout(orphanGuard);
         child.kill(signal);
         // Capture the disposition: the re-raise half of the contract — the
         // handler reaps FIRST and then re-raises, so the child must die OF
