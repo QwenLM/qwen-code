@@ -2597,6 +2597,19 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('does not surface usage_update as a debug transcript event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 46_351,
+          size: 1_000_000,
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
   it('normalizes memory_changed with closed-enum scope + mode', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', {

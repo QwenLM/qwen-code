@@ -2264,6 +2264,21 @@ describe('SessionService', () => {
     });
   });
 
+  describe('findSessionIdIgnoringCase', () => {
+    it('finds a legacy mixed-case transcript', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy.mockReturnValue([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (sessionId) =>
+          sessionId === legacySessionId ? 'active' : undefined,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();

@@ -340,7 +340,6 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-const BRANCH_SESSION_TIMEOUT_MS = 120_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
@@ -464,6 +463,18 @@ export class DaemonPendingPromptLimitError extends Error {
   }
 }
 
+export class DaemonSessionIdProtocolError extends Error {
+  constructor(
+    readonly requestedSessionId: string,
+    readonly actualSessionId: string,
+  ) {
+    super(
+      `Daemon returned session "${actualSessionId}" instead of requested session "${requestedSessionId}".`,
+    );
+    this.name = 'DaemonSessionIdProtocolError';
+  }
+}
+
 export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
@@ -490,9 +501,7 @@ export function isStaleBranchPointError(
   return (
     error instanceof DaemonHttpError &&
     error.status === 409 &&
-    typeof error.body === 'object' &&
-    error.body !== null &&
-    (error.body as Record<string, unknown>)['code'] === 'branch_point_invalid'
+    (error.body as { code?: unknown } | null)?.code === 'branch_point_invalid'
   );
 }
 
@@ -508,6 +517,11 @@ export interface CreateSessionRequest {
    * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
+  /**
+   * UUID v1-v5 to assign to a new thread session. This is creation, not an
+   * idempotent attach; use load/resume after an ambiguous response.
+   */
+  sessionId?: string;
   modelServiceId?: string;
   /**
    * Per-request session-scope override. The production daemon defaults
@@ -1064,7 +1078,7 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     const caps = await this.capabilities();
-    if (!caps.features.includes(capability)) {
+    if (!Array.isArray(caps.features) || !caps.features.includes(capability)) {
       throw new DaemonCapabilityMissingError(
         capability,
         `daemon does not advertise the ${capability} feature`,
@@ -2289,6 +2303,9 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    if (req.sessionId !== undefined && req.sessionId !== null) {
+      await this.requireCapability('session_id_override');
+    }
     if (req.sourceType !== undefined || req.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -2311,6 +2328,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
           // `sessionScope: '' | null` doesn't get the field silently
@@ -2334,7 +2352,17 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
-        return (await res.json()) as DaemonSession;
+        const session = (await res.json()) as DaemonSession;
+        if (
+          typeof req.sessionId === 'string' &&
+          session.sessionId !== req.sessionId.toLowerCase()
+        ) {
+          throw new DaemonSessionIdProtocolError(
+            req.sessionId.toLowerCase(),
+            session.sessionId,
+          );
+        }
+        return session;
       },
     );
   }
@@ -2541,7 +2569,7 @@ export class DaemonClient {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
-          ...(req.name !== undefined ? { name: req.name } : {}),
+          name: req.name,
           atRecordId: req.atRecordId,
         }),
       },
@@ -2551,7 +2579,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonBranchedSession;
       },
-      BRANCH_SESSION_TIMEOUT_MS,
+      120_000,
     );
   }
 
@@ -6177,17 +6205,18 @@ export function matchTurnEvent(
     };
     if (data.promptId === promptId) {
       const stopReason = data.stopReason ?? 'end_turn';
+      const candidate = data.branchPoint;
       const recordUuidPattern =
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       const branchPoint =
         stopReason === 'end_turn' &&
-        typeof data.branchPoint?.assistantRecordUuid === 'string' &&
-        recordUuidPattern.test(data.branchPoint.assistantRecordUuid) &&
-        typeof data.branchPoint.checkpointUuid === 'string' &&
-        recordUuidPattern.test(data.branchPoint.checkpointUuid)
+        typeof candidate?.assistantRecordUuid === 'string' &&
+        recordUuidPattern.test(candidate.assistantRecordUuid) &&
+        typeof candidate.checkpointUuid === 'string' &&
+        recordUuidPattern.test(candidate.checkpointUuid)
           ? {
-              assistantRecordUuid: data.branchPoint.assistantRecordUuid,
-              checkpointUuid: data.branchPoint.checkpointUuid,
+              assistantRecordUuid: candidate.assistantRecordUuid,
+              checkpointUuid: candidate.checkpointUuid,
             }
           : undefined;
       return {

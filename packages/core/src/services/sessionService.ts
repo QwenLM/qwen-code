@@ -613,6 +613,33 @@ export class SessionService {
     return undefined;
   }
 
+  /**
+   * Finds a persisted session whose UUID filename differs only by case.
+   * Legacy CLI sessions may have been written with `uuidgen`'s uppercase
+   * spelling, while daemon-facing caller IDs are canonicalized to lowercase.
+   */
+  async findSessionIdIgnoringCase(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+    for (const state of ['active', 'archived'] as const) {
+      let fileNames: string[];
+      try {
+        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      for (const fileName of fileNames) {
+        if (fileName.toLowerCase() !== expectedFileName) continue;
+        const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
+        const location = await this.getSessionLocation(candidateSessionId);
+        if (location !== undefined) return candidateSessionId;
+      }
+    }
+    return undefined;
+  }
+
   private removeFileIfExists(filePath: string): void {
     try {
       fs.unlinkSync(filePath);
