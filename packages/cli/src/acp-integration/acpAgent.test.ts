@@ -869,7 +869,7 @@ import type {
   McpServer,
   ResumeSessionResponse,
 } from '@agentclientprotocol/sdk';
-import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
+import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { resetTrustedFoldersForTesting } from '../config/trustedFolders.js';
 import {
@@ -2991,6 +2991,72 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('rejects invalid sessionId meta before settings access without closing the child', async () => {
+    await setupSessionMocks('meta-session');
+    const { agent, agentPromise } = await bootAcpAgent();
+    vi.mocked(loadSettings).mockClear();
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: { 'qwen-code/sessionId': '../../escape' },
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'invalid_session_id', httpStatus: 400 },
+    });
+    expect(loadSettings).not.toHaveBeenCalled();
+    expect(loadCliConfig).not.toHaveBeenCalled();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(loadCliConfig).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a concurrent duplicate requested sessionId without closing the child', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(loadCliConfig)
+      .mockImplementationOnce(async () => {
+        await firstGate;
+        return innerConfig as unknown as Config;
+      })
+      .mockResolvedValue(innerConfig as unknown as Config);
+    const { agent, agentPromise } = await bootAcpAgent();
+    const request = {
+      cwd: '/tmp',
+      mcpServers: [],
+      _meta: { 'qwen-code/sessionId': sessionId },
+    };
+
+    const first = agent.newSession(request);
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+    await expect(agent.newSession(request)).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_id_conflict', sessionId },
+    });
+    expect(loadCliConfig).toHaveBeenCalledOnce();
+
+    releaseFirst();
+    await expect(first).resolves.toMatchObject({ sessionId });
+    vi.mocked(innerConfig.getSessionId).mockReturnValue(
+      '550e8400-e29b-41d4-a716-446655440002',
+    );
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).resolves.toBeDefined();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('maps a duplicate sessionId conflict to a RequestError instead of crashing the child', async () => {
     const conflict = new SessionIdConflictError(
       '550e8400-e29b-41d4-a716-446655440000',
@@ -3011,8 +3077,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await expect(
       agent.newSession({ cwd: '/tmp', mcpServers: [] }),
-    ).rejects.toThrow('already exists');
-    expect(RequestError.invalidParams).toHaveBeenCalled();
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: {
+        errorKind: 'session_id_conflict',
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14160,6 +14231,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         unstable_resumeSession: (
           args: Record<string, unknown>,
         ) => Promise<unknown>;
+        cancel: (args: Record<string, unknown>) => Promise<unknown>;
       })
     | undefined;
 
@@ -14186,6 +14258,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForCloseGateToRelease: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
+        cancelPendingPrompt: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
       }
@@ -14198,6 +14271,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExtractDaemonTraceContext.mockReturnValue(undefined);
     vi.mocked(Storage.getRuntimeBaseDir).mockReturnValue(
       '/tmp/qwen-runtime-test',
     );
@@ -14419,6 +14493,210 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       code: -32002,
       data: { uri: 'session:persisted-missing' },
     });
+    expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.failed_stage',
+      'existence_check',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each(['load', 'resume'] as const)(
+    'profiles %s restore stages under the daemon trace context',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const parentContext = { trace: 'restore-parent' };
+      mockExtractDaemonTraceContext.mockReturnValue(parentContext);
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: { 'qwen.telemetry.traceparent': 'daemon-parent' },
+      };
+
+      if (action === 'load') {
+        await agent.loadSession(request);
+      } else {
+        await agent.unstable_resumeSession(request);
+      }
+
+      expect(mockExtractDaemonTraceContext).toHaveBeenCalledWith(request);
+      expect(mockWithDaemonSpan).toHaveBeenCalledWith(
+        'qwen-code.daemon.session_restore',
+        {
+          'qwen-code.daemon.operation': `acp_session_${action}`,
+          'qwen-code.daemon.session_restore.action': action,
+          'session.id': 'persisted-1',
+        },
+        expect.any(Function),
+        { parentContext },
+      );
+      const attributes = Object.fromEntries(
+        mockSessionStartSpan.setAttribute.mock.calls,
+      );
+      for (const stage of [
+        'settings_load',
+        'existence_check',
+        'config_setup',
+        'auth',
+        'file_system_setup',
+        'session_register',
+        'response_build',
+      ]) {
+        expect(
+          attributes[`qwen-code.daemon.session_restore.${stage}_ms`],
+        ).toEqual(expect.any(Number));
+      }
+      // Mirror of the live-path test's `existence_check_ms` absence check.
+      // Hoisting `live_restore` out of its `if (liveSession)` guard would make
+      // cold loads report a stage that implies a live session existed,
+      // polluting restore-stage dashboards while every test stayed green.
+      expect(
+        attributes['qwen-code.daemon.session_restore.live_restore_ms'],
+      ).toBeUndefined();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    'profiles the live %s restore path without an existence check',
+    async (action) => {
+      mockHistoryReplay.mockReset();
+      mockHistoryReplay.mockResolvedValue(undefined);
+      bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: {
+          messages: [{ role: 'user', parts: [{ text: 'first' }] }],
+        },
+      });
+      const { agent, agentPromise } = await spawnAgent();
+      const request = {
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      };
+      try {
+        if (action === 'load') {
+          await agent.loadSession(request);
+        } else {
+          await agent.unstable_resumeSession(request);
+        }
+        expect(mockWithDaemonSpan).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_restore',
+          expect.objectContaining({
+            'qwen-code.daemon.session_restore.action': action,
+          }),
+          expect.any(Function),
+          {},
+        );
+        mockSessionStartSpan.setAttribute.mockClear();
+
+        if (action === 'load') {
+          await agent.loadSession(request);
+        } else {
+          await agent.unstable_resumeSession(request);
+        }
+
+        const attributes = Object.fromEntries(
+          mockSessionStartSpan.setAttribute.mock.calls,
+        );
+        expect(
+          attributes['qwen-code.daemon.session_restore.settings_load_ms'],
+        ).toEqual(expect.any(Number));
+        expect(
+          attributes['qwen-code.daemon.session_restore.live_restore_ms'],
+        ).toEqual(expect.any(Number));
+        expect(
+          attributes['qwen-code.daemon.session_restore.response_build_ms'],
+        ).toEqual(expect.any(Number));
+        expect(
+          attributes['qwen-code.daemon.session_restore.existence_check_ms'],
+        ).toBeUndefined();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s normalizes mixed-case caller UUIDs before persisted lookup',
+    async (action) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      innerConfig.getSessionId.mockReturnValue(sessionId);
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: sessionId.toUpperCase(),
+          mcpServers: [],
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        const sessionService = vi.mocked(SessionService).mock.results[0]?.value;
+        expect(sessionService).toBeDefined();
+        expect(sessionService!.sessionExists).toHaveBeenCalledWith(sessionId);
+
+        await agent.cancel({ sessionId: params.sessionId });
+        expect(lastSessionMock?.cancelPendingPrompt).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('serializes non-live load and resume before settings or disk work', async () => {
+    const innerConfig = bindRestoreMocks({ sessionExists: true });
+    let releaseExists!: () => void;
+    const existsGate = new Promise<void>((resolve) => {
+      releaseExists = resolve;
+    });
+    const sessionExists = vi.fn(async () => {
+      await existsGate;
+      return true;
+    });
+    const loadSession = vi
+      .fn()
+      .mockImplementation(() => innerConfig.getResumedSessionData());
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({ sessionExists, loadSession }) as unknown as InstanceType<
+          typeof SessionService
+        >,
+    );
+    const { agent, agentPromise } = await spawnAgent();
+    vi.mocked(loadSettings).mockClear();
+    const params = {
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    };
+
+    const first = agent.loadSession(params);
+    await vi.waitFor(() => expect(sessionExists).toHaveBeenCalledOnce());
+    await expect(agent.unstable_resumeSession(params)).rejects.toMatchObject({
+      code: -32602,
+      data: {
+        errorKind: 'session_id_conflict',
+        sessionId: 'persisted-1',
+      },
+    });
+    expect(loadSettings).toHaveBeenCalledOnce();
+    expect(sessionExists).toHaveBeenCalledOnce();
+
+    releaseExists();
+    await expect(first).resolves.toBeDefined();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14442,6 +14720,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     expect(result).toBe(initializationError);
     expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.failed_stage',
+      'config_setup',
+    );
 
     innerConfig.shutdown.mockResolvedValue(undefined);
     mockConnectionState.resolve();
@@ -16057,6 +16339,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       code: -32002,
       data: { uri: 'session:persisted-missing' },
     });
+    expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.failed_stage',
+      'existence_check',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
