@@ -10,7 +10,10 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AgentViewLaunchFile , AgentViewPtyHostReceipt } from './protocol.js';
+import type {
+  AgentViewLaunchFile,
+  AgentViewPtyHostReceipt,
+} from './protocol.js';
 import {
   BoundedOutputRing,
   launchAgentViewPtyHost,
@@ -1078,8 +1081,7 @@ async function waitForPtyHost(
   // and request timeout, so slow probes cannot silently exhaust retries.
   const deadlineMs =
     Date.now() + retries * (HOST_READY_DELAY_MS + requestTimeoutMs);
-  for (let attempt = 0; attempt < retries; attempt++) {
-    if (options.signal?.aborted || Date.now() >= deadlineMs) break;
+  while (!options.signal?.aborted && Date.now() < deadlineMs) {
     try {
       const result = await callAgentViewPtyHost(
         socketPath,
