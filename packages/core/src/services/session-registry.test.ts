@@ -86,6 +86,30 @@ describe('deriveSessionName', () => {
   it('falls back to a placeholder when the basename is empty', () => {
     expect(deriveSessionName('/', 's1')).toMatch(/^session-[0-9a-f]{2}$/);
   });
+
+  // An ASCII-only strip collapsed these to a bare `-`, which is truthy, so
+  // the placeholder never fired and every non-Latin project listed as
+  // `--<xx>` — two different projects becoming byte-identical labels.
+  it('keeps non-Latin basenames legible', () => {
+    expect(deriveSessionName('/home/u/工作/项目', 's1')).toMatch(
+      /^项目-[0-9a-f]{2}$/,
+    );
+    expect(deriveSessionName('/home/u/проекты', 's1')).toMatch(
+      /^проекты-[0-9a-f]{2}$/,
+    );
+    expect(deriveSessionName('/home/u/工作/项目', 's1')).not.toBe(
+      deriveSessionName('/home/u/проекты', 's1'),
+    );
+  });
+
+  it('does not split an astral character at the length cap', () => {
+    // U+1D400 is a letter, so it survives the strip. Slicing by UTF-16 unit
+    // would cut the 16th of these in half and leave a lone surrogate in the
+    // advertised name; slicing by code point keeps 32 whole characters.
+    const name = deriveSessionName(`/w/${'𝐀'.repeat(40)}`, 's1');
+    expect(name).toMatch(/^𝐀+-[0-9a-f]{2}$/u);
+    expect([...name.slice(0, -3)]).toHaveLength(32);
+  });
 });
 
 describe('registerSession', () => {
@@ -192,7 +216,23 @@ describe('patchSessionRecord', () => {
   });
 
   it('does not create a record for a session that never registered', async () => {
+    // The registry directory has to already exist, otherwise the mutant that
+    // drops the `existing === null` guard also fails inside `atomicWriteFile`
+    // and the catch-all swallows it — the assertion would pass either way.
+    // Registering then unregistering leaves the directory and no record.
+    await registerSession({
+      sessionId: 'gone',
+      cwd: '/w/app',
+      kind: 'interactive',
+    });
+    await unregisterSession();
+    await expect(fs.stat(getSessionRegistryDir())).resolves.toBeDefined();
+
     await patchSessionRecord({ sessionId: 'new' });
+
+    await expect(fs.stat(getSessionRecordPath())).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
   });
 });
@@ -348,13 +388,36 @@ describe('listLiveSessions', () => {
     ]);
   });
 
+  it('skips a record larger than the parse ceiling without deleting it', async () => {
+    const filePath = await writeRaw('14.json', {
+      schemaVersion: 1,
+      pid: 14,
+      sessionId: 's',
+      cwd: '/w',
+      name: 'n',
+      kind: 'interactive',
+      startedAt: 1,
+      padding: 'x'.repeat(64 * 1024),
+    });
+    expect((await fs.stat(filePath)).size).toBeGreaterThan(64 * 1024);
+
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+    // Not deleted: an oversized file is somebody else's to explain, and
+    // enumeration must stay read-only. It just never gets read or parsed.
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
   it('sorts newest first', async () => {
     await registerSession({
       sessionId: 's-self',
       cwd: '/w/app',
       kind: 'interactive',
     });
-    await patchSessionRecord({ startedAt: 1000 });
+    // The parent record is written *before* self's startedAt is patched
+    // down, so the startedAt-newest record is no longer also the
+    // newest-written file. Otherwise an mtime-descending sort — the exact
+    // regression `patchSessionRecord` invites, since a mid-session rewrite
+    // refreshes mtime — produces the same order and ships green.
     await writeRaw(`${process.ppid}.json`, {
       schemaVersion: 1,
       pid: process.ppid,
@@ -364,6 +427,7 @@ describe('listLiveSessions', () => {
       kind: 'interactive',
       startedAt: 2000,
     });
+    await patchSessionRecord({ startedAt: 1000 });
 
     const live = await listLiveSessions({ includeSelf: true });
     expect(live.map((r) => r.sessionId)).toEqual(['s-parent', 's-self']);

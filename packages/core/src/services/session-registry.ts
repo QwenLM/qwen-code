@@ -135,10 +135,15 @@ export function getSessionRecordPath(pid: number = process.pid): string {
  * need a guaranteed-unique handle should use the session id.
  */
 export function deriveSessionName(cwd: string, sessionId: string): string {
-  const base = path
-    .basename(cwd)
-    .replace(/[^\w.-]+/g, '-')
-    .slice(0, 32);
+  // Unicode-aware on purpose: an ASCII-only class collapses a wholly
+  // non-Latin basename (CJK, Cyrillic, ...) to a single `-`, which is
+  // truthy — so the `'session'` fallback never fires and every such
+  // project shows up as an indistinguishable `--<xx>`. Slicing by code
+  // point rather than UTF-16 unit keeps an astral letter from being cut
+  // in half at the 32-character boundary.
+  const base = [...path.basename(cwd).replace(/[^\p{L}\p{N}._-]+/gu, '-')]
+    .slice(0, 32)
+    .join('');
   const suffix = createHash('sha256')
     .update(sessionId)
     .digest('hex')

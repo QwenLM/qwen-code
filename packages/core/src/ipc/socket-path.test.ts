@@ -13,9 +13,16 @@ import {
 } from './socket-path.js';
 
 const originalRuntimeDir = process.env['XDG_RUNTIME_DIR'];
+// `resolvePeerSocketPath` reads `os.tmpdir()` too, which honors `$TMPDIR`
+// on POSIX. A long ambient TMPDIR pushes the joined path past the 103-byte
+// limit and the resolver correctly abandons it — so leaving TMPDIR alone
+// would make these assertions fail on exactly the deep-temp-dir setups
+// this feature exists for.
+const originalTmpDir = process.env['TMPDIR'];
 
 beforeEach(() => {
   delete process.env['XDG_RUNTIME_DIR'];
+  delete process.env['TMPDIR'];
 });
 
 afterEach(() => {
@@ -23,6 +30,11 @@ afterEach(() => {
     delete process.env['XDG_RUNTIME_DIR'];
   } else {
     process.env['XDG_RUNTIME_DIR'] = originalRuntimeDir;
+  }
+  if (originalTmpDir === undefined) {
+    delete process.env['TMPDIR'];
+  } else {
+    process.env['TMPDIR'] = originalTmpDir;
   }
 });
 

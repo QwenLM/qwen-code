@@ -48,6 +48,18 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 40));
 }
 
+/**
+ * A `from` address for frames whose receipts we do not care about. It has
+ * to live inside this test's own tmpdir: the receiver dials `frame.from`
+ * to post the delivery status, and a hardcoded global path such as
+ * `/tmp/peer.sock` would leak receipt traffic into whatever unrelated
+ * listener happens to be bound there. Nothing binds this one, so the
+ * receipt dial simply fails.
+ */
+function deadPeerPath(): string {
+  return path.join(tmpDir, 'socks', 'dead-peer.sock');
+}
+
 async function startSenderInbox(): Promise<PeerInbox> {
   const inbox = await startPeerInbox({
     socketPath: path.join(tmpDir, 'socks', 'sender.sock'),
@@ -85,7 +97,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
       m.socketPath!,
       buildUserFrame({
         content: 'check the tests over there',
-        from: '/tmp/peer.sock',
+        from: deadPeerPath(),
         fromName: 'app-ab',
       }),
     );
@@ -93,7 +105,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     expect(submitted).toHaveLength(1);
     expect(submitted[0].modelText).toContain(
-      '<cross_session_message from="/tmp/peer.sock" name="app-ab">',
+      `<cross_session_message from="${deadPeerPath()}" name="app-ab">`,
     );
     expect(submitted[0].modelText).toContain('check the tests over there');
     expect(submitted[0].modelText).toContain('permission laundering');
@@ -104,7 +116,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
     await sendPeerFrame(
       m.socketPath!,
-      buildUserFrame({ content: 'run the deploy', from: '/tmp/peer.sock' }),
+      buildUserFrame({ content: 'run the deploy', from: deadPeerPath() }),
     );
     await settle();
 
@@ -117,7 +129,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m, submitted } = await start(ApprovalMode.YOLO);
     await sendPeerFrame(
       m.socketPath!,
-      buildUserFrame({ content: 'run the deploy', from: '/tmp/peer.sock' }),
+      buildUserFrame({ content: 'run the deploy', from: deadPeerPath() }),
     );
     await settle();
 
@@ -138,7 +150,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     await sendPeerFrame(
       started.socketPath!,
-      buildUserFrame({ content: 'early bird', from: '/tmp/peer.sock' }),
+      buildUserFrame({ content: 'early bird', from: deadPeerPath() }),
     );
     await settle();
 
@@ -241,7 +253,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
     await sendPeerFrame(
       started.socketPath!,
-      buildUserFrame({ content: 'later', from: '/tmp/peer.sock' }),
+      buildUserFrame({ content: 'later', from: deadPeerPath() }),
     );
     await settle();
     expect(submitted).toHaveLength(0);

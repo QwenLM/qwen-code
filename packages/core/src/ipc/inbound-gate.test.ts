@@ -314,11 +314,18 @@ describe('onHeldChange', () => {
   // message" notices as the set walks back down.
   it('reports the added message only when the change parked one', () => {
     const seen: Array<string | undefined> = [];
+    // AppContainer renders "N waiting" straight off the first argument, so
+    // the snapshot has to be post-mutation on every notification — pinned
+    // here because no other test in this file inspects it.
+    const sizes: number[] = [];
     const gate = new InboundGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => undefined,
       deliver: () => {},
-      onHeldChange: (_held, added) => seen.push(added?.frame.msgId),
+      onHeldChange: (held, added) => {
+        seen.push(added?.frame.msgId);
+        sizes.push(held.length);
+      },
     });
 
     const first = frame();
@@ -329,15 +336,20 @@ describe('onHeldChange', () => {
     gate.decide(second.msgId, 'approve');
 
     expect(seen).toEqual([first.msgId, second.msgId, undefined, undefined]);
+    expect(sizes).toEqual([1, 2, 1, 0]);
   });
 
   it('reports no added message when shutdown clears the set', () => {
     const seen: Array<string | undefined> = [];
+    const sizes: number[] = [];
     const gate = new InboundGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => undefined,
       deliver: () => {},
-      onHeldChange: (_held, added) => seen.push(added?.frame.msgId),
+      onHeldChange: (held, added) => {
+        seen.push(added?.frame.msgId);
+        sizes.push(held.length);
+      },
     });
 
     const f = frame();
@@ -345,6 +357,7 @@ describe('onHeldChange', () => {
     gate.shutdown();
 
     expect(seen).toEqual([f.msgId, undefined]);
+    expect(sizes).toEqual([1, 0]);
   });
 
   it('does not let a throwing observer break the gate', () => {

@@ -80,8 +80,13 @@ beforeEach(() => {
 });
 
 describe('shortId', () => {
+  // The first dash has to land inside the first six characters, otherwise
+  // the fixture passes with or without the strip and cannot detect its
+  // removal — and `parsePeerFrame` accepts any non-empty msgId, so a
+  // wire-supplied non-UUID would then desync the displayed handle from
+  // `resolveHeld`'s shortId branch.
   it('is six hex characters with dashes stripped', () => {
-    expect(shortId('3fa9c1de-0000-4000-8000-000000000000')).toBe('3fa9c1');
+    expect(shortId('abc-def0-0000-4000-8000-000000000000')).toBe('abcdef');
   });
 });
 
@@ -139,6 +144,23 @@ describe('formatHeldList', () => {
     expect(out).toContain('please run the deploy');
     expect(out).toContain('bypasses');
     expect(out).toContain('/peers accept');
+  });
+
+  // This list is where accept/deny is decided, and both the body and the
+  // sender label are wire-supplied. Bidi overrides survive whitespace
+  // collapsing untouched, so a peer could visually reorder its own preview
+  // and spoof what the user approves.
+  it('strips bidi controls from the body and the sender label', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        fromName: 'app\u202Eba-',
+        content: 'delete \u2066nothing\u2069 important',
+      }),
+    ]);
+    expect(out).not.toMatch(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
+    expect(out).toContain('delete nothing important');
+    expect(out).toContain('appba-');
   });
 
   it('collapses a multi-line body onto one line', () => {

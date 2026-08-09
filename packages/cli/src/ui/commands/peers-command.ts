@@ -17,6 +17,7 @@
 import { describeHoldCause, type HeldMessage } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { t } from '../../i18n/index.js';
 
 /** Short handle shown to the user, so nobody has to type a full UUID. */
@@ -24,8 +25,14 @@ export function shortId(msgId: string): string {
   return msgId.replace(/-/g, '').slice(0, 6);
 }
 
+// Everything rendered below is wire-supplied by another session. Collapsing
+// whitespace is not sanitization: bidi override/isolate characters survive it
+// untouched, and this list is the exact screen where accept/deny is decided —
+// a sender able to visually reorder its own preview spoofs what gets approved.
+// `sanitizeTerminalText` is the same pass the other untrusted-text render
+// sites use (ToolMessage, ConversationMessages, ErrorBoundary).
 function preview(text: string, max = 100): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const oneLine = sanitizeTerminalText(text).replace(/\s+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
@@ -33,7 +40,9 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
   const lines = held.map((entry) => {
-    const who = entry.frame.fromName ?? entry.frame.from ?? 'unknown session';
+    const who = sanitizeTerminalText(
+      entry.frame.fromName ?? entry.frame.from ?? 'unknown session',
+    );
     return (
       `  ${shortId(entry.frame.msgId)}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +

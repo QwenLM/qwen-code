@@ -30,6 +30,18 @@ describe('defangEnvelopeTags', () => {
     expect(defangEnvelopeTags('<Cross_Session_Message >')).toContain('&lt;');
   });
 
+  // The lookahead's `|$` alternative: a bare token at the very end of the
+  // content has no trailing character to match on. Left undefanged it lands
+  // directly before the envelope's real closing tag.
+  it('neutralizes a bare delimiter at the end of the content', () => {
+    expect(defangEnvelopeTags('hi <cross_session_message')).toBe(
+      'hi &lt;cross_session_message',
+    );
+    expect(defangEnvelopeTags('bye </cross_session_message')).toBe(
+      'bye &lt;/cross_session_message',
+    );
+  });
+
   it('leaves lookalike tags alone', () => {
     const text = '<cross_session_messages> and <cross_session_message_x>';
     expect(defangEnvelopeTags(text)).toBe(text);
@@ -122,6 +134,9 @@ describe('formatPeerDisplay', () => {
       content: 'x'.repeat(500),
     });
     expect(out).toContain('…');
-    expect(out.length).toBeLessThan(200);
+    // Exact, not a loose ceiling: a 44-char prefix plus the 120-char cap.
+    // `toBeLessThan(200)` left ~35 characters of slack, so a regression
+    // widening the transcript/queue-preview line would ship green.
+    expect(out.length).toBe(164);
   });
 });
