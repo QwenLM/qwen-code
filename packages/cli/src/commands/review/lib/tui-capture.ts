@@ -44,6 +44,11 @@ export function isNothingToKill(stderr: string): boolean {
     /no server running/i.test(stderr) ||
     /error connecting to .*(no such file or directory)/i.test(stderr) ||
     /(couldn't|could not|can't|cannot) create directory/i.test(stderr) ||
+    // A socket path past sun_path (~108 bytes): tmux answers this to
+    // new-session AND kill-server, so a start that never created a socket
+    // printed a false orphan WARNING (reproduced on 3.3a with a long
+    // TMUX_TMPDIR).
+    /file name too long/i.test(stderr) ||
     /no such file or directory/i.test(stderr)
   );
 }

@@ -128,6 +128,13 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   // then persisted into the manifest's degradedBecause. ENOENT is the only
   // answer that means absent; the rest are this host, right now.
   if (code && code !== 'ENOENT') return { status: 'hung', code };
+  // Nor is a binary that RAN and failed: an installed freeze whose --help
+  // exits non-zero, or dies on a signal, spawned fine — reporting it as not
+  // installed sends an operator to install something already present.
+  if (r.status !== null && r.status !== 0) {
+    return { status: 'hung', code: `exit ${String(r.status)}` };
+  }
+  if (r.signal) return { status: 'hung', code: `signal ${r.signal}` };
   return { status: 'absent' };
 }
 
@@ -154,8 +161,11 @@ export const probes = {
   freeze: (): ProbeResult => probeOutput('freeze', '--help'),
 };
 
-/** Every signal whose default action would terminate the process past the
- * finally-based reap: a closed terminal window HUPs the foreground process
+/** The signals Node lets JavaScript observe whose default action would
+ * otherwise terminate the process past the finally-based reap. NOT every
+ * such signal exists here — SIGUSR2, SIGALRM, SIGXCPU and friends still
+ * kill the process with the server standing, and SIGKILL cannot be caught
+ * at all; the holder's own watchdog is what bounds those: a closed terminal window HUPs the foreground process
  * group (measured: exit 129 with server, socket and holder all surviving),
  * and the capture window legally runs up to an hour. Exported so the signal
  * tests iterate the REAL list. */
@@ -371,6 +381,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let shaped = false;
     let manifestHadPng = false;
     try {
+      // A FIFO here would block readFileSync FOREVER — a hang, not a throw,
+      // so no refusal is ever printed and the process sits until something
+      // outside kills it, before the reap handlers are even installed. Only
+      // a regular file can be a capture manifest anyway; anything else is
+      // unverifiable, which the catch below already treats as "not ours".
+      // A FIFO here would block readFileSync FOREVER — a hang, not a throw,
+      // so no refusal is printed, no reap handler is installed yet, and NO
+      // timeout inside the process can interrupt it: the read is
+      // synchronous on the main thread (measured — a vitest run wedged past
+      // its own 10s test timeout until the runner killed it). Only a
+      // regular file can be a capture manifest anyway; anything else is
+      // unverifiable, which the catch below already treats as "not ours".
+      if (!statSync(manifestPath).isFile()) throw new Error('not a file');
       const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         evidence?: unknown;
         pngPath?: unknown;
@@ -459,24 +482,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       );
       return;
     }
-    // The sibling proves the DIRECTORY writable, not the artifact paths
-    // themselves. Whatever survived the clear still has to be overwritable
-    // at the end of the run, and the two shapes that are not — a directory
-    // (EISDIR) and a read-only or foreign-owned file (EACCES/EPERM, the
-    // shape a shared CI stage running as another user leaves) — refused
-    // only at the FINAL write: the full capture window burned (settle, or
-    // --timeout-ms up to the 1h ceiling, plus a freeze render), the pane
-    // text produced and then thrown away. Fail fast instead, naming the
-    // path. Append mode: `w` would truncate a file this run is not
-    // authorized to replace yet, and openSync creates nothing that is
-    // missing here — a nonexistent artifact path is the normal shape and
-    // the sibling probe already covered it. The PNG is deliberately not
-    // probed: a render that cannot write degrades to the ans-only rung,
-    // which is an outcome, not a refusal.
-    for (const path of [ansPath, manifestPath]) {
-      if (!existsSync(path)) continue;
-      closeSync(openSync(path, 'a'));
-    }
+    // No per-path writability probe beyond this: the collision gate above
+    // refuses on ANY survivor at the two mandatory paths, so a directory, a
+    // read-only file, an append-only one (chattr +a, which an append-mode
+    // probe would have passed and the truncating final write would then
+    // have failed) — every shape that could fail the last write — is
+    // already refused before the capture window opens.
   } catch (e) {
     refuse(
       `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,

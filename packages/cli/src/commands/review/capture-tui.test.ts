@@ -662,6 +662,61 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO at an artifact path instead of blocking on it',
+    async () => {
+      // Reading a FIFO blocks until a writer appears — a HANG, not a throw,
+      // so no refusal is printed and no reap handler is installed yet. Run
+      // from a CHILD with a kill deadline: the block is a synchronous read
+      // on the main thread, so an in-process timeout cannot interrupt it
+      // (measured — a regression wedged the whole vitest run past its own
+      // 10s test timeout), and only an external killer turns it red.
+      let captureTuiTs = join(
+        process.cwd(),
+        'src/commands/review/capture-tui.ts',
+      );
+      if (!existsSync(captureTuiTs)) {
+        captureTuiTs = join(
+          process.cwd(),
+          'packages/cli/src/commands/review/capture-tui.ts',
+        );
+      }
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-fifo-'));
+      try {
+        spawnSync('mkfifo', [join(dir, 'cap.json')]);
+        if (!existsSync(join(dir, 'cap.json'))) return; // no mkfifo here
+        const driver = join(dir, 'driver-fifo.mts');
+        writeFileSync(
+          driver,
+          [
+            `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
+            `mod.probes.tmux = () => ({ status: 'absent' });`,
+            `await mod.runCaptureTui({ command: 'printf hi', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: undefined, keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 1000 } as never);`,
+          ].join('\n'),
+        );
+        const { spawn } = await import('node:child_process');
+        const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+          cwd: process.cwd(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        child.stdout.on('data', (b: Buffer) => (out += b.toString()));
+        child.stderr.on('data', (b: Buffer) => (out += b.toString()));
+        const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
+        const code = await new Promise<number | null>((resolve) =>
+          child.once('exit', (c) => resolve(c)),
+        );
+        clearTimeout(killer);
+        // Exit 3 with the collision named — not a SIGKILL'd hang.
+        expect(code).toBe(3);
+        expect(out).toContain('collides with a file this capture did not');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
   it('refuses a BARE --keys — no tokens is a template that drove nothing', async () => {
     // yargs `array: true` turns `--keys` (bare), `--keys=` and an unquoted
     // `--keys $EMPTY` into [], which was accepted silently: nothing typed,
