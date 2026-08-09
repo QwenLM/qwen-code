@@ -257,13 +257,17 @@ describe('Agent View supervisor runner', () => {
       text: 'next',
     });
 
-    await expect(handle.answer('session-3', 'yes')).resolves.toEqual({
+    const answerRequest = {
+      sessionId: 'session-3',
+      generation: 1,
+      promptId: 'prompt-3',
+      callId: 'call-3',
+      text: 'yes',
+    };
+    await expect(handle.answer(answerRequest)).resolves.toEqual({
       answered: true,
     });
-    expect(handler.answer).toHaveBeenCalledWith({
-      sessionId: 'session-3',
-      text: 'yes',
-    });
+    expect(handler.answer).toHaveBeenCalledWith(answerRequest);
 
     await expect(handle.logs('session-3')).resolves.toEqual({
       logs: ['line-1'],
@@ -360,7 +364,7 @@ describe('Agent View supervisor runner', () => {
     const supervisorPromise = runAgentViewSupervisor({
       globalDir,
       maintenanceIntervalMs: 10,
-      hibernationPolicy: { autoExitGraceMs: 0 },
+      hibernationPolicy: { autoExitGraceMs: 1000 },
     });
 
     await waitForSupervisor(socketPath, globalDir);

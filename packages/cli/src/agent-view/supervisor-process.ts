@@ -1983,16 +1983,13 @@ class AgentViewSupervisorProcessHandler
     this.notifyChanged();
     return { sessionId, sent: true };
   }
-  async answer(params?: Record<string, unknown>) {
+  async answer(params: AgentViewAnswerRequest) {
     const request: AgentViewAnswerRequest = {
-      sessionId: await resolveManagedSessionId(
-        requireSessionId(params),
-        this.store,
-      ),
-      generation: positiveIntegerParam(params, 'generation'),
-      promptId: requireStringParam(params, 'promptId'),
-      callId: requireStringParam(params, 'callId'),
-      text: requireText(params),
+      sessionId: await resolveManagedSessionId(params.sessionId, this.store),
+      generation: params.generation,
+      promptId: params.promptId,
+      callId: params.callId,
+      text: params.text,
     };
     await this.queueAnswerForSession(request);
     this.notifyChanged();
@@ -4277,17 +4274,6 @@ function requireText(params: Record<string, unknown> | undefined): string {
     throw new Error('Agent View message text is required.');
   }
   return text;
-}
-
-function requireStringParam(
-  params: Record<string, unknown> | undefined,
-  key: string,
-): string {
-  const value = params?.[key];
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`Agent View ${key} is required.`);
-  }
-  return value;
 }
 
 function positiveIntegerParam(

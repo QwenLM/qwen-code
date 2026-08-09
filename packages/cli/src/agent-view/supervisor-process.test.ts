@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS } from './attach-lease.js';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
+  AgentViewAnswerRequest,
   AgentViewLaunchFile,
   AgentViewSessionStateFile,
   AgentViewWorkerControlEvent,
@@ -118,6 +119,46 @@ function createAgentViewSupervisorHandler(
       generation?: number;
       ackSequence?: number;
     }): ReturnType<NonNullable<typeof handler.workerControl>>;
+  };
+}
+
+async function pendingInputStateForTest(
+  sessionId: string,
+  globalDir: string,
+  overrides: Partial<Extract<LegacyWorkerEvent, { type: 'state' }>> = {},
+): Promise<Extract<LegacyWorkerEvent, { type: 'state' }>> {
+  const launch = await readAgentViewLaunch(sessionId, { globalDir });
+  return {
+    type: 'state',
+    sessionId,
+    promptId: launch?.promptId ?? 'prompt-1',
+    sessionState: 'needs_input',
+    waitingFor: 'approval',
+    inputKind: 'blocking',
+    callId: 'call-1',
+    inputType: 'tool_confirmation',
+    inputSummary: 'Test input',
+    ...overrides,
+  };
+}
+
+async function answerRequestForTest(
+  sessionId: string,
+  globalDir: string,
+  text: string,
+): Promise<AgentViewAnswerRequest> {
+  const [worker, activity, launch] = await Promise.all([
+    readAgentViewWorker(sessionId, { globalDir }),
+    readAgentViewActivity(sessionId, { globalDir }),
+    readAgentViewLaunch(sessionId, { globalDir }),
+  ]);
+  return {
+    sessionId,
+    generation: worker?.generation ?? 1,
+    promptId:
+      activity?.pendingInput?.promptId ?? launch?.promptId ?? 'prompt-1',
+    callId: activity?.pendingInput?.callId ?? 'call-1',
+    text,
   };
 }
 
@@ -782,14 +823,12 @@ describe('Agent View supervisor process helpers', () => {
       lastHeartbeatAt: '2026-07-17T00:00:00.000Z',
     });
 
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'approval',
-      at: '2026-07-17T00:00:01.000Z',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, {
+        token,
+        at: '2026-07-17T00:00:01.000Z',
+      }),
+    );
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
@@ -934,9 +973,11 @@ describe('Agent View supervisor process helpers', () => {
       handler.send?.({ sessionId: result.sessionId, text: 'next step' }),
     ).resolves.toEqual({ sessionId: result.sessionId, sent: true });
     expect(hosts[0]?.input).toBe('');
-    await expect(
-      handler.workerControl?.({ sessionId: result.sessionId, token }),
-    ).resolves.toMatchObject({
+    const initialControls = await handler.workerControl?.({
+      sessionId: result.sessionId,
+      token,
+    });
+    expect(initialControls).toMatchObject({
       sessionId: result.sessionId,
       events: [
         {
@@ -980,9 +1021,11 @@ describe('Agent View supervisor process helpers', () => {
       handler.send?.({ sessionId: result.sessionId, text: 'continue' }),
     ).resolves.toEqual({ sessionId: result.sessionId, sent: true });
     expect(hosts[0]?.input).toBe('');
-    await expect(
-      handler.workerControl?.({ sessionId: result.sessionId, token }),
-    ).resolves.toMatchObject({
+    const continueControls = (await handler.workerControl?.({
+      sessionId: result.sessionId,
+      token,
+    })) as { events: AgentViewWorkerControlEvent[] };
+    expect(continueControls).toMatchObject({
       sessionId: result.sessionId,
       events: [
         {
@@ -993,21 +1036,27 @@ describe('Agent View supervisor process helpers', () => {
         },
       ],
     });
+    const continuePromptId = continueControls?.events.find(
+      (event) => event.type === 'prompt',
+    )?.promptId;
+    if (!continuePromptId) throw new Error('expected follow-up prompt id');
 
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-      lastResult: 'Anything else?',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, {
+        token,
+        promptId: continuePromptId,
+        waitingFor: 'response',
+        inputKind: 'soft',
+        inputType: 'ask_user_question',
+        lastResult: 'Anything else?',
+      }),
+    );
     await expect(
       readAgentViewActivity(result.sessionId, { globalDir }),
     ).resolves.not.toMatchObject({ queuedPromptCount: 1 });
     await expect(
-      handler.answer?.({ sessionId: result.sessionId, text: 'no' }),
-    ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
+      handler.send?.({ sessionId: result.sessionId, text: 'no' }),
+    ).resolves.toEqual({ sessionId: result.sessionId, sent: true });
     await expect(
       readAgentViewActivity(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
@@ -1081,17 +1130,24 @@ describe('Agent View supervisor process helpers', () => {
       token,
       cwd: globalDir,
     });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'approval',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, { token }),
+    );
+
+    const yesRequest = await answerRequestForTest(
+      result.sessionId,
+      globalDir,
+      'yes',
+    );
+    const noRequest = await answerRequestForTest(
+      result.sessionId,
+      globalDir,
+      'no',
+    );
 
     const settled = await Promise.allSettled([
-      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
-      handler.answer?.({ sessionId: result.sessionId, text: 'no' }),
+      handler.answer?.(yesRequest),
+      handler.answer?.(noRequest),
     ]);
 
     expect(settled.filter((item) => item.status === 'fulfilled')).toHaveLength(
@@ -1101,7 +1157,7 @@ describe('Agent View supervisor process helpers', () => {
     expect(
       rejected && rejected.status === 'rejected' ? rejected.reason : undefined,
     ).toMatchObject({
-      message: expect.stringContaining('waiting for the previous response'),
+      message: expect.stringContaining('stale or does not match'),
     });
     const controls = (await handler.workerControl?.({
       sessionId: result.sessionId,
@@ -1117,7 +1173,7 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('serializes mixed follow-up prompts and soft answers for the same session', async () => {
+  it('serializes concurrent soft responses for the same session', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -1137,18 +1193,19 @@ describe('Agent View supervisor process helpers', () => {
       token,
       cwd: globalDir,
     });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-      lastResult: 'Anything else?',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, {
+        token,
+        waitingFor: 'response',
+        inputKind: 'soft',
+        inputType: 'ask_user_question',
+        lastResult: 'Anything else?',
+      }),
+    );
 
     const settled = await Promise.allSettled([
       handler.send?.({ sessionId: result.sessionId, text: 'first' }),
-      handler.answer?.({ sessionId: result.sessionId, text: 'second' }),
+      handler.send?.({ sessionId: result.sessionId, text: 'second' }),
     ]);
 
     expect(settled.filter((item) => item.status === 'fulfilled')).toHaveLength(
@@ -1230,18 +1287,18 @@ describe('Agent View supervisor process helpers', () => {
     });
 
     await expect(
-      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+      handler.answer?.(
+        await answerRequestForTest(result.sessionId, globalDir, 'yes'),
+      ),
     ).rejects.toThrow('is not waiting for input');
 
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'approval',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, { token }),
+    );
     await expect(
-      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+      handler.answer?.(
+        await answerRequestForTest(result.sessionId, globalDir, 'yes'),
+      ),
     ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
     expect(hosts[0]?.input).toBe('');
     await expect(
@@ -1261,16 +1318,14 @@ describe('Agent View supervisor process helpers', () => {
       readAgentViewActivity(result.sessionId, { globalDir }),
     ).resolves.not.toMatchObject({ queuedPromptCount: 1 });
 
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'approval',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, { token }),
+    );
     await writeAttachedStateForTest(result.sessionId, globalDir);
     await expect(
-      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+      handler.answer?.(
+        await answerRequestForTest(result.sessionId, globalDir, 'yes'),
+      ),
     ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
     await handler.workerControl?.({
       sessionId: result.sessionId,
@@ -1278,18 +1333,19 @@ describe('Agent View supervisor process helpers', () => {
     });
 
     await writeDetachedStateForTest(result.sessionId, globalDir);
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-    });
+    await handler.workerEvent?.(
+      await pendingInputStateForTest(result.sessionId, globalDir, {
+        token,
+        waitingFor: 'response',
+        inputKind: 'soft',
+        inputType: 'ask_user_question',
+      }),
+    );
     await expect(
-      handler.answer?.({ sessionId: result.sessionId, text: 'src/index.ts' }),
-    ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
+      handler.send?.({ sessionId: result.sessionId, text: 'src/index.ts' }),
+    ).resolves.toEqual({ sessionId: result.sessionId, sent: true });
     await expect(
-      handler.answer?.({ sessionId: result.sessionId, text: 'src/app.ts' }),
+      handler.send?.({ sessionId: result.sessionId, text: 'src/app.ts' }),
     ).rejects.toThrow('is waiting for the previous response');
 
     await fs.rm(globalDir, { recursive: true, force: true });

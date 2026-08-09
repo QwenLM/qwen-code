@@ -6424,6 +6424,7 @@ describe('answerAgentViewPendingToolCall', () => {
         {
           type: 'answer',
           sequence: 1,
+          promptId: 'prompt-1',
           callId: 'call-1',
           text: 'yes',
           at: '2026-07-17T00:00:00.000Z',
@@ -6459,6 +6460,8 @@ describe('answerAgentViewPendingToolCall', () => {
         {
           type: 'answer',
           sequence: 1,
+          promptId: 'prompt-1',
+          callId: 'call-2',
           text: 'src/index.ts',
           at: '2026-07-17T00:00:00.000Z',
         },
@@ -6492,6 +6495,8 @@ describe('answerAgentViewPendingToolCall', () => {
         {
           type: 'answer',
           sequence: 1,
+          promptId: 'prompt-1',
+          callId: 'call-3',
           text: 'no',
           at: '2026-07-17T00:00:00.000Z',
         },
@@ -6525,6 +6530,8 @@ describe('answerAgentViewPendingToolCall', () => {
         {
           type: 'answer',
           sequence: 1,
+          promptId: 'prompt-1',
+          callId: 'agent-call',
           text: 'yes',
           at: '2026-07-17T00:00:00.000Z',
         },
@@ -6537,21 +6544,25 @@ describe('answerAgentViewPendingToolCall', () => {
 });
 
 describe('applyAgentViewWorkerControlEventForUi', () => {
-  it('queues normal text answers as prompts when no approval is pending', async () => {
+  it('does not reinterpret unmatched answers as prompts', async () => {
     const enqueuePrompt = vi.fn();
 
     await applyAgentViewWorkerControlEventForUi(
       {
         type: 'answer',
         sequence: 1,
+        promptId: 'prompt-1',
+        callId: 'call-1',
         text: 'run the focused test',
         at: '2026-07-17T00:00:00.000Z',
       },
       [],
       enqueuePrompt,
+      undefined,
+      'prompt-1',
     );
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('run the focused test');
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it('does not queue approval answers as prompts', async () => {
@@ -6572,12 +6583,15 @@ describe('applyAgentViewWorkerControlEventForUi', () => {
       {
         type: 'answer',
         sequence: 1,
+        promptId: 'prompt-1',
         callId: 'call-1',
         text: 'yes',
         at: '2026-07-17T00:00:00.000Z',
       },
       [pendingCall],
       enqueuePrompt,
+      undefined,
+      'prompt-1',
     );
 
     expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
