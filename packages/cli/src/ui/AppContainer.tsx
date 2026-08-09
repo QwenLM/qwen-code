@@ -472,6 +472,17 @@ export function useQueuedSubmissionDrain({
               ...(submission.submittedPrompt === undefined
                 ? {}
                 : { submittedPrompt: submission.submittedPrompt }),
+              // A peer turn's `submittedPrompt` is the one-line summary
+              // `usePeerMessaging` queued alongside the envelope. It has to
+              // be handed to the recorder as well: `recordNotification`
+              // omits the system payload when the display text is
+              // undefined, and a resumed session then rebuilds the item
+              // from the model-bound parts — i.e. it renders the raw
+              // envelope where the summary belongs.
+              ...(submission.origin === 'peer' &&
+              submission.submittedPrompt !== undefined
+                ? { notificationDisplayText: submission.submittedPrompt }
+                : {}),
               onAdmissionFailed: () => {
                 restoreMessages(
                   [submission.modelText],
@@ -2492,13 +2503,21 @@ export const AppContainer = (props: AppContainerProps) => {
       const submittedPromptProvenanceUnavailable =
         consumesComposerState &&
         submittedPromptProvenanceUnavailableRef.current;
-      const submitsPeerContent =
-        consumesComposerState && composerHoldsPeerContentRef.current;
+      // Deliberately NOT gated on `consumesComposerState`. Vim's Enter
+      // handler calls this as `onSubmit(value)` with no options, so that
+      // gate reads false on the one path where the composer's contents
+      // are unquestionably what is being submitted — and a peer envelope
+      // popped into the composer would drain as `UserQuery` and reach the
+      // shell. The flag already tracks composer contents on its own.
+      const submitsPeerContent = composerHoldsPeerContentRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
-        composerHoldsPeerContentRef.current = false;
         submittedPromptProvenanceUnavailableRef.current = false;
       }
+      // Cleared here rather than inside the block above for the same
+      // reason: the vim path consumes the composer without saying so, and
+      // a flag left set would tag the *next* submission `'peer'` too.
+      composerHoldsPeerContentRef.current = false;
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;

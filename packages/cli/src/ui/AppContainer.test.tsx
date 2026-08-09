@@ -1764,6 +1764,64 @@ describe('AppContainer State Management', () => {
           expect.objectContaining({
             userAdmission: { turnKey: 'message-queue:peer-1' },
             submittedPrompt: 'message from session b',
+            // Also the recorder's display text. recordNotification drops
+            // the system payload when this is undefined, and /resume then
+            // rebuilds the item from the model-bound parts — putting the
+            // raw envelope in the transcript where the summary belongs.
+            notificationDisplayText: 'message from session b',
+          }),
+        );
+      });
+    });
+
+    it('does not label a non-peer batch with a peer display summary', async () => {
+      // The summary rides on submittedPrompt, which typed input carries
+      // too. Keying the recorder off it without checking the origin would
+      // relabel every ordinary turn as a notification.
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue({
+        getSnapshot: () => ({ goal: undefined }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>);
+
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          modelText: 'what does this repo do?',
+          submittedPrompt: 'what does this repo do?',
+          origin: 'typed' as const,
+          turnKey: 'message-queue:typed-1',
+        };
+      });
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(submitQuery).toHaveBeenCalledWith(
+          'what does this repo do?',
+          SendMessageType.UserQuery,
+          undefined,
+          expect.not.objectContaining({
+            notificationDisplayText: expect.anything(),
           }),
         );
       });
@@ -2358,6 +2416,45 @@ describe('AppContainer State Management', () => {
           false,
           'message from session b',
           'peer',
+        );
+      });
+
+      // Vim's Enter handler is `onSubmit(value)` — one argument, no options
+      // object. Gating the peer guard on "options were passed" therefore
+      // opened the hazard on the one submit path that unambiguously sends
+      // the composer's contents: the envelope drained as UserQuery and, in
+      // `!` shell mode, reached handleShellCommand.
+      it('re-queues as peer when submitted with no options (vim Enter)', () => {
+        const { mockQueueMessage } = renderWithPoppedPeer();
+
+        capturedUIActions.handleFinalSubmit(envelope);
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          envelope,
+          false,
+          undefined,
+          'peer',
+        );
+      });
+
+      // The optionless path consumes the composer just as much as the other
+      // one, so it has to clear the flag too — otherwise the user's next
+      // prompt inherits the tag and is recorded as someone else's message.
+      it('clears the peer tag after an optionless submit', () => {
+        const { mockQueueMessage } = renderWithPoppedPeer();
+
+        capturedUIActions.handleFinalSubmit(envelope);
+        mockQueueMessage.mockClear();
+        capturedUIActions.handleFinalSubmit('my own prompt');
+
+        // Three arguments, not four: the untagged shape. Asserting the
+        // absence of a `'peer'` fourth argument is not enough on its own —
+        // the third argument here is undefined, which `expect.anything()`
+        // does not match, so a negated matcher would pass either way.
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          'my own prompt',
+          false,
+          undefined,
         );
       });
 
