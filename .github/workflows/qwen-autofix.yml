@@ -4549,10 +4549,18 @@ jobs:
           REPAIR_OUTCOME: '${{ steps.verify_repair.outputs.outcome }}'
           REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
           REPAIR_VERIFIED_HEAD: '${{ steps.verify_repair.outputs.verified_head }}'
+          FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
+          # A pre-existing verdict never reaches the repair pass (it is what
+          # SKIPS the repair), so the first gate's flag is authoritative.
+          # Forwarded so the failure report can say "base update needed"
+          # instead of the generic gate-rejection clause.
+          if [[ "${FIRST_PREEXISTING}" == 'true' ]]; then
+            echo "preexisting=true" >> "${GITHUB_OUTPUT}"
+          fi
           if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
             OUTCOME="${REPAIR_OUTCOME}"
             COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
@@ -5009,6 +5017,7 @@ jobs:
         env:
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           COMMITTED: '${{ steps.final_verify.outputs.committed }}'
+          PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -5280,6 +5289,10 @@ jobs:
                   # wording-doesn't-match-behaviour bug this PR fixes.
                   GATE_CLAUSE=''
                   [[ -s "${WORKDIR}/gate-rejection.md" ]] && GATE_CLAUSE=' — the verification gate rejected the attempt'
+                  # Pre-existing failures get the honest clause: the rejection
+                  # is not the agent's, the repair was deliberately skipped,
+                  # and the actionable remedy is a base update.
+                  [[ "${PREEXISTING}" == 'true' ]] && GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass was skipped and the branch needs a base update (merge main)'
                   HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 fi
               fi
@@ -5455,9 +5468,11 @@ jobs:
                 echo '<!-- autofix-gate-rejection-start -->'
                 echo "**Why it was not pushed:**"
                 echo
-                # Must stay >= reject_fix's tail -c 3000 + label + two four-backtick
-                # fences (~3.1 KB), or the closing fence is silently truncated.
-                head -c 3500 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
+                # Must stay >= reject_fix's tail -c 3000 + label + the
+                # pre-existing paragraph (~456 bytes + branch name) + two
+                # four-backtick fences (~3.8 KB), or the closing fence is
+                # silently truncated.
+                head -c 3900 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
                 echo '<!-- autofix-gate-rejection-end -->'
               fi
               echo

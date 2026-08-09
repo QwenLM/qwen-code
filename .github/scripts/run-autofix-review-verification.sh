@@ -100,8 +100,15 @@ baseline_also_fails() {
   echo "🔁 Baseline A/B: re-running the failed check at origin/${BRANCH}" \
     "(${baseline})" | tee -a "${GATE_LOG}"
   git checkout --quiet --detach "${baseline}" 2>> "${GATE_LOG}" || return 1
+  # The baseline transcript goes to a SIDE log: gate-rejection.md renders
+  # `tail -c 3000` of GATE_LOG as the evidence window, and on a green
+  # baseline a chatty success transcript would fill it and push the actual
+  # failure text out — misdirecting the repair agent, the PR comment, and
+  # the next round's LAST_REJECTION block all at once.
+  local ab_log="${GATE_LOG}.baseline"
+  : > "${ab_log}"
   rc=0
-  if ! "$@" >> "${GATE_LOG}" 2>&1; then
+  if ! "$@" >> "${ab_log}" 2>&1; then
     rc=1
   fi
   if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
@@ -109,7 +116,15 @@ baseline_also_fails() {
     # this point may trust it.
     reject_fix 'could not restore the verification tree after the baseline check'
   fi
-  [[ "${rc}" -eq 1 ]]
+  if [[ "${rc}" -eq 1 ]]; then
+    # Only a FAILING baseline transcript is evidence — merge its tail into
+    # the window, where it backs the pre-existing label.
+    tail -c 1500 "${ab_log}" >> "${GATE_LOG}" 2> /dev/null || true
+    return 0
+  fi
+  echo "🔁 baseline is green — the failure belongs to this round" \
+    | tee -a "${GATE_LOG}"
+  return 1
 }
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's.
@@ -119,6 +134,23 @@ run_check() {
     if baseline_also_fails "$@"; then
       reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
     fi
+    reject_fix "${label}"
+  fi
+}
+run_check_no_ab() {
+  # A/B-exempt: for checks whose baseline re-run would compare a DIFFERENT
+  # computation than the one that failed, so a baseline verdict proves
+  # nothing. The contracts check consumes its file list from stdin, which
+  # the first run drains — the baseline leg would re-check an empty list
+  # and pass vacuously. The schema check reads packages/core/dist, which
+  # the core-rebuild guard built from the ROUND's sources and which,
+  # being gitignored, survives the detach and confounds the baseline. Their
+  # rejections stay charged to the round — which is also where the repair
+  # agent can actually act on them (generate:settings-schema is in its
+  # allowlist).
+  local label="${1}"
+  shift
+  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
     reject_fix "${label}"
   fi
 }
@@ -166,10 +198,10 @@ fi
 # that predates the script does not contain it (bash would exit 127
 # and kill the gate with no outcome), and the gate logic must come
 # from the trusted base, not the branch under verification.
-run_check 'settings schema is stale on the agent-committed fix' \
+run_check_no_ab 'settings schema is stale on the agent-committed fix' \
   bash "${RUNNER_TEMP}/check-settings-schema.sh"
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
-run_check 'cross-package contract verification failed' \
+run_check_no_ab 'cross-package contract verification failed' \
   bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
 assert_verification_tree
 
@@ -226,8 +258,18 @@ else
       continue
     fi
     echo "🧪 Testing ${p} (changed files only)..."
-    run_check "tests failed in ${p}" \
-      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+    # A workspace this round ADDS has no baseline to compare against: npm
+    # exits 1 there with "No workspaces found" (measured), which would
+    # misread as pre-existing and skip the one repair that CAN fix the
+    # round's own package. A/B only when the workspace exists at the
+    # pre-round ref.
+    if git cat-file -e "origin/${BRANCH}:${p}/package.json" 2> /dev/null; then
+      run_check "tests failed in ${p}" \
+        npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+    else
+      run_check_no_ab "tests failed in ${p}" \
+        npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+    fi
   done
 fi
 assert_verification_tree

@@ -8049,10 +8049,10 @@ exit 1
       reviewVerificationRunner.match(/retryable=true/g) ?? [],
     ).toHaveLength(1);
     expect(reviewVerificationRunner).toContain(
-      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
     );
     expect(reviewVerificationRunner).toContain(
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'cross-package contract verification failed'",
     );
     expect(pushAndReportStep).toContain(
       "steps.final_verify.outputs.outcome == 'fixed'",
@@ -8073,10 +8073,10 @@ exit 1
       'VERIFICATION_HEAD="$(git rev-parse HEAD)"',
     );
     const schemaCheck = reviewVerificationRunner.indexOf(
-      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
     );
     const contractCheck = reviewVerificationRunner.indexOf(
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'cross-package contract verification failed'",
     );
     const coreRebuild = reviewVerificationRunner.indexOf(
       "run_check 'core rebuild failed on the agent-committed fix'",
@@ -9180,8 +9180,8 @@ exit 1
     // is captured for the retry.
     for (const check of [
       "run_check 'core rebuild failed on the agent-committed fix'",
-      "run_check 'settings schema is stale on the agent-committed fix'",
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
       "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
       "run_check 'lint failed on the agent-committed fix' npm run lint",
@@ -11155,7 +11155,14 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
   // reports pre-existing and skips the doomed repair (retryable stays
   // unset). These tests execute the REAL script in a real git repo with a
   // stubbed npm whose failures are keyed by commit SHA.
-  const runGate = ({ failAt }) => {
+  const runGate = ({
+    failAt = [],
+    agentCommit = true,
+    schemaFail = false,
+    addWorkspace = false,
+    noisySuccess = false,
+    touchCore = false,
+  }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
       const sh = (cmd, cwd) =>
@@ -11169,14 +11176,36 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       g('echo base > f.txt && git add . && git commit -qm base');
       g('git branch -M main && git push -q origin main');
       g('git checkout -qb feature');
-      g('echo branch > f.txt && git commit -qam branch');
+      if (touchCore) {
+        // Reaches the core-rebuild run_check BEFORE the commit gate, so a
+        // failure there exercises the no-round-commit guard.
+        g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
+        g('git add . && git commit -qm core');
+      } else {
+        g('echo branch > f.txt && git commit -qam branch');
+      }
       g('git push -q origin feature');
-      g('echo agent > f.txt && git commit -qam agent');
+      if (agentCommit) {
+        if (addWorkspace) {
+          // The round ADDS a workspace — it does not exist at the baseline.
+          g('mkdir -p packages/newpkg');
+          g(
+            `printf '{"name":"newpkg","scripts":{"test":"vitest run"}}' > packages/newpkg/package.json`,
+          );
+          g('git add . && git commit -qm agent');
+        } else {
+          g('echo agent > f.txt && git commit -qam agent');
+        }
+      }
       const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
       const failShas = failAt.map(shaOf).join(' ');
 
-      // Stubs: npm fails `run build` when HEAD is in FAIL_BUILD_SHAS; the
-      // staged helper scripts all pass; the package resolver maps nothing.
+      // Stubs. npm mirrors two MEASURED behaviors: `run build` red when HEAD
+      // is in FAIL_BUILD_SHAS (printing a marker line), and `run test
+      // --workspace <p>` exiting 1 with "No workspaces found" when the
+      // workspace directory does not exist — --if-present forgives a missing
+      // script, not a missing workspace. NOISY_SUCCESS makes a PASSING build
+      // print >3 KB, the shape that used to flood the evidence window.
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
@@ -11188,6 +11217,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '  for s in ${FAIL_BUILD_SHAS}; do',
           '    if [[ "$s" == "$head" ]]; then echo "stub build FAILED at $head"; exit 1; fi',
           '  done',
+          '  if [[ "${NOISY_SUCCESS:-}" == "1" ]]; then',
+          '    for i in $(seq 1 200); do echo "baseline build banner line $i — all green, nothing to see"; done',
+          '  fi',
+          'fi',
+          'if [[ "$1" == "run" && "$2" == "test" && "$3" == "--workspace" ]]; then',
+          '  if [[ ! -d "$4" ]]; then echo "npm error No workspaces found: --workspace=$4"; exit 1; fi',
+          '  if [[ "${WORKSPACE_TEST_FAIL:-}" == "1" ]]; then echo "stub workspace tests FAILED in $4"; exit 1; fi',
           'fi',
           'exit 0',
         ].join('\n'),
@@ -11195,14 +11231,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       chmodSync(join(bin, 'npm'), 0o755);
       const rt = join(dir, 'rt');
       mkdirSync(rt);
-      writeFileSync(join(rt, 'check-settings-schema.sh'), 'exit 0\n');
+      writeFileSync(
+        join(rt, 'check-settings-schema.sh'),
+        'if [[ "${SCHEMA_FAIL:-}" == "1" ]]; then echo "schema stale"; exit 1; fi\nexit 0\n',
+      );
       writeFileSync(
         join(rt, 'check-autofix-contracts.sh'),
         'cat > /dev/null\nexit 0\n',
       );
       writeFileSync(
         join(rt, 'resolve-owning-packages.sh'),
-        'cat > /dev/null\n',
+        'cat > /dev/null\nprintf "%s" "${RESOLVED_PKGS:-}"\n',
       );
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
@@ -11224,6 +11263,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             RUNNER_TEMP: rt,
             GITHUB_OUTPUT: outFile,
             FAIL_BUILD_SHAS: failShas,
+            SCHEMA_FAIL: schemaFail ? '1' : '',
+            NOISY_SUCCESS: noisySuccess ? '1' : '',
+            WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
+            RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
           },
         },
       );
@@ -11271,5 +11314,94 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.status).toBe(0);
     expect(r.outputs).toContain('outcome=fixed');
     expect(r.outputs).not.toContain('preexisting');
+  });
+
+  it('keeps the failure text in the evidence window past a chatty green baseline', () => {
+    // The baseline transcript goes to a side log: rendered evidence is
+    // `tail -c 3000` of GATE_LOG, and a passing baseline that prints >3 KB
+    // used to push the actual failure line out of gate-rejection.md — the
+    // sole carrier into the repair agent's feedback, the PR comment, and
+    // the next round's LAST_REJECTION block.
+    const r = runGate({ failAt: ['feature'], noisySuccess: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('stub build FAILED');
+  });
+
+  it('never A/Bs a check with no round commit to remove', () => {
+    // The core-rebuild check runs BEFORE the commit gate, so it can fail on
+    // a round that committed nothing — the baseline IS the tree under test
+    // and a re-run would tautologically "confirm" pre-existing, skipping a
+    // repair today's semantics grant.
+    const r = runGate({
+      agentCommit: false,
+      touchCore: true,
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('never A/Bs the stdin-fed and dist-coupled checks', () => {
+    // The schema check's baseline verdict is confounded by the round-built
+    // core dist (gitignored, survives the detach), and the contracts
+    // check's stdin is drained by its first run — both are A/B-exempt and
+    // stay charged to the round, where the repair agent can act on them.
+    const r = runGate({ schemaFail: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('never marks a round-added workspace pre-existing', () => {
+    // npm exits 1 with "No workspaces found" for a workspace absent at the
+    // baseline (measured; --if-present forgives a missing script, not a
+    // missing workspace) — without the existence guard that misreads as
+    // pre-existing and skips the one repair that CAN fix the round's own
+    // package.
+    const r = runGate({ addWorkspace: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('tests failed in packages/newpkg');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+});
+
+describe('review verification gate: preexisting output is consumed', () => {
+  // The dead-switch rule: an output with no read site cannot be trusted to
+  // mean anything. preexisting=true flows verify → Finalize verification →
+  // the failure report's headline, which swaps the generic gate clause for
+  // the actionable one.
+  it('Finalize verification forwards the flag', () => {
+    expect(workflow).toContain(
+      "FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'",
+    );
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{FIRST_PREEXISTING\}" == 'true' \]\]; then\n\s*echo "preexisting=true" >> "\$\{GITHUB_OUTPUT\}"/,
+    );
+  });
+
+  it('the failure report reads it and renders the base-update clause', () => {
+    expect(workflow).toContain(
+      "PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'",
+    );
+    expect(workflow).toContain(
+      'PRE-EXISTING failure (present without this round',
+    );
+    expect(workflow).toContain('needs a base update (merge main)');
+  });
+
+  it('the evidence cap fits the pre-existing paragraph', () => {
+    // reject_fix renders tail -c 3000 + label + ~456 bytes of pre-existing
+    // wording + branch name + two fences; a 3500-byte cap measurably cut
+    // the closing fence for branch names past 44 characters.
+    expect(workflow).toContain('head -c 3900 "${WORKDIR}/gate-rejection.md"');
+    expect(workflow).not.toMatch(
+      /head -c 3500 "\$\{WORKDIR\}\/gate-rejection\.md"/,
+    );
   });
 });
