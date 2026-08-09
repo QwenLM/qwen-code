@@ -367,6 +367,7 @@ const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
 const DOCKED_ENVIRONMENT_PANEL_WIDTH = 332;
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'contextUsage',
   'model',
   'widthMode',
   'voice',
@@ -5966,6 +5967,12 @@ export function App({
       reportError,
     ],
   );
+  // Stable identity: ChatEditor is memoized and an inline closure would
+  // re-render it on every app render.
+  const handleShowContextUsage = useCallback(
+    () => showContextUsage('/context', false),
+    [showContextUsage],
+  );
 
   // Stable reference: this travels through the memoized MessageList →
   // MessageItem chain, so an inline closure would defeat their memo.
@@ -10262,6 +10269,9 @@ export function App({
                               ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
                               : DEFAULT_COMPOSER_TOOLBAR_ACTIONS)
                           }
+                          tokenCount={connection.tokenCount ?? 0}
+                          contextWindow={connection.contextWindow ?? 0}
+                          onShowContextUsage={handleShowContextUsage}
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}

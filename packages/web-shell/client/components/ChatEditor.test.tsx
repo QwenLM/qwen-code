@@ -16,7 +16,11 @@ import type {
   SlashMenuState,
 } from '../hooks/useComposerCore';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
-import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import {
+  ChatEditor,
+  formatContextUsageDetail,
+  type ComposerToolbarAction,
+} from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -265,6 +269,9 @@ function renderChatEditor(props: {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
+  tokenCount?: number;
+  contextWindow?: number;
+  onShowContextUsage?: () => void;
   placeholderText?: string;
   animatePlaceholder?: boolean;
   disabled?: boolean;
@@ -340,6 +347,129 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor context usage ring', () => {
+  const ring = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-context-usage]',
+    );
+
+  it('renders in toolbarRight before the voice actions', () => {
+    const container = renderChatEditor({
+      tokenCount: 34_298,
+      contextWindow: 100_000,
+      onShowContextUsage: vi.fn(),
+    });
+
+    const button = ring(container)!;
+    expect(button).not.toBeNull();
+    expect(button.getAttribute('aria-label')).toBe('34.3% context used');
+    const liveVoice = container.querySelector(
+      '[data-testid="live-voice-button"]',
+    )!;
+    // The ring sits immediately left of the voice cluster.
+    expect(
+      button.compareDocumentPosition(liveVoice) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('is controlled by the contextUsage toolbar action', () => {
+    const shown = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      visibleToolbarActions: ['contextUsage'],
+    });
+    const hidden = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      visibleToolbarActions: ['voice'],
+    });
+
+    expect(ring(shown)).not.toBeNull();
+    expect(ring(hidden)).toBeNull();
+  });
+
+  it('stays hidden while usage or the context window is unknown', () => {
+    const noUsage = renderChatEditor({ tokenCount: 0, contextWindow: 1000 });
+    const noWindow = renderChatEditor({ tokenCount: 100, contextWindow: 0 });
+
+    expect(ring(noUsage)).toBeNull();
+    expect(ring(noWindow)).toBeNull();
+  });
+
+  it('opens the context breakdown when clicked', () => {
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the used/total detail in a tooltip on focus', async () => {
+    const container = renderChatEditor({
+      tokenCount: 53_600,
+      contextWindow: 1_000_000,
+      onShowContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
+  });
+
+  it('escalates the arc color at the /context panel thresholds', () => {
+    const arcClass = (container: HTMLElement) =>
+      ring(container)!.querySelectorAll('circle')[1].getAttribute('class') ??
+      '';
+
+    const warn = renderChatEditor({ tokenCount: 61, contextWindow: 100 });
+    const error = renderChatEditor({ tokenCount: 81, contextWindow: 100 });
+    const normal = renderChatEditor({ tokenCount: 60, contextWindow: 100 });
+
+    expect(arcClass(warn)).toContain('contextRingValueWarning');
+    expect(arcClass(error)).toContain('contextRingValueError');
+    expect(arcClass(normal)).not.toContain('Warning');
+    expect(arcClass(normal)).not.toContain('Error');
+  });
+
+  it('caps the arc at 100% while the label keeps the real overflow', () => {
+    const container = renderChatEditor({
+      tokenCount: 150,
+      contextWindow: 100,
+    });
+
+    const button = ring(container)!;
+    expect(button.getAttribute('aria-label')).toBe('150.0% context used');
+    const arc = button.querySelectorAll('circle')[1];
+    expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
+  });
+});
+
+describe('formatContextUsageDetail', () => {
+  it('formats used/total with k/M units and one decimal', () => {
+    expect(formatContextUsageDetail(53_600, 1_000_000)).toBe(
+      '53.6k / 1.0M tokens (5.4%)',
+    );
+    expect(formatContextUsageDetail(338_108, 1_000_000)).toBe(
+      '338.1k / 1.0M tokens (33.8%)',
+    );
+    expect(formatContextUsageDetail(512, 2000)).toBe(
+      '512 / 2.0k tokens (25.6%)',
+    );
   });
 });
 

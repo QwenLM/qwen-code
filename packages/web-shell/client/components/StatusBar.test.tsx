@@ -35,8 +35,6 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
-  mockConnection.contextWindow = 0;
-  mockConnection.tokenCount = 0;
   vi.clearAllMocks();
 });
 
@@ -65,83 +63,6 @@ function mount(
 
 const goalButton = () =>
   document.querySelector<HTMLButtonElement>('button[aria-label^="Goals"]');
-
-const contextButton = () =>
-  document.querySelector<HTMLButtonElement>('button[title="Context Usage"]');
-
-describe('StatusBar context pill', () => {
-  it('renders a mini bar with the percentage and keeps the full text accessible', () => {
-    mockConnection.contextWindow = 1_000_000;
-    mockConnection.tokenCount = 338_108;
-    mount();
-
-    const button = contextButton();
-    expect(button?.textContent).toBe('33.8%');
-    // The visible label is only the bare percentage; the meaning lives in the
-    // accessible name so screen readers still hear "context used".
-    expect(button?.getAttribute('aria-label')).toBe('33.8% context used');
-    const fill = button?.querySelector<HTMLSpanElement>('span > span');
-    expect(fill?.style.width).toBe('33.8108%');
-  });
-
-  it('escalates the fill color at the /context panel thresholds', () => {
-    mockConnection.contextWindow = 100;
-
-    mockConnection.tokenCount = 61;
-    mount();
-    let fill = contextButton()!.querySelector<HTMLSpanElement>('span > span')!;
-    expect(fill.className).toContain('contextFillWarning');
-    act(() => root!.unmount());
-    container!.remove();
-
-    mockConnection.tokenCount = 81;
-    mount();
-    fill = contextButton()!.querySelector<HTMLSpanElement>('span > span')!;
-    expect(fill.className).toContain('contextFillError');
-  });
-
-  it('caps the fill width at 100% when usage exceeds the window', () => {
-    mockConnection.contextWindow = 100;
-    mockConnection.tokenCount = 150;
-    mount();
-
-    const fill =
-      contextButton()!.querySelector<HTMLSpanElement>('span > span')!;
-    expect(fill.style.width).toBe('100%');
-    expect(contextButton()?.textContent).toBe('150.0%');
-  });
-
-  it('opens the context breakdown when clicked', () => {
-    mockConnection.contextWindow = 1000;
-    mockConnection.tokenCount = 100;
-    const onShowContext = vi.fn();
-    mount({ onShowContext });
-
-    act(() => {
-      contextButton()?.dispatchEvent(
-        new MouseEvent('click', { bubbles: true, cancelable: true }),
-      );
-    });
-
-    expect(onShowContext).toHaveBeenCalledTimes(1);
-  });
-
-  it('stays hidden until a token count arrives', () => {
-    mockConnection.contextWindow = 1000;
-    mockConnection.tokenCount = 0;
-    mount();
-    expect(contextButton()).toBeNull();
-  });
-
-  it('renders in compact mode', () => {
-    // The default chat layout mounts the StatusBar with compact={true}; the
-    // pill must survive it or it would never be visible in the product.
-    mockConnection.contextWindow = 1000;
-    mockConnection.tokenCount = 338;
-    mount({ compact: true });
-    expect(contextButton()?.textContent).toBe('33.8%');
-  });
-});
 
 describe('StatusBar goal pill', () => {
   it('names the active goal in its accessible label', () => {

@@ -91,6 +91,7 @@ import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'contextUsage'
   | 'gitBranch'
   | 'model'
   | 'commands'
@@ -101,6 +102,7 @@ export type ComposerToolbarAction =
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'contextUsage',
   'gitBranch',
   'model',
   'widthMode',
@@ -167,6 +169,11 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  /** Current context-window occupancy for the `contextUsage` toolbar ring. */
+  tokenCount?: number;
+  contextWindow?: number;
+  /** Show the context-usage breakdown, exactly like typing /context. */
+  onShowContextUsage?: () => void;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -493,6 +500,57 @@ function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
       <path
         d="M473.532 524.327a8.16 8.16 0 0 1-8.17 8.17h-305.36l111.88 111.88c3.19 3.19 3.19 8.4 0 11.59l-25.09 25.09c-3.19 3.19-8.4 3.19-11.59 0l-168.6-168.61c-3.19-3.19-3.19-8.4 0-11.59l164.47-168.67c3.19-3.19 8.4-3.19 11.59 0l25.61 25.61c3.19 3.19 3.19 8.4 0 11.59l-106.59 110.78 303.62-0.11c4.52 0 8.23 3.71 8.23 8.23v36.04zM550.012 486.537a8.16 8.16 0 0 1 8.17-8.17h305.36l-111.88-111.89c-3.19-3.19-3.19-8.4 0-11.59l25.08-25.08c3.19-3.19 8.4-3.19 11.59 0l168.61 168.6c3.19 3.19 3.19 8.4 0 11.59l-164.47 168.67c-3.19 3.19-8.4 3.19-11.59 0l-25.61-25.61c-3.19-3.19-3.19-8.4 0-11.59l106.58-110.78-303.62 0.11c-4.52 0-8.23-3.71-8.23-8.23v-36.03z"
         fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/** `53.6k / 1.0M tokens (5.4%)` — the context ring's hover detail. */
+export function formatContextUsageDetail(used: number, size: number): string {
+  const fmt = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+    return `${n}`;
+  };
+  const pct = size > 0 ? ((used / size) * 100).toFixed(1) : '0.0';
+  return `${fmt(used)} / ${fmt(size)} tokens (${pct}%)`;
+}
+
+const CONTEXT_RING_RADIUS = 6;
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
+
+// Same thresholds as the /context panel's progress bar (ContextUsageMessage):
+// >80% error, >60% warning. The arc is visually capped at 100%; the numeric
+// label keeps reporting real overflow.
+function ContextUsageRing({ pct }: { pct: number }) {
+  const capped = Math.min(pct, 100);
+  const valueClass =
+    pct > 80
+      ? `${styles.contextRingValue} ${styles.contextRingValueError}`
+      : pct > 60
+        ? `${styles.contextRingValue} ${styles.contextRingValueWarning}`
+        : styles.contextRingValue;
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle
+        cx="8"
+        cy="8"
+        r={CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+        className={styles.contextRingTrack}
+      />
+      <circle
+        cx="8"
+        cy="8"
+        r={CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeDasharray={CONTEXT_RING_CIRCUMFERENCE}
+        strokeDashoffset={CONTEXT_RING_CIRCUMFERENCE * (1 - capped / 100)}
+        transform="rotate(-90 8 8)"
+        className={valueClass}
       />
     </svg>
   );
@@ -1175,6 +1233,9 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      tokenCount = 0,
+      contextWindow = 0,
+      onShowContextUsage,
       availableModels = [],
       onSelectMode,
       onSelectModel,
@@ -2377,6 +2438,40 @@ export const ChatEditor = memo(
                         <WidthModeIcon mode={chatWidthMode} />
                       </span>
                     </button>
+                  )}
+                {showToolbarAction('contextUsage') &&
+                  contextWindow > 0 &&
+                  tokenCount > 0 && (
+                    <TooltipProvider delayDuration={300}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
+                            data-hide-during-mobile-voice
+                            data-web-shell-context-usage
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onShowContextUsage?.();
+                            }}
+                            disabled={!onShowContextUsage}
+                            aria-label={t('status.contextUsed', {
+                              pct: ((tokenCount / contextWindow) * 100).toFixed(
+                                1,
+                              ),
+                            })}
+                          >
+                            <span className={styles.toolBtnIcon}>
+                              <ContextUsageRing
+                                pct={(tokenCount / contextWindow) * 100}
+                              />
+                            </span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          {formatContextUsageDetail(tokenCount, contextWindow)}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   )}
                 {showToolbarAction('voice') && (
                   <>
