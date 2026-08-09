@@ -117,12 +117,15 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
-  # Suggestions may improve a PR, but continuing to implement them after ten
+  # Suggestions may improve a PR, but continuing to implement them after five
   # change-producing rounds expands the diff and creates fresh review churn.
-  # From round 11 onward, only Critical findings, formally requested changes,
+  # From round 6 onward, only Critical findings, formally requested changes,
   # failed checks, and base conflicts may drive code changes; lower-severity
-  # feedback is recorded and left open.
-  CRITICAL_ONLY_AFTER_ROUND: '10'
+  # feedback is recorded and left open. Lowered from 10: at 10 the threshold
+  # only ever bound takeover PRs (the strict cap discards a plain PR at round
+  # 10 before Critical-only could engage), so long-running managed PRs spent
+  # ten rounds growing their diff on suggestions before the brake applied.
+  CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
   # reviewer loop with the exact regeneration property the review bot has
@@ -1730,7 +1733,22 @@ jobs:
               gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。\n\n</details>\n\n<!-- takeover-ack engaged -->')"
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
             else
-              gh pr edit "${PR}" --repo "${REPO}" --add-label "${TAKEOVER_LABEL}"
+              # REST for consistency and runner-version independence: `gh pr
+              # edit`'s GraphQL lookup requests
+              # repository.pullRequest.projectCards, which GitHub rejects on
+              # the gh builds that still send that query (demonstrated on the
+              # ECS pool — see pr-self-report-label.yml). This job runs on
+              # ubuntu-latest, where the command still worked; REST behaves
+              # the same on every runner image.
+              # Idempotent create first, with the label's real color: the
+              # REST add would silently create a missing label with a RANDOM
+              # color (gh pr edit failed loud there), and this was the one
+              # POST site without the guard its siblings carry
+              # (pr-self-report-label.yml creates; repo-hygiene.yml probes).
+              gh label create "${TAKEOVER_LABEL}" --repo "${REPO}" --color '1D76DB' \
+                --description 'Summon the autofix loop to manage this PR (remove to release; needs triage+)' \
+                2> /dev/null || true
+              gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${TAKEOVER_LABEL}" > /dev/null
               echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
               # Ack HERE, not via the pull_request:labeled round-trip: that
               # event has been observed to simply not fire (#7999 — the
@@ -1756,7 +1774,18 @@ jobs:
             if [[ "${HAS}" != 'true' ]]; then
               echo "ℹ️ #${PR} does not carry ${TAKEOVER_LABEL} — nothing to do"
             else
-              gh pr edit "${PR}" --repo "${REPO}" --remove-label "${TAKEOVER_LABEL}"
+              # REST for the same reason as the add above; the label name is a
+              # path segment and contains a slash, so it must be URI-encoded.
+              # A concurrent removal between the presence check and this
+              # DELETE already reached the end state — the 404 must not abort
+              # the step and drop the release ack below. Other failures (403,
+              # 5xx, network) also must not drop the ack — a later
+              # `/takeover stop` retries the removal — but must not disappear
+              # silently either: masked, the ack reads "released" while the
+              # loop keeps managing the PR.
+              if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
+                [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
+              fi
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
               # Release ack, direct from the command — the exact mirror of
               # the engage side above, for the same reason: the unlabeled

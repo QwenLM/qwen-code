@@ -200,6 +200,7 @@ sequenceDiagram
 | `sessionScope`                                | `'single'`                                         | `'single'` shares one session across all clients; `'thread'` creates a separate session for each conversation thread.                                        |
 | `channelFactory`                              | `defaultSpawnChannelFactory`                       | Pluggable ACP child factory.                                                                                                                                 |
 | `initializeTimeoutMs`                         | `DEFAULT_INIT_TIMEOUT_MS = 10_000`                 | ACP `initialize` handshake timeout.                                                                                                                          |
+| `sessionRestoreTimeoutMs`                     | `60_000`                                           | ACP `loadSession` / `unstable_resumeSession` timeout; defaults to 60s, and an explicitly configured initialize timeout can raise it but never lower it.      |
 | `maxSessions`                                 | `DEFAULT_MAX_SESSIONS = 32`                        | Cap on `byId.size`. `0` / `Infinity` = unlimited; NaN/negative throws.                                                                                       |
 | `eventRingSize`                               | `DEFAULT_RING_SIZE` (from `eventBus.ts`)           | Per-session event ring; soft-capped at `MAX_EVENT_RING_SIZE`.                                                                                                |
 | `permissionResponseTimeoutMs`                 | `DEFAULT_PERMISSION_TIMEOUT_MS = 5 min`            | Per-request wallclock for the mediator.                                                                                                                      |
@@ -215,6 +216,8 @@ sequenceDiagram
 | `permissionConsensusQuorum`                   | from `settings.json`                               | N for consensus policy.                                                                                                                                      |
 | `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`             | Wire to `PermissionAuditRing` for the audit trail.                                                                                                           |
 | `channelIdleTimeoutMs`                        | `0`                                                | Keep the ACP child alive for this many milliseconds after the last session closes.                                                                           |
+
+Timed-out restores are not cancellable in the current ACP SDK. The bridge therefore keeps a settlement fence and capacity admission until the real request settles or its transport closes. A late result is closed exactly once and never registered. Cleanup uncertainty quarantines only fresh session work on that workspace; existing session and workspace-control traffic continues until the channel drains and is recycled.
 
 ## Additional bridge methods
 
