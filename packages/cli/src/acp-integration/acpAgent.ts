@@ -181,6 +181,10 @@ import {
   SettingScope,
 } from '../config/settings.js';
 import { loadSettingsCached } from '../config/settings-cache.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
@@ -221,6 +225,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { ActiveWorkReporter } from './active-work-reporter.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
@@ -241,6 +246,7 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -312,6 +318,12 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
@@ -369,20 +381,25 @@ const SESSION_DRAIN_TIMEOUT_MS = 30_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
-type AcpSessionStartStage =
+type AcpSessionProfileStage =
   | 'settings_load'
+  | 'live_restore'
+  | 'existence_check'
   | 'config_setup'
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
   | 'response_build';
 
-interface AcpSessionStartSpan {
+interface AcpSessionProfileSpan {
   setAttribute(name: string, value: string | number | boolean): unknown;
 }
 
-function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
-  let failedStage: AcpSessionStartStage | undefined;
+function createAcpSessionProfiler(
+  span: AcpSessionProfileSpan | undefined,
+  attributePrefix: 'session_start' | 'session_restore',
+) {
+  let failedStage: AcpSessionProfileStage | undefined;
   const setAttribute = (
     name: string,
     value: string | number | boolean,
@@ -390,24 +407,30 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     try {
       span?.setAttribute(name, value);
     } catch {
-      // Telemetry must not affect session creation.
+      // Telemetry must not affect session creation or restore.
     }
   };
-  const recordStage = (stage: AcpSessionStartStage, start: number): void => {
+  const recordStage = (stage: AcpSessionProfileStage, start: number): void => {
     const durationMs = Math.round((performance.now() - start) * 100) / 100;
     if (Number.isFinite(durationMs) && durationMs >= 0) {
-      setAttribute(`qwen-code.daemon.session_start.${stage}_ms`, durationMs);
+      setAttribute(
+        `qwen-code.daemon.${attributePrefix}.${stage}_ms`,
+        durationMs,
+      );
     }
   };
-  const recordFailure = (stage: AcpSessionStartStage): void => {
+  const recordFailure = (stage: AcpSessionProfileStage): void => {
     if (failedStage !== undefined) return;
     failedStage = stage;
-    setAttribute('qwen-code.daemon.session_start.failed_stage', stage);
+    setAttribute(`qwen-code.daemon.${attributePrefix}.failed_stage`, stage);
   };
 
   return {
+    fail(stage: AcpSessionProfileStage): void {
+      recordFailure(stage);
+    },
     async time<T>(
-      stage: AcpSessionStartStage,
+      stage: AcpSessionProfileStage,
       fn: () => T | Promise<T>,
     ): Promise<T> {
       if (!span) return await fn();
@@ -421,7 +444,7 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
         recordStage(stage, start);
       }
     },
-    timeSync<T>(stage: AcpSessionStartStage, fn: () => T): T {
+    timeSync<T>(stage: AcpSessionProfileStage, fn: () => T): T {
       if (!span) return fn();
       const start = performance.now();
       try {
@@ -438,6 +461,22 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     },
   };
 }
+
+function createAcpSessionStartProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_start');
+}
+
+function createAcpSessionRestoreProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_restore');
+}
+
+type AcpSessionRestoreProfiler = ReturnType<
+  typeof createAcpSessionRestoreProfiler
+>;
 
 function workspaceMemoryErrorData(
   code: string,
@@ -3593,6 +3632,7 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly startingSessionIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -3622,6 +3662,8 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
+  /** Set once the daemon negotiates active-work reporting; one per channel. */
+  private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -4181,6 +4223,9 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // A Session missing from the next snapshot is how the daemon learns the
+    // child released it — including when it never saw our close response.
+    this.activeWorkReporter?.notifyChanged();
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -4300,12 +4345,19 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      /**
+       * Close only if the Session holds no active work — the daemon's
+       * automatic-cleanup path. Explicit close, kill, and shutdown leave this
+       * unset and keep their force semantics.
+       */
+      onlyIfUnheld?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
-      return;
+      // Already gone is the outcome the caller wanted, not a refusal.
+      return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
@@ -4318,6 +4370,19 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    // Checked under the close gate and before anything destructive runs. The
+    // gate is what makes this atomic: with it held the Session admits no new
+    // prompt and starts no new automatic turn, so a hold cannot appear between
+    // this read and the teardown below. Without it, a caller that asked
+    // "anything running?" and then closed would race exactly the work it was
+    // trying to protect.
+    if (opts?.onlyIfUnheld) {
+      const holds = session.collectActiveWorkHolds();
+      if (holds.length > 0) {
+        cancelClose();
+        return { closed: false, holds };
+      }
+    }
     for (const [requestId, generation] of this.generationControllers) {
       if (generation.sessionId !== sessionId) continue;
       generation.controller.abort();
@@ -4373,6 +4438,7 @@ class QwenAgent implements Agent {
     } finally {
       if (!removedFromStore) cancelClose();
     }
+    return { closed: true, holds: [] };
   }
 
   private async discardStoredSessionIfCurrent(
@@ -4392,6 +4458,8 @@ class QwenAgent implements Agent {
   }
 
   async disposeSessions(): Promise<void> {
+    this.activeWorkReporter?.dispose();
+    this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -4612,6 +4680,30 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedProfile) &&
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
+    const requestedActiveWork = args._meta?.[ACTIVE_WORK_HEARTBEAT_META_KEY];
+    const activeWorkRequested =
+      requestedActiveWork !== null &&
+      typeof requestedActiveWork === 'object' &&
+      !Array.isArray(requestedActiveWork) &&
+      (requestedActiveWork as Record<string, unknown>)['v'] ===
+        ACTIVE_WORK_HEARTBEAT_VERSION;
+    // The daemon proposes a cadence; we answer with the one we will actually
+    // use, clamped into the range both sides agree on. The daemon clamps the
+    // echo again — neither side trusts the other to pick a sane number, and a
+    // flood or a multi-hour interval would each break freshness in its own way.
+    const activeWorkIntervalMs = activeWorkRequested
+      ? clampActiveWorkIntervalMs(
+          (requestedActiveWork as Record<string, unknown>)['intervalMs'],
+        )
+      : undefined;
+    if (activeWorkIntervalMs !== undefined) {
+      this.activeWorkReporter?.dispose();
+      this.activeWorkReporter = new ActiveWorkReporter(
+        (method, params) => this.connection.extNotification(method, params),
+        () => this.sessions.values(),
+        activeWorkIntervalMs,
+      );
+    }
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
@@ -4622,6 +4714,15 @@ class QwenAgent implements Agent {
         : {}),
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+      ...(activeWorkIntervalMs !== undefined
+        ? {
+            [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              intervalMs: activeWorkIntervalMs,
+              categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+            },
+          }
         : {}),
     };
     return Object.keys(responseMeta).length > 0
@@ -4659,361 +4760,509 @@ class QwenAgent implements Agent {
     }
   }
 
+  private reserveStartingSessionId(sessionId: string): () => void {
+    if (
+      this.sessions.has(sessionId) ||
+      this.startingSessionIds.has(sessionId)
+    ) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active or starting.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+    this.startingSessionIds.add(sessionId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.startingSessionIds.delete(sessionId);
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const parsedSessionId = parseCallerSuppliedSessionId(
+      params._meta?.[REQUESTED_SESSION_ID_META_KEY],
+    );
+    if (parsedSessionId.kind === 'invalid') {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `\`_meta["${REQUESTED_SESSION_ID_META_KEY}"]\` must be an RFC UUID v1-v5`,
+        { errorKind: 'invalid_session_id', httpStatus: 400 },
+      );
+    }
     const requestedSessionId =
-      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
-        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
-        : undefined;
-    const sessionSource = getSessionSource(params);
+      parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    const releaseStartingSessionId = requestedSessionId
+      ? this.reserveStartingSessionId(requestedSessionId)
+      : undefined;
+    try {
+      const sessionSource = getSessionSource(params);
+      const parentContext = extractDaemonTraceContext(params);
+      return await withDaemonSpan(
+        'qwen-code.daemon.session_start',
+        { 'qwen-code.daemon.operation': 'acp_session_new' },
+        async (span) => {
+          const profiler = createAcpSessionStartProfiler(span);
+          // Per-request settings: session handlers run concurrently, and
+          // `this.settings` is only a "latest loaded" cache for agent-level
+          // readers. Threading the instance explicitly keeps a slow session
+          // creation from picking up whichever workspace loaded last — Session
+          // persists model changes through this instance, so a mix-up writes to
+          // another workspace's settings.json.
+          const settings = profiler.timeSync('settings_load', () =>
+            loadSettingsCached(cwd),
+          );
+          this.settings = settings;
+          const config = await profiler.time('config_setup', () =>
+            this.newSessionConfig(
+              cwd,
+              mcpServers,
+              settings,
+              sessionSource,
+              requestedSessionId,
+              undefined,
+              shouldDeferMcpDiscovery(params)
+                ? { skipMcpDiscovery: true }
+                : undefined,
+            ),
+          );
+          let session: Session;
+          try {
+            await profiler.time('auth', () => this.ensureAuthenticated(config));
+            profiler.timeSync('file_system_setup', () =>
+              this.setupFileSystem(config),
+            );
+            session = await profiler.time('session_register', () =>
+              this.createAndStoreSession(config, settings),
+            );
+          } catch (error) {
+            return this.cleanupAfterRequestFailure(error, async () => {
+              if (
+                this.sessions.get(config.getSessionId())?.getConfig() !== config
+              ) {
+                await this.cleanupUnstoredConfig(config);
+              }
+            });
+          }
+          profiler.setSessionId(session.getId());
+          return profiler.timeSync('response_build', () => ({
+            sessionId: session.getId(),
+            models: this.buildAvailableModels(config),
+            modes: this.buildModesData(config),
+            configOptions: this.buildConfigOptions(config),
+          }));
+        },
+        parentContext ? { parentContext } : {},
+      );
+    } finally {
+      releaseStartingSessionId?.();
+    }
+  }
+
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
-      'qwen-code.daemon.session_start',
-      { 'qwen-code.daemon.operation': 'acp_session_new' },
-      async (span) => {
-        const profiler = createAcpSessionStartProfiler(span);
-        // Per-request settings: session handlers run concurrently, and
-        // `this.settings` is only a "latest loaded" cache for agent-level
-        // readers. Threading the instance explicitly keeps a slow session
-        // creation from picking up whichever workspace loaded last — Session
-        // persists model changes through this instance, so a mix-up writes to
-        // another workspace's settings.json.
-        const settings = profiler.timeSync('settings_load', () =>
-          loadSettingsCached(cwd),
-        );
-        this.settings = settings;
-        const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(
-            cwd,
-            mcpServers,
-            settings,
-            sessionSource,
-            requestedSessionId,
-            undefined,
-            shouldDeferMcpDiscovery(params)
-              ? { skipMcpDiscovery: true }
-              : undefined,
-          ),
-        );
-        let session: Session;
-        try {
-          await profiler.time('auth', () => this.ensureAuthenticated(config));
-          profiler.timeSync('file_system_setup', () =>
-            this.setupFileSystem(config),
-          );
-          session = await profiler.time('session_register', () =>
-            this.createAndStoreSession(config, settings),
-          );
-        } catch (error) {
-          return this.cleanupAfterRequestFailure(error, async () => {
-            if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
-            ) {
-              await this.cleanupUnstoredConfig(config);
-            }
-          });
-        }
-        profiler.setSessionId(session.getId());
-        return profiler.timeSync('response_build', () => ({
-          sessionId: session.getId(),
-          models: this.buildAvailableModels(config),
-          modes: this.buildModesData(config),
-          configOptions: this.buildConfigOptions(config),
-        }));
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_load',
+        'qwen-code.daemon.session_restore.action': 'load',
+        'session.id': sessionId,
       },
+      async (span) =>
+        this.loadSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
       parentContext ? { parentContext } : {},
     );
   }
 
-  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+  private async loadSessionWithProfiler(
+    params: LoadSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<LoadSessionResponse> {
+    let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
-    // Load per-request settings BEFORE the existence check: the check must
-    // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
-    // whichever settings a concurrent handler loaded last.
-    const settings = loadSettingsCached(params.cwd);
-    const liveSession = this.sessions.get(params.sessionId);
+    const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        params.sessionId,
-        liveSession,
-        async (config, sessionData) => {
-          const response: LoadSessionResponse = {
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          } as LoadSessionResponse;
-          const records = sessionData.conversation.messages;
-          const visibleRecords = selectVisibleHistoryRecords(
-            records,
-            shouldHideInheritedHistory(params),
-          );
-          if (visibleRecords.length === 0) return response;
-
-          const bulkReplay = isBulkLoadReplayRequest(params);
-          const replayPage = bulkReplay
-            ? selectRecentHistoryRecords(
-                visibleRecords,
-                getLoadReplayPageSize(params),
-              )
-            : { records: visibleRecords, hasMore: false };
-          const replay = await collectHistoryReplayUpdates({
-            sessionId: params.sessionId,
-            config,
-            records: replayPage.records,
-            gaps: sessionData.historyGaps,
-            cumulativeUsage: createReplayCumulativeUsage(),
-            logger: debugLogger,
-          });
-          if (!bulkReplay) {
-            try {
-              for (const update of replay.updates) {
-                await liveSession.sendUpdate(update);
-              }
-            } finally {
-              // Replayed plan updates re-stamp the revision via sendUpdate;
-              // drop it so a replayed snapshot cannot bind a later approval
-              // (same rule Session.replayHistory applies to cold loads),
-              // even if delivery fails part-way. The bulk path keeps a live
-              // binding on purpose: it hands the updates to the client
-              // instead of replaying them through this session.
-              liveSession.clearActiveTodoPlanRevision();
-            }
-            if (replay.replayError !== undefined) {
-              throw RequestError.internalError(undefined, replay.replayError);
-            }
-            return response;
-          }
-
-          return {
-            ...response,
-            _meta: {
-              [LOAD_REPLAY_META_KEY]: {
-                v: LOAD_REPLAY_VERSION,
-                updates: replay.updates,
-                ...(replay.replayError !== undefined
-                  ? { partial: true as const, replayError: replay.replayError }
-                  : {}),
-                ...(replayPage.hasMore ? { hasMore: true as const } : {}),
-              },
-            },
-          };
-        },
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
       );
-    }
-    const exists = await this.runWithPinnedRuntimeBaseDir(
-      settings,
-      params.cwd,
-      async () => {
-        const sessionService = new SessionService(params.cwd);
-        return sessionService.sessionExists(params.sessionId);
-      },
-    );
-    if (!exists) {
-      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
-    }
-    // Adopt into the "latest loaded" cache only once the session is
-    // confirmed — a failed probe for a stale id must not repoint
-    // agent-level readers at this request's workspace.
-    this.settings = settings;
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          async (config, sessionData) => {
+            const response = profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(sessionData.artifactSnapshot
+                    ? { artifactSnapshot: sessionData.artifactSnapshot }
+                    : {}),
+                }) as LoadSessionResponse,
+            );
+            const records = sessionData.conversation.messages;
+            const visibleRecords = selectVisibleHistoryRecords(
+              records,
+              shouldHideInheritedHistory(params),
+            );
+            if (visibleRecords.length === 0) return response;
 
-    const config = await this.newSessionConfig(
-      params.cwd,
-      // `LoadSessionRequest.mcpServers` is required in today's ACP
-      // schema, but mirror `unstable_resumeSession` and tolerate a
-      // future loosening — `newSessionConfig` iterates the list, so
-      // a `null`/`undefined` would otherwise throw `TypeError`.
-      params.mcpServers ?? [],
-      settings,
-      sessionSource,
-      params.sessionId,
-      true,
-    );
-    const sessionData = config.getResumedSessionData();
-    const bulkReplay = isBulkLoadReplayRequest(params);
-    const replayPageSize = bulkReplay
-      ? getLoadReplayPageSize(params)
-      : undefined;
-    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
-    try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      await this.createAndStoreSession(config, settings, sessionData, {
-        enableLiveScreenContext: isCompatibleLiveSessionSource(
-          sessionSource ?? {},
-        ),
-        ...(bulkReplay ? { replayHistory: false } : {}),
-        beforeStartPostReplayServices: async (createdSession) => {
-          if (bulkReplay) {
-            const records = sessionData?.conversation.messages;
-            let replayUpdates: SessionUpdate[] = [];
-            if (records) {
-              createdSession.primeTurnFromHistory(records);
-              const visibleRecords = selectVisibleHistoryRecords(
-                records,
-                shouldHideInheritedHistory(params),
-              );
-              const replayPage = selectRecentHistoryRecords(
-                visibleRecords,
-                replayPageSize,
-              );
-              const replayUsage = createReplayCumulativeUsage();
-              const replay = await collectHistoryReplayUpdates({
-                sessionId: params.sessionId,
-                config,
-                records: replayPage.records,
-                gaps: sessionData?.historyGaps,
-                cumulativeUsage: replayUsage,
-                supersedeUnrestorableGoal: true,
-                logger: debugLogger,
-              });
-              replayUpdates = replay.updates;
-              copyCumulativeUsage(createdSession.cumulativeUsage, replayUsage);
+            const bulkReplay = isBulkLoadReplayRequest(params);
+            const replayPage = bulkReplay
+              ? selectRecentHistoryRecords(
+                  visibleRecords,
+                  getLoadReplayPageSize(params),
+                )
+              : { records: visibleRecords, hasMore: false };
+            const replay = await collectHistoryReplayUpdates({
+              sessionId,
+              config,
+              records: replayPage.records,
+              gaps: sessionData.historyGaps,
+              cumulativeUsage: createReplayCumulativeUsage(),
+              logger: debugLogger,
+            });
+            if (!bulkReplay) {
+              try {
+                for (const update of replay.updates) {
+                  await liveSession.sendUpdate(update);
+                }
+              } finally {
+                // Replayed plan updates re-stamp the revision via sendUpdate;
+                // drop it so a replayed snapshot cannot bind a later approval
+                // (same rule Session.replayHistory applies to cold loads),
+                // even if delivery fails part-way. The bulk path keeps a live
+                // binding on purpose: it hands the updates to the client
+                // instead of replaying them through this session.
+                liveSession.clearActiveTodoPlanRevision();
+              }
               if (replay.replayError !== undefined) {
-                replayEnvelope = {
+                throw RequestError.internalError(undefined, replay.replayError);
+              }
+              return response;
+            }
+
+            return {
+              ...response,
+              _meta: {
+                [LOAD_REPLAY_META_KEY]: {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: replay.updates,
+                  ...(replay.replayError !== undefined
+                    ? {
+                        partial: true as const,
+                        replayError: replay.replayError,
+                      }
+                    : {}),
+                  ...(replayPage.hasMore ? { hasMore: true as const } : {}),
+                },
+              },
+            };
+          },
+        );
+      });
+    }
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
+    try {
+      // Load per-request settings only after reserving a non-live id. The check
+      // must resolve `advanced.runtimeOutputDir` from this request's cwd.
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+          const sessionService = new SessionService(params.cwd);
+          if (await sessionService.sessionExists(sessionId)) {
+            return sessionId;
+          }
+          return sessionService.findSessionIdIgnoringCase?.(sessionId);
+        }),
+      );
+      if (!persistedSessionId) {
+        profiler.fail('existence_check');
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
+      }
+      sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
+      // Adopt into the "latest loaded" cache only once the session is
+      // confirmed — a failed probe for a stale id must not repoint
+      // agent-level readers at this request's workspace.
+      this.settings = settings;
+
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          // `LoadSessionRequest.mcpServers` is required in today's ACP
+          // schema, but mirror `unstable_resumeSession` and tolerate a
+          // future loosening — `newSessionConfig` iterates the list, so
+          // a `null`/`undefined` would otherwise throw `TypeError`.
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+        ),
+      );
+      const sessionData = config.getResumedSessionData();
+      const bulkReplay = isBulkLoadReplayRequest(params);
+      const replayPageSize = bulkReplay
+        ? getLoadReplayPageSize(params)
+        : undefined;
+      let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
+      try {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings, sessionData, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            ...(bulkReplay ? { replayHistory: false } : {}),
+            beforeStartPostReplayServices: async (createdSession) => {
+              if (bulkReplay) {
+                const records = sessionData?.conversation.messages;
+                let replayUpdates: SessionUpdate[] = [];
+                if (records) {
+                  createdSession.primeTurnFromHistory(records);
+                  const visibleRecords = selectVisibleHistoryRecords(
+                    records,
+                    shouldHideInheritedHistory(params),
+                  );
+                  const replayPage = selectRecentHistoryRecords(
+                    visibleRecords,
+                    replayPageSize,
+                  );
+                  const replayUsage = createReplayCumulativeUsage();
+                  const replay = await collectHistoryReplayUpdates({
+                    sessionId,
+                    config,
+                    records: replayPage.records,
+                    gaps: sessionData?.historyGaps,
+                    cumulativeUsage: replayUsage,
+                    supersedeUnrestorableGoal: true,
+                    logger: debugLogger,
+                  });
+                  replayUpdates = replay.updates;
+                  copyCumulativeUsage(
+                    createdSession.cumulativeUsage,
+                    replayUsage,
+                  );
+                  if (replay.replayError !== undefined) {
+                    replayEnvelope = {
+                      v: LOAD_REPLAY_VERSION,
+                      updates: replayUpdates,
+                      partial: true,
+                      replayError: replay.replayError,
+                      ...(replayPage.hasMore ? { hasMore: true } : {}),
+                    };
+                  }
+                  replayEnvelope ??= {
+                    v: LOAD_REPLAY_VERSION,
+                    updates: replayUpdates,
+                    ...(replayPage.hasMore ? { hasMore: true } : {}),
+                  };
+                }
+                replayEnvelope ??= {
                   v: LOAD_REPLAY_VERSION,
                   updates: replayUpdates,
-                  partial: true,
-                  replayError: replay.replayError,
-                  ...(replayPage.hasMore ? { hasMore: true } : {}),
                 };
               }
-              replayEnvelope ??= {
-                v: LOAD_REPLAY_VERSION,
-                updates: replayUpdates,
-                ...(replayPage.hasMore ? { hasMore: true } : {}),
-              };
-            }
-            replayEnvelope ??= {
-              v: LOAD_REPLAY_VERSION,
-              updates: replayUpdates,
-            };
+
+              await this.#restoreWorktreeOnResume(config, createdSession);
+              await this.#restoreBackgroundAgentsOnResume(
+                config,
+                createdSession,
+              );
+              this.#restoreGoalOnResume(config, createdSession);
+            },
+          }),
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(error, async () => {
+          if (
+            this.sessions.get(config.getSessionId())?.getConfig() !== config
+          ) {
+            await this.cleanupUnstoredConfig(config);
           }
-
-          await this.#restoreWorktreeOnResume(config, createdSession);
-          await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-          this.#restoreGoalOnResume(config, createdSession);
-        },
+        });
+      }
+      return profiler.timeSync('response_build', () => {
+        const response: LoadSessionResponse = {
+          modes: this.buildModesData(config),
+          models: this.buildAvailableModels(config),
+          configOptions: this.buildConfigOptions(config),
+          ...(sessionData?.artifactSnapshot
+            ? { artifactSnapshot: sessionData.artifactSnapshot }
+            : {}),
+        } as LoadSessionResponse;
+        if (!replayEnvelope) return response;
+        return {
+          ...response,
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: replayEnvelope,
+          },
+        };
       });
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
-      });
+    } finally {
+      releaseStartingSessionId();
     }
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    const response: LoadSessionResponse = {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as LoadSessionResponse;
-    if (!replayEnvelope) {
-      return response;
-    }
-    return {
-      ...response,
-      _meta: {
-        [LOAD_REPLAY_META_KEY]: replayEnvelope,
-      },
-    };
   }
 
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_resume',
+        'qwen-code.daemon.session_restore.action': 'resume',
+        'session.id': sessionId,
+      },
+      async (span) =>
+        this.resumeSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
+      parentContext ? { parentContext } : {},
+    );
+  }
+
+  private async resumeSessionWithProfiler(
+    params: ResumeSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<ResumeSessionResponse> {
+    let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
-    // Same per-request settings discipline as `loadSession`.
-    const settings = loadSettingsCached(params.cwd);
-    const liveSession = this.sessions.get(params.sessionId);
+    const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
       const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        params.sessionId,
-        liveSession,
-        async (config, sessionData) =>
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          async (config, sessionData) =>
+            profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(sessionData.artifactSnapshot
+                    ? { artifactSnapshot: sessionData.artifactSnapshot }
+                    : {}),
+                }) as ResumeSessionResponse,
+            ),
+        );
+      });
+    }
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
+    try {
+      // Same per-request settings discipline as `loadSession`.
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+          const sessionService = new SessionService(params.cwd);
+          if (await sessionService.sessionExists(sessionId)) {
+            return sessionId;
+          }
+          return sessionService.findSessionIdIgnoringCase?.(sessionId);
+        }),
+      );
+      if (!persistedSessionId) {
+        profiler.fail('existence_check');
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
+      }
+      sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
+      this.settings = settings;
+
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+        ),
+      );
+      try {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(
+            config,
+            settings,
+            config.getResumedSessionData(),
+            {
+              enableLiveScreenContext: isCompatibleLiveSessionSource(
+                sessionSource ?? {},
+              ),
+              replayHistory: false,
+              beforeStartPostReplayServices: async (createdSession) => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+                this.#restoreGoalOnResume(config, createdSession);
+              },
+            },
+          ),
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(error, async () => {
+          if (
+            this.sessions.get(config.getSessionId())?.getConfig() !== config
+          ) {
+            await this.cleanupUnstoredConfig(config);
+          }
+        });
+      }
+
+      const sessionData = config.getResumedSessionData();
+      return profiler.timeSync(
+        'response_build',
+        () =>
           ({
             modes: this.buildModesData(config),
             models: this.buildAvailableModels(config),
             configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
+            ...(sessionData?.artifactSnapshot
               ? { artifactSnapshot: sessionData.artifactSnapshot }
               : {}),
           }) as ResumeSessionResponse,
       );
+    } finally {
+      releaseStartingSessionId();
     }
-    const exists = await this.runWithPinnedRuntimeBaseDir(
-      settings,
-      params.cwd,
-      async () => {
-        const sessionService = new SessionService(params.cwd);
-        return sessionService.sessionExists(params.sessionId);
-      },
-    );
-    if (!exists) {
-      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
-    }
-    this.settings = settings;
-
-    const config = await this.newSessionConfig(
-      params.cwd,
-      params.mcpServers ?? [],
-      settings,
-      sessionSource,
-      params.sessionId,
-      true,
-    );
-    try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      await this.createAndStoreSession(
-        config,
-        settings,
-        config.getResumedSessionData(),
-        {
-          enableLiveScreenContext: isCompatibleLiveSessionSource(
-            sessionSource ?? {},
-          ),
-          replayHistory: false,
-          beforeStartPostReplayServices: async (createdSession) => {
-            await this.#restoreWorktreeOnResume(config, createdSession);
-            await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-            this.#restoreGoalOnResume(config, createdSession);
-          },
-        },
-      );
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
-      });
-    }
-
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    const sessionData = config.getResumedSessionData();
-    return {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as ResumeSessionResponse;
   }
 
   /**
@@ -5149,33 +5398,36 @@ class QwenAgent implements Agent {
   async setSessionMode(
     params: SetSessionModeRequest,
   ): Promise<SetSessionModeResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode(params);
+    return session.setMode({ ...params, sessionId });
   }
 
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel(params);
+    return await session.setModel({ ...params, sessionId });
   }
 
   async setSessionConfigOption(
     params: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
-    const { sessionId, configId, value } = params;
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const { configId, value } = params;
 
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -5216,11 +5468,12 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
-    const sanitizedParams = { ...params };
+    const sanitizedParams = { ...params, sessionId };
     const meta =
       params._meta && typeof params._meta === 'object'
         ? { ...params._meta }
@@ -5273,10 +5526,10 @@ class QwenAgent implements Agent {
         settleCall = resolve;
       }),
     };
-    let calls = this.activePromptCalls.get(params.sessionId);
+    let calls = this.activePromptCalls.get(sessionId);
     if (!calls) {
       calls = new Set();
-      this.activePromptCalls.set(params.sessionId, calls);
+      this.activePromptCalls.set(sessionId, calls);
     }
     calls.add(call);
     try {
@@ -5289,16 +5542,23 @@ class QwenAgent implements Agent {
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
-        this.activePromptCalls.delete(params.sessionId);
+        this.activePromptCalls.delete(sessionId);
       }
       settleCall();
+      // Order a fresh snapshot ahead of this response on the same stream. The
+      // daemon drops its own pending-prompt count the instant the response
+      // lands, so any hold this prompt left behind — a background agent it
+      // started, its terminal notification — has to already be on the wire or
+      // the daemon sees an idle Session for as long as the next report takes.
+      await this.activeWorkReporter?.flush();
     }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
     try {
       await session.cancelPendingPrompt();
@@ -7577,6 +7837,14 @@ class QwenAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     try {
+      const rawSessionId = params['sessionId'];
+      const normalizedParams =
+        typeof rawSessionId === 'string'
+          ? {
+              ...params,
+              sessionId: normalizeSessionIdForLookup(rawSessionId),
+            }
+          : params;
       if (
         method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
         this.privateParentState !== 'trusted'
@@ -7586,7 +7854,7 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
-      return await this.extMethodInternal(method, params);
+      return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
       if (writerError) {
@@ -9418,13 +9686,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
+        const outcome = await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
             ? { drainTimeoutMs: rawDrainTimeoutMs }
             : {}),
         });
-        return { sessionId, closed: true };
+        // `holds` rides along only on a refusal, so the response every existing
+        // caller already parses keeps its exact shape.
+        return outcome.closed
+          ? { sessionId, closed: true }
+          : { sessionId, closed: false, holds: outcome.holds };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -11516,7 +11789,10 @@ class QwenAgent implements Agent {
       });
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
-        throw RequestError.invalidParams(undefined, error.message);
+        throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
+          errorKind: 'session_id_conflict',
+          sessionId: error.sessionId,
+        });
       }
       const writerError = getSessionWriterError(error);
       if (writerError) {
@@ -11838,7 +12114,7 @@ class QwenAgent implements Agent {
     } = {},
   ): Promise<Session> {
     this.assertManagedSessionAdmission();
-    const sessionId = config.getSessionId();
+    const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const geminiClient = config.getGeminiClient();
     const needsInitialize = !geminiClient.isInitialized();
 
@@ -11848,11 +12124,24 @@ class QwenAgent implements Agent {
     this.assertManagedSessionAdmission();
 
     if (this.sessions.has(sessionId)) {
-      throw new Error(`Session ${sessionId} is already active.`);
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
     }
 
-    const session = new Session(sessionId, config, this.connection, settings);
+    const session = new Session(
+      sessionId,
+      config,
+      this.connection,
+      settings,
+      () => this.activeWorkReporter?.notifyChanged(),
+    );
     this.sessions.set(sessionId, session);
+    // The Session set itself is part of the snapshot: publish so the daemon
+    // learns about this Session from a report rather than inferring it.
+    this.activeWorkReporter?.notifyChanged();
     this.initializingConfigs.delete(config);
     try {
       if (options.enableLiveScreenContext) {

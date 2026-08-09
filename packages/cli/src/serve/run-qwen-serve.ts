@@ -21,6 +21,11 @@ import express, {
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
+  scrubAndReportInheritedLoaderEnv,
+  scrubInheritedLoaderEnv,
+  setLoaderKeyRejectionReporter,
+} from '../config/shared-env-keys.js';
+import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
@@ -29,9 +34,11 @@ import {
   normalizeMaxJournalEvents,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
+  consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
@@ -395,6 +402,8 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type PersistDisabledSkillsBatchResult =
+  import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
 type ChannelWebhookConfigRuntime = {
   loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
   parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
@@ -1278,6 +1287,7 @@ function createBootstrapCapabilities(input: {
       maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
         input.opts.maxPendingPromptsPerSession,
       ),
+      sessionRestoreTimeoutMs: resolveSessionRestoreTimeoutMs(input.opts),
     },
   };
 }
@@ -1953,6 +1963,11 @@ interface DaemonLoggerLifecycleCallbacks {
   initialized(logger: DaemonLogger): void;
   published(): void;
   signalOwned(): void;
+  // Called once the startup scrub has mutated the host process.env, with
+  // the restore close() would run. runQwenServe's catch invokes it when
+  // startup fails after the scrub — the close() path is unreachable then,
+  // and an embedded caller must not keep a permanently scrubbed env.
+  scrubApplied(restoreScrubbedLoaderEnv: () => void): void;
 }
 
 /**
@@ -2015,6 +2030,7 @@ export async function runQwenServe(
 ): Promise<RunHandle> {
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
+  let restoreScrubbedLoaderEnv: (() => void) | undefined;
   try {
     return await runQwenServeImpl(optsIn, deps, {
       initialized: (logger) => {
@@ -2026,8 +2042,16 @@ export async function runQwenServe(
       signalOwned: () => {
         if (owner === 'startup') owner = 'signal';
       },
+      scrubApplied: (restore) => {
+        restoreScrubbedLoaderEnv = restore;
+      },
     });
   } catch (error) {
+    // Startup failed after the scrub and (when the logger was up) the
+    // reporter install; the close() path that reverts both is unreachable.
+    if (daemonLog) {
+      setLoaderKeyRejectionReporter(undefined);
+    }
     if (daemonLog && owner === 'startup') {
       const startupLog = daemonLog;
       writeDaemonLifecycleBestEffort(() =>
@@ -2038,6 +2062,7 @@ export async function runQwenServe(
       );
       await startupLog.close();
     }
+    restoreScrubbedLoaderEnv?.();
     throw error;
   }
 }
@@ -2079,14 +2104,50 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+  // Snapshot before any scrub: close() restores the host's launch
+  // environment from this copy, not from the (possibly scrubbed) base env.
+  const launchEnv = { ...process.env };
+  const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...(optsIn.memoryProjectScope !== undefined
       ? {
           QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
         }
       : {}),
-  });
+  };
+  // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
+  // carries the tsx loader's NODE_OPTIONS, so only then does the base env
+  // keep loader vars — dev-mode ACP children and channel workers need the
+  // loader to boot their .ts entries. DEV is hardcoded-excluded from
+  // project .env/settings.env (shared-env-keys.ts), so this consults the
+  // launch environment only. Every other launch scrubs them here, before
+  // the freeze: the base env is what session-hosting children (the ACP
+  // child, channel daemon workers) spawn with, and a loader var that
+  // reaches them runs during Node bootstrap — before the child's own
+  // post-boot scrub could ever remove it.
+  if (process.env['DEV'] !== 'true') {
+    scrubInheritedLoaderEnv(baseEnv);
+  }
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> =
+    Object.freeze(baseEnv);
+  // The daemon process itself is done with loader vars either way:
+  // session-shell subprocesses run here with process.env while their cwd is
+  // another workspace. The scrub is reverted on close() so an embedded
+  // caller reusing the host process gets its launch environment back.
+  const scrubbedLoaderEnvKeys = scrubAndReportInheritedLoaderEnv(
+    process.env,
+    'qwen serve',
+    'daemon',
+  );
+  const restoreScrubbedLoaderEnv = (): void => {
+    for (const key of scrubbedLoaderEnvKeys) {
+      if (Object.hasOwn(process.env, key)) continue;
+      const value = launchEnv[key];
+      if (value === undefined) continue;
+      process.env[key] = value;
+    }
+  };
+  loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -2603,6 +2664,35 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  // Per-workspace .env loads keep running after boot (skill status, voice
+  // capability checks, settings reloads); boot stderr is long gone by then,
+  // so fresh loader-key rejections must land in the durable daemon log or
+  // they vanish without a diagnostic.
+  setLoaderKeyRejectionReporter((source, freshKeys) => {
+    daemonLog.warn(
+      'rejected loader-affecting env keys; they were not applied',
+      { source, rejectedKeys: freshKeys },
+    );
+  });
+  // Boot stderr rarely survives desktop/systemd daemon launches, so persist
+  // the scrub decision in the durable daemon log as well.
+  if (scrubbedLoaderEnvKeys.length > 0) {
+    daemonLog.info(
+      'scrubbed inherited loader env vars from the daemon process; ' +
+        'session subprocesses will not inherit them',
+      { removedKeys: scrubbedLoaderEnvKeys },
+    );
+  }
+  // The serve fast path rejects loader keys before this logger exists, and
+  // its stderr warnings rarely survive desktop/systemd launches either.
+  const fastPathRejectedLoaderKeys = consumeServeFastPathRejectedLoaderKeys();
+  if (fastPathRejectedLoaderKeys.length > 0) {
+    daemonLog.info(
+      'rejected loader-affecting env keys during serve fast-path boot; ' +
+        'they were not applied to the daemon process',
+      { rejectedKeys: fastPathRejectedLoaderKeys },
+    );
+  }
   let loggerPublished = false;
   let loggerSignalOwned = false;
   writeStderrLine(
@@ -2729,6 +2819,8 @@ async function runQwenServeImpl(
     }
     assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  opts.sessionRestoreTimeoutMs = sessionRestoreTimeoutMs;
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
   // bridge treats a non-finite / negative value as the "disabled"
@@ -3799,6 +3891,90 @@ async function runQwenServeImpl(
           settingsChanges,
         };
       });
+    const persistDisabledSkillsBatchFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      enabled: boolean,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistDisabledSkillsBatchResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const {
+          resolveSkillSettings,
+          skillSettingStrings,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
+        const fresh = loadSettingsForPersistence(workspace);
+        const resolved = resolveSkillSettings(fresh);
+        const initialDisabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'disabled',
+        );
+        const initialEnabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'enabled',
+        );
+        let next = { disabled: initialDisabled, enabled: initialEnabled };
+        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
+
+        for (const skillName of skillNames) {
+          const normalizedName = skillName.trim().toLowerCase();
+          const disablement = resolved.disablements.get(normalizedName);
+          if (disablement?.reason === 'hard' && disablement.lockedScope) {
+            outcomes.push({
+              skillName,
+              error: new runtime.WorkspaceSkillNotToggleableError(
+                skillName,
+                'locked',
+                disablement.lockedScope,
+              ),
+            });
+            continue;
+          }
+          const updated = updateWorkspaceSkillSettingLists(
+            next,
+            skillName,
+            enabled,
+            resolved.defaultDisabledNames.has(normalizedName) &&
+              !resolved.enabledNames.has(normalizedName),
+          );
+          const changed =
+            JSON.stringify(updated.disabled) !==
+              JSON.stringify(next.disabled) ||
+            JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
+          next = updated;
+          outcomes.push({ skillName, changed });
+        }
+
+        const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
+          [];
+        if (JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)) {
+          settingsChanges.push({
+            key: 'skills.disabled',
+            value: next.disabled.length > 0 ? next.disabled : undefined,
+          });
+        }
+        if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
+          settingsChanges.push({
+            key: 'skills.enabled',
+            value: next.enabled.length > 0 ? next.enabled : undefined,
+          });
+        }
+        if (settingsChanges.length > 0) {
+          assertGenerationOpen?.();
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: WORKSPACE_SETTING_SCOPE,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+        }
+        return { outcomes, settingsChanges };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -3920,6 +4096,7 @@ async function runQwenServeImpl(
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3984,6 +4161,7 @@ async function runQwenServeImpl(
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
@@ -4317,6 +4495,7 @@ async function runQwenServeImpl(
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -4390,6 +4569,7 @@ async function runQwenServeImpl(
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
+        persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
         reloadDaemonEnv: (workspace, assertGenerationOpen) =>
@@ -4864,6 +5044,7 @@ async function runQwenServeImpl(
           ...(opts.initializeTimeoutMs !== undefined
             ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
+          sessionRestoreTimeoutMs,
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
             : {}),
@@ -4946,6 +5127,7 @@ async function runQwenServeImpl(
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
+          persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
           persistSetting: persistSettingFn,
           persistSettings: persistSettingsFn,
           reloadDaemonEnv: (workspace, assertGenerationOpen) =>
@@ -5473,6 +5655,7 @@ async function runQwenServeImpl(
 
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      getSessionBridges: () => runtimeBridges,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       ...(workspaceTrustHotReloadAvailable
         ? {
@@ -5566,6 +5749,7 @@ async function runQwenServeImpl(
       clientMcpSenderRegistry,
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:
@@ -7050,8 +7234,10 @@ async function runQwenServeImpl(
                         daemonLog.info('daemon stopped');
                       }
                     });
+                    setLoaderKeyRejectionReporter(undefined);
                     await daemonLog.close();
                   }
+                  restoreScrubbedLoaderEnv();
                   if (finalErr) rej(finalErr);
                   else res();
                 });
@@ -7366,6 +7552,7 @@ async function runQwenServeImpl(
         const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
+          opts.strictPort !== true &&
           opts.port !== 0 &&
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1

@@ -44,13 +44,20 @@ function deferred<T>() {
 }
 
 async function waitForMockCall(mock: { mock: { calls: unknown[] } }) {
-  for (let i = 0; i < 10; i++) {
+  // Wall-clock deadline, not a fixed tick count: the mock is invoked after
+  // real async work (index reads, cursor I/O), and ten zero-delay turns can
+  // elapse before that work completes on a loaded CI runner — the poll spun
+  // through its turns without waiting any actual time.
+  const deadline = Date.now() + 2000;
+  for (;;) {
     if (mock.mock.calls.length > 0) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (Date.now() >= deadline) {
+      throw new Error('Expected mock to be called');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  throw new Error('Expected mock to be called');
 }
 
 describe('auto-memory extraction', () => {

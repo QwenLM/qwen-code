@@ -467,6 +467,7 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logLoopDetected,
+  logRepeatedToolFailureGuard,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -483,6 +484,7 @@ export {
   IdeConnectionType,
   LoopDetectedEvent,
   LoopType,
+  RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
@@ -648,10 +650,10 @@ export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
-  wrapUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
   stripTrailingUserPromptSubmitContextPart,
 } from './hooks/user-prompt-submit-context.js';
+export { wrapUserPromptSubmitContext } from './utils/transcript-records.js';
 
 // ============================================================================
 // Goals (/goal command runtime)

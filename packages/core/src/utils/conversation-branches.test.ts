@@ -113,6 +113,36 @@ describe('inspectConversationBranches', () => {
     ]);
   });
 
+  it('summarizes user records from clean display metadata', () => {
+    const records = [
+      record('root-user', null, {
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'expanded model prompt' },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                'hook-only context',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+        },
+        systemPayload: {
+          displayText: 'raw @file prompt',
+          hookContext: 'hook-only context',
+        },
+      }),
+      assistant('only-answer', 'root-user', 'only answer'),
+    ];
+
+    expect(inspectConversationBranches(records).branches[0]).toMatchObject({
+      firstUserTextAfterBranchPoint: 'raw @file prompt',
+      lastUserText: 'raw @file prompt',
+    });
+  });
+
   it('counts tool results in a branch chain', () => {
     const records = [
       record('root-user', null),
