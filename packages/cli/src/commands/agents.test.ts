@@ -78,21 +78,6 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
 }));
 
-vi.mock('../config/settings.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../config/settings.js')>();
-  return {
-    ...actual,
-    loadSettings: mockLoadSettings,
-  };
-});
-
-vi.mock('../utils/version.js', () => ({
-  getCliVersion: mockGetCliVersion,
-}));
-
-vi.mock('../ui/components/StandaloneSessionPicker.js', () => ({
-  showResumeSessionPickerItem: mockShowResumeSessionPickerItem,
-}));
 interface AgentsArgs {
   cwd?: string;
   json?: boolean;
