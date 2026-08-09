@@ -115,17 +115,19 @@ const CONTEXT_PRESET_ITEM_IDS = new Set<StatusLinePresetItemId>([
  * - explicit `true`/`false` always wins, so users can force either behavior;
  * - when unset, a preset status line that already shows context usage hides
  *   the footer indicator to avoid duplicating it;
+ * - callers can keep the automatic indicator when their layout may clip it;
  * - when unset for a `command` status line, the indicator stays visible — the
  *   command output is opaque, so we never guess what it contains.
  */
 export function resolveHideContextIndicator(
   config: StatusLineConfig | undefined,
   isContextOverLimit = false,
+  keepAutomaticIndicator = false,
 ): boolean {
   if (typeof config?.hideContextIndicator === 'boolean') {
     return config.hideContextIndicator;
   }
-  if (isContextOverLimit) {
+  if (isContextOverLimit || keepAutomaticIndicator) {
     return false;
   }
   if (config?.type === 'preset') {
@@ -230,7 +232,7 @@ function buildMetricsPayload(
  * on a timer so external data (git branch, quota, clock) stays fresh even
  * when no Agent state has changed.
  */
-export function useStatusLine(): {
+export function useStatusLine(keepAutomaticContextIndicator = false): {
   lines: string[];
   useThemeColors: boolean;
   respectUserColors: boolean;
@@ -768,6 +770,7 @@ export function useStatusLine(): {
       statusLineConfig,
       uiState.sessionStats.lastPromptTokenCount >
         (config.getContentGeneratorConfig()?.contextWindowSize ?? Infinity),
+      keepAutomaticContextIndicator,
     ),
   };
 }

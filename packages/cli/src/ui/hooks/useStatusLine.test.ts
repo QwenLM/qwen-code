@@ -379,6 +379,23 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
+    it('keeps an automatic indicator on narrow displays but honors explicit hiding', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'context-used'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine(true));
+      expect(result.current.hideContextIndicator).toBe(false);
+
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'context-used'],
+        hideContextIndicator: true,
+      });
+      rerender();
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
     it('keeps the footer over-limit warning for an automatically hidden preset', () => {
       mockUIState.sessionStats.lastPromptTokenCount = 131073;
       setStatusLineConfig({

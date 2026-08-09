@@ -53,22 +53,21 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
+  const isNarrow = isNarrowWidth(terminalWidth);
   const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
     respectUserColors,
     hideContextIndicator,
-  } = useStatusLine();
+  } = useStatusLine(isNarrow);
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
-
-  const { columns: terminalWidth } = useTerminalSize();
-  const isNarrow = isNarrowWidth(terminalWidth);
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
