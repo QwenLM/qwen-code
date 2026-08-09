@@ -59,8 +59,14 @@ export const JOURNAL_FORMAT_VERSION = 1;
  * carry a multi-gigabyte journal alongside a small, structurally valid
  * `canResume` manifest — and the listing path journal-loads every such
  * manifest. Buffering that aborts the process before any `byteLength`/hash
- * check can reject it, so the size is checked first. The bound is far above
- * any real run: a workflow is capped at 1000 dispatches, i.e. two lines each.
+ * check can reject it, so the size is checked first. The bound clears any
+ * ordinary run — the default dispatch cap is 1000, i.e. two lines each — but
+ * it is not unreachable: `QWEN_CODE_MAX_WORKFLOW_AGENTS` raises that cap to
+ * `HARD_MAX_AGENTS_PER_RUN_CEILING` (10,000, so 20,000 lines) and per-line
+ * result size is unbounded, so a run configured that way can cross it and
+ * lose resumability with an intact journal on disk. Fixing that properly
+ * means streaming the checkpoint hash and reading only up to
+ * `checkpoint.byteLength` instead of buffering the whole file.
  */
 export const MAX_WORKFLOW_JOURNAL_BYTES = 128 * 1024 * 1024;
 

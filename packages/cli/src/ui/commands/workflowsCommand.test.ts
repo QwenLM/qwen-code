@@ -542,7 +542,9 @@ describe('workflowsCommand', () => {
 
     // Write snapshot JSON files into a fresh temp dir and return a context
     // whose `config.storage.getWorkflowRunsDir()` points at it. This drives
-    // the real `listWorkflowSnapshots` (no module mocking).
+    // the real `listWorkflowRunRecords` (no module mocking) — note the
+    // different bad-record semantics: an unparseable file surfaces as a
+    // visible `interrupted · not recoverable` row rather than being skipped.
     async function ctxWithSnapshots(
       snaps: Array<Partial<WorkflowSnapshot>>,
       mode: 'interactive' | 'non_interactive' = 'interactive',

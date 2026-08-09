@@ -474,6 +474,13 @@ describe('durable workflow manifests', () => {
       ['non-enumerable-property', hiddenProperty],
       ['too-deep', deeplyNested],
       ['bigint', { secret: 10n }],
+      // Non-round-trippable in the same way bigint is, but quieter about it:
+      // JSON.stringify coerces NaN/Infinity to null instead of throwing, so
+      // without `cloneJsonArgs`'s Number.isFinite gate these persist as
+      // `{ secret: null }` with canResume true — and the resume drift check
+      // cannot tell that apart from a caller who really passed null.
+      ['nan', { secret: Number.NaN }],
+      ['infinity', { secret: Number.POSITIVE_INFINITY }],
       ['function', { secret: () => 'PRIVATE_FUNCTION_SENTINEL' }],
       ['symbol', { secret: Symbol('PRIVATE_SYMBOL_SENTINEL') }],
       ['too-large', { secret: 'x'.repeat(MAX_WORKFLOW_ARGS_BYTES + 1) }],
@@ -596,6 +603,26 @@ describe('durable workflow manifests', () => {
       'utf8',
     );
     await fs.mkdir(config.storage.getWorkflowRunDir('wf_06'));
+    // Same shape as wf_05, and for the same reason: pin `runtimeVersion`
+    // independently of `schemaVersion`. The raw cases above only ever vary
+    // schemaVersion, so the `runtimeVersion` clause in parseManifest — which
+    // looks redundant next to the schema check — can be dropped during a
+    // version bump with every test still green. A manifest written by a
+    // different runtime would then parse, and a resume would replay its
+    // journal under semantics that no longer match.
+    const otherRuntime = await writeWorkflowManifest(
+      config,
+      task({ runId: 'wf_07', status: 'paused', startTime: 70 }),
+      { args: null, journal: EMPTY_JOURNAL },
+    );
+    await fs.writeFile(
+      config.storage.getWorkflowRunManifestPath('wf_07'),
+      JSON.stringify({
+        ...otherRuntime,
+        runtimeVersion: WORKFLOW_RUNTIME_VERSION + 1,
+      }),
+      'utf8',
+    );
 
     const records = await listWorkflowRunRecords(config);
     expect(records.map((record) => record.runId).sort()).toEqual([
@@ -605,12 +632,15 @@ describe('durable workflow manifests', () => {
       'wf_04',
       'wf_05',
       'wf_06',
+      'wf_07',
     ]);
     expect(records.every((record) => record.canResume === false)).toBe(true);
     expect(records.every((record) => Boolean(record.resumeBlockedReason))).toBe(
       true,
     );
-    for (const runId of cases.map(([id]) => id).concat('wf_05', 'wf_06')) {
+    for (const runId of cases
+      .map(([id]) => id)
+      .concat('wf_05', 'wf_06', 'wf_07')) {
       await expect(readWorkflowManifest(config, runId)).rejects.toThrow();
     }
   });

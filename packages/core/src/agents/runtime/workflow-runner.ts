@@ -290,10 +290,12 @@ export class WorkflowRunner {
     // `.finally`), and it durably writes 'paused' + canResume. A run that
     // completes or is cancelled while that write is in flight would publish
     // its terminal manifest first and have the barrier overwrite it — a
-    // finished run advertised as resumable forever. Joining the barrier
-    // before each terminal write orders the two.
-    const joinPauseBarrier = (): Promise<void> =>
-      scheduler.whenPauseBarrierSettled();
+    // finished run advertised as resumable forever. Latching the scheduler
+    // out of pausing and then joining the barrier before each terminal write
+    // orders the two: joining alone would only cover the barrier that exists
+    // at call time, leaving the fsync + manifest write that follows open to a
+    // pause that starts a fresh one.
+    const joinPauseBarrier = (): Promise<void> => scheduler.beginSettling();
 
     let terminalCheckpoint: JournalCheckpoint | undefined;
 

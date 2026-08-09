@@ -32,6 +32,7 @@ export class WorkflowDispatchScheduler {
   private inFlight = 0;
   private pauseBarrierPending = false;
   private pauseBarrier: Promise<void> = Promise.resolve();
+  private settling = false;
   private readonly queue: Job[] = [];
   private readonly gateWaiters: GateWaiter[] = [];
   private readonly stateListeners = new Set<
@@ -88,7 +89,9 @@ export class WorkflowDispatchScheduler {
   }
 
   pause(): boolean {
-    if (this.state !== 'running' || this.signal?.aborted) return false;
+    if (this.state !== 'running' || this.settling || this.signal?.aborted) {
+      return false;
+    }
     this.setState('pausing');
     if (this.inFlight === 0) this.finishPause();
     return true;
@@ -113,15 +116,26 @@ export class WorkflowDispatchScheduler {
   }
 
   /**
-   * Resolves once any in-flight pause barrier has settled. The barrier is
-   * entered from a dispatch's `.finally`, which cannot await it, so it runs
-   * detached from every caller: a run that completes or is cancelled during
-   * the barrier's fsync + manifest write has to join it here before writing
-   * its own terminal manifest, or the barrier's 'paused' + canResume write
-   * lands last and the settled run stays advertised as resumable. Never
-   * rejects — a failed barrier settles the run through its own error path.
+   * Closes the pause window for good, then resolves once any in-flight pause
+   * barrier has settled. The barrier is entered from a dispatch's `.finally`,
+   * which cannot await it, so it runs detached from every caller: a run that
+   * completes or is cancelled during the barrier's fsync + manifest write has
+   * to join it here before writing its own terminal manifest, or the barrier's
+   * 'paused' + canResume write lands last and the settled run stays advertised
+   * as resumable. Never rejects — a failed barrier settles the run through its
+   * own error path.
+   *
+   * Joining the barrier is not enough on its own: it only covers the barrier
+   * that exists at call time. Settlement then awaits an fsync + a manifest
+   * write, and a `pause()` landing anywhere in that window would start a NEW
+   * barrier whose 'paused' + canResume write races the terminal one. So the
+   * latch is set here — before the join — and `pause()`/`finishPause()` both
+   * refuse once it is set. A settling run is no longer pausable; `pause()`
+   * reporting false surfaces as "could not be paused because its state
+   * changed", which is exactly what happened.
    */
-  whenPauseBarrierSettled(): Promise<void> {
+  beginSettling(): Promise<void> {
+    this.settling = true;
     return this.pauseBarrier;
   }
 
@@ -170,6 +184,11 @@ export class WorkflowDispatchScheduler {
       this.state !== 'pausing' ||
       this.inFlight !== 0 ||
       this.pauseBarrierPending ||
+      // The run is settling terminal: `beginSettling()` already joined the
+      // barrier that existed then, and everything after it is the terminal
+      // manifest write. Starting a barrier now would durably write 'paused' +
+      // canResume in that window and race the terminal write.
+      this.settling ||
       // pause()/resume()/run() all refuse once the run is aborted; the
       // in-flight `.finally` path reaches here without that check. Running
       // the barrier anyway would durably write 'paused' + canResume for a

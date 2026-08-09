@@ -301,6 +301,77 @@ describe('WorkflowDispatchScheduler', () => {
     expect(beforePaused).toHaveBeenCalledTimes(1);
   });
 
+  it('hands back an already-resolved barrier on a never-paused scheduler', async () => {
+    // Pins the `pauseBarrier` field initializer. Without it the barrier is
+    // undefined until the first finishPause(), so beginSettling() hands every
+    // caller undefined for the whole pre-pause lifetime and any `.then()`
+    // chain on the result throws instead of ordering the terminal write.
+    const scheduler = new WorkflowDispatchScheduler(1);
+
+    const settled = scheduler.beginSettling();
+
+    expect(settled).toBeInstanceOf(Promise);
+    let chained = false;
+    expect(() => {
+      void settled.then(() => {
+        chained = true;
+      });
+    }).not.toThrow();
+    await expect(settled).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(chained).toBe(true));
+  });
+
+  it('refuses pause() once settlement has begun', async () => {
+    // A settling run awaits an fsync + a terminal manifest write. A pause
+    // accepted in that window would start a barrier beginSettling() never
+    // covered, and its 'paused' + canResume write would race the terminal one.
+    const beforePaused = vi.fn(async () => {});
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      new AbortController().signal,
+      undefined,
+      beforePaused,
+    );
+
+    await scheduler.beginSettling();
+
+    expect(scheduler.pause()).toBe(false);
+    expect(scheduler.snapshot().state).toBe('running');
+    expect(beforePaused).not.toHaveBeenCalled();
+  });
+
+  it('does not start a pause barrier from a dispatch that settles after beginSettling', async () => {
+    // The other arm: pause() was already accepted, so the barrier is started
+    // by the in-flight dispatch's `.finally` rather than by pause() itself.
+    // That path has to honour the latch too.
+    const beforePaused = vi.fn(async () => {});
+    let finish: (() => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(
+      1,
+      new AbortController().signal,
+      undefined,
+      beforePaused,
+    );
+
+    const running = scheduler.run(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    expect(scheduler.pause()).toBe(true);
+    expect(scheduler.snapshot().state).toBe('pausing');
+
+    await scheduler.beginSettling();
+    finish?.();
+    await running;
+
+    await vi.waitFor(() => expect(scheduler.snapshot().inFlight).toBe(0));
+    expect(beforePaused).not.toHaveBeenCalled();
+    expect(scheduler.snapshot().state).toBe('pausing');
+  });
+
   it('refuses pause() after the abort signal fired on a running scheduler', async () => {
     // Symmetric guard: an aborted running run must not transition into
     // pausing/paused.

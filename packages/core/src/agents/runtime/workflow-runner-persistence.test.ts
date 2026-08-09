@@ -180,6 +180,141 @@ describe('WorkflowRunner persistence', () => {
     expect(durable).toMatchObject({ status: 'cancelled', canResume: false });
   });
 
+  // Joining the barrier only covers the one that exists at join time. The
+  // terminal flush + manifest write that follows is a second window: a pause
+  // landing inside it used to be admitted (the entry is still 'running' until
+  // registry.complete), start a barrier nothing joined, and race its 'paused' +
+  // canResume write against the terminal write — which trips atomicWriteFile's
+  // inode guard and settles a normally-completed run as failed.
+  it('refuses a pause that lands while the terminal manifest is being written', async () => {
+    const { config, registry, storage } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: null,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    const originalWrite = workflowSnapshot.writeWorkflowManifest;
+    const statuses: Array<string | undefined> = [];
+    let releaseCompleted: (() => void) | undefined;
+    const completedGate = new Promise<void>((resolve) => {
+      releaseCompleted = resolve;
+    });
+    vi.spyOn(workflowSnapshot, 'writeWorkflowManifest').mockImplementation(
+      async (...args: Parameters<typeof originalWrite>) => {
+        const status = args[2].status;
+        statuses.push(status);
+        if (status === 'completed') await completedGate;
+        return originalWrite(...args);
+      },
+    );
+
+    finishDispatch?.('done');
+    await vi.waitFor(() => expect(statuses).toContain('completed'));
+    // Settlement is parked inside the terminal manifest write. The registry
+    // entry still reads 'running', so registry.pause's own guard admits this.
+    expect(registry.get(handle.runId)?.status).toBe('running');
+    expect(registry.pause(handle.runId)).toBe(false);
+    releaseCompleted?.();
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+    expect(statuses).not.toContain('paused');
+    const durable = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunManifestPath(handle.runId),
+        'utf8',
+      ),
+    ) as { status: string; canResume: boolean };
+    expect(durable).toMatchObject({ status: 'completed', canResume: false });
+  });
+
+  // The catch path's join is the only ordering guarantee between an
+  // error/cancel settlement and a barrier that is already mid-write. The
+  // finally block's re-persist heals the end state, so this pins the ordering
+  // itself: no 'paused' write may land after a terminal one, or a crash inside
+  // the window leaves a failed run advertised as resumable.
+  it('orders an error settlement after a barrier that is already mid-write', async () => {
+    const { config, registry, storage } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      // Two dispatches, because reaching the catch path takes some care: a
+      // rejecting dispatch is retried and the retry parks behind the pause
+      // gate, and a paused run holds even a *completed* dispatch's result
+      // gate, so the script cannot throw on its own either. The cancel below
+      // releases the first gate, and the second `agent()` then rejects
+      // immediately against the aborted signal — which is what unwinds the
+      // script into the catch path.
+      script: 'await agent("a"); await agent("b");',
+      args: null,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    const originalWrite = workflowSnapshot.writeWorkflowManifest;
+    const started: Array<string | undefined> = [];
+    const committed: Array<string | undefined> = [];
+    let releasePaused: (() => void) | undefined;
+    const pausedGate = new Promise<void>((resolve) => {
+      releasePaused = resolve;
+    });
+    vi.spyOn(workflowSnapshot, 'writeWorkflowManifest').mockImplementation(
+      async (...args: Parameters<typeof originalWrite>) => {
+        const status = args[2].status;
+        started.push(status);
+        if (status === 'paused') await pausedGate;
+        const result = await originalWrite(...args);
+        committed.push(status);
+        return result;
+      },
+    );
+
+    expect(handle.pause()).toBe(true);
+    finishDispatch?.('done');
+    // The barrier is entered from the dispatch's `.finally` and is now parked
+    // inside its 'paused' + canResume write.
+    await vi.waitFor(() => expect(started).toContain('paused'));
+    registry.cancel(handle.runId, Date.now());
+    // Give the catch path room to reach its terminal write while the barrier
+    // is still mid-write. With the join it stays parked; without it, the
+    // 'cancelled' write lands here — inside the barrier's window.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(committed).not.toContain('cancelled');
+    releasePaused?.();
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: false });
+    expect(registry.get(handle.runId)?.status).toBe('cancelled');
+    // The invariant: the barrier really ran, and every terminal write landed
+    // after it.
+    const lastPaused = committed.lastIndexOf('paused');
+    const firstTerminal = committed.findIndex(
+      (status) => status === 'failed' || status === 'cancelled',
+    );
+    expect(lastPaused).toBeGreaterThanOrEqual(0);
+    expect(firstTerminal).toBeGreaterThan(lastPaused);
+    const durable = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunManifestPath(handle.runId),
+        'utf8',
+      ),
+    ) as { status: string; canResume: boolean };
+    expect(durable).toMatchObject({ status: 'cancelled', canResume: false });
+  });
+
   it('fails the run instead of publishing paused when the manifest cannot be replaced', async () => {
     const { config, registry, storage } = await harness();
     let finishDispatch: ((value: string) => void) | undefined;

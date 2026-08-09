@@ -373,9 +373,10 @@ export const workflowsCommand: SlashCommand = {
       };
     }
 
-    // Merge persisted snapshots (runs from earlier CLI processes) into the
+    // Merge persisted run records (runs from earlier CLI processes) into the
     // listing. In-memory registry entries win on a runId collision — they
-    // carry live status, while a snapshot is a frozen terminal projection.
+    // carry live status, while a record is a persisted projection: terminal,
+    // or 'interrupted' for an orphaned active run.
     const records = await listWorkflowRunRecords(config);
     const liveRunIds = new Set(allEntries.map((e) => e.runId));
     const persistedEntries = records
@@ -393,8 +394,10 @@ export const workflowsCommand: SlashCommand = {
     const now = Date.now();
     // Order: active first (oldest startTime first inside the bucket so
     // long-runners stay visible), then terminal by endTime DESC. Mirrors
-    // the dialog's two-bucket sort. Snapshots are always terminal, so they
-    // only ever join the second bucket.
+    // the dialog's two-bucket sort. Persisted records are never active —
+    // terminal, or 'interrupted', which `isActiveWorkflowStatus` excludes —
+    // so they only ever join the second bucket, and the `endTime` fallbacks
+    // below are what keep an 'interrupted' record sortable there.
     const active = allEntries
       .filter((e) => isActiveWorkflowStatus(e.status))
       .sort((a, b) => a.startTime - b.startTime);
