@@ -19,6 +19,7 @@ import {
   getToolCallComponent,
 } from '../toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from '../toolcalls/index.js';
+import { getUserTranscriptDisplayText } from '../../adapters/userTranscriptDisplay.js';
 import './ChatViewer.css';
 
 /**
@@ -62,6 +63,7 @@ export interface ChatMessageData {
   model?: string; // for assistant messages
   // Tool call data
   toolCall?: ToolCallData;
+  systemPayload?: unknown;
   // Additional Claude format fields
   cwd?: string;
   gitBranch?: string;
@@ -274,7 +276,8 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
         );
       }
 
-      const content = extractContent(msg.message);
+      const content =
+        getUserTranscriptDisplayText(msg) ?? extractContent(msg.message);
       const timestamp = parseTimestamp(msg.timestamp);
 
       // Skip empty messages (but not tool calls)

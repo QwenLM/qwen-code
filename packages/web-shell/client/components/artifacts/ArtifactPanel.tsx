@@ -15,7 +15,9 @@ import { DownloadIcon } from 'lucide-react';
 import {
   ChevronRightIcon,
   CirclePlusIcon,
+  Maximize2Icon,
   MessageCirclePlusIcon,
+  Minimize2Icon,
   PanelRightIcon,
   PlusIcon,
   SquareActivityIcon,
@@ -252,6 +254,8 @@ interface ArtifactPanelProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }
 
 export function ArtifactPanel({
@@ -285,6 +289,8 @@ export function ArtifactPanel({
   onImageIngestionNotice,
   onClose,
   variant = 'docked',
+  fullscreen = false,
+  onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
@@ -341,9 +347,9 @@ export function ArtifactPanel({
 
   return (
     <aside
-      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''} ${fullscreen ? styles.panelFullscreen : ''}`}
       style={
-        variant === 'docked' && panelWidth
+        variant === 'docked' && panelWidth && !fullscreen
           ? { flexBasis: panelWidth, width: panelWidth }
           : undefined
       }
@@ -456,6 +462,26 @@ export function ArtifactPanel({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+          )}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              className={`${styles.iconButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              onClick={onToggleFullscreen}
+              aria-label={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+              aria-pressed={fullscreen}
+              title={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+            >
+              {fullscreen ? (
+                <Minimize2Icon className={styles.toolbarIcon} aria-hidden />
+              ) : (
+                <Maximize2Icon className={styles.toolbarIcon} aria-hidden />
+              )}
+            </button>
           )}
           <button
             type="button"

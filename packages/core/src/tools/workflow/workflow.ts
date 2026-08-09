@@ -148,7 +148,7 @@ const WORKFLOW_PARAM_SCHEMA = {
       type: 'boolean',
       default: false,
       description:
-        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
+        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
     },
   },
   // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
@@ -230,7 +230,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         ],
         returnDisplay:
           usageBanner +
-          `Workflow ${handle.runId} started in the background (status: ${status}). Use Background Tasks to observe or stop it.`,
+          `Workflow ${handle.runId} started in the background (status: ${status}). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
       };
     }
     const settlement = await handle.completion;
@@ -531,7 +531,8 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'run — agent() calls whose rolling prefix-hash matches the journal are ' +
         'served from cache for the longest unchanged prefix. Runs are tracked ' +
         'in the background-tasks view and the `/workflows` dialog (live phase ' +
-        'tree, token usage, cancel). Set `run_in_background: true` to return a ' +
+        'tree, token usage, cooperative pause/resume, cancel). Set ' +
+        '`run_in_background: true` to return a ' +
         'run handle immediately in the interactive TUI and receive completion ' +
         'through the conversation. Scripts run in a node:vm sandbox without ' +
         'access to the filesystem or shell; all I/O happens through the ' +

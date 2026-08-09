@@ -9,6 +9,7 @@ import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
 import type {
+  ChannelPairingApprovalSubject,
   ChannelManagementService,
   ChannelStartupRequest,
   ChannelUpsertRequest,
@@ -182,19 +183,44 @@ function parsePairingCode(
   return code.trim().toUpperCase();
 }
 
-function parsePairingSenderId(
+function parsePairingApprovalSubject(
   body: Record<string, unknown>,
   res: Response,
-): string | undefined {
+): ChannelPairingApprovalSubject | undefined {
   const senderId = body['senderId'];
-  if (typeof senderId !== 'string' || senderId.length === 0) {
+  const groupId = body['groupId'];
+  if (senderId !== undefined && groupId !== undefined) {
+    res.status(400).json({
+      error: 'Provide exactly one of `senderId` or `groupId`.',
+      code: 'invalid_channel_pairing_subject',
+    });
+    return undefined;
+  }
+  if (senderId !== undefined) {
+    if (typeof senderId === 'string' && senderId.length > 0) {
+      return { type: 'user', id: senderId };
+    }
     res.status(400).json({
       error: '`senderId` must be a non-empty string.',
       code: 'invalid_channel_pairing_sender_id',
     });
     return undefined;
   }
-  return senderId;
+  if (groupId !== undefined) {
+    if (typeof groupId === 'string' && groupId.length > 0) {
+      return { type: 'group', id: groupId };
+    }
+    res.status(400).json({
+      error: '`groupId` must be a non-empty string.',
+      code: 'invalid_channel_pairing_group_id',
+    });
+    return undefined;
+  }
+  res.status(400).json({
+    error: 'Provide exactly one of `senderId` or `groupId`.',
+    code: 'invalid_channel_pairing_subject',
+  });
+  return undefined;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -398,13 +424,13 @@ export function registerWorkspaceChannelManagementRoutes(
         if (!resolved || !validateClient(req, res, resolved.runtime)) return;
         const name = parseInstanceName(req, res);
         if (!name) return;
-        const senderId = parsePairingSenderId(deps.safeBody(req), res);
-        if (!senderId) return;
+        const subject = parsePairingApprovalSubject(deps.safeBody(req), res);
+        if (!subject) return;
         try {
           noStore(res);
           res
             .status(200)
-            .json(await resolved.service.revokePairingApproval(name, senderId));
+            .json(await resolved.service.revokePairingApproval(name, subject));
         } catch (error) {
           sendManagementError(res, error);
         }

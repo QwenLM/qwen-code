@@ -151,12 +151,9 @@ interface CardRunCorrelation {
   sender?: { senderName: string };
 }
 
-function withNonBotMentionContext(
-  data: DingTalkMessageData,
-  text: string,
-): string {
+function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
   if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
-    return text;
+    return [];
   }
 
   const mentions = new Set<string>();
@@ -167,14 +164,12 @@ function withNonBotMentionContext(
     // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
     if (dingtalkId === data.chatbotUserId) continue;
     const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
-    const stableId = dingtalkId || staffId;
+    // Prefer staffId so the model sees the same identifier space as senderId.
+    const stableId = staffId || dingtalkId;
     if (stableId) mentions.add(stableId);
   }
 
-  if (mentions.size === 0) return text;
-  const memberLabel = mentions.size === 1 ? 'member' : 'members';
-  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
-  return text ? `${context}\n${text}` : context;
+  return [...mentions];
 }
 
 interface DingTalkTokenResponse {
@@ -1711,9 +1706,10 @@ export class DingtalkChannel extends ChannelBase {
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
       const messageText = isMentioned ? cleanText : cleanText || content.text;
-      const envelopeText = isGroup
-        ? withNonBotMentionContext(data, messageText)
-        : messageText;
+      // Carry mention targets as a structured envelope field (like
+      // referencedText) so ChannelBase renders the marker after prompt
+      // sanitization and slash-command parsing sees the body alone.
+      const mentionedMemberIds = isGroup ? collectNonBotMentionIds(data) : [];
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
@@ -1725,7 +1721,8 @@ export class DingtalkChannel extends ChannelBase {
         ...(isGroup && conversationTitle
           ? { chatName: conversationTitle }
           : {}),
-        text: envelopeText,
+        text: messageText,
+        ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,

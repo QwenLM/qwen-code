@@ -18,8 +18,11 @@ import {
   MAX_PENDING_WORKFLOW_APPROVALS,
   MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS,
   MAX_RETAINED_TERMINAL_WORKFLOWS,
+  isActiveWorkflowStatus,
+  isTerminalWorkflowStatus,
   type WorkflowApprovalRequestCallback,
   type WorkflowTaskRegistration,
+  type WorkflowStatus,
 } from './workflow-run-registry.js';
 
 function reg(
@@ -122,6 +125,26 @@ describe('WorkflowRunRegistry', () => {
     cleanup();
   });
 
+  it('parks an approval while the entry is pausing', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_pausing_approval', { isBackgrounded: true }));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    const respond = vi.fn(async () => {});
+    r.bridgeApprovalEvents('wf_pausing_approval', emitter);
+
+    r.onDispatchStateChange('wf_pausing_approval', 'pausing');
+    expect(r.get('wf_pausing_approval')!.status).toBe('pausing');
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ respond }),
+    );
+
+    const approvals = r.get('wf_pausing_approval')!.pendingApprovals;
+    expect(approvals).toHaveLength(1);
+    expect(respond).not.toHaveBeenCalled();
+  });
   it('rejects pending approvals exactly once when a run is cancelled', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_cancel_approval'));
@@ -408,6 +431,34 @@ describe('WorkflowRunRegistry', () => {
         hideAlwaysAllow: true,
         hideModify: true,
         skipIdeDiff: true,
+      },
+    });
+  });
+
+  it('preserves plain-text rendering for copied info confirmations', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_plain_info'));
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_plain_info', emitter);
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({
+        name: 'HookedTool',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Hook confirmation',
+          prompt: '[literal](https://example.com)',
+          renderPromptAsPlainText: true,
+        },
+      }),
+    );
+
+    expect(r.get('wf_plain_info')!.pendingApprovals[0]).toMatchObject({
+      confirmationDetails: {
+        type: 'info',
+        prompt: '[literal](https://example.com)',
+        renderPromptAsPlainText: true,
       },
     });
   });
@@ -737,6 +788,165 @@ describe('WorkflowRunRegistry', () => {
     expect(e.agentsCompleted).toBe(1);
   });
 
+  it.each(['running', 'pausing', 'paused'] as const)(
+    'treats %s workflows as active until a terminal transition',
+    (status) => {
+      const r = new WorkflowRunRegistry();
+      const entry = r.register(reg(`wf_${status}`));
+      if (status !== 'running') r.onDispatchStateChange(entry.runId, 'pausing');
+      if (status === 'paused') r.onDispatchStateChange(entry.runId, 'paused');
+
+      // R12 (doudouOUC): paused is still an ACTIVE registry state (duplicate
+      // register throws, mutations land) but no longer a BLOCKING one — a
+      // paused-and-forgotten run must not block /clear forever.
+      expect(r.hasRunningEntries()).toBe(status !== 'paused');
+      expect(() => r.register(reg(entry.runId))).toThrow(/already active/);
+      r.onPhaseStarted(entry.runId, 'Active phase');
+      r.onAgentDispatched(entry.runId);
+      r.onAgentCompleted(entry.runId);
+      r.onBudgetUpdated(entry.runId, 12, 100);
+      r.setRecentLogs(entry.runId, ['active log']);
+      expect(entry).toMatchObject({
+        status,
+        currentPhase: 'Active phase',
+        agentsDispatched: 1,
+        agentsCompleted: 1,
+        tokensSpent: 12,
+        recentLogs: ['active log'],
+      });
+
+      if (status === 'running') r.complete(entry.runId, 'done', 2_000);
+      if (status === 'pausing') r.fail(entry.runId, 'boom', 2_000);
+      if (status === 'paused') r.cancel(entry.runId, 2_000);
+      expect(r.hasRunningEntries()).toBe(false);
+    },
+  );
+
+  it('does not resume a workflow until pausing has reached paused', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_resume_gate', { isBackgrounded: true }));
+    const handle = {
+      runId: entry.runId,
+      abort: vi.fn(),
+      pause: vi.fn(() => true),
+      resume: vi.fn(() => true),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+
+    r.onDispatchStateChange(entry.runId, 'pausing');
+    expect(r.resume(entry.runId)).toBe(false);
+    expect(handle.resume).not.toHaveBeenCalled();
+    r.onDispatchStateChange(entry.runId, 'running');
+    expect(entry.status).toBe('pausing');
+
+    r.onDispatchStateChange(entry.runId, 'paused');
+    expect(r.resume(entry.runId)).toBe(true);
+    expect(handle.resume).toHaveBeenCalledOnce();
+  });
+
+  it('ignores late dispatch state changes after cancellation', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_cancelled', { isBackgrounded: true }));
+
+    r.onDispatchStateChange(entry.runId, 'pausing');
+    r.cancel(entry.runId, 2_000);
+    r.onDispatchStateChange(entry.runId, 'paused');
+    r.onDispatchStateChange(entry.runId, 'running');
+
+    expect(entry.status).toBe('cancelled');
+  });
+
+  it('enforces dispatch state transition guards across the full cycle', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_guards'));
+    expect(entry.status).toBe('running');
+
+    // Rejection: running -> paused (skipping pausing) is rejected
+    r.onDispatchStateChange('wf_guards', 'paused');
+    expect(entry.status).toBe('running');
+
+    // Valid cycle: running -> pausing -> paused -> running
+    r.onDispatchStateChange('wf_guards', 'pausing');
+    expect(entry.status).toBe('pausing');
+    r.onDispatchStateChange('wf_guards', 'paused');
+    expect(entry.status).toBe('paused');
+
+    // Rejection: paused -> pausing (backwards) is rejected
+    r.onDispatchStateChange('wf_guards', 'pausing');
+    expect(entry.status).toBe('paused');
+
+    r.onDispatchStateChange('wf_guards', 'running');
+    expect(entry.status).toBe('running');
+  });
+
+  it('fires statusChange once per accepted dispatch-state transition', () => {
+    // useBackgroundTaskView re-pulls entries exclusively via this
+    // callback — a pause/resume cycle must re-render the dialog row on
+    // every accepted transition (and stay quiet on a rejected one).
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_emit', { isBackgrounded: true }));
+    const cb = vi.fn();
+    r.setStatusChangeCallback(cb);
+
+    r.onDispatchStateChange(entry.runId, 'pausing');
+    r.onDispatchStateChange(entry.runId, 'paused');
+    r.onDispatchStateChange(entry.runId, 'running');
+    expect(cb).toHaveBeenCalledTimes(3);
+
+    cb.mockClear();
+    // running -> paused skips pausing — rejected, no emit.
+    r.onDispatchStateChange(entry.runId, 'paused');
+    expect(cb).not.toHaveBeenCalled();
+    expect(entry.status).toBe('running');
+  });
+
+  it('caps agentsCompleted at agentsDispatched on double completion', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_overcount', { isBackgrounded: true }));
+
+    r.onAgentDispatched(entry.runId);
+    r.onAgentCompleted(entry.runId);
+    r.onAgentCompleted(entry.runId);
+    expect(entry.agentsCompleted).toBe(1);
+
+    r.cancel(entry.runId, 2_000);
+    r.onAgentCompleted(entry.runId);
+    expect(entry.agentsCompleted).toBe(1);
+  });
+
+  it('mirrors post-cancel budget updates like post-cancel completions', () => {
+    // Dispatches in flight at cancel time settle afterwards and report
+    // their tokens in a `finally`; onBudgetUpdated must follow them the
+    // same way onAgentCompleted does, or a cancelled run's
+    // completed-agent count and tokensSpent diverge.
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_budget_cancel', { isBackgrounded: true }));
+
+    r.onAgentDispatched(entry.runId);
+    r.onBudgetUpdated(entry.runId, 100, 1000);
+    expect(entry.tokensSpent).toBe(100);
+
+    r.cancel(entry.runId, 2_000);
+    r.onAgentCompleted(entry.runId);
+    r.onBudgetUpdated(entry.runId, 350, 1000);
+    expect(entry.agentsCompleted).toBe(1);
+    expect(entry.tokensSpent).toBe(350);
+  });
+  it('does not pause a foreground workflow', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_foreground'));
+    const handle = {
+      runId: entry.runId,
+      abort: vi.fn(),
+      pause: vi.fn(() => true),
+      resume: vi.fn(() => true),
+    } as unknown as WorkflowRunHandle;
+    r.attachHandle(handle);
+
+    expect(r.pause(entry.runId)).toBe(false);
+    expect(handle.pause).not.toHaveBeenCalled();
+  });
+
   it('setRecentLogs caps at 100 entries (keeps the tail)', () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_1'));
@@ -803,15 +1013,21 @@ describe('WorkflowRunRegistry', () => {
     expect(ids).not.toContain('wf_0');
   });
 
-  it('running entries are never evicted', () => {
+  it('active entries are never evicted', () => {
     const r = new WorkflowRunRegistry();
-    r.register(reg('runner')); // stays running
+    r.register(reg('runner'));
+    r.register(reg('pauser'));
+    r.onDispatchStateChange('pauser', 'pausing');
+    r.register(reg('paused'));
+    r.onDispatchStateChange('paused', 'pausing');
+    r.onDispatchStateChange('paused', 'paused');
     for (let i = 0; i < MAX_RETAINED_TERMINAL_WORKFLOWS + 3; i++) {
       r.register(reg(`done_${i}`));
       r.complete(`done_${i}`, null, 2_000 + i);
     }
-    expect(r.get('runner')).toBeDefined();
     expect(r.get('runner')!.status).toBe('running');
+    expect(r.get('pauser')!.status).toBe('pausing');
+    expect(r.get('paused')!.status).toBe('paused');
   });
 
   it('register callback fires synchronously inside register()', () => {
@@ -1037,30 +1253,61 @@ describe('WorkflowRunRegistry', () => {
     expect(ac1.signal.aborted).toBe(false);
   });
 
-  it('abortAll() aborts every running entry and marks them cancelled', () => {
+  it('abortAll() aborts every active entry and marks them cancelled', () => {
     const r = new WorkflowRunRegistry();
-    const ac1 = new AbortController();
-    const ac2 = new AbortController();
+    const acRunning = new AbortController();
+    const acPausing = new AbortController();
+    const acPaused = new AbortController();
     const acDone = new AbortController();
-    r.register(reg('wf_run1', { abortController: ac1 }));
-    r.register(reg('wf_run2', { abortController: ac2 }));
+    r.register(reg('wf_running', { abortController: acRunning }));
+    r.register(reg('wf_pausing', { abortController: acPausing }));
+    r.onDispatchStateChange('wf_pausing', 'pausing');
+    r.register(reg('wf_paused', { abortController: acPaused }));
+    r.onDispatchStateChange('wf_paused', 'pausing');
+    r.onDispatchStateChange('wf_paused', 'paused');
     r.register(reg('wf_done', { abortController: acDone }));
     r.complete('wf_done', null, 1_000);
     r.abortAll();
-    expect(ac1.signal.aborted).toBe(true);
-    expect(ac2.signal.aborted).toBe(true);
+    expect(acRunning.signal.aborted).toBe(true);
+    expect(acPausing.signal.aborted).toBe(true);
+    expect(acPaused.signal.aborted).toBe(true);
     // Already-terminal entry's controller is NOT re-aborted (no-op for
     // settled entries).
     expect(acDone.signal.aborted).toBe(false);
-    expect(r.get('wf_run1')!.status).toBe('cancelled');
-    expect(r.get('wf_run2')!.status).toBe('cancelled');
+    expect(r.get('wf_running')!.status).toBe('cancelled');
+    expect(r.get('wf_pausing')!.status).toBe('cancelled');
+    expect(r.get('wf_paused')!.status).toBe('cancelled');
     expect(r.get('wf_done')!.status).toBe('completed');
   });
 
-  it('hasRunningEntries() reflects the running subset', () => {
+  it.each(['running', 'pausing'] as const)(
+    'hasRunningEntries() treats %s as blocking',
+    (status) => {
+      const r = new WorkflowRunRegistry();
+      expect(r.hasRunningEntries()).toBe(false);
+      r.register(reg('wf_1'));
+      if (status !== 'running') r.onDispatchStateChange('wf_1', 'pausing');
+      expect(r.hasRunningEntries()).toBe(true);
+      r.complete('wf_1', null, 1_000);
+      expect(r.hasRunningEntries()).toBe(false);
+    },
+  );
+
+  // R12 (doudouOUC): a paused run has drained its dispatches and its
+  // wall-clock watchdog is suspended — counting it as blocking would let
+  // a paused-and-forgotten run block /clear and session switching
+  // forever. Mirrors BackgroundTaskRegistry.hasRunningTasks(), which
+  // also excludes paused. Session-switch teardown cancels paused runs
+  // via abortAll() instead of blocking on them.
+  it('hasRunningEntries() does not block on a paused run', () => {
     const r = new WorkflowRunRegistry();
     expect(r.hasRunningEntries()).toBe(false);
     r.register(reg('wf_1'));
+    r.onDispatchStateChange('wf_1', 'pausing');
+    r.onDispatchStateChange('wf_1', 'paused');
+    expect(r.hasRunningEntries()).toBe(false);
+    // Resume re-arms the block; terminal settles it again.
+    r.onDispatchStateChange('wf_1', 'running');
     expect(r.hasRunningEntries()).toBe(true);
     r.complete('wf_1', null, 1_000);
     expect(r.hasRunningEntries()).toBe(false);
@@ -1114,18 +1361,41 @@ describe('WorkflowRunRegistry', () => {
     expect(e.perPhaseTokens.get(null)).toBe(100);
   });
 
-  it('P5: onBudgetUpdated is a no-op on missing / terminal entries', () => {
+  it('P5: onBudgetUpdated is a no-op on missing entries', () => {
     const r = new WorkflowRunRegistry();
     // Missing entry — no throw.
     r.onBudgetUpdated('wf_unknown', 100, 1000);
-
-    r.register(reg('wf_1'));
-    r.complete('wf_1', null, 1_000);
-    r.onBudgetUpdated('wf_1', 999, 1000); // terminal → ignored
-    const e = r.get('wf_1')!;
-    expect(e.tokensSpent).toBe(0);
-    expect(e.tokenBudgetTotal).toBeNull();
   });
+
+  it.each(['completed', 'failed'] as const)(
+    'mirrors post-%s dispatch drains like post-cancel drains',
+    (terminal) => {
+      // The runner's `finally` aborts the controller after EVERY
+      // settlement, so dispatches in flight at settlement drain after
+      // completed / failed exactly like cancelled — the entry counters
+      // must follow, or a run that fire-and-forget'd dispatches shows a
+      // permanently frozen 1/2-agent counter in the dialog.
+      const r = new WorkflowRunRegistry();
+      const entry = r.register(reg('wf_drain', { isBackgrounded: true }));
+
+      r.onAgentDispatched(entry.runId);
+      r.onAgentDispatched(entry.runId);
+      r.onAgentCompleted(entry.runId);
+      r.onBudgetUpdated(entry.runId, 100, 1000);
+
+      if (terminal === 'completed') r.complete(entry.runId, 'ok', 2_000);
+      else r.fail(entry.runId, 'boom', 2_000);
+
+      r.onAgentCompleted(entry.runId);
+      r.onBudgetUpdated(entry.runId, 350, 1000);
+      expect(entry.agentsCompleted).toBe(2);
+      expect(entry.tokensSpent).toBe(350);
+
+      // The cap still holds after settlement.
+      r.onAgentCompleted(entry.runId);
+      expect(entry.agentsCompleted).toBe(2);
+    },
+  );
 
   it('P5: onBudgetUpdated is a no-op on backwards / zero deltas (R1 #8: monotonic spent)', () => {
     // R1 #8 contract: the orchestrator fires `budgetUpdated` after every
@@ -1185,4 +1455,25 @@ describe('WorkflowRunRegistry', () => {
     r.reset();
     expect(r.shouldShowUsageWarning()).toBe(false);
   });
+});
+
+describe('workflow status guards', () => {
+  // The terminal guard is an explicit positive match, not the negation of
+  // the active whitelist — a status later added to WorkflowStatus must not
+  // silently classify as terminal and flow into WorkflowSnapshot.status.
+  it.each<WorkflowStatus>(['completed', 'failed', 'cancelled'])(
+    'classifies %s as terminal',
+    (status) => {
+      expect(isTerminalWorkflowStatus(status)).toBe(true);
+      expect(isActiveWorkflowStatus(status)).toBe(false);
+    },
+  );
+
+  it.each<WorkflowStatus>(['running', 'pausing', 'paused'])(
+    'classifies %s as active',
+    (status) => {
+      expect(isActiveWorkflowStatus(status)).toBe(true);
+      expect(isTerminalWorkflowStatus(status)).toBe(false);
+    },
+  );
 });

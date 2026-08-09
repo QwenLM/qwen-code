@@ -1,6 +1,6 @@
 # Direct External Context Provider
 
-**Status:** Phase 1 implemented; optional auto-recall profile implemented
+**Status:** Read-only on-demand, auto-recall, and optional Mem0 write implemented
 
 **Date:** 2026-07-23
 
@@ -10,12 +10,15 @@
 
 ## Decision
 
-Phase 1 is intentionally limited to a tool-invoked, retrieval-only surface. It
-adds one private Qwen Code extension with one MCP tool:
-`context_search({ query })`. The optional Phase 2 profile adds deterministic
-retrieval through an administrator-installed `UserPromptSubmit` Hook. Its
-detailed design is in
+Phase 1 remains the default tool-invoked, retrieval-only surface. It adds one
+private Qwen Code extension with one MCP tool: `context_search({ query })`.
+The optional Phase 2 profile adds deterministic retrieval through an
+administrator-installed `UserPromptSubmit` Hook. Its detailed design is in
 [Direct External Context Auto Recall](./direct-external-context-auto-recall.md).
+The optional Phase 4 Mem0 variant adds an administrator-only
+`context_remember({ content })` surface with a separate content-visible
+confirmation Hook. Its detailed design is in
+[Direct External Context Mem0 Write](./direct-external-context-mem0-write.md).
 
 The extension supports two explicit read adapters:
 
@@ -23,9 +26,11 @@ The extension supports two explicit read adapters:
 - Generic HTTP Search V1 for an existing knowledge base, RAG service, or
   enterprise search endpoint.
 
-Write tools, personal memory, and managed replacement of Qwen's native memory
-remain deferred. On-demand and auto-recall are mutually exclusive deployment
-profiles so one turn cannot query the same provider twice.
+The default extension manifest remains search-only. Generic knowledge-base
+writes, personal memory, and managed replacement of Qwen's native memory remain
+out of scope. On-demand and auto-recall are mutually exclusive retrieval
+profiles so one turn cannot query the same provider twice. Mem0 writes are an
+opt-in variant of on-demand v1, not another retrieval path.
 
 ## Problem
 
@@ -50,12 +55,15 @@ client-provided metadata into authorization.
 - Return stable MCP errors without exposing provider response details.
 - Keep the implementation private to the qwen-code monorepo until its
   deployment model is proven.
+- Optionally save exact repository-shared text through one narrowly scoped
+  Mem0 Direct Import operation after visible user confirmation.
 
 ## Non-goals
 
 - Automatic recall from an input path that does not provide
   `submitted_prompt`, or without administrator opt-in.
-- Any add, update, delete, ingestion, or shared-memory write operation.
+- Generic knowledge-base ingestion or any Mem0 update, delete, entity, event,
+  or Project-management operation.
 - Trusted personal identity, personal memory, or per-user audit.
 - Per-document user ACL evaluation or OAuth token brokerage.
 - DLP, retention policy, deletion workflow, or tamper-resistant approval.
@@ -74,7 +82,9 @@ flowchart TD
     C -- "No" --> D{"Single interactive CLI process for trusted collaborators?"}
     D -- "No" --> G
     D -- "Yes" --> E{"Automatic outbound retrieval accepted?"}
-    E -- "No" --> O["Use Direct on-demand profile"]
+    E -- "No" --> W{"Need optional shared Mem0 writes?"}
+    W -- "No" --> O["Use Direct read-only on-demand profile"]
+    W -- "Yes" --> M["Use managed Mem0 write variant"]
     E -- "Yes" --> R["Use Direct auto-recall profile"]
 ```
 
@@ -115,20 +125,29 @@ interface ExternalContextProvider {
     signal: AbortSignal;
   }): Promise<readonly ExternalContextItem[]>;
 }
+
+interface ExternalMemoryWriter {
+  remember(input: {
+    content: string;
+    signal: AbortSignal;
+  }): Promise<RememberResult>;
+}
 ```
 
 The interface deliberately contains no tenant, user, repository, namespace,
 application ID, or arbitrary filter. The explicit provider factory binds those
 values from administrator-controlled configuration before a tool call.
 
-Phase 1 does not expose this interface as a public package API. Adding another
-provider requires a reviewed adapter and an explicit factory case.
+Neither interface is a public package API. Adding another provider requires a
+reviewed adapter and an explicit factory case. Generic HTTP remains
+search-only; write semantics are deliberately provider-specific.
 
 ## Runtime behavior
 
 ### Tool contract
 
-The extension always registers exactly one tool:
+The default extension manifest and every valid v1 configuration with no
+`write` block register exactly one tool:
 
 ```ts
 context_search({ query: string });
@@ -173,6 +192,11 @@ omitted once the next item cannot retain non-empty content.
 JSON serialization preserves the data envelope, but it cannot guarantee that a
 model will ignore prompt injection embedded in retrieved content. Provider
 content remains untrusted.
+
+A valid v1 Mem0 write configuration additionally registers
+`context_remember({ content })`. Generic HTTP and v2 configurations reject the
+write block. The complete input, confirmation, Provider, and unknown-outcome
+semantics are defined in the dedicated Mem0 write design.
 
 ### Failure behavior
 
@@ -278,10 +302,13 @@ selection. Each security-isolated corpus must use a Mem0 Project and API key
 whose effective access is restricted to that corpus. `app_id` classifies
 records inside a Project; it is not an authorization boundary.
 
-Phase 1 never calls Mem0 add, update, delete, entity, event, or project
-management APIs. Where Mem0 cannot issue a read-only key, same-UID code that
-obtains the key may still call write APIs directly. Deployments requiring hard
-credential isolation or write prevention must use the Governed Profile.
+The default manifest and read-only v1 configuration never call Mem0 add,
+update, delete, entity, event, or Project-management APIs. The optional managed
+write variant adds only Direct Import through `/v3/memories/add/`; it does not
+expose the remaining APIs. Where Mem0 cannot issue a read-only key, same-UID
+code that obtains the key may still call write APIs directly. Deployments
+requiring hard credential isolation or enforced write approval must use the
+Governed Profile.
 
 Mem0 Memory Decay is opt-in and off by default. When enabled, every returned
 memory receives a fire-and-forget reinforcement that updates access history and
@@ -336,18 +363,19 @@ are not hidden behind this interface.
 
 ## Security model
 
-| Property                      | Phase 1 behavior                                                |
-| ----------------------------- | --------------------------------------------------------------- |
-| Corpus selection              | Fixed by administrator configuration and provider credential    |
-| Model-controlled fields       | Search query only                                               |
-| Trusted user identity         | Not provided                                                    |
-| Per-document ACL              | Not evaluated                                                   |
-| Provider credential isolation | Not provided from same-UID code or Qwen tools                   |
-| Outbound-query DLP            | Not provided                                                    |
-| Provider result trust         | Explicitly untrusted; prompt-injection risk remains             |
-| Explicit mutations            | No write MCP or hook path; credential capabilities still matter |
-| Provider read effects         | Search may record audit, access, or ranking metadata            |
-| Audit                         | No local audit; provider-side logs may exist                    |
+| Property                      | Direct Profile behavior                                       |
+| ----------------------------- | ------------------------------------------------------------- |
+| Corpus selection              | Fixed by administrator configuration and provider credential  |
+| Model-controlled fields       | Search query; optional write content only                     |
+| Trusted user identity         | Not provided                                                  |
+| Per-document ACL              | Not evaluated                                                 |
+| Provider credential isolation | Not provided from same-UID code or Qwen tools                 |
+| Outbound-content DLP          | Not provided                                                  |
+| Provider result trust         | Explicitly untrusted; prompt-injection risk remains           |
+| Explicit mutations            | Optional Mem0 Direct Import only; no update or delete tool    |
+| Write approval                | Best-effort interactive UX, not an authorization boundary     |
+| Provider read effects         | Search may record audit, access, or ranking metadata          |
+| Audit                         | No tamper-resistant local audit; provider-side logs may exist |
 
 MCP annotations are descriptive hints, not authorization. The extension omits
 `readOnlyHint` because it cannot guarantee that every provider search is free
@@ -389,22 +417,29 @@ Administrators should:
 6. Validate search quality, provenance, latency, and provider-side access
    controls before wider rollout.
 
+The managed Mem0 write variant uses separate configuration, MCP, system
+settings, and user-settings examples. Its MCP allowlist contains search and
+remember, while the default extension manifest remains search-only. Its
+administrator-controlled `PreToolUse` Hook shows the exact escaped content and
+asks again after the normal MCP permission prompt. This double confirmation is
+intentional but remains bypassable when the Hook cannot run or same-UID code
+uses the credential directly. See the dedicated write design for the launcher
+and failure contract.
+
 Removing the pinned MCP configuration from the managed launcher rolls back the
 Qwen integration. Local trials can instead disable or remove the extension.
-Phase 1 does not call explicit mutation, migration, or deletion APIs. Provider
-search may retain logs or update access metadata, and rollback does not remove
-that provider-side state.
+The read-only variants do not call explicit mutation, migration, or deletion
+APIs. Rolling back the write variant does not delete memories already accepted
+by Mem0. Provider search may also retain logs or update access metadata.
 
 ## Deferred phases
 
 The optional auto-recall profile is implemented separately in
 [Direct External Context Auto Recall](./direct-external-context-auto-recall.md).
-The broader proposal in #7585 retains possible later phases:
-
-- Explicit shared-memory writes, only after provider-side write authorization,
-  confirmation semantics, idempotency, and audit are defined.
-- Additional provider-specific adapters where the Generic HTTP contract is not
-  sufficient.
+The optional Mem0 write variant is implemented separately in
+[Direct External Context Mem0 Write](./direct-external-context-mem0-write.md).
+The broader proposal in #7585 retains possible additional provider-specific
+adapters where the Generic HTTP contract is not sufficient.
 
 The remaining items are not latent switches in either direct profile. They
 require separate review and implementation.
