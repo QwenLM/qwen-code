@@ -1386,6 +1386,33 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
+  it('filters legacy projections whose payload is not an object', () => {
+    // `DaemonEvent.data` is `unknown`, and `stringifyJson` returns strings
+    // verbatim, primitives as `42` / `true` / `null`, and `''` for undefined.
+    // Keying the match on a leading `{` let all of those through.
+    const legacy = (id: string, payload: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text: `some_future_event (unrecognized daemon event): ${payload}`,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy('obj', '{"a":1}'),
+      legacy('arr', '[1,2]'),
+      legacy('str', 'plain text payload'),
+      legacy('num', '42'),
+      legacy('bool', 'true'),
+      legacy('null', 'null'),
+      legacy('empty', ''),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
   it('only matches the legacy shape, never a quoted marker or a status block', () => {
     // The text match is a compatibility shim, so it must be scoped to `debug`
     // blocks and anchored to the whole projection. Matching the marker as a

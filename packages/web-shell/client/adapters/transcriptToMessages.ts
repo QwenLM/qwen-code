@@ -117,13 +117,18 @@ function isIgnoredWebShellStatus(text: string): boolean {
 
 /**
  * Whole shape of the legacy top-level projection — `<event-type>
- * (unrecognized daemon event): <json>` — anchored at the start. Matching the
- * marker anywhere in the text would hide any block that merely quotes it,
- * such as a malformed payload carrying an upstream peer's message. Event
- * types are snake_case identifiers and the payload is a JSON document.
+ * (unrecognized daemon event): <payload>` — anchored at the start. Matching
+ * the marker anywhere in the text would hide any block that merely quotes it,
+ * such as a malformed payload carrying an upstream peer's message.
+ *
+ * The payload is deliberately unconstrained. `DaemonEvent.data` is `unknown`
+ * and `stringifyJson` returns strings verbatim, serializes primitives as
+ * `42` / `true` / `null`, and yields `''` for `undefined` — so keying on a
+ * leading `{` would let every non-object payload slip through. The event-type
+ * prefix plus the fixed phrase is specific enough on its own.
  */
 const LEGACY_UNRECOGNIZED_EVENT_PATTERN =
-  /^[A-Za-z0-9_.-]+ \(unrecognized daemon event\): [[{"]/;
+  /^[A-Za-z0-9_.-]+ \(unrecognized daemon event\): /;
 
 /**
  * The legacy `session_update` projection is `<kind>: <json>` — no marker to
