@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -529,11 +530,15 @@ export async function downloadMediaUrl(params: {
             yield chunk;
           }
         };
-        await pipeline(
-          source,
-          counter,
-          createWriteStream(partPath, { mode: 0o600 }),
-        );
+        // The fd must be open BEFORE the pipeline runs: createWriteStream
+        // opens lazily, so a failure on an all-synchronous body (e.g. the
+        // byte cap tripping on the first chunks) could otherwise reject —
+        // and reach the outer `.part` cleanup — before the file was even
+        // created, resurrecting the `.part` after its rm. (On open failure
+        // the stream self-destructs and `once` rejects into the catch.)
+        const destination = createWriteStream(partPath, { mode: 0o600 });
+        await once(destination, 'open');
+        await pipeline(source, counter, destination);
       } catch (err) {
         if (signal?.aborted) throw err;
         if (err instanceof OmniDownloadError) throw err;
