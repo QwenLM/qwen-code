@@ -545,7 +545,7 @@ describe('gemini.tsx main function', () => {
     [
       'keeps for a direct (editor) ACP child',
       { acp: true } as CliArgs,
-      undefined,
+      '',
       false,
     ],
     [
@@ -560,7 +560,7 @@ describe('gemini.tsx main function', () => {
       'false',
       false,
     ],
-    ['keeps for a non-ACP launch', {} as CliArgs, undefined, false],
+    ['keeps for a non-ACP launch', {} as CliArgs, '', false],
   ])(
     'inherited loader env vars past the ACP handoff (%s)',
     async (_mode, argv, daemonMarker, expectScrubbed) => {
