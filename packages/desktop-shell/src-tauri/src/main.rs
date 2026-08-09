@@ -633,28 +633,22 @@ fn check_updates_silently(app: AppHandle) {
         if !matches!(confirmed, Ok(true)) {
             return;
         }
-        while let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
-            let retry = tauri::async_runtime::spawn_blocking({
+        if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
+            let _ = tauri::async_runtime::spawn_blocking({
                 let app = app.clone();
                 let version = version.clone();
                 move || {
                     app.dialog()
                         .message(format!(
-                            "Qwen Code Desktop {version} could not be installed.\n\n{error}\n\nQwen Code remains usable. Check your connection and try again."
+                            "Qwen Code Desktop {version} could not be installed.\n\n{error}\n\nSave your work before quitting. Reinstall Qwen Code if it does not reopen."
                         ))
                         .title("Qwen Code update failed")
                         .kind(MessageDialogKind::Error)
-                        .buttons(MessageDialogButtons::OkCancelCustom(
-                            "Try again".to_string(),
-                            "Later".to_string(),
-                        ))
                         .blocking_show()
                 }
             })
             .await;
-            if !matches!(retry, Ok(true)) {
-                return;
-            }
+            return;
         }
         app.request_restart();
     });
