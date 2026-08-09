@@ -161,6 +161,7 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
   DaemonSkillInstallRequest,
   DaemonSkillMutationResult,
@@ -175,6 +176,7 @@ import type {
   DaemonWorkspaceExtensionsStatus,
   ExtensionMutationResponse,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
   ExtensionCatalog,
@@ -464,6 +466,8 @@ export class DaemonPendingPromptLimitError extends Error {
 export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
+
+export const EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS = 120_000;
 
 export function isDaemonTurnError(error: unknown): error is DaemonTurnError {
   return (
@@ -1375,6 +1379,38 @@ export class DaemonClient {
       '/workspace/extensions/install',
       'POST /workspace/extensions/install',
       { method: 'POST', body: params, clientId, mode: 'rest' },
+    );
+  }
+
+  async installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse> {
+    const query = new URLSearchParams({
+      filename: params.filename,
+      consent: String(params.consent === true),
+    });
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/extensions/install-archive?${query}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/octet-stream' },
+          clientId,
+        ),
+        body: params.archive,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/extensions/install-archive',
+          );
+        }
+        return (await res.json()) as ExtensionInstallResponse;
+      },
+      EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+      'rest',
     );
   }
 
@@ -3138,6 +3174,36 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSkillToggleResult;
+      },
+    );
+  }
+
+  /**
+   * Toggle up to 100 user-invocable skills and return every target outcome.
+   *
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
+   */
+  async setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ skillNames, enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/skills/enable');
+        }
+        return (await res.json()) as DaemonSkillBatchToggleResult;
       },
     );
   }
@@ -5832,6 +5898,19 @@ export class WorkspaceDaemonClient {
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
       { enabled },
+      opts?.clientId,
+    );
+  }
+
+  setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return this.post(
+      '/skills/enable',
+      'POST /workspaces/:workspace/skills/enable',
+      { skillNames, enabled },
       opts?.clientId,
     );
   }
