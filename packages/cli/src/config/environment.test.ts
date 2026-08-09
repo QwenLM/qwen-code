@@ -60,6 +60,10 @@ const TRACKED_ENV = [
   'npm_config_ca',
   'npm_config_strict_ssl',
   'PIP_CERT',
+  'PIP_CONFIG_FILE',
+  'SSH_ASKPASS',
+  'LESSOPEN',
+  'LESSCLOSE',
   'CURL_HOME',
   'WGETRC',
   'PYTHON',
@@ -421,6 +425,80 @@ describe('loadEnvironment', () => {
     expect(process.env['WGETRC']).toBeUndefined();
     expect(process.env['PYTHON']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // #8663 review round: PIP_CONFIG_FILE redirects all of pip's configuration
+  // (index-url / trusted-host / proxy / cert) at an attacker file, SSH_ASKPASS
+  // is the askpass program git/ssh execute on an auth challenge, and LESSOPEN/
+  // LESSCLOSE are run by `less` as input preprocessors. Each must be rejected
+  // on every application boundary — initial load and reload alike.
+  it('never applies pip config / ssh askpass / less preprocessor keys from a project .env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const envPath = path.join(workspace, '.env');
+    fs.writeFileSync(
+      envPath,
+      [
+        'PIP_CONFIG_FILE=/workspace-a/pip.conf',
+        'SSH_ASKPASS=/workspace-a/evil-askpass',
+        'LESSOPEN=| /workspace-a/evil-lessopen.sh %s',
+        'LESSCLOSE=/workspace-a/evil-lessclose.sh %s %s',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['LESSCLOSE']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    // A mid-session reload must not apply them either.
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['LESSCLOSE']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
+  // The settings.env application (load and reload) and the daemon's
+  // per-workspace runtime env build consult the same hardcoded predicate.
+  it('rejects pip config / ssh askpass / less preprocessor keys from settings.env and the runtime env build', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const settings = testSettings({
+      env: {
+        PIP_CONFIG_FILE: '/workspace-a/pip.conf',
+        SSH_ASKPASS: '/workspace-a/evil-askpass',
+        LESSOPEN: '| /workspace-a/evil-lessopen.sh %s',
+        RUNTIME_SETTINGS_ONLY: 'from-settings',
+      },
+    });
+
+    loadEnvironment(settings, workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    // Reload force-writes settings.env keys; the hardcoded gate must keep
+    // rejecting them there too.
+    reloadEnvironment(settings, workspace);
+    expect(process.env['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(process.env['SSH_ASKPASS']).toBeUndefined();
+    expect(process.env['LESSOPEN']).toBeUndefined();
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+    expect(snapshot.effectiveEnv['PIP_CONFIG_FILE']).toBeUndefined();
+    expect(snapshot.effectiveEnv['SSH_ASKPASS']).toBeUndefined();
+    expect(snapshot.effectiveEnv['LESSOPEN']).toBeUndefined();
+    expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
+      'from-settings',
+    );
   });
 
   // The privileged <workspace>/.qwen/.env scope deliberately bypasses
@@ -880,7 +958,7 @@ describe('loadEnvironment', () => {
         'GIT_CONFIG_COUNT=2',
         'GIT_CONFIG_KEY_0=core.fsmonitor',
         'GIT_CONFIG_VALUE_0=/home-a/fsmonitor',
-        'RUNTIME_DOTENV=allowed',
+        'RUNTIME_DOTENV=rotated',
         '',
       ].join('\n'),
     );
@@ -889,7 +967,9 @@ describe('loadEnvironment', () => {
     expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
     expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
     // An ordinary key next to them still rotates — the freeze is key-scoped.
-    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+    // The fixture value must actually change between reloads, or this check
+    // passes even when reload freezes every key.
+    expect(process.env['RUNTIME_DOTENV']).toBe('rotated');
 
     // Removal is frozen too (symmetric with GIT_CONFIG_COUNT, documented in
     // the settings.md upgrade note): a home `.env` deletion does not

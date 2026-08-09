@@ -151,6 +151,33 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     }
   });
 
+  // PIP_CONFIG_FILE redirects all of pip's configuration (index-url /
+  // trusted-host / proxy / cert) at an attacker file; SSH_ASKPASS is the
+  // askpass fallback git/ssh execute on an auth challenge; less executes
+  // LESSOPEN (and LESSCLOSE when the preprocessor ran) as an input
+  // preprocessor. Each is code execution or credential diversion from a
+  // project .env.
+  it('excludes pip config, ssh askpass, and less preprocessor redirects', () => {
+    for (const key of [
+      'PIP_CONFIG_FILE',
+      'SSH_ASKPASS',
+      'LESSOPEN',
+      'LESSCLOSE',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // SSH_ASKPASS_REQUIRE only selects *when* the askpass program runs; with
+  // SSH_ASKPASS project-blocked it has nothing to execute, so it stays
+  // settable from project files.
+  it('keeps SSH_ASKPASS_REQUIRE out of the hardcoded exclusions', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).not.toContain(
+      'SSH_ASKPASS_REQUIRE',
+    );
+    expect(isHardcodedProjectEnvExclusion('SSH_ASKPASS_REQUIRE')).toBe(false);
+  });
+
   // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
   // feature (fast-path.test.ts loads it without the full settings loader);
   // it stays reload-only rather than hardcoded-excluded.
@@ -200,15 +227,29 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('pip_cert')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('CURL_HOME')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('wgetrc')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('pip_config_file')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('SSH_ASKPASS')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('ssh_askpass')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('LESSOPEN')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('lessclose')).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded
-  // index, matched by prefix rather than literal membership.
-  it('matches numbered GIT_CONFIG_KEY_/VALUE_ pairs by prefix', () => {
+  // index, matched by numeric suffix rather than literal membership.
+  it('matches numbered GIT_CONFIG_KEY_/VALUE_ pairs by numeric suffix', () => {
     expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_KEY_0')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_VALUE_0')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('git_config_key_12')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_VALUE_7')).toBe(true);
+    // Git only reads decimal-numbered pairs (GIT_CONFIG_KEY_%d), so keys
+    // with empty, nonnumeric, or trailing-garbage suffixes are
+    // project-defined variables Git never consumes and must stay settable.
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_KEY_')).toBe(false);
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_KEY_CACHE')).toBe(false);
+    expect(isHardcodedProjectEnvExclusion('git_config_value_cache')).toBe(
+      false,
+    );
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_KEY_0X')).toBe(false);
     // A key that merely starts with GIT_CONFIG but is not a KEY_/VALUE_ pair
     // (and not a listed literal) is not excluded: GIT_CONFIG_NOSYSTEM only
     // skips the system gitconfig read and injects nothing.
@@ -283,6 +324,10 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('PIP_CERT')).toBe(false);
     expect(isLoaderEnvKey('CURL_HOME')).toBe(false);
     expect(isLoaderEnvKey('WGETRC')).toBe(false);
+    expect(isLoaderEnvKey('PIP_CONFIG_FILE')).toBe(false);
+    expect(isLoaderEnvKey('SSH_ASKPASS')).toBe(false);
+    expect(isLoaderEnvKey('LESSOPEN')).toBe(false);
+    expect(isLoaderEnvKey('LESSCLOSE')).toBe(false);
   });
 
   // Library search paths and the interactive-sh-only ENV are deliberately
@@ -592,6 +637,83 @@ describe('acquireInheritedLoaderEnvScrub', () => {
       handle.release();
       handle.release(); // idempotent
       expect(process.env['LD_PRELOAD']).toBe('/legit.so');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  // Regression: the embedding host can assign loader keys between two
+  // acquires. The nested scrub deletes that assignment, and only the
+  // snapshot taken at the nested acquire lets the final release bring it
+  // back — without it the host's value is silently lost, corrupting the
+  // shared env of the embedding process.
+  it('restores a host assignment made between acquires (A -> assign -> B -> release)', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      // Daemon A boots and scrubs the shared env.
+      const daemonA = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      // The embedding host assigns a loader key while A holds the scrub.
+      process.env['NODE_OPTIONS'] = '--max-old-space-size=4096';
+
+      // Daemon B boots and its scrub removes the host assignment.
+      const daemonB = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(daemonB.removedKeys).toContain('NODE_OPTIONS');
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      // B closes first; A still holds the scrub, so nothing restores yet.
+      daemonB.release();
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      // The final release brings the host assignment back.
+      daemonA.release();
+      expect(process.env['NODE_OPTIONS']).toBe('--max-old-space-size=4096');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  // The snapshot must track the NEWEST value observed at any acquire
+  // boundary: restoring the first acquire's stale value instead would
+  // overwrite a host re-assignment the same way losing it would.
+  it('restores the newest host assignment, not the stale first-acquire snapshot', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    process.env['NODE_OPTIONS'] = '--stale';
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const daemonA = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      process.env['NODE_OPTIONS'] = '--current';
+      const daemonB = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(daemonB.removedKeys).toContain('NODE_OPTIONS');
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+
+      daemonA.release();
+      daemonB.release();
+      expect(process.env['NODE_OPTIONS']).toBe('--current');
     } finally {
       write.mockRestore();
     }

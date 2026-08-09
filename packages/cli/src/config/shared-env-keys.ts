@@ -81,6 +81,12 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (`OPENSSL_CONF`).
   'CURL_HOME',
   'WGETRC',
+  // PIP_CONFIG_FILE redirects all of pip's configuration at the file it
+  // names — index-url, trusted-host, proxy, cert, or client-cert in an
+  // attacker file sends session pip traffic or credentials to attacker
+  // infrastructure — the same config-file-redirect class as
+  // npm_config_userconfig and GIT_CONFIG_GLOBAL.
+  'PIP_CONFIG_FILE',
   // The git command-execution env family: git runs these on any invocation in
   // a session subprocess. GIT_SSH_COMMAND / GIT_SSH (its documented legacy
   // counterpart, still exec'd by git for SSH transports) / GIT_EXTERNAL_DIFF
@@ -95,7 +101,8 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // GIT_CONFIG_COUNT and the numbered pairs. core/utils/git-branches.ts
   // scrubs the config-injection subset from the repo's own git invocations,
   // so a project `.env` setting this family contradicts that model. Numbered
-  // GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are matched by prefix below.
+  // GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are matched by numeric
+  // suffix below.
   'GIT_SSH_COMMAND',
   'GIT_SSH',
   'GIT_EXEC_PATH',
@@ -108,6 +115,20 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
+  // git falls back to executing $SSH_ASKPASS for passphrase prompts (its
+  // askpass order is GIT_ASKPASS > core.askPass > SSH_ASKPASS, and ssh runs
+  // it whenever SSH_ASKPASS_REQUIRE=force or no terminal is available), so a
+  // project `.env` pointing it at an attacker script is code execution on
+  // any git/ssh auth challenge. SSH_ASKPASS_REQUIRE stays settable: it only
+  // selects *when* the askpass program runs, and with SSH_ASKPASS
+  // project-blocked it has no program to execute.
+  'SSH_ASKPASS',
+  // less executes $LESSOPEN as an input preprocessor on every file a session
+  // views (and $LESSCLOSE on exit whenever the preprocessor ran), so a
+  // project `.env` setting either is attacker command execution the first
+  // time a session runs `less`.
+  'LESSOPEN',
+  'LESSCLOSE',
   // node-gyp interpreter selection: node-gyp's find-python.js executes
   // NODE_GYP_FORCE_PYTHON / npm_config_python / PYTHON as the build Python,
   // so a project `.env` pointing them at an attacker script is code execution
@@ -145,19 +166,26 @@ const HARDCODED_PROJECT_ENV_EXCLUSIONS: ReadonlySet<string> = new Set(
 
 // Command-scope git config injection uses numbered GIT_CONFIG_KEY_<n> /
 // GIT_CONFIG_VALUE_<n> pairs read up to GIT_CONFIG_COUNT — an unbounded index,
-// so match them by prefix rather than listing literals (mirrors
-// core/utils/git-branches.ts). GIT_CONFIG_COUNT alone already neutralizes the
-// pairs, but stripping the pairs too matches the repo's existing git scrub.
-const HARDCODED_PROJECT_ENV_EXCLUSION_PREFIXES = [
-  'git_config_key_',
-  'git_config_value_',
+// so match them by numeric suffix rather than listing literals. Git only
+// reads decimal-numbered pairs (GIT_CONFIG_KEY_%d up to the count), so a key
+// with an empty or nonnumeric suffix (e.g. GIT_CONFIG_KEY_CACHE) is a
+// project-defined variable Git never consumes and it must stay settable.
+// (core/utils/git-branches.ts scrubs the same family by bare prefix; that
+// over-scrub is harmless, but a denylist rejection freezes the key, so this
+// gate matches precisely.) GIT_CONFIG_COUNT alone already neutralizes the
+// pairs, but rejecting the pairs too matches the repo's existing git scrub.
+const HARDCODED_PROJECT_ENV_EXCLUSION_PATTERNS = [
+  /^git_config_key_\d+$/u,
+  /^git_config_value_\d+$/u,
 ] as const;
 
 export function isHardcodedProjectEnvExclusion(key: string): boolean {
   const lowerKey = key.toLowerCase();
-  if (HARDCODED_PROJECT_ENV_EXCLUSIONS.has(lowerKey)) return true;
-  return HARDCODED_PROJECT_ENV_EXCLUSION_PREFIXES.some((prefix) =>
-    lowerKey.startsWith(prefix),
+  return (
+    HARDCODED_PROJECT_ENV_EXCLUSIONS.has(lowerKey) ||
+    HARDCODED_PROJECT_ENV_EXCLUSION_PATTERNS.some((pattern) =>
+      pattern.test(lowerKey),
+    )
   );
 }
 
@@ -306,9 +334,9 @@ export function scrubAndReportInheritedLoaderEnv(
 // scrub, nothing to restore), then the first daemon's close() restores the
 // loader vars into the shared env and re-poisons the survivor's session
 // subprocesses — reopening #8653 for the still-live daemon. Coordinate the
-// scrub of `process.env` process-globally: the first acquire snapshots the
-// pre-scrub values, and only the last release (refcount back to zero) restores
-// them.
+// scrub of `process.env` process-globally: each acquire snapshots the loader
+// values present at that boundary, and only the last release (refcount back
+// to zero) restores them.
 let sharedProcessEnvScrubDepth = 0;
 const sharedProcessEnvScrubOriginals = new Map<string, string>();
 
@@ -333,11 +361,17 @@ export function acquireInheritedLoaderEnvScrub(
 ): InheritedLoaderEnvScrubHandle {
   if (sharedProcessEnvScrubDepth === 0) {
     sharedProcessEnvScrubOriginals.clear();
-    for (const key of Object.keys(env)) {
-      if (!isLoaderEnvKey(key)) continue;
-      const value = env[key];
-      if (value !== undefined) sharedProcessEnvScrubOriginals.set(key, value);
-    }
+  }
+  // Snapshot on every acquire, not just the first: the embedding host can
+  // assign loader keys between acquires, and the scrub below deletes them
+  // with no record — the final release would then leave the assignment
+  // absent or restore a stale pre-scrub value, corrupting the shared env.
+  // The newest value observed at any acquire boundary is the one the final
+  // restore must bring back.
+  for (const key of Object.keys(env)) {
+    if (!isLoaderEnvKey(key)) continue;
+    const value = env[key];
+    if (value !== undefined) sharedProcessEnvScrubOriginals.set(key, value);
   }
   sharedProcessEnvScrubDepth++;
   const removedKeys = scrubAndReportInheritedLoaderEnv(
