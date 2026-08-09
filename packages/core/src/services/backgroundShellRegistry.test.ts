@@ -60,9 +60,9 @@ function makeEntry(
     cwd: '/tmp',
     status: 'running',
     startTime: 1000,
-    outputPath: '/tmp/s1.output',
     abortController: new AbortController(),
     ...overrides,
+    outputPath: overrides.outputPath ?? join(makeTempDir(), 'shell.output'),
   };
 }
 
@@ -669,95 +669,73 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
-  // Every register/complete in these loop tests also writes the status
-  // sidecar through atomicWriteFileSync, and a loaded CI runner has been
-  // measured spending ~700ms per sidecar write — ~50s for the ~70 writes
-  // of the longest loop, past the 15s default. The explicit timeout buys
-  // the I/O the time it costs; the assertions are unchanged.
-  const SIDECAR_IO_TIMEOUT = 120_000;
   describe('terminal-entry retention cap', () => {
-    it(
-      'retains only a bounded number of terminal entries (oldest by endTime evicted)',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        // Register and complete one more entry than the cap allows. Use
-        // strictly increasing endTimes so eviction order is deterministic.
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
-          reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
-          reg.complete(`s-${i}`, 0, i * 10 + 5);
-        }
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-        // The two oldest (`s-0`, `s-1`) get pruned; the newest survives.
-        expect(reg.get('s-0')).toBeUndefined();
-        expect(reg.get('s-1')).toBeUndefined();
-        expect(reg.get(`s-${MAX_RETAINED_TERMINAL_SHELLS + 1}`)).toBeDefined();
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
+    it('retains only a bounded number of terminal entries (oldest by endTime evicted)', () => {
+      const reg = new BackgroundShellRegistry();
+      // Register and complete one more entry than the cap allows. Use
+      // strictly increasing endTimes so eviction order is deterministic.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
+        reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
+        reg.complete(`s-${i}`, 0, i * 10 + 5);
+      }
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      // The two oldest (`s-0`, `s-1`) get pruned; the newest survives.
+      expect(reg.get('s-0')).toBeUndefined();
+      expect(reg.get('s-1')).toBeUndefined();
+      expect(reg.get(`s-${MAX_RETAINED_TERMINAL_SHELLS + 1}`)).toBeDefined();
+    });
 
-    it(
-      'never evicts running entries even when the cap is exceeded',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        // Register one extra terminal entry beyond the cap, then a single
-        // running entry. The running entry must be retained regardless of
-        // its launch order — pruning a still-running shell would lose the
-        // user's only handle on a live process.
-        reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
-          reg.register(
-            makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
-          );
-          reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
-        }
-        // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS + 1);
-        expect(reg.get('live')?.status).toBe('running');
-        // The oldest terminal entry (lowest endTime) is the one evicted.
-        expect(reg.get('done-0')).toBeUndefined();
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
-
-    it(
-      'prunes after fail() too, not just complete()',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-          reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
-          reg.complete(`done-${i}`, 0, i * 10 + 5);
-        }
-        const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+    it('never evicts running entries even when the cap is exceeded', () => {
+      const reg = new BackgroundShellRegistry();
+      // Register one extra terminal entry beyond the cap, then a single
+      // running entry. The running entry must be retained regardless of
+      // its launch order — pruning a still-running shell would lose the
+      // user's only handle on a live process.
+      reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
         reg.register(
-          makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+          makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
         );
-        reg.fail('overflow', 'boom', overflowStart + 5);
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-        expect(reg.get('done-0')).toBeUndefined();
-        expect(reg.get('overflow')?.status).toBe('failed');
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
+        reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
+      }
+      // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS + 1);
+      expect(reg.get('live')?.status).toBe('running');
+      // The oldest terminal entry (lowest endTime) is the one evicted.
+      expect(reg.get('done-0')).toBeUndefined();
+    });
 
-    it(
-      'prunes after cancel() too, not just complete()',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-          reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
-          reg.complete(`done-${i}`, 0, i * 10 + 5);
-        }
-        const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
-        reg.register(
-          makeEntry({ shellId: 'overflow', startTime: overflowStart }),
-        );
-        reg.cancel('overflow', overflowStart + 5);
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-        expect(reg.get('done-0')).toBeUndefined();
-        expect(reg.get('overflow')?.status).toBe('cancelled');
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
+    it('prunes after fail() too, not just complete()', () => {
+      const reg = new BackgroundShellRegistry();
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
+        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.complete(`done-${i}`, 0, i * 10 + 5);
+      }
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      reg.fail('overflow', 'boom', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+      expect(reg.get('overflow')?.status).toBe('failed');
+    });
+
+    it('prunes after cancel() too, not just complete()', () => {
+      const reg = new BackgroundShellRegistry();
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
+        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.complete(`done-${i}`, 0, i * 10 + 5);
+      }
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      reg.cancel('overflow', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+      expect(reg.get('overflow')?.status).toBe('cancelled');
+    });
   });
 
   describe('cancel', () => {
