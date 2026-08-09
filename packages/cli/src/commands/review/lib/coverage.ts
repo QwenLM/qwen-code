@@ -511,7 +511,9 @@ export function coverageFromTranscripts(
       if (b === undefined || !wasDeliveredVerbatim(rec.launchPrompt, b)) {
         continue;
       }
-      const brief = BRIEFS[key as keyof typeof BRIEFS];
+      // Record keys carry run suffixes (`reverse-audit--round-N--<digest>`,
+      // `${role}--${file}`); BRIEFS is keyed by the bare role.
+      const brief = BRIEFS[key.split('--')[0] as keyof typeof BRIEFS];
       if (brief?.publicLabel) return brief.publicLabel;
     }
     return null;
@@ -588,7 +590,9 @@ export function coverageFromTranscripts(
     // is too long. A zero-tool-call agent that merely copied the template must not
     // be credited with a disclosed gap — that is the whiff wearing a costume.
     if (rec.successfulToolCalls === 0) {
-      if (!superseded(rec, chunk)) idleAgents.push(name);
+      if (!superseded(rec, chunk)) {
+        idleAgents.push(gapAgentLabel(rec) ?? name);
+      }
       continue;
     }
 
@@ -663,7 +667,7 @@ export function coverageFromTranscripts(
     // handed both for one agent follows whichever came last.
     if (told.length > 0 && rec.diffToolCalls === 0) {
       if (!rewrittenThisRecord && !superseded(rec, chunk)) {
-        unopenedAgents.push(name);
+        unopenedAgents.push(gapAgentLabel(rec) ?? name);
       }
       continue;
     }

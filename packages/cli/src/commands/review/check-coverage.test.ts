@@ -864,15 +864,18 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     // posted body rendered a disclosure as "You are review agent
     // `reverse-audit` — Reverse audit agen...:" — plumbing, truncated, on a
     // public PR page. A record matching a built role prompt gets the
-    // author-register name instead.
+    // author-register name instead. The key is spelled the way
+    // agent-prompt records a findings-taking role — with its digest
+    // suffix — because that is the shape the lookup has to survive.
     transcript('a1', good(1), { calls: 3, range: [0, 100] });
     transcript('a2', good(2), { calls: 2, range: [100, 100] });
     const p = plan();
-    const key = 'reverse-audit';
+    const role = 'reverse-audit';
+    const key = `${role}--round-1--abc123def456`;
     const d = promptRecordDir(p);
     const brief = briefPath(p, key);
     const prompt =
-      `You are ${key}.\n` +
+      `You are ${role}.\n` +
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
     writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
@@ -888,8 +891,36 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     const entry = gaps.find((g) =>
       g.gaps.includes('the negative-path matrix rows'),
     );
-    expect(entry?.agent).toBe(BRIEFS[key].publicLabel);
+    expect(entry?.agent).toBe(BRIEFS[role].publicLabel);
     expect(entry?.agent).not.toContain('You are');
+  });
+
+  it('names idle and unopened rostered agents in the same register', () => {
+    // The fallback name rides the posted body's coverage lines too: a
+    // rostered whole-diff agent that made no tool call, or none against
+    // the diff, must not read "You are ..." there either.
+    const p = plan();
+    const d = promptRecordDir(p);
+    const launch = (key: string, offset: number): string => {
+      const brief = briefPath(p, key);
+      const prompt =
+        `You are ${key}.\n` +
+        `read_file(file_path="${brief}")\n` +
+        `read_file(file_path="${DIFF}", offset=${offset}, limit=100)`;
+      writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+      return prompt;
+    };
+    transcript('tm-idle', launch('reverse-audit--round-1--abc123def456', 0), {
+      calls: 0,
+    });
+    const unopenedKey = 'verify--round-1--fed456abc123';
+    transcript('tm-unopened', launch(unopenedKey, 100), {
+      opens: [briefPath(p, unopenedKey)],
+    });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.idleAgents).toEqual([BRIEFS['reverse-audit'].publicLabel]);
+    expect(r.unopenedAgents).toEqual([BRIEFS['verify'].publicLabel]);
   });
 
   it('reports none when nobody disclosed one', () => {

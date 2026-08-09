@@ -298,6 +298,17 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       // wrapping parenthesis defeated the leading-token match.
       'Budget gap: (none)',
       'Budget gap: [N/A]',
+      // Punctuation-only placeholders wrapped in brackets, with and
+      // without a trailing period — pinned so a later cleanup cannot
+      // delete the trailing-strip and flip these into phantom gaps.
+      'Budget gap: (-)',
+      'Budget gap: (-).',
+      'Budget gap: .(-)',
+      // Quote-wrapped non-answers, straight and smart.
+      'Budget gap: "none"',
+      "Budget gap: 'none'",
+      'Budget gap: “none”',
+      'Budget gap: "N/A"',
       'Budget gap:',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);

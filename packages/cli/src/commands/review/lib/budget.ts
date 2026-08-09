@@ -373,13 +373,14 @@ export function budgetGapDisclosures(finalText: string): string[] {
       raw = raw.slice(0, -1);
     }
     raw = stripWrappers(raw.trim()).trim();
-    // The normalized form also sheds wrapping brackets: `(none)` reached a
-    // real posted body as a phantom gap because the leading parenthesis
-    // defeated the leading-token match below.
+    // The normalized form also sheds wrapping brackets, quotes, and edge
+    // punctuation: `(none)` reached a real posted body as a phantom gap
+    // because the wrapping defeated the leading-token match below, and one
+    // merged pass per side is what lets `(-).` lose its bracket AND its
+    // period — a fixed-order pass strands the bracket.
     const normalized = raw
-      .replace(/^[([{\s]+/, '')
-      .replace(/[)\]}\s]+$/, '')
-      .replace(/[.!…,;:\s]+$/, '')
+      .replace(/^[([{'"“”‘’\s.!…,;:]+/, '')
+      .replace(/[)\]}'"“”‘’\s.!…,;:]+$/, '')
       .trim();
     if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(normalized)) {
       continue;
