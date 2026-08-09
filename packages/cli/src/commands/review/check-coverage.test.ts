@@ -39,6 +39,7 @@ import {
   findingsFilePath,
 } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import { checkCoverageCommand } from './check-coverage.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -856,6 +857,39 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.blindAgents).toEqual(['chunk 1']);
     expect(r.budgetGaps).toEqual([]);
+  });
+
+  it("names a rostered discloser by its brief's publicLabel, not its prompt", () => {
+    // The fallback label is the launch prompt's first line, and a real
+    // posted body rendered a disclosure as "You are review agent
+    // `reverse-audit` — Reverse audit agen...:" — plumbing, truncated, on a
+    // public PR page. A record matching a built role prompt gets the
+    // author-register name instead.
+    transcript('a1', good(1), { calls: 3, range: [0, 100] });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
+    const p = plan();
+    const key = 'reverse-audit';
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, key);
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('tm-gap', prompt, {
+      calls: 3,
+      opens: [brief],
+      text:
+        'No issues found — mapped the behaviours.\n' +
+        'Budget gap: the negative-path matrix rows',
+    });
+
+    const gaps = coverageFromTranscripts(p, ENV).budgetGaps;
+    const entry = gaps.find((g) =>
+      g.gaps.includes('the negative-path matrix rows'),
+    );
+    expect(entry?.agent).toBe(BRIEFS[key].publicLabel);
+    expect(entry?.agent).not.toContain('You are');
   });
 
   it('reports none when nobody disclosed one', () => {

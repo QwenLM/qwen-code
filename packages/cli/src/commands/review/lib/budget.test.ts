@@ -294,6 +294,10 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: N/A - stayed under budget',
       'Budget gap: nothing skipped',
       'Budget gap: no gaps',
+      // Bracket-wrapped non-answers reached a real posted body: the
+      // wrapping parenthesis defeated the leading-token match.
+      'Budget gap: (none)',
+      'Budget gap: [N/A]',
       'Budget gap:',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);

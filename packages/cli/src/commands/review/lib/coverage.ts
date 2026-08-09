@@ -501,6 +501,22 @@ export function coverageFromTranscripts(
     }
     return g;
   };
+  // The rostered role a record's launch was built for, said as the brief's
+  // publicLabel — the register the posted body renders disclosures in.
+  // `null` when the launch matches no built role prompt (a chunk agent's
+  // label is already its chunk; anything else keeps the fallback).
+  const gapAgentLabel = (rec: AgentRecord): string | null => {
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined || !wasDeliveredVerbatim(rec.launchPrompt, b)) {
+        continue;
+      }
+      const brief = BRIEFS[key as keyof typeof BRIEFS];
+      if (brief?.publicLabel) return brief.publicLabel;
+    }
+    return null;
+  };
+
   // A record's gaps are silenced only by a GAP-FREE superseding record — a
   // genuine repair. Two relaunches that both hit the ceiling and both
   // disclose would otherwise supersede each other and drop every gap.
@@ -673,7 +689,12 @@ export function coverageFromTranscripts(
     // mutually supersede every disclosure into silence.
     const gaps = gapsOf(rec);
     if (gaps.length > 0 && !gapsSuperseded(rec, chunk)) {
-      budgetGaps.push({ agent: name, gaps });
+      // Named in the AUTHOR's register where the record matches a rostered
+      // launch: the fallback label is the launch prompt's first line, and a
+      // real posted body rendered a disclosure as "You are review agent
+      // `reverse-audit` — Reverse audit agen...:" — the run's own plumbing,
+      // truncated, on a public PR page.
+      budgetGaps.push({ agent: gapAgentLabel(rec) ?? name, gaps });
     }
 
     // What it was told to read, plus what it demonstrably read. The second

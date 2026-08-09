@@ -373,7 +373,14 @@ export function budgetGapDisclosures(finalText: string): string[] {
       raw = raw.slice(0, -1);
     }
     raw = stripWrappers(raw.trim()).trim();
-    const normalized = raw.replace(/[.!…,;:\s]+$/, '').trim();
+    // The normalized form also sheds wrapping brackets: `(none)` reached a
+    // real posted body as a phantom gap because the leading parenthesis
+    // defeated the leading-token match below.
+    const normalized = raw
+      .replace(/^[([{\s]+/, '')
+      .replace(/[)\]}\s]+$/, '')
+      .replace(/[.!…,;:\s]+$/, '')
+      .trim();
     if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(normalized)) {
       continue;
     }
