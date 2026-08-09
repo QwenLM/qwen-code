@@ -5,6 +5,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import {
+  needsConfirmation,
+  isAutoEditApproved,
+} from '../../core/permissionFlow.js';
+import { ApprovalMode } from '../../config/approval-mode.js';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -307,6 +312,86 @@ describe('WorkflowTool', () => {
     const tool = new WorkflowTool(fakeConfig());
     const invocation = tool.build({ script: 'return 1' });
     expect(await invocation.getDefaultPermission()).toBe('ask');
+  });
+
+  // The headless / CI path.
+  //
+  // WorkflowTool defaults to `'ask'`, and an unattended run cannot answer a
+  // confirmation prompt: `review run` spawns the CLI with stdin closed and
+  // `--approval-mode yolo`. So whether a workflow can run in CI at all comes
+  // down to how that `'ask'` resolves against the approval mode — a decision
+  // that lives in `permissionFlow`, not in this tool, and was pinned by no
+  // test on either side.
+  //
+  // These cases exist so a change to the tool's confirmation surface cannot
+  // silently make unattended runs hang. That failure would not look like a
+  // test failure; it would look like CI timing out.
+  describe('unattended approval path', () => {
+    it('YOLO resolves the "ask" default to no confirmation', () => {
+      expect(
+        needsConfirmation('ask', ApprovalMode.YOLO, ToolNames.WORKFLOW),
+      ).toBe(false);
+    });
+
+    // AUTO_EDIT auto-approves on `confirmationDetails.type`, and WorkflowTool
+    // overrides neither `getConfirmationDetails` nor `requiresUserInteraction`
+    // — so it inherits BaseToolInvocation's generic `'info'` dialog, which is
+    // exactly what `isAutoEditApproved` accepts. That inheritance is
+    // load-bearing but incidental: giving WorkflowTool a richer confirmation
+    // UI later would flip AUTO_EDIT back to prompting. Assert the actual
+    // details object rather than a hard-coded 'info' so the link is tested.
+    it('AUTO_EDIT auto-approves via the inherited info dialog', async () => {
+      const tool = new WorkflowTool(fakeConfig());
+      const invocation = tool.build({ script: 'return 1' });
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      expect(details.type).toBe('info');
+      expect(isAutoEditApproved(ApprovalMode.AUTO_EDIT, details)).toBe(true);
+    });
+
+    it('does not demand user interaction, which would force a prompt in every mode', () => {
+      const tool = new WorkflowTool(fakeConfig());
+      const invocation = tool.build({ script: 'return 1' });
+      // Optional on the interface; an absent method means the same thing,
+      // since callers default the flag to false.
+      expect(invocation.requiresUserInteraction?.() ?? false).toBe(false);
+      // requiresUserInteraction short-circuits ahead of the YOLO branch, so
+      // were it true the mode would not matter.
+      expect(
+        needsConfirmation(
+          'ask',
+          ApprovalMode.YOLO,
+          ToolNames.WORKFLOW,
+          /* requiresUserInteraction */ true,
+        ),
+      ).toBe(true);
+    });
+
+    // DEFAULT still prompts — recorded as the expected contract, not a bug.
+    // An unattended caller is responsible for choosing a non-interactive
+    // approval mode; `review run` defaults to `yolo` for exactly this reason.
+    it('DEFAULT still requires confirmation', () => {
+      expect(
+        needsConfirmation('ask', ApprovalMode.DEFAULT, ToolNames.WORKFLOW),
+      ).toBe(true);
+    });
+
+    // The end-to-end shape of an unattended run: a bare Config exposing none
+    // of the interactive surface (no isInteractive, no approval bridge, no
+    // completion channel), a foreground call, and no stdin. It must complete
+    // and return a result rather than block waiting for something to answer.
+    it('a foreground run completes against a config with no interactive surface', async () => {
+      const tool = new WorkflowTool(fakeConfig(), {
+        dispatch: async (prompt) => `T:${prompt}`,
+      });
+      const invocation = tool.build({
+        script: `const r = await agent("do work"); return r;`,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      expect(JSON.stringify(result.llmContent)).toContain('T:do work');
+    });
   });
 
   it('execute() runs the script via WorkflowOrchestrator with injected dispatch and returns a ToolResult', async () => {
