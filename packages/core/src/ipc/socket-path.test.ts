@@ -40,7 +40,17 @@ describe('resolvePeerSocketPath', () => {
     );
   });
 
-  it.skipIf(isWindows)('falls back to the system temp dir', () => {
+  // The tmpdir branch only survives when the resulting path still fits in
+  // sun_path; past that `resolvePeerSocketPath` deliberately drops to /tmp,
+  // so on a host with a long TMPDIR (deep self-hosted runner work dirs, Nix
+  // sandboxes, devcontainers) this expectation would fail against correct
+  // code. Skip rather than assert the wrong branch.
+  const TMPDIR_SUFFIX_BYTES = Buffer.byteLength('/qwen-socks/4242.sock');
+  it.skipIf(
+    isWindows ||
+      Buffer.byteLength(os.tmpdir()) + TMPDIR_SUFFIX_BYTES >
+        MAX_SOCKET_PATH_BYTES,
+  )('falls back to the system temp dir', () => {
     expect(resolvePeerSocketPath(4242)).toBe(
       `${os.tmpdir()}/qwen-socks/4242.sock`.replace(/\/+/g, '/'),
     );

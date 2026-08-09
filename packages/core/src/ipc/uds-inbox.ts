@@ -62,17 +62,28 @@ function createLineReader(
   let buffer = '';
   return (chunk: string) => {
     buffer += chunk;
-    if (buffer.length > MAX_FRAME_BYTES) {
-      buffer = '';
-      onOverflow();
-      return;
-    }
+    // Complete lines are extracted before the cap is applied. Capping the
+    // whole accumulated buffer first would discard legal, under-cap frames
+    // whenever a pipelining sender happened to put several of them in one
+    // chunk, and would reject a line of exactly MAX_FRAME_BYTES because its
+    // own terminating newline pushed the buffer one over.
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
+      if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) {
+        buffer = '';
+        onOverflow();
+        return;
+      }
       if (line.trim().length > 0) onLine(line);
       newline = buffer.indexOf('\n');
+    }
+    // What is left is an incomplete line. Cap it too, or a peer that never
+    // writes a newline grows the buffer until the process dies.
+    if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES) {
+      buffer = '';
+      onOverflow();
     }
   };
 }
@@ -139,7 +150,7 @@ export async function startPeerInbox(
       },
       () => {
         debugLogger.error(
-          'peer sent more than 1 MiB without a newline; dropping the connection',
+          'peer sent a line over 1 MiB; dropping the connection',
         );
         socket.destroy();
       },

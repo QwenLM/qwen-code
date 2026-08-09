@@ -21,6 +21,7 @@ import {
   encodePeerFrame,
   type PeerFrame,
 } from './peer-frames.js';
+import { MAX_SOCKET_PATH_BYTES } from './socket-path.js';
 import { probePeerSocket, sendPeerFrame, PeerSendError } from './uds-client.js';
 import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
 
@@ -30,8 +31,31 @@ let received: PeerFrame[];
 
 const isWindows = process.platform === 'win32';
 
+/**
+ * Root for this suite's sockets.
+ *
+ * `startPeerInbox` refuses any path over `MAX_SOCKET_PATH_BYTES`, and
+ * `os.tmpdir()` alone eats that whole budget on some hosts (deep
+ * self-hosted runner work dirs, Nix sandboxes, devcontainers) — which
+ * fails every test here with `inbox failed to start`, for a reason that
+ * has nothing to do with the inbox. Mirror the short-path fallback
+ * `resolvePeerSocketPath` already applies to production paths.
+ */
+function socketTmpRoot(): string {
+  // Longest path the suite builds: <root>/qwen-inbox-XXXXXX/socks/<name>.
+  const longest = path.join(
+    os.tmpdir(),
+    'qwen-inbox-XXXXXX',
+    'socks',
+    'a.sock',
+  );
+  return Buffer.byteLength(longest) <= MAX_SOCKET_PATH_BYTES
+    ? os.tmpdir()
+    : '/tmp';
+}
+
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-inbox-'));
+  tmpDir = await fs.mkdtemp(path.join(socketTmpRoot(), 'qwen-inbox-'));
   received = [];
 });
 
@@ -199,6 +223,49 @@ describe.skipIf(isWindows)('framing', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]).toMatchObject({ message: { content: 'after' } });
+  });
+
+  it('keeps pipelined frames whose accumulated bytes cross the cap', async () => {
+    // Regression: the cap used to be applied to the whole accumulated
+    // buffer *before* complete lines were extracted. Two legal frames on
+    // one connection push the buffer past the cap between the newline of
+    // the first and the end of the second, so both were discarded and the
+    // connection destroyed — even though neither line is over-cap.
+    const started = await listen();
+    const filler = 'z'.repeat(MAX_FRAME_BYTES - 512);
+    const first = encodePeerFrame(buildUserFrame({ content: `a${filler}` }));
+    const second = encodePeerFrame(buildUserFrame({ content: `b${filler}` }));
+    expect(Buffer.byteLength(first)).toBeLessThan(MAX_FRAME_BYTES);
+    expect(
+      Buffer.byteLength(first) + Buffer.byteLength(second),
+    ).toBeGreaterThan(MAX_FRAME_BYTES);
+
+    await writeRaw(started.socketPath, [first + second]);
+    await settle();
+
+    const contents = received.map((f) =>
+      (f as { message: { content: string } }).message.content.slice(0, 1),
+    );
+    expect(contents).toEqual(['a', 'b']);
+  });
+
+  it('accepts a line of exactly the cap', async () => {
+    // The terminating newline is not part of the line, so a frame sized
+    // exactly at the cap has to be admitted, not rejected off-by-one.
+    const started = await listen();
+    const base = buildUserFrame({ content: '' });
+    const overhead = Buffer.byteLength(
+      encodePeerFrame({ ...base, message: { ...base.message, content: '' } }),
+    );
+    // encodePeerFrame appends the newline, which is not part of the line.
+    const padding = MAX_FRAME_BYTES - (overhead - 1);
+    const frame = buildUserFrame({ content: 'y'.repeat(padding) });
+    const line = encodePeerFrame(frame);
+    expect(Buffer.byteLength(line) - 1).toBe(MAX_FRAME_BYTES);
+
+    await writeRaw(started.socketPath, [line]);
+    await settle();
+    expect(received).toHaveLength(1);
   });
 
   it('drops a connection that never sends a newline', async () => {

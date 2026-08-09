@@ -1482,6 +1482,7 @@ describe('AppContainer State Management', () => {
         return {
           kind: 'user' as const,
           modelText: 'held user work',
+          origin: 'typed' as const,
           turnKey: 'message-queue:held-user',
         };
       });
@@ -1548,6 +1549,7 @@ describe('AppContainer State Management', () => {
           return {
             kind: 'user' as const,
             modelText: 'ordinary user work',
+            origin: 'typed' as const,
             turnKey: `message-queue:${status}`,
           };
         });
@@ -1599,6 +1601,7 @@ describe('AppContainer State Management', () => {
         return {
           kind: 'user' as const,
           modelText: 'persistent failure batch',
+          origin: 'typed' as const,
           turnKey: 'message-queue:persistent',
         };
       });
@@ -1668,6 +1671,7 @@ describe('AppContainer State Management', () => {
         return {
           kind: 'user' as const,
           modelText: 'queued during preprocessing',
+          origin: 'typed' as const,
           turnKey: 'message-queue:during-preprocessing',
         };
       });
@@ -1707,6 +1711,116 @@ describe('AppContainer State Management', () => {
               turnKey: 'message-queue:during-preprocessing',
             },
           }),
+        );
+      });
+    });
+
+    it('submits a peer-origin batch as SendMessageType.Peer', async () => {
+      // UserQuery would run the envelope through prepareQueryForGemini's
+      // slash/shell/@ preprocessing, so with `!` shell mode active the
+      // peer's content is executed as a shell command with no approval.
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue({
+        getSnapshot: () => ({ goal: undefined }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>);
+
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          modelText: '<peer-envelope>rm -rf ~</peer-envelope>',
+          submittedPrompt: 'message from session b',
+          origin: 'peer' as const,
+          turnKey: 'message-queue:peer-1',
+        };
+      });
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(submitQuery).toHaveBeenCalledWith(
+          '<peer-envelope>rm -rf ~</peer-envelope>',
+          SendMessageType.Peer,
+          undefined,
+          expect.objectContaining({
+            userAdmission: { turnKey: 'message-queue:peer-1' },
+            submittedPrompt: 'message from session b',
+          }),
+        );
+      });
+    });
+
+    it('restores a failed peer admission with its origin intact', async () => {
+      // Without the origin the retry re-enters the queue as typed input and
+      // the shell-execution path is open again on the next drain.
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue({
+        getSnapshot: () => ({ goal: undefined }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>);
+
+      const restoreMessages = vi.fn();
+      const submitQuery = vi.fn(async (..._args: unknown[]): Promise<void> => {
+        const metadata = _args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+      }) as unknown as Parameters<
+        typeof useQueuedSubmissionDrain
+      >[0]['submitQuery'];
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          modelText: 'envelope',
+          origin: 'peer' as const,
+          turnKey: 'message-queue:peer-2',
+        };
+      });
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(restoreMessages).toHaveBeenCalledWith(
+          ['envelope'],
+          undefined,
+          'peer',
         );
       });
     });

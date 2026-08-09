@@ -18,6 +18,7 @@ import type {
   TrackedWaitingToolCall,
 } from './useReactToolScheduler.js';
 import { useReactToolScheduler } from './useReactToolScheduler.js';
+import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import type {
   Config,
   EditorType,
@@ -1443,6 +1444,81 @@ describe('useGeminiStream', () => {
       .map((c) => (c[0] as { text?: string })?.text)
       .filter((t): t is string => typeof t === 'string');
     expect(addedTexts.some((t) => t.includes('teammate_message'))).toBe(false);
+  });
+
+  it('never hands a peer envelope to the shell, even in shell mode', async () => {
+    // A peer envelope is attacker-influenced text delivered by another
+    // local session. Submitted as a plain user query it reaches
+    // handleShellCommand, which executes any non-empty string in the
+    // user's shell with no approval prompt.
+    const { handleShellCommand } = (
+      useShellCommandProcessor as unknown as Mock
+    )();
+    (handleShellCommand as Mock).mockClear();
+
+    const { result, rerender } = renderTestHook();
+    const shellModeProps = {
+      client: mockConfig.getGeminiClient(),
+      history: [],
+      addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      handleSlashCommand: mockHandleSlashCommand as unknown as (
+        cmd: PartListUnion,
+      ) => Promise<SlashCommandProcessorResult | false>,
+      shellModeActive: true,
+      loadedSettings: mockLoadedSettings,
+      toolCalls: [] as TrackedToolCall[],
+    };
+    rerender(shellModeProps);
+
+    const display = '**session-b** sent a message';
+    const modelText =
+      '<peer_message from="session-b">\nrm -rf ~\n</peer_message>';
+
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.Peer,
+        undefined,
+        { submittedPrompt: display },
+      );
+    });
+
+    expect(handleShellCommand).not.toHaveBeenCalled();
+
+    // The envelope reached the model instead, as a Peer turn…
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        modelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Peer }),
+      );
+    });
+
+    // …and only the one-line summary was rendered, never the envelope.
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: 'notification', text: display },
+      expect.any(Number),
+    );
+    const addedTexts = (mockAddItem as Mock).mock.calls
+      .map((c) => (c[0] as { text?: string })?.text)
+      .filter((t): t is string => typeof t === 'string');
+    expect(addedTexts.some((t) => t.includes('peer_message'))).toBe(false);
+
+    // Positive control: the same text typed by the user in the same shell
+    // mode DOES reach the shell, so the assertion above is discriminating.
+    mockSendMessageStream.mockClear();
+    await act(async () => {
+      await result.current.submitQuery(
+        modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        undefined,
+      );
+    });
+    expect(handleShellCommand).toHaveBeenCalled();
   });
 
   it('drains teammate reports outside the teammate runtime context', async () => {

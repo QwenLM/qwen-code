@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import {
   ApprovalMode,
   buildUserFrame,
+  MAX_SOCKET_PATH_BYTES,
   sendPeerFrame,
   startPeerInbox,
   type PeerFrame,
@@ -25,6 +26,28 @@ import { PeerMessaging } from './peer-messaging.js';
 
 const isWindows = process.platform === 'win32';
 
+/**
+ * Root for this suite's sockets.
+ *
+ * Every socket path here is passed explicitly, which bypasses the
+ * short-path fallback `resolvePeerSocketPath` applies to production
+ * paths — so a long `os.tmpdir()` (deep self-hosted runner work dirs, Nix
+ * sandboxes, devcontainers) blows the `sun_path` budget and fails every
+ * test with `peer messaging failed to start`. Apply the same fallback.
+ */
+function socketTmpRoot(): string {
+  // Longest path the suite builds: <root>/qwen-peer-msg-XXXXXX/socks/sender.sock.
+  const longest = path.join(
+    os.tmpdir(),
+    'qwen-peer-msg-XXXXXX',
+    'socks',
+    'sender.sock',
+  );
+  return Buffer.byteLength(longest) <= MAX_SOCKET_PATH_BYTES
+    ? os.tmpdir()
+    : '/tmp';
+}
+
 let tmpDir: string;
 let messaging: PeerMessaging | null = null;
 /** Stands in for the peer that sent us something, to collect receipts. */
@@ -32,7 +55,7 @@ let senderInbox: PeerInbox | null = null;
 let receipts: PeerFrame[];
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-peer-msg-'));
+  tmpDir = await fs.mkdtemp(path.join(socketTmpRoot(), 'qwen-peer-msg-'));
   receipts = [];
 });
 

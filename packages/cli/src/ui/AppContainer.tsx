@@ -463,7 +463,9 @@ export function useQueuedSubmissionDrain({
           )
         : submitQuery(
             submission.modelText,
-            SendMessageType.UserQuery,
+            submission.origin === 'peer'
+              ? SendMessageType.Peer
+              : SendMessageType.UserQuery,
             undefined,
             {
               userAdmission: { turnKey: submission.turnKey },
@@ -474,6 +476,7 @@ export function useQueuedSubmissionDrain({
                 restoreMessages(
                   [submission.modelText],
                   submission.submittedPrompt,
+                  submission.origin,
                 );
                 markAdmissionFailed();
               },
@@ -2294,7 +2297,10 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (!peerMessaging) return;
     peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
-      addMessage(modelText, false, displayText);
+      // Tagged 'peer' so the drain submits it as SendMessageType.Peer.
+      // Without the tag it drains as a plain user query and, with `!`
+      // shell mode active, the envelope is executed as a shell command.
+      addMessage(modelText, false, displayText, 'peer');
     });
   }, [addMessage, peerMessaging]);
 

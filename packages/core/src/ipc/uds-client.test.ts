@@ -38,13 +38,22 @@ vi.mock('node:net', () => ({
 
 const { probePeerSocket } = await import('./uds-client.js');
 
+// `node:net` is mocked, but `isLocalIpcPath` is not: it gates every dial and
+// accepts only named pipes on win32. A POSIX path here would make
+// `probePeerSocket` return false without dialing, turning the whole suite red
+// on the `test_windows` merge gate for reasons unrelated to classification.
+const PROBE_PATH =
+  process.platform === 'win32'
+    ? '\\\\.\\pipe\\qwen-probe'
+    : '/tmp/qwen-probe/a.sock';
+
 afterEach(() => {
   sockets.length = 0;
 });
 
 /** Dials, then fails the dial with `code`, and reports the verdict. */
 function probeWithErrno(code: string): Promise<boolean> {
-  const verdict = probePeerSocket('/tmp/qwen-probe/a.sock');
+  const verdict = probePeerSocket(PROBE_PATH);
   const socket = sockets.at(-1);
   if (!socket) throw new Error('probePeerSocket did not dial');
   const error: NodeJS.ErrnoException = new Error(code);
@@ -72,7 +81,7 @@ describe('probePeerSocket errno classification', () => {
   );
 
   it('reports a peer alive when the dial connects', async () => {
-    const verdict = probePeerSocket('/tmp/qwen-probe/a.sock');
+    const verdict = probePeerSocket(PROBE_PATH);
     sockets.at(-1)?.emit('connect');
     expect(await verdict).toBe(true);
   });
