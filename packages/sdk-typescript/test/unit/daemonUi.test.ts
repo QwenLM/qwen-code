@@ -3646,7 +3646,7 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       source: 'history_truncated',
       data,
       text: expect.stringContaining(
-        'kept the latest 10000 events and dropped 16371 older replay events',
+        'kept the latest 10000 source events and dropped 16371 older source events',
       ) as string,
     });
     expect((event as { text: string }).text).toContain(

@@ -828,6 +828,9 @@ function liveJournalTextChunk(event: BridgeEvent):
   ) {
     return undefined;
   }
+  if (!hasOnlyModeledChunkKeys(data)) {
+    return undefined;
+  }
   if (
     hasDiscreteMessageMeta(data?.update?._meta) ||
     hasUnmodeledTextMeta(data?.update?._meta)
@@ -844,6 +847,20 @@ function liveJournalTextChunk(event: BridgeEvent):
     sourceRecordIds: extractSourceRecordIdsFromMeta(data?.update?._meta),
     parentToolCallId: extractParentToolCallIdFromMeta(data?.update?._meta),
   };
+}
+
+// `mergeLiveJournalTextEvent` rebuilds a merged entry by spread-merging
+// the segment's first and last source events, so only chunks whose data
+// and update carry exactly the modeled keys can join a segment — any
+// extra key would leak unmodeled fields into the merged aggregate.
+function hasOnlyModeledChunkKeys(data: SessionUpdateData | undefined): boolean {
+  if (!data || !data.update) return false;
+  return (
+    Object.keys(data).every((key) => key === 'sessionId' || key === 'update') &&
+    Object.keys(data.update).every(
+      (key) => key === 'sessionUpdate' || key === 'content' || key === '_meta',
+    )
+  );
 }
 
 function mergeLiveJournalTextEvent(

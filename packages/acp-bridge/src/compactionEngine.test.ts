@@ -859,6 +859,38 @@ describe('TurnBoundaryCompactionEngine', () => {
       ).toEqual({ source: 'slash_command' });
     });
 
+    it.each([
+      [
+        'an unmodeled update key',
+        (event: BridgeEvent) => {
+          (event.data as { update: Record<string, unknown> }).update[
+            'annotations'
+          ] = [];
+          return event;
+        },
+      ],
+      [
+        'an unmodeled data key',
+        (event: BridgeEvent) => {
+          (event.data as Record<string, unknown>)['attachments'] = [];
+          return event;
+        },
+      ],
+    ] as const)(
+      'keeps text chunks carrying %s out of merged live entries',
+      (_name, decorate) => {
+        const engine = new TurnBoundaryCompactionEngine();
+        engine.ingest(makeTextChunk(1, 'first'));
+        engine.ingest(decorate(makeTextChunk(2, 'second')));
+        engine.ingest(makeTextChunk(3, 'third'));
+
+        const live = engine.snapshot().liveJournal;
+        expect(live).toHaveLength(3);
+        expect(extractTexts(live)).toEqual(['first', 'second', 'third']);
+        expect(live.map((event) => event.id)).toEqual([1, 2, 3]);
+      },
+    );
+
     it('does not let snapshot frequency change journal eviction', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 1,
