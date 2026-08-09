@@ -370,7 +370,16 @@ jobs:
 
   triage:
     needs: ['authorize']
-    timeout-minutes: 30
+    # TUNABLE WITHOUT A CODE CHANGE: set the repository variable in
+    # Settings → Variables. Why the fallback is 60: the fixed 30 was
+    # measurably clipping the distribution — 22 successful triage jobs
+    # sampled on 2026-08-09 ran median 5.8m / p90 22.3m / max 29.5m, and
+    # five substantial PRs (8723, 8726, 8731, 8764, 8801) died at exactly
+    # the cap, each discarding a full agent run. Triage is advisory, so
+    # the worst case a longer budget risks is one held runner; a killed
+    # run wastes the same runner AND the work. The fromJSON(vars.X || N)
+    # form is probe-verified on a live runner (see #8731).
+    timeout-minutes: '${{ fromJSON(vars.QWEN_TRIAGE_TIMEOUT_MINUTES || 60) }}'
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
       # Keep non-runnable PR/comment triggers out of the shared per-number

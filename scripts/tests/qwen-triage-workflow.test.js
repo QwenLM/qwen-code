@@ -5847,3 +5847,20 @@ describe('qwen-triage build-process guard', () => {
     }
   }, 30000);
 });
+
+describe('triage job budget', () => {
+  // The fixed 30-minute cap was measurably clipping the distribution: 22
+  // successful triage jobs sampled on 2026-08-09 ran median 5.8m / p90
+  // 22.3m / max 29.5m, and five substantial PRs died at exactly the cap,
+  // each discarding a full agent run for nothing — triage is advisory, so
+  // a killed run wastes the runner AND the work it was about to publish.
+  // The budget is a repository variable so the next resize needs no PR;
+  // the fallback keeps an unconfigured repo bounded. Both halves pinned so
+  // neither the knob nor its default can silently vanish.
+  it('is operator-tunable with a bounded fallback', () => {
+    const triageJob = job('triage');
+    expect(triageJob).toContain(
+      "timeout-minutes: '${{ fromJSON(vars.QWEN_TRIAGE_TIMEOUT_MINUTES || 60) }}'",
+    );
+  });
+});
