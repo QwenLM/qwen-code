@@ -937,6 +937,7 @@ export async function main() {
             settings.merged.context?.fileFiltering?.customIgnoreFiles,
             managedCoordinationWorker.coordination.writeMode,
             managedCoordinationWorker.coordination.projectCwd,
+            managedCoordinationWorker.coordination.inputSnapshot,
           ),
         }
       : undefined;
@@ -1004,24 +1005,30 @@ export async function main() {
               managedCoordinationWorker.coordination.sideband,
             )
           : process.env;
-        await sendAgentViewWorkerEvent({
-          type: 'ready',
-          cwd: process.cwd(),
-          capabilities: ['ready', 'heartbeat', 'state'],
-          summary: config.getQuestion(),
-        }, sidebandEnv).catch((error) => {
+        await sendAgentViewWorkerEvent(
+          {
+            type: 'ready',
+            cwd: process.cwd(),
+            capabilities: ['ready', 'heartbeat', 'state'],
+            summary: config.getQuestion(),
+          },
+          sidebandEnv,
+        ).catch((error) => {
           debugLogger.debug(
             `Agent View worker ready sideband failed: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
         });
-        await reportAgentViewWorkerState({
-          promptId: managedCoordinationWorker?.coordination.promptId,
-          sessionState: managedCoordinationWorker ? 'working' : 'idle',
-          cwd: process.cwd(),
-          summary: config.getQuestion(),
-        }, sidebandEnv);
+        await reportAgentViewWorkerState(
+          {
+            promptId: managedCoordinationWorker?.coordination.promptId,
+            sessionState: managedCoordinationWorker ? 'working' : 'idle',
+            cwd: process.cwd(),
+            summary: config.getQuestion(),
+          },
+          sidebandEnv,
+        );
         startAgentViewWorkerHeartbeat(sidebandEnv);
       }
     }
@@ -1542,12 +1549,8 @@ export async function main() {
       const { parseManagedCoordinationResult } = await import(
         './agent-view/coordination-worker.js'
       );
-      const {
-        createAgentViewWorkerSidebandEnv,
-        reportAgentViewWorkerResult,
-      } = await import(
-        './agent-view/worker-sideband.js'
-      );
+      const { createAgentViewWorkerSidebandEnv, reportAgentViewWorkerResult } =
+        await import('./agent-view/worker-sideband.js');
       let capturedResult: CLIResultMessage | undefined;
       let exitCode = 1;
       let executionError: unknown;
@@ -1561,6 +1564,7 @@ export async function main() {
             adapter: new JsonOutputAdapter(nonInteractiveConfig, (result) => {
               capturedResult = result;
             }),
+            processAtCommands: false,
           },
         );
       } catch (error) {
@@ -1577,13 +1581,16 @@ export async function main() {
           }
         : parseManagedCoordinationResult(capturedResult);
       try {
-        await reportAgentViewWorkerResult({
-          promptId: managedCoordinationWorker.coordination.promptId,
-          attemptId: managedCoordinationWorker.coordination.attemptId,
-          ...result,
-        }, createAgentViewWorkerSidebandEnv(
-          managedCoordinationWorker.coordination.sideband,
-        ));
+        await reportAgentViewWorkerResult(
+          {
+            promptId: managedCoordinationWorker.coordination.promptId,
+            attemptId: managedCoordinationWorker.coordination.attemptId,
+            ...result,
+          },
+          createAgentViewWorkerSidebandEnv(
+            managedCoordinationWorker.coordination.sideband,
+          ),
+        );
       } catch (error) {
         debugLogger.warn('Managed coordination result sideband failed', error);
         exitCode = 1;
@@ -1616,19 +1623,18 @@ async function exitManagedCoordinationFailure(
     error instanceof Error ? error.message : String(error)
   ).slice(0, 32_000);
   try {
-    const {
-      createAgentViewWorkerSidebandEnv,
-      reportAgentViewWorkerResult,
-    } = await import(
-      './agent-view/worker-sideband.js'
+    const { createAgentViewWorkerSidebandEnv, reportAgentViewWorkerResult } =
+      await import('./agent-view/worker-sideband.js');
+    await reportAgentViewWorkerResult(
+      {
+        promptId: worker.coordination.promptId,
+        attemptId: worker.coordination.attemptId,
+        outcome: 'failed',
+        summary,
+        artifacts: [],
+      },
+      createAgentViewWorkerSidebandEnv(worker.coordination.sideband),
     );
-    await reportAgentViewWorkerResult({
-      promptId: worker.coordination.promptId,
-      attemptId: worker.coordination.attemptId,
-      outcome: 'failed',
-      summary,
-      artifacts: [],
-    }, createAgentViewWorkerSidebandEnv(worker.coordination.sideband));
   } catch (sidebandError) {
     debugLogger.warn(
       'Managed coordination failure sideband failed',

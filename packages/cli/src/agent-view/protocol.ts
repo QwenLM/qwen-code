@@ -34,6 +34,7 @@ export interface AgentViewCoordinationDispatchRequest {
   coordinationId: string;
   cwd: string;
   tasks: AgentViewCoordinationTaskRequest[];
+  environment: Record<string, string>;
 }
 
 export interface AgentViewCoordinationReassignRequest {
@@ -41,6 +42,7 @@ export interface AgentViewCoordinationReassignRequest {
   taskId: string;
   taskFile: string;
   writeMode: AgentViewCoordinationWriteMode;
+  environment: Record<string, string>;
 }
 
 export interface AgentViewCoordinationDispatchAck {

@@ -448,6 +448,7 @@ export interface RunNonInteractiveOptions {
    * cleanly the run emits a no-op result and exits 0.
    */
   continueInterrupted?: boolean;
+  processAtCommands?: boolean;
 }
 
 /**
@@ -1163,7 +1164,7 @@ export async function runNonInteractive(
           }
         }
 
-        if (!slashHandled) {
+        if (!slashHandled && options.processAtCommands !== false) {
           const { processedQuery, shouldProceed } = await handleAtCommand({
             query: input,
             config,

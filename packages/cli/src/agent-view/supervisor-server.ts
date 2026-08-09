@@ -7,8 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as path from 'node:path';
-import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
-import { AGENT_VIEW_MAX_COORDINATION_WORKERS } from './protocol.js';
+import { AGENT_VIEW_PROTOCOL_VERSION , AGENT_VIEW_MAX_COORDINATION_WORKERS } from './protocol.js';
 import type {
   AgentViewSupervisorOperation,
   AgentViewSupervisorRequestMap,
@@ -406,7 +405,11 @@ function parseSupervisorParams<Op extends AgentViewSupervisorOperation>(
   params: unknown,
 ): AgentViewSupervisorRequestMap[Op] {
   if (op === 'dispatchCoordination') {
-    if (!isRecord(params) || typeof params['cwd'] !== 'string') {
+    if (
+      !isRecord(params) ||
+      typeof params['cwd'] !== 'string' ||
+      !isStringRecord(params['environment'])
+    ) {
       throw new Error('Coordination dispatch requires an absolute cwd.');
     }
     if (!path.isAbsolute(params['cwd'])) {
@@ -449,6 +452,7 @@ function parseSupervisorParams<Op extends AgentViewSupervisorOperation>(
       !isFullUuid(params['coordinationId']) ||
       !isFullUuid(params['taskId']) ||
       typeof params['taskFile'] !== 'string' ||
+      !isStringRecord(params['environment']) ||
       !path.isAbsolute(params['taskFile']) ||
       (params['writeMode'] !== 'read-only' &&
         params['writeMode'] !== 'isolated-writer')
@@ -479,6 +483,13 @@ function parseSupervisorParams<Op extends AgentViewSupervisorOperation>(
   return (
     isRecord(params) ? params : undefined
   ) as AgentViewSupervisorRequestMap[Op];
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((entry) => typeof entry === 'string')
+  );
 }
 
 function isSupervisorOperation(

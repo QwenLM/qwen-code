@@ -86,6 +86,7 @@ import {
   createAgentViewWorkerSidebandEnv,
   QWEN_AGENT_VIEW_ATTEMPT_ID,
   QWEN_AGENT_VIEW_COORDINATION_MODE,
+  QWEN_AGENT_VIEW_INPUT_SNAPSHOT,
   QWEN_AGENT_VIEW_GENERATION,
   QWEN_AGENT_VIEW_PROJECT_CWD,
   QWEN_AGENT_VIEW_PROMPT_ID,
@@ -196,6 +197,7 @@ export interface AgentViewSupervisorProcessOptions
   extends AgentViewSupervisorPathOptions {
   launchPtyHost?: (
     launch: AgentViewLaunchFile,
+    workerEnvironment?: Readonly<Record<string, string>>,
   ) => Promise<AgentViewPtyHostHandle>;
   hibernationPolicy?: AgentViewSupervisorHibernationPolicy;
   waitForWorkerReady?: boolean;
@@ -608,7 +610,11 @@ class AgentViewSupervisorProcessHandler
         );
       }
       await this.assertCoordinationCapacity(attempts);
-      return this.launchCoordinationAttempts(request.cwd, attempts);
+      return this.launchCoordinationAttempts(
+        request.cwd,
+        attempts,
+        request.environment,
+      );
     });
   }
 
@@ -697,6 +703,7 @@ class AgentViewSupervisorProcessHandler
       const acknowledgements = await this.launchCoordinationAttempts(
         latest?.snapshot.state.projectCwd ?? manifest?.projectCwd ?? '',
         [attempt],
+        request.environment,
       );
       const acknowledgement = acknowledgements[0];
       if (!acknowledgement) {
@@ -766,6 +773,7 @@ class AgentViewSupervisorProcessHandler
   private async launchCoordinationAttempts(
     requestedCwd: string,
     attempts: CoordinationAttemptSpec[],
+    workerEnvironment: Readonly<Record<string, string>>,
   ): Promise<AgentViewCoordinationDispatchAck[]> {
     const parentCwd = await requireCoordinationDirectory(requestedCwd);
     let writer: ProvisionedCoordinationWorktree | undefined;
@@ -867,6 +875,7 @@ class AgentViewSupervisorProcessHandler
               parentCwd,
               attempt,
               inputSnapshot,
+              workerEnvironment,
               attempt === writerAttempt ? writer : undefined,
             );
           },
@@ -968,6 +977,7 @@ class AgentViewSupervisorProcessHandler
     parentCwd: string,
     attempt: CoordinationAttemptSpec,
     inputSnapshot: AgentViewCoordinationDispatchAck['inputSnapshot'],
+    workerEnvironment: Readonly<Record<string, string>>,
     writer?: ProvisionedCoordinationWorktree,
   ): Promise<AgentViewCoordinationDispatchAck> {
     const store = this.store;
@@ -1018,6 +1028,7 @@ class AgentViewSupervisorProcessHandler
       [QWEN_AGENT_VIEW_TASK_PATH]: taskPath,
       [QWEN_AGENT_VIEW_PROMPT_ID]: attempt.promptId,
       [QWEN_AGENT_VIEW_ATTEMPT_ID]: attempt.lineage.attemptId,
+      [QWEN_AGENT_VIEW_INPUT_SNAPSHOT]: inputSnapshot,
     };
     const launch: AgentViewLaunchFile = {
       schemaVersion: 1,
@@ -1077,7 +1088,11 @@ class AgentViewSupervisorProcessHandler
       },
       store,
     );
-    const host = await this.workers.launchPtyHostForSupervisor(launch, store);
+    const host = await this.workers.launchPtyHostForSupervisor(
+      launch,
+      store,
+      workerEnvironment,
+    );
     await ensureSessionStillLaunchable(attempt.sessionId, store, host);
     this.workers.set(attempt.sessionId, host);
     await writeAgentViewWorker(
@@ -2037,6 +2052,10 @@ class AgentViewSupervisorProcessHandler
     });
   }
   async remove(params?: Record<string, unknown>) {
+    return this.withCoordinationAdmission(() => this.removeLocked(params));
+  }
+
+  private async removeLocked(params?: Record<string, unknown>) {
     const store = this.store;
     const sessionId = await resolveManagedSessionId(
       requireSessionId(params),
@@ -2817,15 +2836,19 @@ class WorkerRegistry {
   async launchPtyHostForSupervisor(
     launchRecord: AgentViewLaunchFile,
     store: AgentViewStoreOptions,
+    workerEnvironment?: Readonly<Record<string, string>>,
   ): Promise<AgentViewPtyHostHandle> {
     const launch = await refreshStoredResumeWorkerLaunchIfNeeded(
       launchRecord,
       store,
     );
     if (this.options.launchPtyHost) {
-      return this.options.launchPtyHost(launch);
+      return this.options.launchPtyHost(launch, workerEnvironment);
     }
-    return launchAgentViewPtyHostProcess(launch, store);
+    return launchAgentViewPtyHostProcess(launch, {
+      ...store,
+      ...(workerEnvironment ? { workerEnvironment } : {}),
+    });
   }
 
   waitForWorkerReadyIfNeeded(
@@ -4151,7 +4174,12 @@ function parseCoordinationDispatchParams(
   if (tasks.filter((task) => task.writeMode === 'isolated-writer').length > 1) {
     throw new Error('A coordination dispatch can contain at most one writer.');
   }
-  return { coordinationId, cwd: path.resolve(cwd), tasks };
+  return {
+    coordinationId,
+    cwd: path.resolve(cwd),
+    tasks,
+    environment: parseCoordinationEnvironment(params?.['environment']),
+  };
 }
 
 function parseCoordinationReassignParams(
@@ -4166,7 +4194,19 @@ function parseCoordinationReassignParams(
     coordinationId,
     taskId,
     ...parseCoordinationTaskRequest(params),
+    environment: parseCoordinationEnvironment(params?.['environment']),
   };
+}
+
+function parseCoordinationEnvironment(value: unknown): Record<string, string> {
+  if (!isRecord(value)) {
+    throw new Error('Coordination launch environment is required.');
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([, entry]) => typeof entry !== 'string')) {
+    throw new Error('Coordination launch environment must contain strings.');
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
 }
 
 function parseCoordinationTaskRequest(
@@ -4299,6 +4339,9 @@ async function cleanupPristineCoordinationWorktree(
       path.resolve(worktree.service.getUserWorktreePath(worktree.state.slug))
   ) {
     return false;
+  }
+  if (await worktree.service.isUserWorktreeRemoved(worktree.state.slug)) {
+    return true;
   }
   if (await worktree.service.hasUnmergedWorktreeCommits(worktree.state.slug)) {
     return false;

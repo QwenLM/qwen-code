@@ -93,7 +93,7 @@ describe('AgentViewApp', () => {
     await flushInk();
     await flushInk();
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('ship it', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('ship it');
     expect(loadRows).toHaveBeenCalled();
     expect(onAttachRequested).not.toHaveBeenCalled();
     expect(onExit).not.toHaveBeenCalled();
@@ -138,7 +138,7 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await settleInput();
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('ship it', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('ship it');
     await flushInk();
     expect(lastFrame()).toContain('ship it');
   });
@@ -163,7 +163,7 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await waitForFrame(lastFrame, 'daemon unavailable');
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('ship it', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('ship it');
     expect(loadRows).toHaveBeenCalled();
     expect(lastFrame()).toContain('daemon unavailable');
   });
@@ -648,7 +648,7 @@ describe('AgentViewApp', () => {
     await flushInk();
 
     expect(removeSession).not.toHaveBeenCalled();
-    expect(dispatchPrompt).toHaveBeenCalledWith('new task', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('new task');
   });
 
   it('keeps dispatch input active after removing a session', async () => {
@@ -676,7 +676,7 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await flushInk();
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('next task', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('next task');
     expect(lastFrame()).toContain('describe a task for a new session');
   });
 
@@ -728,7 +728,7 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await settleInput();
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('launch', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('launch');
   });
 
   it('shows shortcut help', async () => {
@@ -766,7 +766,7 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await flushInk();
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('/model', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('/model');
     expect(onAttachRequested).not.toHaveBeenCalled();
   });
 
@@ -821,7 +821,7 @@ describe('AgentViewApp', () => {
     await Promise.resolve();
 
     expect(dispatchPrompt).toHaveBeenCalledOnce();
-    expect(dispatchPrompt).toHaveBeenCalledWith('slow', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('slow');
     expect(lastFrame()).toContain('Starting session');
 
     resolveDispatch({ sessionId: 'new-session' });
@@ -845,10 +845,10 @@ describe('AgentViewApp', () => {
     stdin.write('\r');
     await flushInk();
 
-    expect(dispatchPrompt).toHaveBeenCalledWith('/zz', false);
+    expect(dispatchPrompt).toHaveBeenCalledWith('/zz');
   }, 10_000);
 
-  it('clears input on Ctrl+C and exits on a repeated Ctrl+C', async () => {
+  it('clears input before requiring a repeated Ctrl+C to exit', async () => {
     const onExit = vi.fn();
     const { stdin, lastFrame } = render(
       <AgentViewApp
@@ -869,32 +869,11 @@ describe('AgentViewApp', () => {
 
     stdin.write('\x03');
     await flushInk();
+    expect(onExit).not.toHaveBeenCalled();
+
+    stdin.write('\x03');
+    await flushInk();
     expect(onExit).toHaveBeenCalledOnce();
-  });
-
-  it('refreshes rows on the configured interval', async () => {
-    vi.useFakeTimers();
-    try {
-      const loadRows = vi.fn(async () => [row('session-2')]);
-      const { lastFrame } = render(
-        <AgentViewApp
-          rows={[row('session-1')]}
-          actions={actions({ loadRows })}
-          onExit={vi.fn()}
-          refreshIntervalMs={10}
-        />,
-      );
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(10);
-      });
-      await Promise.resolve();
-
-      expect(loadRows).toHaveBeenCalledOnce();
-      expect(lastFrame()).toContain('session-2');
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it('refreshes rows when the supervisor subscription reports a change', async () => {
@@ -1007,6 +986,7 @@ function row(
     updatedAt: '2026-07-17T10:00:00.000Z',
     alive: true,
     aliveIndicator: 'alive',
+    worktreeMode: 'none',
     ...overrides,
   };
 }

@@ -21,13 +21,17 @@ import {
 import {
   QWEN_AGENT_VIEW_ATTEMPT_ID,
   QWEN_AGENT_VIEW_COORDINATION_MODE,
+  QWEN_AGENT_VIEW_INPUT_SNAPSHOT,
   QWEN_AGENT_VIEW_PROJECT_CWD,
   QWEN_AGENT_VIEW_PROMPT_ID,
   QWEN_AGENT_VIEW_TASK_PATH,
   readAgentViewCoordinationWorkerEnv,
   type AgentViewCoordinationWorkerEnv,
 } from './worker-sideband.js';
-import { isAgentViewSnapshottedPath } from './input-snapshot.js';
+import {
+  captureAgentViewInputSnapshot,
+  isAgentViewSnapshottedPath,
+} from './input-snapshot.js';
 
 const MAX_ARTIFACTS = 64;
 const MAX_ARTIFACT_BYTES = 4_096;
@@ -128,6 +132,7 @@ export async function createManagedCoordinationPathGuard(
   customIgnoreFiles?: readonly string[],
   writeMode: AgentViewCoordinationWorkerEnv['writeMode'] = 'read-only',
   policySourceCwd: string = activeCwd,
+  expectedInputSnapshot?: string,
 ): Promise<ToolInvocationGuard> {
   const [root, policySourceRoot] = await Promise.all([
     fs.realpath(activeCwd),
@@ -138,11 +143,7 @@ export async function createManagedCoordinationPathGuard(
     customIgnoreFiles,
   ).getIgnoreFileNames();
   if (writeMode === 'isolated-writer') {
-    await requireMatchingIgnorePolicy(
-      policySourceRoot,
-      root,
-      ignoreFileNames,
-    );
+    await requireMatchingIgnorePolicy(policySourceRoot, root, ignoreFileNames);
   }
   const qwenIgnore = new QwenIgnoreParser(root, customIgnoreFiles);
   const immutableIgnorePaths = new Set(
@@ -155,12 +156,25 @@ export async function createManagedCoordinationPathGuard(
     '.ignore',
     '.rgignore',
   ]);
+  let inputChanged = false;
   return async ({ toolName, args }) => {
     const pathKey = PATH_ARGUMENT_BY_TOOL[toolName];
     if (!pathKey) {
       return {
         allowed: false,
         reason: 'Tool is outside managed coordination policy.',
+      };
+    }
+    if (expectedInputSnapshot && !inputChanged) {
+      inputChanged =
+        (await captureAgentViewInputSnapshot(policySourceRoot)) !==
+        expectedInputSnapshot;
+    }
+    if (inputChanged) {
+      return {
+        allowed: false,
+        reason:
+          'Managed coordination input changed after dispatch; collect and reassign the task.',
       };
     }
     if (toolName === ToolNames.LS) {
@@ -271,7 +285,9 @@ async function readIgnorePolicyFile(
 ): Promise<Buffer | undefined> {
   const filePath = path.resolve(root, fileName);
   if (!isWithin(root, filePath)) {
-    throw new Error('Managed coordination ignore policy escapes its workspace.');
+    throw new Error(
+      'Managed coordination ignore policy escapes its workspace.',
+    );
   }
   let stat;
   try {
@@ -422,6 +438,7 @@ function hasCoordinationMarker(env: NodeJS.ProcessEnv): boolean {
     QWEN_AGENT_VIEW_TASK_PATH,
     QWEN_AGENT_VIEW_PROMPT_ID,
     QWEN_AGENT_VIEW_ATTEMPT_ID,
+    QWEN_AGENT_VIEW_INPUT_SNAPSHOT,
   ].some((key) => env[key] !== undefined);
 }
 

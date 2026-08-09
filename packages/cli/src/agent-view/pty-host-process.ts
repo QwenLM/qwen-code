@@ -10,8 +10,7 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { AgentViewLaunchFile } from './protocol.js';
-import type { AgentViewPtyHostReceipt } from './protocol.js';
+import type { AgentViewLaunchFile , AgentViewPtyHostReceipt } from './protocol.js';
 import {
   BoundedOutputRing,
   launchAgentViewPtyHost,
@@ -88,6 +87,7 @@ interface AgentViewPtyHostStatus {
 
 export interface AgentViewPtyHostProcessOptions {
   globalDir?: string;
+  workerEnvironment?: Readonly<Record<string, string>>;
   spawnProcess?: (
     args: readonly string[],
     env: Readonly<Record<string, string>>,
@@ -118,10 +118,23 @@ export async function launchAgentViewPtyHostProcess(
     store,
   ).launchPath;
   await removeAgentViewPtyHostReceipt(launch.sessionId, store);
-  const child = (options.spawnProcess ?? defaultSpawnPtyHost)(
-    [INTERNAL_AGENT_VIEW_PTY_HOST_ARG, launchPath, socketPath, store.globalDir],
-    { [PTY_HOST_AUTH_TOKEN_ENV]: authToken },
-  );
+  const hostArgs = [
+    INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+    launchPath,
+    socketPath,
+    store.globalDir,
+  ];
+  const hostEnv = {
+    ...options.workerEnvironment,
+    [PTY_HOST_AUTH_TOKEN_ENV]: authToken,
+  };
+  const child = options.spawnProcess
+    ? options.spawnProcess(hostArgs, hostEnv)
+    : defaultSpawnPtyHost(
+        hostArgs,
+        hostEnv,
+        options.workerEnvironment !== undefined,
+      );
   child.unref?.();
 
   let status: AgentViewPtyHostStatus;
@@ -347,7 +360,7 @@ function createChildExitTracker(
   beginExitMonitoring(): void;
 } {
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
-    child.once('exit', (code, signal) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       const signalNumber = signal ? os.constants.signals[signal] : undefined;
       const exit = {
         exitCode: typeof code === 'number' ? code : 1,
@@ -363,7 +376,12 @@ function createChildExitTracker(
         resolve(exit);
       }, REMOTE_HOST_STOP_POLL_MS);
       interval.unref?.();
-    });
+    };
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      child.removeListener('exit', onExit);
+      onExit(child.exitCode, child.signalCode);
+    }
   });
   return { exited, beginExitMonitoring() {} };
 }
@@ -380,7 +398,6 @@ function createRemoteExitTracker(
 } {
   let settled = false;
   let probing = false;
-  let idleInterval: NodeJS.Timeout | undefined;
   let stopInterval: NodeJS.Timeout | undefined;
   let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
@@ -432,7 +449,7 @@ function createRemoteExitTracker(
     }
   };
 
-  idleInterval = setInterval(() => {
+  const idleInterval = setInterval(() => {
     void probe();
   }, REMOTE_HOST_EXIT_POLL_MS);
   idleInterval.unref?.();
@@ -1104,13 +1121,14 @@ async function waitForPtyHost(
 function defaultSpawnPtyHost(
   args: readonly string[],
   env: Readonly<Record<string, string>>,
+  replaceEnvironment = false,
 ): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
   return spawn(argv[0]!, argv.slice(1), {
     detached: true,
     stdio: 'ignore',
     env: {
-      ...process.env,
+      ...(replaceEnvironment ? {} : process.env),
       ...env,
       QWEN_CODE_NO_RELAUNCH: '1',
     },

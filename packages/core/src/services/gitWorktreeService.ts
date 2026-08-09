@@ -2105,6 +2105,40 @@ export class GitWorktreeService {
     }
   }
 
+  async isUserWorktreeRemoved(slug: string): Promise<boolean> {
+    try {
+      await fs.lstat(this.getUserWorktreePath(slug));
+      return false;
+    } catch (error) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        debugLogger.warn(
+          `isUserWorktreeRemoved failed for slug ${slug}: ${error}`,
+        );
+        return false;
+      }
+    }
+    const branchName = worktreeBranchForSlug(slug);
+    try {
+      const out = await (
+        await this.getGit()
+      ).raw([
+        'for-each-ref',
+        '--count=1',
+        '--format=%(refname)',
+        `refs/heads/${branchName}`,
+      ]);
+      return out.trim().length === 0;
+    } catch (error) {
+      debugLogger.warn(
+        `isUserWorktreeRemoved failed for slug ${slug}: ${error}`,
+      );
+      return false;
+    }
+  }
+
   /**
    * Removes a user worktree, optionally deleting its branch.
    *

@@ -285,6 +285,18 @@ function deriveActions(
   pinned: boolean,
 ): AgentViewPresentationActions {
   const detached = state.attachState === 'detached';
+  if (state.coordination) {
+    return {
+      canAttach: false,
+      canPeek: true,
+      canReply: false,
+      canStop: detached && taskState === 'running',
+      canRemove: detached,
+      canRespawn: false,
+      canHibernate: false,
+      needsBlockingAnswer: false,
+    };
+  }
   const needsBlockingAnswer =
     taskState === 'waiting' && inputState !== 'soft_question';
   const canRecover = detached && recoverability !== 'blocked';

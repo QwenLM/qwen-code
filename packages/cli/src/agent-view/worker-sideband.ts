@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type {
   AgentViewCoordinationOutcome,
   AgentViewCoordinationWriteMode,
+  AgentViewInputSnapshot,
   AgentViewInputKind,
   AgentViewWorkerControlEvent,
   AgentViewSessionState,
@@ -27,6 +28,7 @@ export const QWEN_AGENT_VIEW_COORDINATION_MODE =
 export const QWEN_AGENT_VIEW_TASK_PATH = 'QWEN_AGENT_VIEW_TASK_PATH';
 export const QWEN_AGENT_VIEW_PROMPT_ID = 'QWEN_AGENT_VIEW_PROMPT_ID';
 export const QWEN_AGENT_VIEW_ATTEMPT_ID = 'QWEN_AGENT_VIEW_ATTEMPT_ID';
+export const QWEN_AGENT_VIEW_INPUT_SNAPSHOT = 'QWEN_AGENT_VIEW_INPUT_SNAPSHOT';
 
 export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_WORKER,
@@ -40,6 +42,7 @@ export const AGENT_VIEW_WORKER_ENV_KEYS = [
   QWEN_AGENT_VIEW_TASK_PATH,
   QWEN_AGENT_VIEW_PROMPT_ID,
   QWEN_AGENT_VIEW_ATTEMPT_ID,
+  QWEN_AGENT_VIEW_INPUT_SNAPSHOT,
 ] as const;
 
 export type AgentViewWorkerEnvKey = (typeof AGENT_VIEW_WORKER_ENV_KEYS)[number];
@@ -59,6 +62,7 @@ export interface AgentViewCoordinationWorkerEnv {
   taskPath: string;
   promptId: string;
   attemptId: string;
+  inputSnapshot: AgentViewInputSnapshot;
 }
 
 type AgentViewWorkerEventWithoutSession =
@@ -165,6 +169,7 @@ export function readAgentViewCoordinationWorkerEnv(
   const taskPath = env[QWEN_AGENT_VIEW_TASK_PATH];
   const promptId = env[QWEN_AGENT_VIEW_PROMPT_ID];
   const attemptId = env[QWEN_AGENT_VIEW_ATTEMPT_ID];
+  const inputSnapshot = env[QWEN_AGENT_VIEW_INPUT_SNAPSHOT];
   if (
     !sideband ||
     !projectCwd ||
@@ -173,7 +178,8 @@ export function readAgentViewCoordinationWorkerEnv(
     !taskPath ||
     !path.isAbsolute(taskPath) ||
     !promptId ||
-    !attemptId
+    !attemptId ||
+    !/^sha256:[0-9a-f]{64}$/.test(inputSnapshot ?? '')
   ) {
     return undefined;
   }
@@ -184,6 +190,7 @@ export function readAgentViewCoordinationWorkerEnv(
     taskPath,
     promptId,
     attemptId,
+    inputSnapshot: inputSnapshot as AgentViewInputSnapshot,
   };
 }
 

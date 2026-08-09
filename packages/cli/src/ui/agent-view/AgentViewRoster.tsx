@@ -356,6 +356,7 @@ export function AgentViewRoster({
         <AgentViewPromptBox
           promptInput={promptInput}
           placeholder={getInputPlaceholder()}
+          canAttach={Boolean(rows[selectedIndex]?.actions.canAttach)}
         />
       )}
     </Box>
@@ -719,7 +720,7 @@ function SessionPeekBox({
         </Box>
       ) : null}
       <Text color={theme.text.secondary}>
-        {getPeekFooter(inputMode, queuedPrompts)}
+        {getPeekFooter(inputMode, queuedPrompts, row.actions.canAttach)}
       </Text>
     </Box>
   );
@@ -728,6 +729,7 @@ function SessionPeekBox({
 function getPeekFooter(
   inputMode: 'answer' | 'send' | undefined,
   queuedPrompts: string[] | undefined,
+  canAttach: boolean,
 ): string {
   if (queuedPrompts?.length) {
     return 'waiting for response · space close · ctrl+x stop/remove';
@@ -735,15 +737,19 @@ function getPeekFooter(
   if (inputMode) {
     return 'enter send · space close when empty · ctrl+x stop/remove';
   }
-  return 'enter attach · space close · ctrl+x stop/remove';
+  return canAttach
+    ? 'enter attach · space close · ctrl+x stop/remove'
+    : 'space close · ctrl+x stop/remove';
 }
 
 function AgentViewPromptBox({
   promptInput,
   placeholder,
+  canAttach,
 }: {
   promptInput: AgentViewPromptInput;
   placeholder: string;
+  canAttach: boolean;
 }) {
   return (
     <Box flexDirection="column">
@@ -773,7 +779,9 @@ function AgentViewPromptBox({
         </Box>
       ) : null}
       <Text color={theme.text.secondary}>
-        {'enter attach/dispatch · space peek · ctrl+x stop/remove · ? help'}
+        {canAttach
+          ? 'enter attach/dispatch · space peek · ctrl+x stop/remove · ? help'
+          : 'enter dispatch · space peek · ctrl+x stop/remove · ? help'}
       </Text>
     </Box>
   );
@@ -953,11 +961,12 @@ function getRosterMarkerColor(row: AgentRosterRow): string {
 }
 
 function formatRowName(row: AgentRosterRow): string {
-  return (
+  const name =
     cleanRowText(row.displayName) ??
     cleanRowText(row.title) ??
-    'Untitled session'
-  );
+    'Untitled session';
+  if (!row.coordination) return name;
+  return `${row.worktreeMode === 'worktree' ? '[writer]' : '[coord]'} ${name}`;
 }
 
 function formatRowOutput(row: AgentRosterRow): string {

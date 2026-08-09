@@ -6,6 +6,7 @@
 
 import type {
   AgentViewActivityFile,
+  AgentViewCoordinationLineage,
   AgentViewLaunchFile,
   AgentViewProcessState,
   AgentViewRosterEntry,
@@ -64,6 +65,8 @@ export interface AgentRosterRow {
   updatedAt: string;
   alive: boolean;
   aliveIndicator: AgentRosterAliveIndicator;
+  coordination?: AgentViewCoordinationLineage;
+  worktreeMode: AgentViewSessionStateFile['worktree']['mode'];
   summary?: string;
   waitingFor?: string;
   inputKind?: AgentViewActivityFile['inputKind'];
@@ -149,6 +152,8 @@ function toRosterRow(
     updatedAt: session.updatedAt,
     alive: aliveIndicator === 'alive',
     aliveIndicator,
+    ...(session.coordination ? { coordination: session.coordination } : {}),
+    worktreeMode: session.worktree.mode,
     summary: cleanText(activity?.summary) ?? cleanText(launch?.initialPrompt),
     waitingFor: activity?.waitingFor,
     inputKind: activity?.inputKind,
@@ -232,6 +237,9 @@ function getSearchText(row: AgentRosterRow): string {
     row.summary,
     row.waitingFor,
     row.lastResult,
+    row.coordination?.coordinationId,
+    row.coordination?.taskId,
+    row.coordination?.attemptId,
   ]
     .filter((value): value is string => Boolean(value))
     .join(' ')

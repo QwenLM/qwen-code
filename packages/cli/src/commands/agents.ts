@@ -512,7 +512,16 @@ function formatPeekPanel(value: unknown): AgentViewPeekPanel {
   const activity = isActivity(value['activity'])
     ? value['activity']
     : undefined;
+  const state = isSessionState(value['state']) ? value['state'] : undefined;
+  const coordination = state?.coordination;
+  const worktree = state?.worktree;
   const lines = [
+    coordination
+      ? `Coordination: ${formatSessionShortId(coordination.coordinationId)} · task ${formatSessionShortId(coordination.taskId)} · attempt ${formatSessionShortId(coordination.attemptId)}`
+      : undefined,
+    worktree?.mode === 'worktree'
+      ? `Worktree: ${worktree.path ?? state?.activeCwd}${worktree.branch ? ` · ${worktree.branch}` : ''}`
+      : undefined,
     activity?.waitingFor ? `Waiting: ${activity.waitingFor}` : undefined,
     activity?.queuedPromptCount ? formatQueuedPromptLine(activity) : undefined,
     activity?.lastResult ? `Result: ${activity.lastResult}` : undefined,

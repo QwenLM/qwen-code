@@ -19,7 +19,11 @@ import {
   launchAgentViewPtyHostProcess,
 } from './pty-host-process.js';
 import { BoundedOutputRing, type AgentViewPtyHostHandle } from './pty-host.js';
-import { getAgentViewSessionPaths } from './supervisor-store.js';
+import {
+  getAgentViewSessionPaths,
+  writeAgentViewPtyHostReceipt,
+} from './supervisor-store.js';
+import { QWEN_AGENT_VIEW_GENERATION } from './worker-sideband.js';
 
 const socketDirs = new Set<string>();
 
@@ -426,10 +430,12 @@ describe('Agent View PTY host process server', () => {
   it('resolves connected host exit when status polling fails', async () => {
     vi.useFakeTimers();
     try {
-      const host = fakeHost();
       const socketPath = shortSocketPath();
-      const server = createAgentViewPtyHostServer(host, socketPath);
-      await server.listen();
+      const server = await createStatusServer(
+        socketPath,
+        [],
+        Number.MAX_SAFE_INTEGER,
+      );
       const connected = await connectAgentViewPtyHostProcess(
         createLaunch('session-1'),
         socketPath,
@@ -476,7 +482,7 @@ describe('Agent View PTY host process server', () => {
     connected.dispose();
 
     await waitFor(() => host.shutdowns === 1);
-    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+    await expect(connected.exited).resolves.toEqual({ exitCode: 0 });
   });
 
   it('bridges data through a connected host handle', async () => {
@@ -639,44 +645,38 @@ describe('Agent View PTY host process server', () => {
 
   it('fails quickly when the spawned PTY host exits before ready', async () => {
     const child = fakeChildProcess(2468);
+    const spawnProcess = vi.fn(() => child);
     const launched = launchAgentViewPtyHostProcess(
-      {
-        schemaVersion: 1,
-        sessionId: 'session-early-exit',
-        argv: ['qwen'],
-        env: {},
-        entrypoint: 'qwen',
-        projectCwd: '/workspace/project',
-        activeCwd: '/workspace/project',
-        includeDirectories: [],
-        terminal: { columns: 80, rows: 24 },
-      },
+      createLaunch('session-early-exit'),
       {
         globalDir: '/tmp/qwen-agent-view-test',
-        spawnProcess: () => child,
+        spawnProcess,
       },
     );
+    await waitFor(() => spawnProcess.mock.calls.length === 1);
     child.emit('exit', 1, null);
 
     await expect(launched).rejects.toThrow(
       'Agent View PTY host exited before ready (code 1).',
     );
-    expect(child.killedWith).toBe('SIGKILL');
+    expect(child.killedWith).toBe('SIGTERM');
   });
 
   it('fails quickly when the spawned PTY host emits an error before ready', async () => {
     const child = fakeChildProcess(2468);
+    const spawnProcess = vi.fn(() => child);
     const launched = launchAgentViewPtyHostProcess(
       createLaunch('session-spawn-error'),
       {
         globalDir: '/tmp/qwen-agent-view-test',
-        spawnProcess: () => child,
+        spawnProcess,
       },
     );
+    await waitFor(() => spawnProcess.mock.calls.length === 1);
     child.emit('error', new Error('spawn failed'));
 
     await expect(launched).rejects.toThrow('spawn failed');
-    expect(child.killedWith).toBe('SIGKILL');
+    expect(child.killedWith).toBe('SIGTERM');
   });
 
   it('passes the launch file, socket path, and token to spawned PTY hosts', async () => {
@@ -690,7 +690,9 @@ describe('Agent View PTY host process server', () => {
     socketDirs.add(path.dirname(socketPath));
     const server = await createStatusServer(socketPath);
     const child = fakeChildProcess(2468);
-    const spawnProcess = vi.fn(() => child);
+    const spawnProcess = vi.fn(
+      spawnPtyHostForTest(launch, socketPath, globalDir, child),
+    );
     try {
       await launchAgentViewPtyHostProcess(launch, {
         globalDir,
@@ -702,6 +704,7 @@ describe('Agent View PTY host process server', () => {
           INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
           getAgentViewSessionPaths(launch.sessionId, { globalDir }).launchPath,
           socketPath,
+          globalDir,
         ],
         expect.objectContaining({
           QWEN_AGENT_VIEW_PTY_HOST_TOKEN: expect.stringMatching(
@@ -730,13 +733,14 @@ describe('Agent View PTY host process server', () => {
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
         globalDir,
-        spawnProcess: () => child,
+        spawnProcess: spawnPtyHostForTest(launch, socketPath, globalDir, child),
       });
 
       handle.dispose();
 
       await waitFor(() => operations.includes('shutdown'));
       expect(child.killedWith).toBeUndefined();
+      child.emit('exit', 1, null);
       await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
     } finally {
       server.close();
@@ -759,7 +763,7 @@ describe('Agent View PTY host process server', () => {
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
         globalDir,
-        spawnProcess: () => child,
+        spawnProcess: spawnPtyHostForTest(launch, socketPath, globalDir, child),
       });
 
       handle.kill('SIGTERM');
@@ -786,7 +790,7 @@ describe('Agent View PTY host process server', () => {
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
         globalDir,
-        spawnProcess: () => child,
+        spawnProcess: spawnPtyHostForTest(launch, socketPath, globalDir, child),
       });
 
       child.emit('exit', null, 'SIGKILL');
@@ -807,6 +811,8 @@ type FakeChildProcess = ChildProcess & { killedWith?: NodeJS.Signals };
 function fakeChildProcess(pid: number): FakeChildProcess {
   const child = new EventEmitter() as ChildProcess;
   Object.defineProperty(child, 'pid', { value: pid });
+  Object.defineProperty(child, 'exitCode', { value: null, writable: true });
+  Object.defineProperty(child, 'signalCode', { value: null, writable: true });
   child.unref = () => child;
   child.kill = ((signal?: NodeJS.Signals | number) => {
     if (typeof signal === 'string') {
@@ -825,6 +831,10 @@ function fakeHost(maxOutputBytes = 5): AgentViewPtyHostHandle & {
   emitData(data: string): void;
 } {
   let dataCallbacks: Array<(data: string) => void> = [];
+  let resolveExit: (exit: { exitCode: number }) => void = () => {};
+  const exited = new Promise<{ exitCode: number }>((resolve) => {
+    resolveExit = resolve;
+  });
   const host: AgentViewPtyHostHandle & {
     input: string;
     resizes: Array<{ columns: number; rows: number }>;
@@ -839,7 +849,7 @@ function fakeHost(maxOutputBytes = 5): AgentViewPtyHostHandle & {
     input: '',
     resizes: [],
     shutdowns: 0,
-    exited: new Promise<{ exitCode: number }>(() => {}),
+    exited,
     write(data: Buffer) {
       host.input += data.toString('utf8');
     },
@@ -856,9 +866,11 @@ function fakeHost(maxOutputBytes = 5): AgentViewPtyHostHandle & {
     },
     kill(signal?: string) {
       host.killedWith = signal;
+      resolveExit({ exitCode: 1 });
     },
     shutdown() {
       host.shutdowns += 1;
+      resolveExit({ exitCode: 0 });
     },
     dispose() {},
     emitData(data: string) {
@@ -890,12 +902,38 @@ function createLaunch(
     schemaVersion: 1,
     sessionId,
     argv: ['qwen'],
-    env: {},
+    env: { [QWEN_AGENT_VIEW_GENERATION]: '1' },
     entrypoint: 'qwen',
     projectCwd: '/workspace/project',
     activeCwd: '/workspace/project',
     includeDirectories: [],
     terminal: { columns: 80, rows: 24 },
+  };
+}
+
+function spawnPtyHostForTest(
+  launch: Parameters<typeof connectAgentViewPtyHostProcess>[0],
+  socketPath: string,
+  globalDir: string,
+  child: FakeChildProcess,
+): (
+  args: readonly string[],
+  env: Readonly<Record<string, string>>,
+) => ChildProcess {
+  return (_args, env) => {
+    void writeAgentViewPtyHostReceipt(
+      {
+        schemaVersion: 1,
+        sessionId: launch.sessionId,
+        hostPid: child.pid ?? 0,
+        workerPid: 1234,
+        hostEndpoint: socketPath,
+        hostAuthToken: env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'] ?? '',
+        generation: Number(launch.env[QWEN_AGENT_VIEW_GENERATION]),
+      },
+      { globalDir },
+    );
+    return child;
   };
 }
 
@@ -939,6 +977,7 @@ async function listenServer(
 async function createStatusServer(
   socketPath: string,
   operations: string[] = [],
+  hostPid = 2468,
 ): Promise<net.Server> {
   if (!isWindowsPipePath(socketPath)) {
     await fs.mkdir(path.dirname(socketPath), { recursive: true });
@@ -962,7 +1001,7 @@ async function createStatusServer(
           ok: true,
           result:
             request.op === 'status'
-              ? { pid: process.pid, workerPid: 1234 }
+              ? { pid: hostPid, workerPid: 1234, generation: 1 }
               : request.op === 'kill'
                 ? { killed: true }
                 : { shuttingDown: true },

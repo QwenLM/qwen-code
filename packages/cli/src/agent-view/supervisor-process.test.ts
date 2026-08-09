@@ -16,9 +16,11 @@ import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
   AgentViewLaunchFile,
   AgentViewSessionStateFile,
+  AgentViewWorkerControlEvent,
+  AgentViewWorkerEvent,
 } from './protocol.js';
 import {
-  createAgentViewSupervisorHandler,
+  createAgentViewSupervisorHandler as createStrictAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
   getAgentViewSupervisorStaleSocketPath,
 } from './supervisor-process.js';
@@ -36,6 +38,88 @@ import {
 import type { AgentViewPtyHostHandle } from './pty-host.js';
 import { BoundedOutputRing } from './pty-host.js';
 import { createAgentViewPtyHostServer } from './pty-host-process.js';
+
+type LegacyWorkerEvent = AgentViewWorkerEvent extends infer Event
+  ? Event extends AgentViewWorkerEvent
+    ? Omit<Event, 'generation' | 'sequence'> & {
+        generation?: number;
+        sequence?: number;
+        token?: string;
+      }
+    : never
+  : never;
+
+function createAgentViewSupervisorHandler(
+  options: Parameters<typeof createStrictAgentViewSupervisorHandler>[0],
+) {
+  const handler = createStrictAgentViewSupervisorHandler(options);
+  const workerEvent = handler.workerEvent?.bind(handler);
+  const workerControl = handler.workerControl?.bind(handler);
+  if (!workerEvent || !workerControl) {
+    throw new Error('Agent View test handler is incomplete.');
+  }
+  const eventSequences = new Map<string, number>();
+  const controlAcks = new Map<string, number>();
+  const currentGeneration = async (sessionId: string): Promise<number> =>
+    (
+      await readAgentViewWorker(sessionId, {
+        ...(options?.globalDir ? { globalDir: options.globalDir } : {}),
+      })
+    )?.generation ?? 1;
+  handler.workerEvent = (async (event: LegacyWorkerEvent) => {
+    const generation =
+      event.generation ?? (await currentGeneration(event.sessionId));
+    const key = `${event.sessionId}:${generation}`;
+    const sequence = event.sequence ?? (eventSequences.get(key) ?? 0) + 1;
+    eventSequences.set(key, Math.max(eventSequences.get(key) ?? 0, sequence));
+    return workerEvent({
+      ...event,
+      generation,
+      sequence,
+    } as AgentViewWorkerEvent & {
+      token?: string;
+    });
+  }) as typeof handler.workerEvent;
+  handler.workerControl = (async (params: {
+    sessionId: string;
+    token?: string;
+    generation?: number;
+    ackSequence?: number;
+  }) => {
+    const generation =
+      params.generation ?? (await currentGeneration(params.sessionId));
+    const key = `${params.sessionId}:${generation}`;
+    const result = (await workerControl({
+      ...params,
+      generation,
+      ackSequence: params.ackSequence ?? controlAcks.get(key) ?? 0,
+    })) as {
+      sessionId: string;
+      events: AgentViewWorkerControlEvent[];
+    };
+    const lastSequence = result.events.at(-1)?.sequence;
+    if (lastSequence !== undefined) {
+      controlAcks.set(key, lastSequence);
+      await workerControl({
+        ...params,
+        generation,
+        ackSequence: lastSequence,
+      });
+    }
+    return { sessionId: result.sessionId, events: result.events };
+  }) as typeof handler.workerControl;
+  return handler as Omit<typeof handler, 'workerEvent' | 'workerControl'> & {
+    workerEvent(
+      event: LegacyWorkerEvent,
+    ): ReturnType<NonNullable<typeof handler.workerEvent>>;
+    workerControl(params: {
+      sessionId: string;
+      token?: string;
+      generation?: number;
+      ackSequence?: number;
+    }): ReturnType<NonNullable<typeof handler.workerControl>>;
+  };
+}
 
 describe('Agent View supervisor process helpers', () => {
   it('computes a stable Unix socket path under the Agent View store', () => {
@@ -1836,7 +1920,11 @@ describe('Agent View supervisor process helpers', () => {
     })) as { sessionId: string };
     const liveHost = fakePtyHost(4321);
     const hostEndpoint = shortHostSocketPath();
-    const hostServer = createAgentViewPtyHostServer(liveHost, hostEndpoint);
+    const hostAuthToken = 'test-host-token';
+    const hostServer = createAgentViewPtyHostServer(liveHost, hostEndpoint, {
+      authToken: hostAuthToken,
+      generation: 1,
+    });
     await hostServer.listen();
     const worker = await readAgentViewWorker(result.sessionId, { globalDir });
     if (!worker) {
@@ -1846,7 +1934,10 @@ describe('Agent View supervisor process helpers', () => {
       result.sessionId,
       {
         ...worker,
+        hostPid: liveHost.pid,
+        workerPid: liveHost.workerPid,
         hostEndpoint,
+        hostAuthToken,
       },
       { globalDir },
     );
@@ -1899,7 +1990,11 @@ describe('Agent View supervisor process helpers', () => {
     const liveHost = fakePtyHost(4321);
     liveHost.output.append('hello logs');
     const hostEndpoint = shortHostSocketPath();
-    const hostServer = createAgentViewPtyHostServer(liveHost, hostEndpoint);
+    const hostAuthToken = 'test-host-token';
+    const hostServer = createAgentViewPtyHostServer(liveHost, hostEndpoint, {
+      authToken: hostAuthToken,
+      generation: 1,
+    });
     await hostServer.listen();
     const worker = await readAgentViewWorker(result.sessionId, { globalDir });
     if (!worker) {
@@ -1910,7 +2005,10 @@ describe('Agent View supervisor process helpers', () => {
       result.sessionId,
       {
         ...worker,
+        hostPid: liveHost.pid,
+        workerPid: liveHost.workerPid,
         hostEndpoint,
+        hostAuthToken,
       },
       { globalDir },
     );
@@ -2223,16 +2321,14 @@ describe('Agent View supervisor process helpers', () => {
     });
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      ownership: 'unmanaged',
-    });
+    ).resolves.toBeUndefined();
     await expect(handler.list()).resolves.toEqual([]);
     await expect(
       handler.respawn?.({ sessionId: result.sessionId }),
-    ).rejects.toThrow(`Agent View session ${result.sessionId} is not managed.`);
+    ).rejects.toThrow(`No Agent View session found for ${result.sessionId}.`);
     await expect(
       handler.logs?.({ sessionId: result.sessionId }),
-    ).rejects.toThrow(`Agent View session ${result.sessionId} is not managed.`);
+    ).rejects.toThrow(`No Agent View session found for ${result.sessionId}.`);
     await expect(handler.respawn?.({ all: true })).resolves.toEqual({
       all: true,
       results: [],
@@ -2461,14 +2557,7 @@ describe('Agent View supervisor process helpers', () => {
     });
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      ownership: 'unmanaged',
-      processState: 'exited',
-      worktree: {
-        mode: 'worktree',
-        owner: 'agent-view',
-      },
-    });
+    ).resolves.toBeUndefined();
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -2807,9 +2896,9 @@ describe('Agent View supervisor process helpers', () => {
     });
     await expect(emptyHandler.tickIdleHibernation()).resolves.toEqual({
       hibernated: [],
-      shutdownRequested: false,
+      shutdownRequested: true,
     });
-    expect(emptyShutdown).not.toHaveBeenCalled();
+    expect(emptyShutdown).toHaveBeenCalledOnce();
     await fs.rm(emptyDir, { recursive: true, force: true });
 
     const activeDir = await fs.mkdtemp(
@@ -3043,6 +3132,7 @@ function fakePtyHost(workerPid = 1234): FakePtyHost {
     },
     kill: (signal) => {
       host.killedWith = signal;
+      resolveExit({ exitCode: 1 });
     },
     resolveExit: (exitCode) => {
       resolveExit({ exitCode });

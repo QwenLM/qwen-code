@@ -82,9 +82,9 @@ describe('AgentViewRoster', () => {
     expect(output).toContain('* Launchpad');
     expect(output).toContain('Pinned');
     expect(output).toContain('Ready to continue');
-    expect(output).toContain('enter to open');
-    expect(output).toContain('space to reply');
-    expect(output).toContain('ctrl+x to delete');
+    expect(output).toContain('enter attach/dispatch');
+    expect(output).toContain('space peek');
+    expect(output).toContain('ctrl+x stop/remove');
     expect(output).not.toContain('Waiting on approval');
     expect(output).toMatch(/> \* beta\s+What would you like to test\? 2m/);
     expect(output).toContain('check status');
@@ -120,7 +120,7 @@ describe('AgentViewRoster', () => {
 
     press('', { return: true });
 
-    expect(onDispatch).toHaveBeenCalledWith(false, 'ship it');
+    expect(onDispatch).toHaveBeenCalledWith('ship it');
   });
 
   it('dispatches prompt when a PTY sends carriage return', () => {
@@ -133,7 +133,7 @@ describe('AgentViewRoster', () => {
 
     press('\r', {});
 
-    expect(onDispatch).toHaveBeenCalledWith(false, 'ship it');
+    expect(onDispatch).toHaveBeenCalledWith('ship it');
   });
 
   it('dispatches when a PTY sends text and carriage return together', () => {
@@ -145,7 +145,7 @@ describe('AgentViewRoster', () => {
 
     press('ship it\r', {});
 
-    expect(onDispatch).toHaveBeenCalledWith(false, 'ship it');
+    expect(onDispatch).toHaveBeenCalledWith('ship it');
   });
 
   it('attaches the selected session on empty Enter or right arrow', () => {
@@ -380,8 +380,7 @@ describe('AgentViewRoster', () => {
 
     const output = lastFrame() ?? '';
     expect(output).toContain('ready');
-    expect(output).toContain('enter to open');
-    expect(output).toContain('space to close');
+    expect(output).toContain('space close');
     expect(output).not.toContain('Summary: ready');
     expect(output).not.toContain('State: idle / alive');
   });
@@ -522,6 +521,7 @@ function row(
     updatedAt: '2026-07-17T10:00:00.000Z',
     alive: true,
     aliveIndicator: 'alive',
+    worktreeMode: 'none',
     ...overrides,
   };
 }
