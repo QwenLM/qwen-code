@@ -133,27 +133,37 @@ export type RestoreInProgressReason =
 /** Fallback retry hint, in seconds, for an ordinary in-flight restore. */
 export const RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS = 5;
 
+/**
+ * The operation the caller actually issued. `spawn` is a fresh `POST /session`
+ * carrying a caller-supplied id that a restore already owns — it must not be
+ * reported as a `load` or `resume` the caller never asked for, or logs name
+ * the wrong operation and the retry instruction points at the wrong endpoint.
+ */
+export type RestoreBlockedAction = 'load' | 'resume' | 'spawn';
+
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
   readonly activeAction: 'load' | 'resume';
-  readonly requestedAction: 'load' | 'resume';
+  readonly requestedAction: RestoreBlockedAction;
   readonly reason: RestoreInProgressReason;
   readonly retryAfterSeconds: number;
 
   constructor(
     sessionId: string,
     activeAction: 'load' | 'resume',
-    requestedAction: 'load' | 'resume',
+    requestedAction: RestoreBlockedAction,
     opts?: {
       reason?: RestoreInProgressReason;
       retryAfterSeconds?: number;
     },
   ) {
     const reason = opts?.reason ?? 'restore_in_progress';
+    const retryTarget =
+      requestedAction === 'spawn' ? 'the spawn' : `session/${requestedAction}`;
     super(
       reason === 'awaiting_abandoned_cleanup'
-        ? `Session "${sessionId}" timed out during session/${activeAction} and its abandoned restore has not settled yet; retry session/${requestedAction} once cleanup completes`
-        : `Session "${sessionId}" is already being restored via session/${activeAction}; retry session/${requestedAction} after it completes`,
+        ? `Session "${sessionId}" timed out during session/${activeAction} and its abandoned restore has not settled yet; retry ${retryTarget} once cleanup completes`
+        : `Session "${sessionId}" is already being restored via session/${activeAction}; retry ${retryTarget} after it completes`,
     );
     this.name = 'RestoreInProgressError';
     this.sessionId = sessionId;
@@ -612,9 +622,17 @@ export type BridgeChannelUnavailableReason =
 
 export class BridgeChannelQuarantinedError extends Error {
   readonly reason: BridgeChannelUnavailableReason;
+  /**
+   * How long the caller should wait before retrying fresh session work. This
+   * state persists until the workspace channel drains, which is at least a
+   * restore budget away — the ordinary 5-second cadence would poll identical
+   * 503s, and a fresh id never reaches the 409 that carries the real hint.
+   */
+  readonly retryAfterSeconds: number;
 
   constructor(
     reason: BridgeChannelUnavailableReason = 'restore_cleanup_failed',
+    retryAfterSeconds: number = RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
   ) {
     super(
       reason === 'restore_settlement_overdue'
@@ -623,6 +641,7 @@ export class BridgeChannelQuarantinedError extends Error {
     );
     this.name = 'BridgeChannelQuarantinedError';
     this.reason = reason;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 

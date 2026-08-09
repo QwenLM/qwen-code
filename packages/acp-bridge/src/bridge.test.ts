@@ -5886,11 +5886,12 @@ describe('createAcpSessionBridge', () => {
     const handle = makeChannel({
       initializeImpl: () => activeWorkInitializeResponse(),
       loadSessionImpl: () => lateRestore.promise,
-      // The wedged child never answers the close-if-unheld probe. Its plain
-      // close still works: the point is that the probe is what stalls.
-      extMethodImpl: (method, params) =>
-        method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
-        params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true
+      // The wedged child answers NO close at all — neither the hold probe nor
+      // the plain agent close. An earlier version of this test let the plain
+      // close succeed, which hid the real hazard: skipping the bounded probe
+      // only helps if what replaces it is also bounded.
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
           ? new Promise<Record<string, unknown>>(() => {})
           : Promise.resolve({}),
     });
@@ -5913,10 +5914,27 @@ describe('createAcpSessionBridge', () => {
       await vi.advanceTimersByTimeAsync(20);
       expect(handle.killed).toBe(false);
 
-      // The last client leaves the sibling. The child cannot confirm, but the
-      // channel is already condemned, so teardown proceeds locally and the
-      // drain reaps the child.
-      await bridge.detachClient(sibling.sessionId, sibling.clientId);
+      // The last client leaves the sibling. Every close the bridge sends this
+      // child goes unanswered, so the detach must not be able to wait on one
+      // forever — `detachClient` itself has to return, or `POST /detach` hangs
+      // too and nothing ever drains.
+      const detached = bridge.detachClient(sibling.sessionId, sibling.clientId);
+      let detachSettled = false;
+      void detached.then(
+        () => {
+          detachSettled = true;
+        },
+        () => {
+          detachSettled = true;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(ACTIVE_WORK_CLOSE_TIMEOUT_MS);
+      await detached;
+      expect(detachSettled).toBe(true);
+
+      // The bounded close expiring is an unknown outcome, which recovers by
+      // killing the channel — and that teardown is what the drain was waiting
+      // for.
       await vi.advanceTimersByTimeAsync(0);
       expect(handle.killed).toBe(true);
     } finally {
@@ -5954,7 +5972,14 @@ describe('createAcpSessionBridge', () => {
         })
         .catch((error: unknown) => error);
       expect(duringActive).toBeInstanceOf(RestoreInProgressError);
-      expect(duringActive).toMatchObject({ reason: 'restore_in_progress' });
+      // The caller issued a spawn, so that is what the 409 must name — both
+      // for log readers and for the endpoint the retry instruction points at.
+      expect(duringActive).toMatchObject({
+        reason: 'restore_in_progress',
+        activeAction: 'load',
+        requestedAction: 'spawn',
+      });
+      expect((duringActive as Error).message).toContain('retry the spawn');
 
       await advanceRestoreDeadline(20);
       expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);

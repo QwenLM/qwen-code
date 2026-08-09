@@ -75,7 +75,6 @@ import {
   CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
-  RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
@@ -98,7 +97,10 @@ import {
   BridgeChannelQuarantinedError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
-import { resolveSessionRestoreTimeoutMs } from './session-restore-timeout.js';
+import {
+  resolveSessionRestoreTimeoutMs,
+  restoreRetryAfterSeconds,
+} from './session-restore-timeout.js';
 import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
@@ -1520,7 +1522,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   };
   const assertFreshSessionsAvailable = (): void => {
     const blocker = freshSessionBlocker();
-    if (blocker) throw new BridgeChannelQuarantinedError(blocker.reason);
+    if (blocker) {
+      throw new BridgeChannelQuarantinedError(
+        blocker.reason,
+        abandonedRestoreRetryAfterSeconds,
+      );
+    }
   };
   const reserveFreshSession = (
     context: BridgeFreshSessionAdmissionContext,
@@ -1613,12 +1620,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // its slot and fence before the channel stops taking fresh work. One further
   // budget: the request already had that long and missed it once.
   const restoreSettlementGraceMs = sessionRestoreTimeoutMs;
-  const abandonedRestoreRetryAfterSeconds = Math.min(
-    120,
-    Math.max(
-      RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS,
-      Math.ceil(sessionRestoreTimeoutMs / 1000),
-    ),
+  const abandonedRestoreRetryAfterSeconds = restoreRetryAfterSeconds(
+    sessionRestoreTimeoutMs,
   );
   // Bd1yh + Bd1z5: per-permission deadline + per-session pending cap.
   // Permission caps keep the legacy sentinel behavior; prompt caps are
@@ -1915,8 +1918,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Without this, the stale continuation tears down the newly restored
       // Session under its just-attached client.
       if (byId.get(entry.sessionId) !== entry) return;
+      // On a condemned channel we skipped the bounded hold probe above; the
+      // agent close that follows must not be unbounded in its place, or we
+      // trade one wait on a wedged child for a worse one. Bounding it routes a
+      // hang into the unknown-outcome recovery, which kills the channel — and
+      // that teardown is exactly what the drain is waiting for.
+      const condemnedOwner = channelInfoForEntry(entry);
+      const agentCloseTimeoutMs =
+        condemnedOwner?.isQuarantined === true ||
+        condemnedOwner?.restoreSettlementOverdue === true
+          ? ACTIVE_WORK_CLOSE_TIMEOUT_MS
+          : undefined;
       await closeSessionImpl(entry.sessionId, undefined, {
         reason: opts.closeReason,
+        ...(agentCloseTimeoutMs !== undefined ? { agentCloseTimeoutMs } : {}),
       }).catch((err) => {
         writeStderrLine(
           `qwen serve: deferred close (${opts.trigger}) failed for ` +
@@ -5822,6 +5837,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       await notifyAgentSessionClose(entry, ci, 'closeSession', {
         throwOnFailure: true,
         requireFlush: closeOpts?.requireAgentClose === true,
+        ...(closeOpts?.agentCloseTimeoutMs !== undefined
+          ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
+          : {}),
       });
     } catch (error) {
       // A child RequestError is a definitive close refusal: the child kept
@@ -6284,7 +6302,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new RestoreInProgressError(
             req.sessionId,
             restoreOwner.action,
-            restoreOwner.action,
+            'spawn',
             abandoned
               ? {
                   reason: 'awaiting_abandoned_cleanup',

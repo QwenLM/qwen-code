@@ -195,8 +195,9 @@ export interface BridgeOptions {
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
-   * How long to wait for `session/load` and `session/resume`. Falls back to an
-   * explicitly configured `initializeTimeoutMs`, then 60 seconds.
+   * How long to wait for `session/load` and `session/resume`. Defaults to
+   * 60 seconds; an explicitly configured `initializeTimeoutMs` can raise it,
+   * but never lower it.
    */
   sessionRestoreTimeoutMs?: number;
   /**

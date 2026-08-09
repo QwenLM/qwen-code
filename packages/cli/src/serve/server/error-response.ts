@@ -16,6 +16,7 @@ import {
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
@@ -197,7 +198,10 @@ export function sendBridgeError(
 ): void {
   if (err instanceof SessionRestoreTimeoutError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
-    res.set('Retry-After', '5');
+    // The state this 504 leaves behind is the abandoned-restore fence, which
+    // outlives one full budget. A 5s hint here just buys one wasted round trip
+    // before the 409 tells the client the real backoff.
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
     res.status(504).json({
       error: err.message,
       code: 'session_restore_timeout',
@@ -211,13 +215,17 @@ export function sendBridgeError(
   }
   if (err instanceof BridgeChannelQuarantinedError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
-    res.set('Retry-After', '5');
+    // Quarantine lasts until the channel drains, which is strictly longer than
+    // the fence — and a fresh-id request never reaches the 409 that carries the
+    // correct hint, so this header is the only backoff signal it gets.
+    res.set('Retry-After', String(err.retryAfterSeconds));
     res.status(503).json({
       error: err.message,
       code: 'acp_channel_unavailable',
       errorKind: 'acp_channel_unavailable',
       retryable: true,
       reason: err.reason,
+      retryAfterSeconds: err.retryAfterSeconds,
     });
     return;
   }

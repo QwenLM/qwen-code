@@ -430,8 +430,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('session-restore-timeout-ms', {
         type: 'number',
         description:
-          'ACP session load/resume timeout (ms). Defaults to 60000, or the ' +
-          'explicit --initialize-timeout-ms value for compatibility.',
+          'ACP session load/resume timeout (ms). Default: 60000. An explicit ' +
+          '--initialize-timeout-ms can raise (but never lower) this default.',
       })
       .option('session-reap-interval-ms', {
         type: 'number',

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import {
   BridgeChannelQuarantinedError,
+  RestoreInProgressError,
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { toRpcError } from './dispatch.js';
@@ -44,6 +45,31 @@ describe('toRpcError', () => {
     });
   });
 
+  it('maps the abandoned-restore fence with its reason and hint', () => {
+    // SDK transport negotiation prefers acp-ws and acp-http over REST, so
+    // without this mapping the default arm turns a retryable fence into an
+    // opaque internal 500 on exactly the transports most clients use.
+    const error = new RestoreInProgressError('persisted-1', 'load', 'load', {
+      reason: 'awaiting_abandoned_cleanup',
+      retryAfterSeconds: 90,
+    });
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        code: 'restore_in_progress',
+        errorKind: 'restore_in_progress',
+        httpStatus: 409,
+        retryable: true,
+        reason: 'awaiting_abandoned_cleanup',
+        retryAfterSeconds: 90,
+        sessionId: 'persisted-1',
+        activeAction: 'load',
+        requestedAction: 'load',
+      },
+    });
+  });
+
   it('maps restore cleanup quarantine as channel unavailable', () => {
     const error = new BridgeChannelQuarantinedError();
     expect(toRpcError(error)).toEqual({
@@ -55,6 +81,24 @@ describe('toRpcError', () => {
         httpStatus: 503,
         retryable: true,
         reason: 'restore_cleanup_failed',
+        retryAfterSeconds: 5,
+      },
+    });
+  });
+
+  it('carries the quarantine backoff hint for a settlement-overdue channel', () => {
+    // Quarantine outlives the fence, and a fresh-id request never reaches the
+    // 409 that carries the real hint — so this payload is the only backoff
+    // signal such a caller gets.
+    const error = new BridgeChannelQuarantinedError(
+      'restore_settlement_overdue',
+      90,
+    );
+    expect(toRpcError(error)).toMatchObject({
+      data: {
+        reason: 'restore_settlement_overdue',
+        retryAfterSeconds: 90,
+        httpStatus: 503,
       },
     });
   });

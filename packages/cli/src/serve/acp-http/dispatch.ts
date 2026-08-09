@@ -37,6 +37,7 @@ import {
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
+  RestoreInProgressError,
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
@@ -719,6 +720,30 @@ export function toRpcError(err: unknown): {
         },
       };
     }
+    case 'RestoreInProgressError': {
+      // Without this case the fence degrades to the default arm — an opaque
+      // `internal` 500 with no code, reason, or hint. SDK transport
+      // negotiation prefers acp-ws and acp-http over REST, so unpinned
+      // clients land exactly here: they cannot distinguish a retryable fence
+      // from a genuine internal error, and cannot honor the longer backoff
+      // the protocol reference tells them to.
+      const fenceError = err as RestoreInProgressError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: fenceError.message,
+        data: {
+          code: 'restore_in_progress',
+          errorKind: 'restore_in_progress',
+          httpStatus: 409,
+          retryable: true,
+          reason: fenceError.reason,
+          retryAfterSeconds: fenceError.retryAfterSeconds,
+          sessionId: fenceError.sessionId,
+          activeAction: fenceError.activeAction,
+          requestedAction: fenceError.requestedAction,
+        },
+      };
+    }
     case 'BridgeChannelQuarantinedError': {
       const unavailableError = err as BridgeChannelQuarantinedError;
       return {
@@ -730,6 +755,7 @@ export function toRpcError(err: unknown): {
           httpStatus: 503,
           retryable: true,
           reason: unavailableError.reason,
+          retryAfterSeconds: unavailableError.retryAfterSeconds,
         },
       };
     }

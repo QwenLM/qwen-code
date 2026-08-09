@@ -11390,7 +11390,9 @@ describe('createServeApp', () => {
         .send({});
 
       expect(res.status).toBe(504);
-      expect(res.headers['retry-after']).toBe('5');
+      // The fence this 504 creates outlives a full budget, so the hint has to
+      // be derived from it rather than the ordinary 5s.
+      expect(res.headers['retry-after']).toBe('60');
       expect(res.body).toMatchObject({
         code: 'session_restore_timeout',
         errorKind: 'restore_timeout',
@@ -11401,10 +11403,40 @@ describe('createServeApp', () => {
       });
     });
 
+    it('carries the fence reason and backoff on a same-id retry', async () => {
+      // The bridge-side hint has to survive the wire: without this, restoring
+      // the old hardcoded 5s or dropping reason/retryable ships green.
+      const bridge = fakeBridge({
+        loadImpl: async () => {
+          throw new RestoreInProgressError('persisted-fenced', 'load', 'load', {
+            reason: 'awaiting_abandoned_cleanup',
+            retryAfterSeconds: 90,
+          });
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-fenced/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.headers['retry-after']).toBe('90');
+      expect(res.body).toMatchObject({
+        code: 'restore_in_progress',
+        reason: 'awaiting_abandoned_cleanup',
+        retryable: true,
+        sessionId: 'persisted-fenced',
+      });
+    });
+
     it('503s fresh session work while restore cleanup is quarantined', async () => {
       const bridge = fakeBridge({
         resumeImpl: async () => {
-          throw new BridgeChannelQuarantinedError();
+          throw new BridgeChannelQuarantinedError(
+            'restore_settlement_overdue',
+            90,
+          );
         },
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -11414,12 +11446,15 @@ describe('createServeApp', () => {
         .send({});
 
       expect(res.status).toBe(503);
-      expect(res.headers['retry-after']).toBe('5');
+      // Quarantine lasts until the channel drains — strictly longer than the
+      // fence — and a fresh-id caller never sees the 409 that would tell it so.
+      expect(res.headers['retry-after']).toBe('90');
       expect(res.body).toMatchObject({
         code: 'acp_channel_unavailable',
         errorKind: 'acp_channel_unavailable',
         retryable: true,
-        reason: 'restore_cleanup_failed',
+        reason: 'restore_settlement_overdue',
+        retryAfterSeconds: 90,
       });
     });
 

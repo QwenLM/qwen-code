@@ -106,24 +106,24 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 `packages/cli/src/serve/types.ts` defines the typed options object accepted by both `runQwenServe` and `createServeApp`. It mirrors the CLI flags above and adds:
 
-| Field                         | Effect                                                                                                                                            |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `eventRingSize`               | Overrides the default per-session ring size.                                                                                                      |
-| `memoryProjectScope`          | `'git-root' \| 'workspace'` project-memory partitioning; falls back to `QWEN_CODE_MEMORY_PROJECT_SCOPE`.                                          |
-| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                                                                 |
-| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                                                                    |
-| `externalToolGuard`           | Optional `{mode:'required', endpoint, token, timeoutMs?}`. Omission is fully off; required mode performs the provider handshake before listening. |
-| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                                                                           |
-| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                                                                                  |
-| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required.                                                     |
-| `promptDeadlineMs`            | Prompt wallclock limit.                                                                                                                           |
-| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                                                                          |
-| `channelIdleTimeoutMs`        | How long to keep the ACP child warm after the last session closes.                                                                                |
-| `initializeTimeoutMs`         | ACP child request timeout, including the initialize handshake.                                                                                    |
-| `sessionRestoreTimeoutMs`     | ACP session load/resume timeout. Precedence: explicit restore value, explicit initialize value, then 60000.                                       |
-| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                                                                     |
-| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                                                                           |
-| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                                                                          |
+| Field                         | Effect                                                                                                                                                                     |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eventRingSize`               | Overrides the default per-session ring size.                                                                                                                               |
+| `memoryProjectScope`          | `'git-root' \| 'workspace'` project-memory partitioning; falls back to `QWEN_CODE_MEMORY_PROJECT_SCOPE`.                                                                   |
+| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                                                                                          |
+| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                                                                                             |
+| `externalToolGuard`           | Optional `{mode:'required', endpoint, token, timeoutMs?}`. Omission is fully off; required mode performs the provider handshake before listening.                          |
+| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                                                                                                    |
+| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                                                                                                           |
+| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required.                                                                              |
+| `promptDeadlineMs`            | Prompt wallclock limit.                                                                                                                                                    |
+| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                                                                                                   |
+| `channelIdleTimeoutMs`        | How long to keep the ACP child warm after the last session closes.                                                                                                         |
+| `initializeTimeoutMs`         | ACP child request timeout, including the initialize handshake.                                                                                                             |
+| `sessionRestoreTimeoutMs`     | ACP session load/resume timeout. Precedence: explicit restore value; otherwise an explicit initialize value raises the 60000 default but never lowers it; otherwise 60000. |
+| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                                                                                              |
+| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                                                                                                    |
+| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                                                                                                   |
 
 ## `BridgeOptions` (programmatic bridge embedding)
 

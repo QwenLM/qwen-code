@@ -9,6 +9,7 @@ import {
   DEFAULT_SESSION_RESTORE_TIMEOUT_MS,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
+  restoreRetryAfterSeconds,
 } from './session-restore-timeout.js';
 
 const INVALID_TIMEOUTS = [
@@ -19,6 +20,24 @@ const INVALID_TIMEOUTS = [
   Number.POSITIVE_INFINITY,
   MAX_SESSION_RESTORE_TIMEOUT_MS + 1,
 ];
+
+describe('restoreRetryAfterSeconds', () => {
+  it.each([
+    { budgetMs: 60_000, expected: 60 },
+    // Floor: an explicit sub-5s budget is honored by the resolver, but a hint
+    // shorter than the ordinary cadence helps nobody.
+    { budgetMs: 20, expected: 5 },
+    { budgetMs: 5_000, expected: 5 },
+    // Ceiling: a very long configured budget must not advertise an absurd wait.
+    { budgetMs: 300_000, expected: 120 },
+    { budgetMs: MAX_SESSION_RESTORE_TIMEOUT_MS, expected: 120 },
+  ])(
+    'clamps a $budgetMs ms budget to $expected s',
+    ({ budgetMs, expected }) => {
+      expect(restoreRetryAfterSeconds(budgetMs)).toBe(expected);
+    },
+  );
+});
 
 describe('resolveSessionRestoreTimeoutMs', () => {
   it('accepts exactly the maximum restore timeout', () => {

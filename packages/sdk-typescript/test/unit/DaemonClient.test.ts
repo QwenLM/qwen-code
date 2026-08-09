@@ -2918,6 +2918,54 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('lets an explicit global timeout win over the advertised budget', async () => {
+      // Precedence, not just each branch in isolation: reordering the last two
+      // branches to prefer the advertised budget would silently stretch a
+      // caller's configured 20s SLA to 90s with every other test still green.
+      vi.useFakeTimers();
+      try {
+        let restoreSignal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 80_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            restoreSignal = init?.signal ?? undefined;
+            restoreSignal?.addEventListener(
+              'abort',
+              () => reject(restoreSignal?.reason),
+              { once: true },
+            );
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 20_000,
+        });
+        await client.capabilities();
+
+        const outcome = client
+          .loadSession('slow-session')
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(19_999);
+        expect(restoreSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('disables a derived restore timer beyond the JavaScript ceiling', async () => {
       const { fetch, calls } = recordingFetch((req) =>
         req.url.endsWith('/capabilities')
