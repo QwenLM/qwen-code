@@ -158,6 +158,39 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
       'Inspect the message list',
     );
+    expect(container.querySelector('[class*="rowActivity"]')).toBeNull();
+    expect(container.querySelector('[class*="rowStats"]')).toBeNull();
+  });
+
+  it('does not duplicate a non-default type when the task has no description', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'type-only',
+        args: { subagent_type: 'reviewer' },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'reviewer',
+    );
+  });
+
+  it('omits a case-variant default agent type', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'case-variant-default',
+        args: {
+          description: 'Inspect the message list',
+          subagent_type: 'General-Purpose',
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Inspect the message list',
+    );
   });
 
   it('keeps completed duration and tokens separate from the task text', () => {

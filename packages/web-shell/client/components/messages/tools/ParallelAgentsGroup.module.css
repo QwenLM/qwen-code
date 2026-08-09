@@ -280,7 +280,7 @@
 
 .row:hover,
 .row:focus-visible {
-  background: var(--accent);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
 .row:focus-visible {
