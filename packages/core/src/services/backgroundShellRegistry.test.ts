@@ -27,6 +27,18 @@ import {
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { escapeXml } from '../utils/xml.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+
+/**
+ * Mirror of how the registry renders a path into the notification XML. The
+ * expected paths below are built from `tmpdir()`, which can legally contain
+ * XML metacharacters (`&` on Windows, `<` on POSIX), so hand-rolling the
+ * escaping here would make these cases depend on the host's TMPDIR.
+ */
+function expectedOutputFileElement(path: string): string {
+  return `<output-file>${escapeXml(stripDisplayControlChars(path))}</output-file>`;
+}
 
 let tmpDirs: string[] = [];
 
@@ -355,9 +367,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
       // Assert the whole element, not just the tail: the temp prefix is
       // random but the escaping is what this test is about.
-      expect(modelText).toContain(
-        `<output-file>${outputPath.replaceAll('&', '&amp;')}</output-file>`,
-      );
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
     });
 
     it('limits output-tail to the retained byte budget', () => {
@@ -425,7 +435,7 @@ describe('BackgroundShellRegistry', () => {
       // Whole element: pins that only the control byte is stripped and the
       // rest of the path survives intact.
       expect(modelText).toContain(
-        `<output-file>${join(dir, 'out.log')}</output-file>`,
+        expectedOutputFileElement(join(dir, 'out.log')),
       );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
