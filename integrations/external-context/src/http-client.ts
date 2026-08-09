@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const MAX_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 class ProviderResponseError extends Error {
   constructor() {
@@ -122,13 +122,11 @@ async function readBoundedBody(response: Response): Promise<string> {
   // getReader(), not `for await`: async-iterating a ReadableStream needs
   // [Symbol.asyncIterator] on the TYPE, and whether it is there depends on
   // which lib set the program resolves — @types/node's stream has it, the
-  // DOM lib's needs lib.dom.asynciterable. That resolution has already
-  // flipped underneath this file once: installing @types/jsdom at the root
-  // (#8693) dragged lib.dom into any program without this package's
-  // tsconfig `types` guard, and every branch behind that guard failed the
-  // autofix verification build with TS2504 on this exact line. The reader
-  // API types identically in every lib set, so the build no longer depends
-  // on that resolution at all.
+  // DOM lib's needs lib.dom.asynciterable. That resolution flipped
+  // underneath this file once: installing @types/jsdom at the root (#8693)
+  // dragged lib.dom into this program and failed the build with TS2504 on
+  // this exact line. The reader API types identically in every lib set, so
+  // the build no longer depends on that resolution.
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;

@@ -5,19 +5,17 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { postJson } from './http-client.js';
+import { MAX_RESPONSE_BYTES, postJson } from './http-client.js';
 
 // Behavioral net for readBoundedBody's reader loop. The loop was rewritten
 // from `for await (const chunk of response.body)` to an explicit getReader()
 // loop — async-iterating a ReadableStream needs [Symbol.asyncIterator] on the
 // TYPE, and that resolution flipped underneath the file when #8693's
-// @types/jsdom install dragged lib.dom into guardless programs (TS2504 on
-// every branch behind the tsconfig guard, discarding autofix rounds). These
-// tests pin what the rewrite must preserve: bounded accumulation, the
-// oversize rejection, and — the easy one to drop — cancelling the stream on
-// early exit, which `for await` used to do implicitly via iterator return().
-
-const MAX_RESPONSE_BYTES = 1024 * 1024;
+// @types/jsdom install dragged lib.dom into this program (TS2504 on the
+// `for await`). These tests pin what the rewrite must preserve: bounded
+// accumulation, the oversize rejection, and — the easy one to drop —
+// cancelling the stream on early exit, which `for await` used to do
+// implicitly via iterator return().
 
 function streamingResponse(
   chunks: Uint8Array[],
