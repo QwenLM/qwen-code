@@ -10,21 +10,23 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from '@agentclientprotocol/sdk';
-import type {
-  TranscriptProjectionDiagnostic,
-  TranscriptRecordInput,
-  TranscriptReplayGapInput,
+// Use the Node-free transcriptRecords subpath so the browser replay bundle
+// does not pull in the full core package barrel.
+import {
+  projectUserTranscriptForDisplay,
+  type TranscriptProjectionDiagnostic,
+  type TranscriptRecordInput,
+  type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
-// Narrow path — the helper is Node-free. Importing the core package barrel
-// here would pull the whole Node-bound core graph into the browser
-// transcript bundle (sdk-typescript daemon/transcript).
-import { stripTrailingUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -56,6 +58,7 @@ export interface TranscriptReplayStateV1 {
   readonly pendingToolCalls: readonly PendingTranscriptToolCall[];
   readonly cumulativeUsage: TranscriptReplayUsageState;
   readonly goalState?: GoalSnapshotV2;
+  readonly goalCause?: GoalStateCause;
 }
 
 export interface TranscriptReplayToolMetadata {
@@ -166,6 +169,28 @@ interface TranscriptGoalStatus {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function replaceTextPartsForDisplay(
+  parts: readonly unknown[] | undefined,
+  displayText: string,
+): readonly unknown[] {
+  const projected: unknown[] = [];
+  let replacedText = false;
+  for (const part of parts ?? []) {
+    if (isObjectRecord(part) && typeof part['text'] === 'string') {
+      if (!replacedText && displayText.length > 0) {
+        projected.push({ text: displayText });
+      }
+      replacedText = true;
+    } else {
+      projected.push(part);
+    }
+  }
+  if (!replacedText && displayText.length > 0) {
+    projected.push({ text: displayText });
+  }
+  return projected;
 }
 
 export function toTranscriptEpochMs(
@@ -389,6 +414,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   };
   private finalized = false;
   private goalState: GoalSnapshotV2 | undefined;
+  private goalCause: GoalStateCause | undefined;
 
   constructor(private readonly options: TranscriptReplayMachineOptions) {
     const initialState = parseInitialState(
@@ -397,6 +423,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     );
     this.usage = { ...initialState.cumulativeUsage };
     this.goalState = initialState.goalState;
+    this.goalCause = initialState.goalCause;
     for (const pending of initialState.pendingToolCalls) {
       this.pendingToolCalls.set(pending.callId, pending);
       this.usedToolCallIds.add(pending.callId);
@@ -505,6 +532,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       })),
       cumulativeUsage: { ...this.usage },
       ...(this.goalState ? { goalState: this.goalState } : {}),
+      ...(this.goalCause ? { goalCause: this.goalCause } : {}),
     };
   }
 
@@ -513,25 +541,25 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    const payload = isObjectRecord(record.systemPayload)
+      ? record.systemPayload
+      : undefined;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
       record.subtype === 'cron' ||
       record.subtype === 'mid_turn_user_message'
     ) {
-      const payload = isObjectRecord(record.systemPayload)
-        ? record.systemPayload
-        : undefined;
       const displayText =
         payload && typeof payload['displayText'] === 'string'
           ? payload['displayText']
           : undefined;
-      const backgroundTask =
-        payload && isObjectRecord(payload['backgroundTask'])
-          ? payload['backgroundTask']
-          : undefined;
       if (displayText) {
         const isNotification = record.subtype === 'notification';
+        const backgroundTask =
+          payload && isObjectRecord(payload['backgroundTask'])
+            ? payload['backgroundTask']
+            : undefined;
         yield emit(
           createTranscriptMessageUpdate({
             role: 'user',
@@ -553,105 +581,32 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
-    } else if (!record.subtype) {
-      // Plain user records — including UserPromptSubmit-augmented ones —
-      // prefer the recorded display projection, then strip a trailing
-      // whole-part tagged hook-context block. Matches resumeHistoryUtils.
-      // Always go through projectMessageParts so multimodal inlineData
-      // (images) survives even when displayText replaces the text parts.
-      const payload = isObjectRecord(record.systemPayload)
-        ? record.systemPayload
-        : undefined;
-      const displayText =
-        payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
-          : undefined;
+    }
+
+    const projection = projectUserTranscriptForDisplay(record);
+    if (projection.displayText !== undefined) {
       yield* this.projectMessageParts(
-        displayText !== undefined
-          ? this.withUserPromptDisplayText(record, displayText)
-          : this.withoutTrailingUserPromptSubmitContext(record),
+        record,
         'user',
         emit,
         meta,
+        undefined,
+        replaceTextPartsForDisplay(
+          record.message?.parts,
+          projection.displayText,
+        ),
       );
       return;
     }
-    yield* this.projectMessageParts(record, 'user', emit, meta);
-  }
 
-  /**
-   * Drops a trailing message part that is entirely a tagged UserPromptSubmit
-   * context block. Injection always appends after the user's own part(s), so
-   * a sole matching part is treated as user-authored and kept.
-   */
-  private withoutTrailingUserPromptSubmitContext(
-    record: TranscriptRecordInput,
-  ): TranscriptRecordInput {
-    const parts = record.message?.parts;
-    if (!Array.isArray(parts)) {
-      return record;
-    }
-    const nextParts = stripTrailingUserPromptSubmitContextPart(parts);
-    if (nextParts === parts) {
-      return record;
-    }
-    return {
-      ...record,
-      message: {
-        ...record.message,
-        parts: [...nextParts],
-      },
-    };
-  }
-
-  /**
-   * Rebuilds a plain user record for display: strip trailing tagged hook
-   * context, then replace every text part with a single `displayText` part at
-   * the first text position so images keep their relative order. An empty
-   * `displayText` means "no user-visible text" (e.g. an image-only channel
-   * prompt): the text parts are dropped WITHOUT synthesizing a `{text:''}`
-   * part, which projectMessageParts would flag as an unknown part and flip
-   * the replay to `complete:false` even though nothing was lost.
-   */
-  private withUserPromptDisplayText(
-    record: TranscriptRecordInput,
-    displayText: string,
-  ): TranscriptRecordInput {
-    const stripped = this.withoutTrailingUserPromptSubmitContext(record);
-    const parts = stripped.message?.parts;
-    if (!Array.isArray(parts) || parts.length === 0) {
-      return {
-        ...stripped,
-        message: {
-          ...stripped.message,
-          parts: displayText === '' ? [] : [{ text: displayText }],
-        },
-      };
-    }
-    let replaced = false;
-    const nextParts: unknown[] = [];
-    for (const part of parts) {
-      if (isObjectRecord(part) && typeof part['text'] === 'string') {
-        if (!replaced) {
-          replaced = true;
-          if (displayText !== '') {
-            nextParts.push({ text: displayText });
-          }
-        }
-        continue;
-      }
-      nextParts.push(part);
-    }
-    if (!replaced && displayText !== '') {
-      nextParts.push({ text: displayText });
-    }
-    return {
-      ...stripped,
-      message: {
-        ...stripped.message,
-        parts: nextParts,
-      },
-    };
+    yield* this.projectMessageParts(
+      record,
+      'user',
+      emit,
+      meta,
+      undefined,
+      projection.parts,
+    );
   }
 
   private *projectAssistantRecord(
@@ -686,8 +641,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
     beforeToolCall?: () => SessionUpdate | undefined,
+    partsOverride?: readonly unknown[],
   ): Iterable<TranscriptReplayEmission> {
-    const parts = record.message?.parts;
+    const parts = partsOverride ?? record.message?.parts;
     if (!parts) return;
     for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
       const part = parts[partIndex];
@@ -879,11 +835,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
+      const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+        cause: payload.cause,
+        previousCause: this.goalCause,
+        previous: this.goalState,
+        next: payload.snapshot,
+      });
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,
       );
       this.goalState = payload.snapshot;
+      this.goalCause = payload.cause;
+      if (bookkeepingOnly) return;
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1191,6 +1155,17 @@ function parseInitialState(
       affectsCompleteness: true,
     });
   }
+  const rawGoalCause = value['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (rawGoalCause !== undefined && !goalCause) {
+    onDiagnostic?.({
+      code: 'invalid_replay_state',
+      severity: 'warning',
+      message: 'Dropped a malformed Goal cause from replay state.',
+      affectsCompleteness: true,
+    });
+  }
   return {
     v: 1,
     pendingToolCalls,
@@ -1203,6 +1178,7 @@ function parseInitialState(
         }
       : emptyUsage(),
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 

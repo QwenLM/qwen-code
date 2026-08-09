@@ -191,7 +191,115 @@ export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const ACTIVE_WORK_HEARTBEAT_META_KEY = 'qwen.daemon.activeWorkHeartbeat';
+export const ACTIVE_WORK_HEARTBEAT_VERSION = 1 as const;
+/** Reporting cadence the daemon asks for; the child may choose another value
+ *  inside [MIN, MAX] and the daemon clamps whatever comes back. */
+export const ACTIVE_WORK_HEARTBEAT_INTERVAL_MS = 15_000;
+export const ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS = 5_000;
+export const ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS = 60_000;
+/** A channel's cached snapshot goes stale after this many report intervals. */
+export const ACTIVE_WORK_STALE_INTERVALS = 3;
+export const ACTIVE_WORK_NOTIFICATION_METHOD =
+  'qwen/notify/channel/active-work';
+export const ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM = 'onlyIfUnheld';
+/** Bound on the conditional-close round trip. Its own constant rather than the
+ *  handshake timeout: this runs on the automatic-cleanup path, where waiting
+ *  longer buys nothing — an unanswered request is simply left for the next
+ *  snapshot to settle. */
+export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
+/** Bounds on a single snapshot. Generous next to any real deployment — they
+ *  exist so a version-skewed or buggy child cannot make the daemon walk an
+ *  unbounded structure per report, not to constrain legitimate use. A packet
+ *  over either bound is discarded whole, like any other malformed one. */
+export const ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS = 1024;
+export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
+
+/**
+ * Work categories a child reports holds for. Deliberately excludes background
+ * shells, Monitors, workflows, and cron: those are out of `activeWork`'s
+ * declared scope. The category travels on every hold so widening the scope
+ * later adds data rather than changing what the `activeWork` boolean means.
+ */
+export type ActiveWorkHoldCategory = 'agent' | 'notification';
+
+export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
+  'agent',
+  'notification',
+];
+
+export interface ActiveWorkHeartbeatCapabilityV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+  intervalMs: number;
+  /** Which categories this child actually reports. A daemon that cares about
+   *  a category the child omits degrades its reporting grade rather than
+   *  silently treating the gap as "no work". */
+  categories: ActiveWorkHoldCategory[];
+}
+
+/**
+ * Coerce a peer-supplied reporting cadence into the agreed range.
+ *
+ * Both sides call this on whatever the other side sent. Neither is treated as
+ * hostile, but a version-skewed or buggy peer proposing 1ms would flood the
+ * transport and one proposing hours would make the daemon's freshness grade
+ * meaningless, so the value is never used raw. Anything unusable falls back to
+ * the default cadence rather than disabling reporting.
+ */
+export function clampActiveWorkIntervalMs(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : NaN;
+  if (Number.isNaN(value)) return ACTIVE_WORK_HEARTBEAT_INTERVAL_MS;
+  return Math.min(
+    ACTIVE_WORK_HEARTBEAT_MAX_INTERVAL_MS,
+    Math.max(ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS, Math.round(value)),
+  );
+}
+
+/**
+ * Collapse coverage counts into the grade `/health?deep=1` reports.
+ *
+ * Deliberately a function over summed counts rather than a per-runtime getter:
+ * grades do not compose. A runtime with no Sessions vouches for everything it
+ * has, so folding its vacuous `full` in as evidence let an empty workspace
+ * vouch for another workspace's unreported Sessions. Callers sum the counts
+ * across every runtime first, then grade once.
+ */
+export function gradeActiveWorkCoverage(totals: {
+  total: number;
+  covered: number;
+  onNegotiatedChannel: number;
+}): 'full' | 'partial' | 'none' {
+  // No Sessions means nothing is unreported, so the picture is complete.
+  if (totals.total === 0 || totals.covered === totals.total) return 'full';
+  // `none` is reserved for "not one Session sits on a channel that negotiated
+  // reporting" — the case where acting on `activeWork` is unsafe rather than
+  // merely degraded.
+  return totals.onNegotiatedChannel === 0 ? 'none' : 'partial';
+}
+
+export interface ActiveWorkHoldV1 {
+  category: ActiveWorkHoldCategory;
+  id: string;
+}
+
+export interface ActiveWorkSessionSnapshotV1 {
+  sessionId: string;
+  holds: ActiveWorkHoldV1[];
+}
+
+/**
+ * A full, channel-wide snapshot: every Session the child currently owns, with
+ * every hold it currently holds. Full-snapshot (rather than incremental
+ * transition) semantics are what make a dropped report self-correcting in
+ * both directions, and a Session's *absence* from a fresh snapshot is
+ * positive evidence the child no longer owns it.
+ */
+export interface ActiveWorkSnapshotV1 {
+  v: typeof ACTIVE_WORK_HEARTBEAT_VERSION;
+  seq: number;
+  sessions: ActiveWorkSessionSnapshotV1[];
+}
 
 export interface ChannelStartupProfileV1 {
   v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
@@ -1696,6 +1804,44 @@ export interface AcpSessionBridge {
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
+
+  /**
+   * Whether an accepted prompt, a running background Agent, or an Agent
+   * terminal notification is unsettled. Background shells, Monitors,
+   * workflows, and cron are deliberately outside this.
+   */
+  readonly activeWork: boolean;
+
+  /**
+   * How much of `activeWork` this runtime can vouch for, as counts rather than
+   * a grade.
+   *
+   * Counts, because the daemon-wide grade cannot be assembled from per-runtime
+   * grades: a runtime with zero Sessions vouches for everything it has and is
+   * therefore vacuously complete, which must not count as evidence that some
+   * *other* runtime's unreported Sessions are covered. Summing counts and
+   * grading once at the end is the only composition that gets that right.
+   *
+   * A Session counts as covered only when its owning channel negotiated
+   * reporting, reports every category, and its last snapshot is still inside
+   * the freshness window. Without this a controller cannot tell "nothing is
+   * running" from "nobody told me what is running", and those must not lead to
+   * the same decision.
+   */
+  readonly activeWorkCoverage: {
+    /** Live Sessions in this runtime. */
+    total: number;
+    /** Of those, how many `activeWork` actually speaks for. */
+    covered: number;
+    /** Of those, how many sit on a channel that negotiated reporting at all.
+     *  Zero is what distinguishes `none` from `partial`. */
+    onNegotiatedChannel: number;
+    /** Epoch ms of the oldest snapshot among the *covered* Sessions, or null
+     *  when none are covered. Diagnostic: the freshness decision is already
+     *  folded into `covered`, because only the daemon knows each channel's
+     *  negotiated cadence. */
+    oldestCoveredReportAt: number | null;
+  };
 
   /** Queued prompts across all sessions — accepted but not yet dispatched,
    *  excluding the one running per session — i.e. the queue-depth gauge for the

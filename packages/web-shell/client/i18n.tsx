@@ -701,6 +701,8 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedUntilProviderUsage':
+    'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
@@ -1475,7 +1477,8 @@ const EN: Messages = {
   'local.lsp': 'Show LSP server status',
   'local.remember': 'Save a durable memory to the memory system',
   'local.summary': 'Generate a project summary file',
-  'local.workflows': 'List active and completed workflow runs',
+  'local.workflows':
+    'List workflow runs or cooperatively pause/resume a live run',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -1668,7 +1671,17 @@ const EN: Messages = {
     `Enabling extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
-    'Enter a GitHub, Git, or npm extension source.',
+    'Enter a GitHub, Git, or npm source, or upload an Extension archive.',
+  'extensions.manage.sourceTab': 'Source',
+  'extensions.manage.archiveTab': 'Archive',
+  'extensions.manage.archiveSelect': 'Select a .zip or .tar.gz archive.',
+  'extensions.manage.archiveSelected': (v) =>
+    `Selected archive: ${v?.name ?? 'extension archive'}`,
+  'extensions.manage.archiveTooLarge':
+    'Extension archives must be 10 MB or smaller.',
+  'extensions.manage.archiveEmpty': 'The selected Extension archive is empty.',
+  'extensions.manage.archiveInvalid':
+    'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installTitle': 'Add Extension',
@@ -2590,7 +2603,7 @@ const EN: Messages = {
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
-    'Must be "Open" for notifications to flow',
+    'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.senderPolicy': 'Sender Policy',
   'channels.editor.field.github.senderPolicy.description':
     'Use "Allowlist" with allowed users on public repos',
@@ -2609,7 +2622,7 @@ const EN: Messages = {
     'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
   'channels.editor.field.gitlab.groupPolicy.description':
-    'Must be "Open" or "Allowlist" for todos to be processed',
+    'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
   'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
   'channels.editor.field.gitlab.senderPolicy.description':
     'Use "Allowlist" with allowed users on public projects',
@@ -2651,7 +2664,11 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+    'Match the shared code before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+  'channels.editor.pairing.subject.group': (v) =>
+    `Group: ${v?.name ?? 'Unknown'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `Requested by ${v?.sender ?? 'Unknown'}`,
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
   'channels.editor.pairing.approveFor': (v) =>
@@ -2670,7 +2687,7 @@ const EN: Messages = {
     'Pending requests will appear here after this Channel is saved in pairing mode.',
   'channels.editor.pairing.approvals.title': 'Pairing approvals',
   'channels.editor.pairing.approvals.description':
-    'Sender IDs approved through pairing for this Channel.',
+    'User and group IDs approved through pairing for this Channel.',
   'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
   'channels.editor.pairing.approvals.revoke': 'Revoke',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
@@ -2683,7 +2700,7 @@ const EN: Messages = {
     'Pairing approvals are temporarily unavailable. Try again.',
   'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
   'channels.editor.pairing.approvals.empty.description':
-    'Approved sender IDs will appear here.',
+    'Approved user and group IDs will appear here.',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -2705,6 +2722,8 @@ const EN: Messages = {
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
+  'channels.editor.validation.outOfRange': (v) =>
+    `Enter a number greater than ${v?.min ?? 0}.`,
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -3478,6 +3497,8 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedUntilProviderUsage':
+    'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
@@ -4211,7 +4232,7 @@ const ZH: Messages = {
   'local.lsp': '显示 LSP 服务器状态',
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
-  'local.workflows': '列出进行中和已完成的工作流运行',
+  'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
@@ -4387,7 +4408,17 @@ const ZH: Messages = {
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
   'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.install': '安装',
-  'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
+  'extensions.manage.installDescription':
+    '输入 GitHub、Git 或 npm 扩展来源，或上传 Extension 压缩包。',
+  'extensions.manage.sourceTab': '来源',
+  'extensions.manage.archiveTab': '压缩包',
+  'extensions.manage.archiveSelect': '选择 .zip 或 .tar.gz 压缩包。',
+  'extensions.manage.archiveSelected': (v) =>
+    `已选择压缩包：${v?.name ?? 'Extension 压缩包'}`,
+  'extensions.manage.archiveTooLarge': 'Extension 压缩包不能超过 10 MB。',
+  'extensions.manage.archiveEmpty': '所选 Extension 压缩包为空。',
+  'extensions.manage.archiveInvalid':
+    '请选择文件名有效且不超过 255 字节的 .zip 或 .tar.gz Extension 压缩包。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installTitle': '添加扩展',
@@ -5243,7 +5274,7 @@ const ZH: Messages = {
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
-    '必须设为 "Open" 才能接收通知',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.senderPolicy': '发送者策略',
   'channels.editor.field.github.senderPolicy.description':
     '公开仓库建议使用 "Allowlist" 并指定允许的用户',
@@ -5261,7 +5292,7 @@ const ZH: Messages = {
     '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
   'channels.editor.field.gitlab.groupPolicy.description':
-    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
   'channels.editor.field.gitlab.senderPolicy': '发送者策略',
   'channels.editor.field.gitlab.senderPolicy.description':
     '公开项目建议使用 "Allowlist" 并指定允许的用户',
@@ -5301,7 +5332,11 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+    '批准前，请核对收到的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+  'channels.editor.pairing.subject.group': (v) =>
+    `群聊：${v?.name ?? '未知群聊'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `由 ${v?.sender ?? '未知用户'} 发起`,
   'channels.editor.pairing.refresh': '刷新配对请求',
   'channels.editor.pairing.approve': '批准',
   'channels.editor.pairing.approveFor': (v) =>
@@ -5317,21 +5352,21 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
-  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.title': '已配对对象',
   'channels.editor.pairing.approvals.description':
-    '通过配对获得此频道访问权限的用户 ID。',
-  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+    '通过配对获得此频道访问权限的用户和群聊 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对对象',
   'channels.editor.pairing.approvals.revoke': '撤销',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
     `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
   'channels.editor.pairing.approvals.revoked': (v) =>
     `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
-  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.error': '未能更新已配对对象',
   'channels.editor.pairing.approvals.unavailable':
-    '暂时无法获取已配对用户，请重试。',
-  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+    '暂时无法获取已配对对象，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对对象',
   'channels.editor.pairing.approvals.empty.description':
-    '批准配对请求后，用户 ID 会显示在这里。',
+    '批准配对请求后，用户或群聊 ID 会显示在这里。',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -5351,6 +5386,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
+  'channels.editor.validation.outOfRange': (v) =>
+    `请输入大于 ${v?.min ?? 0} 的数字。`,
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',

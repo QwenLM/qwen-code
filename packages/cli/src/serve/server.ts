@@ -106,6 +106,7 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { createRequestedSessionIdAdmission } from './session-id-admission.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -518,6 +519,7 @@ export interface ServeAppDeps {
     enabled: boolean,
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
+  persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -548,6 +550,11 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  /**
+   * Returns every bridge generation that is still alive, including draining
+   * generations no longer exposed by the workspace registry.
+   */
+  getSessionBridges?: () => readonly AcpSessionBridge[];
   workspaceTrustHotReloadAvailable?: boolean;
   getWorkspaceTrustPolicySnapshot?: () =>
     | DaemonTrustPolicySnapshot
@@ -671,6 +678,15 @@ export function createServeApp(
   if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
     throw new Error(
       'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
+  if (
+    (deps.workspaceTrustHotReloadAvailable === true ||
+      deps.workspaceRuntimeRemoval !== undefined) &&
+    deps.getSessionBridges === undefined
+  ) {
+    throw new Error(
+      'createServeApp: runtime replacement/removal requires deps.getSessionBridges so session-id admission can inspect draining generations.',
     );
   }
   const app = express();
@@ -977,8 +993,9 @@ export function createServeApp(
       // Wire the production status provider so direct embeds / tests
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
-      // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
-      // readTextFile pick up trust / TOCTOU / audit.
+      delegateReadTextFileToClient: false,
+      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Unexpected delegated reads still fail closed at the WFS boundary.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
@@ -1079,6 +1096,13 @@ export function createServeApp(
             'setWorkspaceSkillEnabled requires persistDisabledSkills in ServeAppDeps',
           );
         }),
+      persistDisabledSkillsBatch:
+        deps.persistDisabledSkillsBatch ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillsEnabled requires persistDisabledSkillsBatch in ServeAppDeps',
+          );
+        }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -1127,6 +1151,21 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  const requestedSessionIdAdmission = createRequestedSessionIdAdmission({
+    archiveCoordinator,
+    getBridges:
+      deps.getSessionBridges ??
+      (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge)),
+    getPersistenceTargets: () =>
+      workspaceRegistry.listManaged().map((runtime) => ({
+        workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      })),
+    getBridgeWorkspaceId: (bridge) =>
+      workspaceRegistry
+        .listEntries()
+        .find((entry) => entry.current?.runtime.bridge === bridge)?.workspaceId,
+  });
   primaryTrustRegistry = workspaceRegistry;
   const primaryRuntime = createLiveWorkspaceDelegate(
     () => workspaceRegistry.primary,
@@ -2239,6 +2278,7 @@ export function createServeApp(
     bridge: primaryBridge,
     workspaceRegistry,
     archiveCoordinator,
+    requestedSessionIdAdmission,
     mutate,
     sendBridgeError,
     daemonLog,
@@ -2594,6 +2634,7 @@ export function createServeApp(
     workspaceRegistry,
     isPrimaryWorkspaceTrusted,
     archiveCoordinator,
+    requestedSessionIdAdmission,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,

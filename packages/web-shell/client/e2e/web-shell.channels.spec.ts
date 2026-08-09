@@ -233,6 +233,13 @@ test('creates and deletes a typed Channel configuration', async ({
           code: 'ABCD1234',
           createdAt: Date.parse('2026-07-28T00:00:00.000Z'),
         },
+        {
+          senderId: 'user-77',
+          senderName: 'Grace',
+          subject: { type: 'group', id: 'group-9', name: 'Release Team' },
+          code: 'QW3N5678',
+          createdAt: Date.parse('2026-07-28T00:02:00.000Z'),
+        },
       ],
     },
   });
@@ -305,6 +312,11 @@ test('creates and deletes a typed Channel configuration', async ({
   await page
     .getByRole('button', { name: 'Approve Ada, code ABCD1234' })
     .click();
+  await page
+    .getByRole('button', {
+      name: 'Approve Group: Release Team, code QW3N5678',
+    })
+    .click();
   await expect(page.getByText('No pending requests')).toBeVisible();
   await expect
     .poll(() =>
@@ -320,7 +332,21 @@ test('creates and deletes a typed Channel configuration', async ({
       expect.objectContaining({
         body: { code: 'ABCD1234' },
       }),
+      expect.objectContaining({
+        body: { code: 'QW3N5678' },
+      }),
     ]);
+  await expect(
+    page.getByRole('button', { name: 'Revoke Group: group-9' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Revoke Group: group-9' }).click();
+  const groupRevokeConfirmation = page.getByRole('alertdialog');
+  await expect(groupRevokeConfirmation).toContainText(
+    'Only the approval created through pairing will be removed.',
+  );
+  await groupRevokeConfirmation
+    .getByRole('button', { name: 'Revoke approval' })
+    .click();
   await expect(
     page.getByRole('button', { name: 'Revoke user-42' }),
   ).toBeVisible();
@@ -342,6 +368,9 @@ test('creates and deletes a typed Channel configuration', async ({
       ),
     )
     .toEqual([
+      expect.objectContaining({
+        body: { groupId: 'group-9' },
+      }),
       expect.objectContaining({
         body: { senderId: 'user-42' },
       }),

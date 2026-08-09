@@ -18,6 +18,7 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
@@ -120,7 +121,7 @@ export interface ChannelEditorDialogProps {
   ) => Promise<DaemonChannelPairingApprovalsSnapshot>;
   revokePairingApproval: (
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
 }
 
@@ -252,6 +253,12 @@ export function ChannelEditorDialog({
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
+    if (code === 'outOfRange') {
+      return t('channels.editor.validation.outOfRange', {
+        min:
+          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+      });
+    }
     if (code === 'policy') return t('channels.editor.validation.policy');
     return t('channels.editor.validation.required', {
       label: field ? fieldLabel(field) : t('channels.editor.instanceName'),
@@ -407,6 +414,7 @@ export function ChannelEditorDialog({
   };
 
   const renderField = (field: DaemonChannelConfigFieldDescriptor) => {
+    if (field.kind === 'object') return null;
     if (field.kind === 'secret') return renderSecret(field);
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];
@@ -651,7 +659,15 @@ export function ChannelEditorDialog({
                 ? String(draft.values['senderPolicy'] ?? '')
                 : draft.senderPolicy;
               const showRadioGroup = !descriptorPolicy;
-              const showPairing = effectivePolicy === 'pairing';
+              const descriptorGroupPolicy = descriptor.fields.some(
+                (field) => field.key === 'groupPolicy',
+              );
+              const effectiveGroupPolicy = descriptorGroupPolicy
+                ? String(draft.values['groupPolicy'] ?? '')
+                : String(instance?.config.groupPolicy ?? '');
+              const showPairing =
+                effectivePolicy === 'pairing' ||
+                effectiveGroupPolicy === 'pairing';
               if (!showRadioGroup && !showPairing) return null;
               return (
                 <section className={styles.section}>
@@ -702,7 +718,8 @@ export function ChannelEditorDialog({
                     </>
                   ) : null}
                   {showPairing ? (
-                    instance?.config.senderPolicy === 'pairing' ? (
+                    instance?.config.senderPolicy === 'pairing' ||
+                    instance?.config.groupPolicy === 'pairing' ? (
                       <ChannelPairingRequests
                         channelName={instance.name}
                         listRequests={listPairingRequests}

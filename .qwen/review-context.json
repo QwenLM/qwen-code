@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "label": "Qwen Code",
+  "rules": [
+    {
+      "paths": ["packages/cli/src/commands/review/**"],
+      "domains": ["cli", "review"],
+      "recommendedTests": ["review"],
+      "requiredConfigurations": ["node22"]
+    },
+    {
+      "paths": ["packages/core/src/**"],
+      "domains": ["core"],
+      "recommendedTests": ["core"],
+      "requiredConfigurations": ["node22"]
+    },
+    {
+      "paths": ["packages/core/src/config/**"],
+      "relatedPaths": ["packages/core/src/config/**"],
+      "domains": ["core-config"]
+    },
+    {
+      "paths": ["packages/core/src/skills/**"],
+      "relatedPaths": ["packages/core/src/skills/**"],
+      "domains": ["core-skills"]
+    },
+    {
+      "paths": ["packages/web-shell/client/**"],
+      "domains": ["web-shell"],
+      "recommendedTests": ["web-shell"],
+      "requiredConfigurations": ["node22"]
+    },
+    {
+      "paths": ["packages/web-shell/client/**"],
+      "relatedPaths": [
+        "packages/web-shell/client/adapters/**",
+        "packages/web-shell/client/completions/**",
+        "packages/web-shell/client/e2e/*",
+        "packages/web-shell/client/e2e/utils/*",
+        "packages/web-shell/client/e2e/visuals/*",
+        "packages/web-shell/client/hooks/**"
+      ]
+    },
+    {
+      "paths": ["integration-tests/**"],
+      "domains": ["integration-tests"],
+      "recommendedTests": ["integration-tests"],
+      "requiredConfigurations": ["node22"]
+    },
+    {
+      "paths": [".github/workflows/**"],
+      "domains": ["ci", "workflows"],
+      "recommendedTests": ["helper-tests"],
+      "requiredConfigurations": ["github-actions"]
+    },
+    {
+      "paths": [
+        "scripts/**",
+        "eslint-rules/**",
+        "eslint.config.js",
+        "package.json"
+      ],
+      "domains": ["build", "lint"],
+      "recommendedTests": ["build-lint"],
+      "requiredConfigurations": ["node22"]
+    }
+  ]
+}

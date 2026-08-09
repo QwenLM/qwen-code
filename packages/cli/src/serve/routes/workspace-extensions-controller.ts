@@ -43,6 +43,7 @@ const sanitizeDaemonMessage = (message: string): string =>
 
 export const redactExtensionDisplaySource = (source: string): string => {
   const redacted = redactUrlCredentials(source);
+  if (redacted.startsWith('upload:')) return redacted;
   if (/^[A-Za-z]:[\\/]/.test(redacted)) return redacted;
   try {
     const url = new URL(redacted);
