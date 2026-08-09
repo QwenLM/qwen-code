@@ -111,10 +111,13 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
-  const ripgrepSigningBlock = workflow.slice(
-    workflow.indexOf('# ripgrep vendor binaries'),
-    workflow.indexOf('# Node.js runtime binary'),
+  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
+  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
+  assert.ok(
+    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
+    'the vendor signing step must keep its ripgrep/Node section markers',
   );
+  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
   assert.doesNotMatch(
     ripgrepSigningBlock,
     /--entitlements/,
@@ -141,7 +144,7 @@ function testDesktopReleaseSigningWorkflow() {
   );
   assert.match(
     appEntitlements,
-    /com\.apple\.security\.device\.audio-input/,
+    /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/,
     'the app bundle must keep microphone access for voice dictation',
   );
   const infoPlist = fs.readFileSync(
@@ -155,7 +158,7 @@ function testDesktopReleaseSigningWorkflow() {
   );
   assert.match(
     nodeEntitlements,
-    /com\.apple\.security\.cs\.allow-jit/,
+    /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/,
     'the bundled Node.js runtime must keep its JIT entitlement',
   );
   assert.doesNotMatch(
