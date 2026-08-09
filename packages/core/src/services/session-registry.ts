@@ -56,7 +56,8 @@
  * origin-disambiguated keying, not a wider guard here.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
@@ -64,6 +65,7 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   isSameProcess,
+  PID_NAMESPACE_UNREADABLE,
   readMachineId,
   readPidNamespaceId,
   readProcStartToken,
@@ -97,6 +99,42 @@ const MAX_RECORD_BYTES = 64 * 1024;
  * and delete a file this code never wrote.
  */
 const RECORD_FILENAME = /^\d+\.json$/;
+
+/**
+ * How many candidate records one enumeration will look at, and how many of
+ * those reads may be in flight at once.
+ *
+ * Both filename and file count are attacker-supplied under this
+ * directory's own threat model: a sandboxed co-tenant can create
+ * `<digits>.json` at will, and an unbounded `Promise.all` over `readdir`
+ * would then open a descriptor and allocate a promise per entry in one
+ * tick. `qwen sessions ps` sits on an interactive path with no back
+ * pressure of its own, so the ceiling has to live here. A real machine
+ * runs single-digit sessions; 512 is far above any honest reading and far
+ * below the point where either resource matters.
+ */
+const MAX_RECORDS_PER_SCAN = 512;
+const SCAN_CONCURRENCY = 16;
+
+/**
+ * `O_NOFOLLOW` does not exist on Windows, where `fs.constants` simply
+ * omits it; `| undefined` would poison the whole flag word into `NaN`.
+ * Zero is the correct degradation — Windows has no symlink-in-a-shared-
+ * home threat model here, and every other guard still applies.
+ */
+const O_NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
+
+/** A directory entry's identity, as observed through an open handle. */
+interface EntryIdentity {
+  dev: number;
+  ino: number;
+}
+
+/** A validated record together with the entry the bytes came from. */
+interface ReadRecord {
+  record: SessionRegistryRecord;
+  entry: EntryIdentity;
+}
 
 export type SessionKind = 'interactive' | 'headless';
 
@@ -195,15 +233,91 @@ export function deriveSessionName(cwd: string, sessionId: string): string {
  * (a platform that exposes neither) and stays on the original
  * trust-the-path behaviour, while a null on one side only means the
  * writer made no claim we can check.
+ *
+ * {@link PID_NAMESPACE_UNREADABLE} is the one value that never matches,
+ * not even itself. `null` is a claim — "this platform has no namespaces" —
+ * and two peers making it are genuinely in the same (non-existent)
+ * namespace. The sentinel is the absence of a claim on a platform that
+ * *does* have namespaces, so two sides carrying it have established
+ * nothing: two containers behind a `hidepid` mount, sharing a machine id
+ * and a `QWEN_HOME`, would otherwise read each other's PID numbers as
+ * their own.
  */
 function isSameOrigin(
   record: Pick<SessionRegistryRecord, 'machineId' | 'pidNamespace'>,
   selfMachine: string | null,
   selfNamespace: string | null,
 ): boolean {
+  if (
+    record.pidNamespace === PID_NAMESPACE_UNREADABLE ||
+    selfNamespace === PID_NAMESPACE_UNREADABLE
+  ) {
+    return false;
+  }
   return (
     record.machineId === selfMachine && record.pidNamespace === selfNamespace
   );
+}
+
+/**
+ * Serializes this process's own registry writes, so `unregisterSession`
+ * and an in-flight `patchSessionRecord` can never interleave.
+ *
+ * `Config.refreshSessionId` queues its patch on a fire-and-forget chain
+ * and returns without awaiting it, so a `/clear` immediately before quit
+ * can still be between its read and its write when exit cleanup runs. In
+ * that interleaving the unlink lands in the middle and the patch's write
+ * then *recreates* the record — a file advertising a PID that has already
+ * exited, which stands until some other session's sweep happens to notice.
+ * Ordering the two removes the interleaving; {@link retiredPids} handles
+ * the other direction, where the patch is merely queued behind the unlink
+ * and would otherwise resurrect it just the same.
+ */
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * PIDs whose record this process has already withdrawn. A later patch for
+ * one is dropped rather than allowed to write the record back.
+ */
+const retiredPids = new Set<number>();
+
+function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
+  // Both arms run `op`: a failed predecessor must not cancel its
+  // successor, since each of these is independently best-effort.
+  const run = writeQueue.then(op, op);
+  writeQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Reject a write whose target is no longer the entry that was validated.
+ *
+ * `readRecord` proves things about an *inode* — its origin, its PID, that
+ * it parses — but every mutation that follows names a *path*, and in a
+ * directory a sandboxed co-tenant can write to, the two stop agreeing the
+ * moment the read returns: the entry can be unlinked and replaced with a
+ * foreign live record, which `patchSessionRecord` would then overwrite and
+ * `unregisterSession` would delete. Re-reading the entry immediately
+ * before the commit step binds them back together.
+ *
+ * `lstatSync` rather than the async form because `assertCanCommit` is the
+ * hook that runs *between* the last check and an irreversible `rename`;
+ * an `await` there would reopen the very window this closes.
+ */
+function assertSameEntry(filePath: string, expected: EntryIdentity): void {
+  const stat = fsSync.lstatSync(filePath);
+  if (
+    !stat.isFile() ||
+    stat.dev !== expected.dev ||
+    stat.ino !== expected.ino
+  ) {
+    throw new Error(
+      `session registry entry ${filePath} changed between validation and write`,
+    );
+  }
 }
 
 /**
@@ -236,50 +350,176 @@ export async function registerSession(
     peerProtocol: PEER_PROTOCOL_VERSION,
   };
 
-  try {
-    const dir = getSessionRegistryDir();
-    await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
-    // mkdir's mode is masked by the umask, and does nothing at all when
-    // the directory already exists — chmod is what actually guarantees
-    // 0700 on an upgrade from a build that created it more loosely.
-    await fs.chmod(dir, REGISTRY_DIR_MODE);
+  return enqueueWrite(async () => {
+    try {
+      const dir = getSessionRegistryDir();
+      await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
+      // mkdir's mode is masked by the umask, and does nothing at all when
+      // the directory already exists — chmod is what actually guarantees
+      // 0700 on an upgrade from a build that created it more loosely.
+      await fs.chmod(dir, REGISTRY_DIR_MODE);
 
-    const filePath = getSessionRecordPath(pid);
-    // Registration is the one write with nothing to merge into, so it is
-    // also the one that would happily clobber a stranger. A record from
-    // another origin at our PID number is not stale, it is not ours, and
-    // it cannot be proven dead from here.
-    const existing = await readRecord(filePath);
-    if (
-      existing !== null &&
-      !isSameOrigin(existing, record.machineId, record.pidNamespace)
-    ) {
-      debugLogger.debug(
-        `registerSession skipped: ${filePath} holds a record from another origin`,
-      );
-      try {
-        fields.onOriginConflict?.({ pid, filePath });
-      } catch (error) {
-        // A reporting callback must not turn a discovery miss into a
-        // failed startup; registration is already best-effort.
-        debugLogger.debug(`onOriginConflict threw: ${describe(error)}`);
+      const filePath = getSessionRecordPath(pid);
+      const reportConflict = () => {
+        debugLogger.debug(
+          `registerSession skipped: ${filePath} holds a record from another origin`,
+        );
+        try {
+          fields.onOriginConflict?.({ pid, filePath });
+        } catch (error) {
+          // A reporting callback must not turn a discovery miss into a
+          // failed startup; registration is already best-effort.
+          debugLogger.debug(`onOriginConflict threw: ${describe(error)}`);
+        }
+      };
+
+      // Two passes at most. The first decides on what is there; if the
+      // exclusive create then loses a race, the second re-reads whatever
+      // won it and runs the winner through the same origin rule, exactly
+      // as if it had been there before we looked.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // Registration is the one write with nothing to merge into, so it
+        // is also the one that would happily clobber a stranger. A record
+        // from another origin at our PID number is not stale, it is not
+        // ours, and it cannot be proven dead from here.
+        const existing = await readRecord(filePath);
+        if (
+          existing !== null &&
+          !isSameOrigin(existing.record, record.machineId, record.pidNamespace)
+        ) {
+          reportConflict();
+          return false;
+        }
+
+        // `existing === null` covers two different situations and only one
+        // of them is a free name: nothing is there, or something is there
+        // that this code cannot honour (a planted symlink, a truncated
+        // write, a future schema). Replacing the second is deliberate and
+        // tested; claiming the first has to be exclusive.
+        if (existing === null && !(await entryExists(filePath))) {
+          // Claim the name with an operation the kernel makes exclusive,
+          // rather than reading "absent" and renaming over whatever
+          // arrived in between: two origins sharing `QWEN_HOME` and a PID
+          // number would both see the gap, and the later rename would
+          // silently replace the earlier live record.
+          const outcome = await linkRecordExclusive(filePath, record);
+          if (outcome === 'created') {
+            retiredPids.delete(pid);
+            return true;
+          }
+          // 'taken' — someone claimed it in between. Go round again and
+          // route whatever they wrote through the origin rule above, as if
+          // it had been there before we looked.
+          if (outcome === 'taken') continue;
+          // 'unsupported' — no hard links on this filesystem. Fall through
+          // to the replacing write, which is where this path has always
+          // been; the exclusivity gap is the price of the filesystem.
+        }
+
+        // Either a same-origin record is present — the recycled-PID
+        // recovery path, where a predecessor died without unregistering —
+        // or hard links are unavailable. Replace it, but commit only if
+        // the directory entry is still the one that was validated.
+        //
+        // `noFollow` keeps a pre-planted `<pid>.json` symlink from
+        // redirecting this write (and its forced 0600) to a file outside
+        // the registry: the sandbox shares this directory across a trust
+        // boundary, so the planting side is not hypothetical.
+        await atomicWriteJSON(filePath, record, {
+          mode: REGISTRY_FILE_MODE,
+          forceMode: true,
+          noFollow: true,
+          assertCanCommit: existing
+            ? () => assertSameEntry(filePath, existing.entry)
+            : undefined,
+        });
+        retiredPids.delete(pid);
+        return true;
       }
+
+      debugLogger.debug(
+        `registerSession skipped: lost the race for ${getSessionRecordPath(pid)} twice`,
+      );
+      return false;
+    } catch (error) {
+      debugLogger.debug(`registerSession failed: ${describe(error)}`);
       return false;
     }
+  });
+}
 
-    // `noFollow` keeps a pre-planted `<pid>.json` symlink from redirecting
-    // this write (and its forced 0600) to a file outside the registry:
-    // the sandbox shares this directory across a trust boundary, so the
-    // planting side is not hypothetical.
-    await atomicWriteJSON(filePath, record, {
-      mode: REGISTRY_FILE_MODE,
-      forceMode: true,
-      noFollow: true,
-    });
+/** True when any directory entry exists at `filePath`, symlinks included. */
+async function entryExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.lstat(filePath);
     return true;
   } catch (error) {
-    debugLogger.debug(`registerSession failed: ${describe(error)}`);
-    return false;
+    // Anything other than "not there" — EACCES on the directory, say —
+    // is not evidence of a free name, so do not treat it as one.
+    return (error as NodeJS.ErrnoException)?.code !== 'ENOENT';
+  }
+}
+
+/**
+ * Create `filePath` holding `record`, or report that someone else got
+ * there first. Never replaces an existing entry of any kind.
+ *
+ * `link(2)` is the exclusivity primitive: it fails with `EEXIST` when the
+ * new name exists — symlinks included, which are an entry rather than a
+ * thing to follow — and it publishes a file that was already written and
+ * fsynced, so the record is never observable half-formed. `rename(2)`,
+ * the usual atomic-write commit, has the opposite property: it replaces.
+ *
+ * Returns `'unsupported'` where the filesystem has no hard links (some
+ * network and FUSE mounts), leaving the caller on its previous path.
+ */
+async function linkRecordExclusive(
+  filePath: string,
+  record: SessionRegistryRecord,
+): Promise<'created' | 'taken' | 'unsupported'> {
+  const tmpPath = path.join(
+    path.dirname(filePath),
+    `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
+  );
+  try {
+    const handle = await fs.open(
+      tmpPath,
+      fsSync.constants.O_WRONLY |
+        fsSync.constants.O_CREAT |
+        fsSync.constants.O_EXCL,
+      REGISTRY_FILE_MODE,
+    );
+    try {
+      await handle.writeFile(JSON.stringify(record, null, 2));
+      await handle.sync();
+      // open()'s mode argument is masked by the umask; fchmod is not, and
+      // goes through the handle so it cannot be redirected.
+      await handle.chmod(REGISTRY_FILE_MODE);
+    } finally {
+      await handle.close();
+    }
+
+    try {
+      await fs.link(tmpPath, filePath);
+      return 'created';
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'EEXIST') return 'taken';
+      if (
+        code === 'EPERM' ||
+        code === 'ENOSYS' ||
+        code === 'ENOTSUP' ||
+        code === 'EOPNOTSUPP' ||
+        code === 'EMLINK' ||
+        code === 'EXDEV'
+      ) {
+        return 'unsupported';
+      }
+      throw error;
+    }
+  } finally {
+    // The link, if it was made, keeps the inode alive under its real name.
+    await fs.unlink(tmpPath).catch(() => {});
   }
 }
 
@@ -295,25 +535,39 @@ export async function registerSession(
  * record would be missing whatever else registration would have set.
  * No-ops too when the record present at this PID came from another
  * origin — merging into it would rewrite a stranger's sessionId, cwd and
- * name, sending discovery to the wrong transcript.
+ * name, sending discovery to the wrong transcript — and once
+ * {@link unregisterSession} has withdrawn this PID, since a patch landing
+ * after the withdrawal would put a dead process back on the register.
  */
 export async function patchSessionRecord(
   patch: Partial<Omit<SessionRegistryRecord, 'pid' | 'schemaVersion'>>,
   pid: number = process.pid,
 ): Promise<void> {
-  const filePath = getSessionRecordPath(pid);
-  try {
-    const existing = await readRecord(filePath);
-    if (existing === null) return;
-    if (!isSameOrigin(existing, readMachineId(), readPidNamespaceId())) return;
-    await atomicWriteJSON(
-      filePath,
-      { ...existing, ...patch },
-      { mode: REGISTRY_FILE_MODE, forceMode: true, noFollow: true },
-    );
-  } catch (error) {
-    debugLogger.debug(`patchSessionRecord failed: ${describe(error)}`);
-  }
+  await enqueueWrite(async () => {
+    if (retiredPids.has(pid)) return;
+    const filePath = getSessionRecordPath(pid);
+    try {
+      const existing = await readRecord(filePath);
+      if (existing === null) return;
+      if (
+        !isSameOrigin(existing.record, readMachineId(), readPidNamespaceId())
+      ) {
+        return;
+      }
+      await atomicWriteJSON(
+        filePath,
+        { ...existing.record, ...patch },
+        {
+          mode: REGISTRY_FILE_MODE,
+          forceMode: true,
+          noFollow: true,
+          assertCanCommit: () => assertSameEntry(filePath, existing.entry),
+        },
+      );
+    } catch (error) {
+      debugLogger.debug(`patchSessionRecord failed: ${describe(error)}`);
+    }
+  });
 }
 
 /**
@@ -324,20 +578,38 @@ export async function patchSessionRecord(
  * somewhere, and one that will not re-register (registration is
  * startup-only). Anything unparseable is left too — it is not a record
  * this code wrote, so it is not this code's to delete.
+ *
+ * Also closes the register for this PID, so a `patchSessionRecord` queued
+ * behind this call is dropped instead of writing the record back.
  */
 export async function unregisterSession(
   pid: number = process.pid,
 ): Promise<void> {
-  const filePath = getSessionRecordPath(pid);
-  try {
-    const existing = await readRecord(filePath);
-    if (existing === null || existing.pid !== pid) return;
-    if (!isSameOrigin(existing, readMachineId(), readPidNamespaceId())) return;
-    await fs.unlink(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
-    debugLogger.debug(`unregisterSession failed: ${describe(error)}`);
-  }
+  await enqueueWrite(async () => {
+    // Before the unlink, not after: a patch queued behind this one must be
+    // refused even if the unlink itself finds nothing to do.
+    retiredPids.add(pid);
+    const filePath = getSessionRecordPath(pid);
+    try {
+      const existing = await readRecord(filePath);
+      if (existing === null || existing.record.pid !== pid) return;
+      if (
+        !isSameOrigin(existing.record, readMachineId(), readPidNamespaceId())
+      ) {
+        return;
+      }
+      // Node exposes no `unlinkat`-by-inode, so the entry is re-checked as
+      // late as it can be. That narrows the swap window to the syscall
+      // pair rather than to the whole validating read — the same binding
+      // the write paths get from `assertCanCommit`, minus a primitive the
+      // platform does not offer.
+      assertSameEntry(filePath, existing.entry);
+      await fs.unlink(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+      debugLogger.debug(`unregisterSession failed: ${describe(error)}`);
+    }
+  });
 }
 
 export interface ListLiveSessionsOptions {
@@ -386,86 +658,123 @@ export async function listLiveSessions(
   const selfMachine = readMachineId();
   const tokensAvailable = supportsProcStartToken();
 
+  // Take the candidates before doing any work on them. Both how many
+  // there are and what they are named is outside this process's control
+  // (see MAX_RECORDS_PER_SCAN), so the ceiling has to be applied to the
+  // list, not discovered while walking it.
+  const candidates = entries.filter((name) => RECORD_FILENAME.test(name));
+  if (candidates.length > MAX_RECORDS_PER_SCAN) {
+    debugLogger.debug(
+      `listLiveSessions: ${candidates.length} candidate records in ${dir}, examining ${MAX_RECORDS_PER_SCAN}`,
+    );
+    candidates.length = MAX_RECORDS_PER_SCAN;
+  }
+
   const live: SessionRegistryRecord[] = [];
-  await Promise.all(
-    entries
-      .filter((name) => RECORD_FILENAME.test(name))
-      .map(async (name) => {
-        const filePath = path.join(dir, name);
-        const record = await readRecord(filePath);
-        if (record === null) return;
+  await mapWithConcurrency(
+    candidates,
+    SCAN_CONCURRENCY,
+    async (name: string) => {
+      const filePath = path.join(dir, name);
+      const read = await readRecord(filePath);
+      if (read === null) return;
+      const record = read.record;
 
-        // A record whose filename disagrees with its contents was not
-        // written by this code (or was renamed by hand). Skip it, and
-        // never sweep it — we cannot reason about which PID it describes.
-        if (`${record.pid}.json` !== name) return;
+      // A record whose filename disagrees with its contents was not
+      // written by this code (or was renamed by hand). Skip it, and
+      // never sweep it — we cannot reason about which PID it describes.
+      if (`${record.pid}.json` !== name) return;
 
-        // Every check below — the self-PID comparison included — reads
-        // `record.pid` as a number on *our* machine in *our* PID
-        // namespace. When the record came from another origin, or from a
-        // writer whose origin we cannot pin down, that reading is
-        // meaningless: the record is neither reported (the PID would name
-        // some unrelated local process, up to and including this one) nor
-        // swept (a local ESRCH says nothing about a process elsewhere,
-        // and registration is startup-only, so an unlink here would hide
-        // a live session for the rest of its life). This has to run
-        // before the self-PID shortcut below, or a foreign record sitting
-        // at our own PID number is adopted as our session without ever
-        // reaching the gate.
-        if (!isSameOrigin(record, selfMachine, selfNamespace)) return;
+      // Every check below — the self-PID comparison included — reads
+      // `record.pid` as a number on *our* machine in *our* PID
+      // namespace. When the record came from another origin, or from a
+      // writer whose origin we cannot pin down, that reading is
+      // meaningless: the record is neither reported (the PID would name
+      // some unrelated local process, up to and including this one) nor
+      // swept (a local ESRCH says nothing about a process elsewhere,
+      // and registration is startup-only, so an unlink here would hide
+      // a live session for the rest of its life). This has to run
+      // before the self-PID shortcut below, or a foreign record sitting
+      // at our own PID number is adopted as our session without ever
+      // reaching the gate.
+      if (!isSameOrigin(record, selfMachine, selfNamespace)) return;
 
-        if (record.pid === selfPid) {
-          // Report the record at our own PID without probing: the origin
-          // gate above has established it describes this machine and this
-          // namespace, and the PID is ours, so it is alive by
-          // construction. (It is not necessarily *this session's* record
-          // — a same-origin predecessor that died on this PID leaves one
-          // behind — but that is a liveness-of-content question, not one
-          // this shortcut answers.)
-          if (includeSelf) live.push(record);
-          return;
+      if (record.pid === selfPid) {
+        // Report the record at our own PID without probing: the origin
+        // gate above has established it describes this machine and this
+        // namespace, and the PID is ours, so it is alive by
+        // construction. (It is not necessarily *this session's* record
+        // — a same-origin predecessor that died on this PID leaves one
+        // behind — but that is a liveness-of-content question, not one
+        // this shortcut answers.)
+        if (includeSelf) live.push(record);
+        return;
+      }
+
+      if (isSameProcess(record.pid, record.procStart)) {
+        // Alive — but on a platform that has start tokens, a record
+        // without one was not written by this build, which always
+        // records one. `isSameProcess` has just degraded to a bare
+        // liveness check, so all this record proves is that *some*
+        // process holds that PID; the session it describes —
+        // sessionId, cwd, name — is whoever wrote the file's to choose,
+        // and the origin fields needed to get this far are plaintext in
+        // every sibling record. Withhold it from callers, but do not
+        // sweep it: the PID is live, and it may equally be a future
+        // version's record, which an unlink would erase for good.
+        if (tokensAvailable && record.procStart == null) return;
+        live.push(record);
+        return;
+      }
+
+      if (sweepStale) {
+        try {
+          // Same binding as unregisterSession's: the entry that proved
+          // itself stale is the only one this may remove, so a co-tenant
+          // who swaps a live foreign record into the name after the read
+          // does not get it deleted on their behalf.
+          assertSameEntry(filePath, read.entry);
+          await fs.unlink(filePath);
+        } catch {
+          // Raced with another session's sweep, replaced under us, or not
+          // ours to delete.
         }
-
-        if (isSameProcess(record.pid, record.procStart)) {
-          // Alive — but on a platform that has start tokens, a record
-          // without one was not written by this build, which always
-          // records one. `isSameProcess` has just degraded to a bare
-          // liveness check, so all this record proves is that *some*
-          // process holds that PID; the session it describes —
-          // sessionId, cwd, name — is whoever wrote the file's to choose,
-          // and the origin fields needed to get this far are plaintext in
-          // every sibling record. Withhold it from callers, but do not
-          // sweep it: the PID is live, and it may equally be a future
-          // version's record, which an unlink would erase for good.
-          if (tokensAvailable && record.procStart == null) return;
-          live.push(record);
-          return;
-        }
-
-        if (sweepStale) {
-          try {
-            await fs.unlink(filePath);
-          } catch {
-            // Raced with another session's sweep, or not ours to delete.
-          }
-        }
-      }),
+      }
+    },
   );
 
   return live.sort((a, b) => b.startedAt - a.startedAt);
 }
 
-/** Read and validate one record. Returns null for anything unusable. */
-async function readRecord(
-  filePath: string,
-): Promise<SessionRegistryRecord | null> {
+/**
+ * Read and validate one record. Returns null for anything unusable.
+ *
+ * Everything is read through a single handle opened `O_NOFOLLOW`, and the
+ * entry's identity comes back with the bytes. Two reasons: the write paths
+ * already refuse to follow a symlink planted at this name, so the read
+ * that authorizes them must not follow one either; and every caller
+ * mutates by *path* afterwards, which is only sound if it can check the
+ * path still resolves to the inode that was validated (see
+ * {@link assertSameEntry}).
+ */
+async function readRecord(filePath: string): Promise<ReadRecord | null> {
   let raw: string;
+  let entry: EntryIdentity;
+  let handle: fs.FileHandle;
   try {
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return null;
-    raw = await fs.readFile(filePath, 'utf8');
+    handle = await fs.open(filePath, fsSync.constants.O_RDONLY | O_NOFOLLOW);
   } catch {
     return null;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return null;
+    entry = { dev: stat.dev, ino: stat.ino };
+    raw = await handle.readFile('utf8');
+  } catch {
+    return null;
+  } finally {
+    await handle.close().catch(() => {});
   }
 
   let parsed: unknown;
@@ -517,19 +826,46 @@ async function readRecord(
   const peerProtocol = value['peerProtocol'];
 
   return {
-    schemaVersion,
-    pid,
-    procStart: typeof procStart === 'string' ? procStart : null,
-    pidNamespace: typeof pidNamespace === 'string' ? pidNamespace : null,
-    machineId: typeof machineId === 'string' ? machineId : null,
-    sessionId,
-    cwd,
-    name,
-    kind,
-    startedAt,
-    qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
-    peerProtocol: typeof peerProtocol === 'number' ? peerProtocol : 0,
+    entry,
+    record: {
+      schemaVersion,
+      pid,
+      procStart: typeof procStart === 'string' ? procStart : null,
+      pidNamespace: typeof pidNamespace === 'string' ? pidNamespace : null,
+      machineId: typeof machineId === 'string' ? machineId : null,
+      sessionId,
+      cwd,
+      name,
+      kind,
+      startedAt,
+      qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
+      peerProtocol: typeof peerProtocol === 'number' ? peerProtocol : 0,
+    },
   };
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight.
+ *
+ * Deliberately not `Promise.all(items.map(...))`: `items` here is derived
+ * from a directory a sandboxed co-tenant can write to, and that form
+ * starts every read in the same tick.
+ */
+async function mapWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      if (item !== undefined) await fn(item);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
 }
 
 function describe(error: unknown): string {

@@ -19,10 +19,30 @@ import {
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
 import {
+  PID_NAMESPACE_UNREADABLE,
   readMachineId,
   readPidNamespaceId,
   readProcStartToken,
 } from '../utils/process-liveness.js';
+
+/**
+ * Lets a test put this process in the state the sentinel exists for: a
+ * platform that has PID namespaces, on which our own could not be read.
+ * Everything else passes through to the real implementation.
+ */
+const selfNamespaceUnreadable = vi.hoisted(() => ({ value: false }));
+
+vi.mock('../utils/process-liveness.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/process-liveness.js')>();
+  return {
+    ...actual,
+    readPidNamespaceId: () =>
+      selfNamespaceUnreadable.value
+        ? actual.PID_NAMESPACE_UNREADABLE
+        : actual.readPidNamespaceId(),
+  };
+});
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/session-registry-test';
@@ -143,11 +163,17 @@ describe('registerSession', () => {
       sweepStale: false,
     });
     expect(live).toHaveLength(1);
-    if (process.platform === 'linux') {
-      expect(live[0].procStart).toBe(readProcStartToken(process.pid));
+    // The recorded token must always equal what this process reads for
+    // itself — that is the regression this guards. The *shape* assertion
+    // is separate and conditional: `readProcStartToken` returns null by
+    // design where /proc is absent or restricted (a hardened container, a
+    // hidepid mount), and requiring digits there would fail the suite for
+    // an environmental reason rather than a code one.
+    const selfToken =
+      process.platform === 'linux' ? readProcStartToken(process.pid) : null;
+    expect(live[0].procStart).toBe(selfToken);
+    if (selfToken !== null) {
       expect(live[0].procStart).toMatch(/^\d+$/);
-    } else {
-      expect(live[0].procStart).toBeNull();
     }
   });
 
@@ -166,9 +192,16 @@ describe('registerSession', () => {
       selfPid: DEAD_PID,
       sweepStale: false,
     });
-    expect(record.pidNamespace).toBe(readPidNamespaceId());
+    const selfNamespace = readPidNamespaceId();
+    expect(record.pidNamespace).toBe(selfNamespace);
     if (process.platform === 'linux') {
-      expect(record.pidNamespace).toMatch(/^\d+$/);
+      // Either a namespace inode or the explicit "could not read it"
+      // sentinel — never null, which would mean "this platform has no
+      // namespaces" and let two containers agree they are one origin.
+      expect(record.pidNamespace).not.toBeNull();
+      if (selfNamespace !== PID_NAMESPACE_UNREADABLE) {
+        expect(record.pidNamespace).toMatch(/^\d+$/);
+      }
     } else {
       expect(record.pidNamespace).toBeNull();
     }
@@ -888,5 +921,267 @@ describe('listLiveSessions', () => {
 
     const live = await listLiveSessions({ includeSelf: true });
     expect(live.map((r) => r.sessionId)).toEqual(['s-parent', 's-self']);
+  });
+});
+
+// Symlinks are not creatable without elevation on stock Windows.
+describe.skipIf(process.platform === 'win32')(
+  'reading a record does not follow a symlink at its path',
+  () => {
+    /**
+     * A valid record body sitting *outside* the registry directory, so
+     * the only way to reach it is through the planted link. Inside the
+     * directory it would be a sweep candidate in its own right and the
+     * assertions below could not tell the two causes apart.
+     */
+    async function plantVictimOutsideRegistry(pid: number): Promise<string> {
+      const victim = path.join(tmpDir, 'victim-record.json');
+      await fs.writeFile(
+        victim,
+        JSON.stringify({
+          schemaVersion: 1,
+          pid,
+          // A real token, so a build that followed the link would find a
+          // record it considers live and report it. `null` would be
+          // withheld anyway and the assertion below could not tell the
+          // two reasons apart.
+          procStart: readProcStartToken(pid),
+          pidNamespace: readPidNamespaceId(),
+          machineId: readMachineId(),
+          sessionId: 's-victim',
+          cwd: '/w/victim',
+          name: 'victim-aa',
+          kind: 'interactive',
+          startedAt: 1000,
+        }),
+      );
+      await fs.mkdir(getSessionRegistryDir(), { recursive: true });
+      return victim;
+    }
+
+    it('does not list what the link points at', async () => {
+      // The write paths already refuse to follow a link here, so the read
+      // that authorizes them must refuse too. Otherwise the *target* is
+      // what gets validated while the *link* is what gets mutated, and a
+      // co-tenant who aims `<pid>.json` at a sibling's record gets that
+      // record acted on for them.
+      //
+      // The parent process is the one PID other than our own that is
+      // reliably alive, which is what makes "not listed" load-bearing
+      // rather than a restatement of the staleness sweep.
+      const victim = await plantVictimOutsideRegistry(process.ppid);
+      await fs.symlink(victim, getSessionRecordPath(process.ppid));
+
+      expect(await listLiveSessions({ sweepStale: true })).toEqual([]);
+      await expect(fs.stat(victim)).resolves.toBeDefined();
+    });
+
+    it('does not patch or unlink through one at its own record path', async () => {
+      const victim = await plantVictimOutsideRegistry(DEAD_PID);
+      await fs.symlink(victim, getSessionRecordPath(DEAD_PID));
+      const before = await fs.readFile(victim, 'utf8');
+
+      await patchSessionRecord({ sessionId: 'rewritten' }, DEAD_PID);
+      await unregisterSession(DEAD_PID);
+
+      expect(await fs.readFile(victim, 'utf8')).toBe(before);
+      // The link itself is left alone too: it is not a record this code
+      // wrote, so it is not this code's to delete.
+      expect(
+        (await fs.lstat(getSessionRecordPath(DEAD_PID))).isSymbolicLink(),
+      ).toBe(true);
+    });
+  },
+);
+
+describe('an unreadable PID namespace is not an origin', () => {
+  it('neither lists nor sweeps a record that could not name its namespace', async () => {
+    // `null` means "this platform has no PID namespaces", which is a claim
+    // two peers can share. The sentinel is the absence of a claim, and two
+    // containers behind a hidepid mount would otherwise match on it and
+    // read each other's PID numbers as their own.
+    const filePath = await writeRaw(`${DEAD_PID}.json`, {
+      schemaVersion: 1,
+      pid: DEAD_PID,
+      procStart: '1',
+      pidNamespace: PID_NAMESPACE_UNREADABLE,
+      sessionId: 's-elsewhere',
+      cwd: '/w/elsewhere',
+      name: 'elsewhere-dd',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    expect(await listLiveSessions({ sweepStale: true })).toEqual([]);
+    // Not listed *and* not swept. A dead PID plus a same-origin verdict
+    // would have deleted it; the file surviving is what shows the origin
+    // gate rejected it first.
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
+  it('does not match another record that could not name its namespace either', async () => {
+    // The case the sentinel exists for, and the only one plain inequality
+    // does not already cover: two containers behind a `hidepid` mount,
+    // sharing a machine id and a `QWEN_HOME`. Both write the sentinel, so
+    // a `null`-collapsing build reads them as one origin and lets a
+    // matching PID number list, overwrite, patch or sweep the other's
+    // record.
+    selfNamespaceUnreadable.value = true;
+    try {
+      const filePath = await writeRaw(`${DEAD_PID}.json`, {
+        schemaVersion: 1,
+        pid: DEAD_PID,
+        procStart: '1',
+        pidNamespace: PID_NAMESPACE_UNREADABLE,
+        sessionId: 's-other-container',
+        cwd: '/w/other',
+        name: 'other-ee',
+        kind: 'interactive',
+        startedAt: 1000,
+      });
+
+      expect(await listLiveSessions({ sweepStale: true })).toEqual([]);
+      await expect(fs.stat(filePath)).resolves.toBeDefined();
+
+      // The write paths keep their hands off it too.
+      await patchSessionRecord({ sessionId: 'mine' }, DEAD_PID);
+      await unregisterSession(DEAD_PID);
+      const onDisk = JSON.parse(await fs.readFile(filePath, 'utf8'));
+      expect(onDisk.sessionId).toBe('s-other-container');
+    } finally {
+      selfNamespaceUnreadable.value = false;
+    }
+  });
+
+  it('refuses to overwrite one at its own PID', async () => {
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: '1',
+      pidNamespace: PID_NAMESPACE_UNREADABLE,
+      sessionId: 's-elsewhere',
+      cwd: '/w/elsewhere',
+      name: 'elsewhere-dd',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    const conflicts: number[] = [];
+    await expect(
+      registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+        onOriginConflict: ({ pid }) => conflicts.push(pid),
+      }),
+    ).resolves.toBe(false);
+    expect(conflicts).toEqual([process.pid]);
+
+    const onDisk = JSON.parse(
+      await fs.readFile(getSessionRecordPath(), 'utf8'),
+    );
+    expect(onDisk.sessionId).toBe('s-elsewhere');
+  });
+});
+
+describe('ordering registry writes against withdrawal', () => {
+  it('drops a patch that was queued before the record was withdrawn', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      kind: 'interactive',
+      pid: DEAD_PID,
+    });
+
+    // `Config.refreshSessionId` queues its patch and returns without
+    // awaiting it, so this is the production shape: a `/clear` still in
+    // flight when exit cleanup runs. Both orders have to hold — the patch
+    // must not land in the middle of the unlink, and must not run after
+    // it either.
+    const patch = patchSessionRecord({ sessionId: 's2' }, DEAD_PID);
+    const withdraw = unregisterSession(DEAD_PID);
+    await Promise.all([patch, withdraw]);
+
+    await expect(fs.stat(getSessionRecordPath(DEAD_PID))).rejects.toThrow(
+      /ENOENT/,
+    );
+  });
+
+  it('drops a patch issued after the record was withdrawn', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      kind: 'interactive',
+      pid: DEAD_PID,
+    });
+    await unregisterSession(DEAD_PID);
+    await patchSessionRecord({ sessionId: 's2' }, DEAD_PID);
+
+    await expect(fs.stat(getSessionRecordPath(DEAD_PID))).rejects.toThrow(
+      /ENOENT/,
+    );
+  });
+
+  it('reopens the register when the PID registers again', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      kind: 'interactive',
+      pid: DEAD_PID,
+    });
+    await unregisterSession(DEAD_PID);
+    await registerSession({
+      sessionId: 's2',
+      cwd: '/w/app',
+      kind: 'interactive',
+      pid: DEAD_PID,
+    });
+    await patchSessionRecord({ cwd: '/w/moved' }, DEAD_PID);
+
+    const onDisk = JSON.parse(
+      await fs.readFile(getSessionRecordPath(DEAD_PID), 'utf8'),
+    );
+    expect(onDisk.cwd).toBe('/w/moved');
+  });
+});
+
+describe('bounding what one enumeration will do', () => {
+  it('caps the records it examines per pass', async () => {
+    // The filenames and the file count are both attacker-supplied here: a
+    // sandboxed co-tenant can create `<digits>.json` at will, and an
+    // unbounded fan-out would open a descriptor for every one of them in
+    // a single tick. The sweep is what makes the ceiling observable —
+    // exactly the records that were examined are the ones that go away.
+    const total = 600;
+    const cap = 512;
+    for (let i = 0; i < total; i++) {
+      const pid = DEAD_PID - i;
+      await writeRaw(`${pid}.json`, {
+        schemaVersion: 1,
+        pid,
+        procStart: '1',
+        pidNamespace: readPidNamespaceId(),
+        sessionId: `s-${i}`,
+        cwd: '/w/app',
+        name: `app-${i}`,
+        kind: 'interactive',
+        startedAt: 1000,
+      });
+    }
+
+    expect(await listLiveSessions({ sweepStale: true })).toEqual([]);
+
+    const left = (await fs.readdir(getSessionRegistryDir())).filter((n) =>
+      /^\d+\.json$/.test(n),
+    );
+    expect(left).toHaveLength(total - cap);
+
+    // Not a leak: the next pass takes the remainder.
+    await listLiveSessions({ sweepStale: true });
+    expect(
+      (await fs.readdir(getSessionRegistryDir())).filter((n) =>
+        /^\d+\.json$/.test(n),
+      ),
+    ).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@ import { hostname } from 'node:os';
 import {
   isPidAlive,
   isSameProcess,
+  PID_NAMESPACE_UNREADABLE,
   readMachineId,
   readPidNamespaceId,
   readProcStartToken,
@@ -24,6 +25,9 @@ const procReadFails = vi.hoisted(() => ({ value: false }));
 
 /** The same, for the `/proc/self/ns/pid` readlink. */
 const nsReadFails = vi.hoisted(() => ({ value: false }));
+
+/** Serves a chosen `/proc/self/ns/pid` target instead of the real one. */
+const nsLinkTarget = vi.hoisted(() => ({ value: null as string | null }));
 
 /**
  * Stands in for the machine-id sources, which cannot be arranged on the
@@ -62,6 +66,9 @@ vi.mock('node:fs', async (importOriginal) => {
         throw Object.assign(new Error('EACCES: /proc unreadable'), {
           code: 'EACCES',
         });
+      }
+      if (nsLinkTarget.value !== null && args[0] === '/proc/self/ns/pid') {
+        return nsLinkTarget.value;
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (actual.readlinkSync as any)(...args);
@@ -227,12 +234,28 @@ describe('readPidNamespaceId', () => {
     expect(target).not.toBe(readlinkSync('/proc/self/ns/mnt'));
   });
 
-  it('returns null instead of throwing when the link cannot be read', () => {
+  it('reports an unreadable link as unprovable, not as "no namespaces"', () => {
     nsReadFails.value = true;
     try {
-      expect(readPidNamespaceId()).toBeNull();
+      // Specifically NOT null. null is the claim "this platform has no PID
+      // namespaces", which two peers can legitimately agree on; an
+      // unreadable `/proc/self/ns/pid` is the absence of any claim. Two
+      // containers behind a hidepid mount that shared a machine id and a
+      // QWEN_HOME would otherwise match as one origin and read each
+      // other's PID numbers as their own.
+      expect(readPidNamespaceId()).toBe(PID_NAMESPACE_UNREADABLE);
+      expect(readPidNamespaceId()).not.toBeNull();
     } finally {
       nsReadFails.value = false;
+    }
+  });
+
+  it('reports a link whose target does not parse as unprovable too', () => {
+    nsLinkTarget.value = 'pid:[not-an-inode]';
+    try {
+      expect(readPidNamespaceId()).toBe(PID_NAMESPACE_UNREADABLE);
+    } finally {
+      nsLinkTarget.value = null;
     }
   });
 });

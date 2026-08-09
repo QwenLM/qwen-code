@@ -79,8 +79,29 @@ export function readProcStartToken(pid: number): string | null {
 }
 
 /**
- * An opaque identifier for the PID namespace this process lives in, or
- * `null` where the platform does not expose one.
+ * Recorded in place of a namespace id when the platform *has* PID
+ * namespaces but this process could not read its own — a `hidepid=2`
+ * mount, a seccomp filter, a `/proc` that is not mounted at all.
+ *
+ * It exists because `null` is already spoken for. `null` means "this
+ * platform has no namespaces", which is a positive statement two peers can
+ * agree on; an unreadable `/proc/self/ns/pid` is the opposite, a total
+ * absence of evidence. Collapsing the two would make two containers that
+ * share a machine id and a `QWEN_HOME` but can neither read their own
+ * namespace agree that they are one origin, and a matching PID number
+ * would then be enough to list, patch, overwrite or sweep the other
+ * container's record.
+ *
+ * Never equal to a real id — those are decimal inodes — so
+ * `isSameOrigin`-style comparisons reject it on whichever side it appears.
+ */
+export const PID_NAMESPACE_UNREADABLE = 'unreadable';
+
+/**
+ * An opaque identifier for the PID namespace this process lives in,
+ * `null` where the platform does not expose one, or
+ * {@link PID_NAMESPACE_UNREADABLE} where it does but the id could not be
+ * read.
  *
  * A PID only means something inside one namespace. Anything that writes a
  * PID into a directory another namespace can also read — a container and
@@ -91,18 +112,20 @@ export function readProcStartToken(pid: number): string | null {
  * Backed by `/proc/self/ns/pid`, a symlink whose target is
  * `pid:[<inode>]`; the inode is stable for the namespace's lifetime and
  * identical for two processes exactly when a PID means the same thing to
- * both of them. Returns `null` off Linux, where the concept does not
- * exist — callers must treat a `null` on both sides as "no namespace
- * boundary to worry about", and a mismatch of any kind as unprovable.
+ * both of them. Callers must treat a `null` on both sides as "no namespace
+ * boundary to worry about", and both a mismatch and an unreadable id as
+ * unprovable.
  */
 export function readPidNamespaceId(): string | null {
   if (process.platform !== 'linux') return null;
   try {
     const target = fs.readlinkSync('/proc/self/ns/pid');
     const match = /^pid:\[(\d+)\]$/.exec(target);
-    return match?.[1] ?? null;
+    // A target that exists but does not parse is the same evidential
+    // state as one that could not be read: Linux, namespaces, no id.
+    return match?.[1] ?? PID_NAMESPACE_UNREADABLE;
   } catch {
-    return null;
+    return PID_NAMESPACE_UNREADABLE;
   }
 }
 

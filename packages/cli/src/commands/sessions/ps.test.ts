@@ -74,7 +74,7 @@ describe('formatAge', () => {
 describe('qwen sessions ps', () => {
   it('prints a table of live sessions', async () => {
     listLiveSessions.mockResolvedValue([record()]);
-    await run({ json: false, all: false });
+    await run({ json: false });
 
     expect(stdout[0]).toMatch(/^NAME\s+PID\s+AGE\s+DIRECTORY$/);
     expect(stdout[1]).toContain('app-ab');
@@ -84,13 +84,13 @@ describe('qwen sessions ps', () => {
 
   it('says so plainly when nothing else is running', async () => {
     listLiveSessions.mockResolvedValue([]);
-    await run({ json: false, all: false });
+    await run({ json: false });
     expect(stdout).toEqual(['No other Qwen Code sessions are running.']);
   });
 
   it('emits one JSON object per line with no header', async () => {
     listLiveSessions.mockResolvedValue([record(), record({ pid: 7 })]);
-    await run({ json: true, all: false });
+    await run({ json: true });
 
     expect(stdout).toHaveLength(2);
     expect(JSON.parse(stdout[0]).pid).toBe(4242);
@@ -99,25 +99,42 @@ describe('qwen sessions ps', () => {
 
   it('prints nothing on stdout for an empty JSON listing', async () => {
     listLiveSessions.mockResolvedValue([]);
-    await run({ json: true, all: false });
+    await run({ json: true });
     expect(stdout).toEqual([]);
   });
 
-  it('excludes this process unless --all is passed', async () => {
+  it('asks for the default listing, with no self-inclusion switch', async () => {
     listLiveSessions.mockResolvedValue([]);
 
-    await run({ json: true, all: false });
-    expect(listLiveSessions).toHaveBeenLastCalledWith({ includeSelf: false });
+    await run({ json: true });
+    expect(listLiveSessions).toHaveBeenLastCalledWith();
+  });
 
-    await run({ json: true, all: true });
-    expect(listLiveSessions).toHaveBeenLastCalledWith({ includeSelf: true });
+  it('exposes no flag that claims to include this process', () => {
+    // `qwen sessions ps` runs and exits inside yargs' argument parsing, so
+    // it never reaches `startInteractiveUI` and never registers itself.
+    // A `--all` toggling `includeSelf` therefore had nothing to include:
+    // both settings produced identical output. Pinned here so it cannot
+    // come back without a registration to go with it.
+    const options: Record<string, unknown> = {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const yargsStub: any = {
+      option(name: string, config: unknown) {
+        options[name] = config;
+        return yargsStub;
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (psCommand.builder as any)(yargsStub);
+
+    expect(Object.keys(options)).toEqual(['json']);
   });
 
   it('neutralizes control sequences coming from another process record', async () => {
     listLiveSessions.mockResolvedValue([
       record({ name: 'ev\x1b[31mil\r', cwd: '/w/a\nb' }),
     ]);
-    await run({ json: false, all: false });
+    await run({ json: false });
 
     const row = stdout[1];
     expect(row).not.toContain('\x1b');
@@ -127,7 +144,7 @@ describe('qwen sessions ps', () => {
 
   it('truncates an over-long name instead of breaking the columns', async () => {
     listLiveSessions.mockResolvedValue([record({ name: 'x'.repeat(80) })]);
-    await run({ json: false, all: false });
+    await run({ json: false });
     expect(stdout[1]).toContain('...');
     expect(stdout[1]).toContain('4242');
   });
@@ -140,7 +157,7 @@ describe('qwen sessions ps', () => {
     // Asserting the cell exactly is what pins the accumulation loop —
     // "contains ..." survives a loop that copies nothing at all.
     listLiveSessions.mockResolvedValue([record({ name: '中'.repeat(15) })]);
-    await run({ json: false, all: false });
+    await run({ json: false });
 
     const cell = '中'.repeat(8) + '...';
     expect(stdout[1]).toBe(
@@ -154,7 +171,7 @@ describe('qwen sessions ps', () => {
       .spyOn(process, 'exit')
       .mockImplementation((() => undefined) as never);
 
-    await run({ json: false, all: false });
+    await run({ json: false });
 
     expect(stderr).toEqual([
       'Error: failed to read the session registry: registry on fire',

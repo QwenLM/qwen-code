@@ -409,6 +409,11 @@ describe('atomicWriteFile', () => {
       const victim = path.join(tmpDir, 'victim.txt');
       const planted = path.join(tmpDir, 'planted.json');
       await fs.writeFile(victim, 'PRECIOUS', { mode: 0o644 });
+      // writeFile's mode is masked by the umask, so under umask 077 the
+      // fixture lands at 0o600 and the "unchanged at 0o644" assertion
+      // below fails for a reason that has nothing to do with the code
+      // under test. chmod is not masked.
+      await fs.chmod(victim, 0o644);
       await fs.symlink(victim, planted);
 
       const realGeteuid = process.geteuid!;
@@ -1694,6 +1699,67 @@ describe('noFollow option — symlink protection', () => {
     // Sanity: the write genuinely went through the seam-routed open.
     expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
   });
+
+  // The ownership-preservation fallback is the *other* path that commits
+  // by pathname under noFollow. lstat proving the entry is a regular file
+  // does not survive the `writeFile(targetPath)` + `chmod(targetPath)`
+  // that follow it: both re-resolve the name, so an attacker who swaps a
+  // symlink in during that window gets the payload and the forced 0o600
+  // delivered to a file of their choosing. O_NOFOLLOW makes the kernel
+  // refuse a symlink at the final component, and the handle then pins
+  // every mutation to the inode that was validated. The existing
+  // behavioral test pre-places a static link, so it never races this
+  // window — only the flags show whether the window is closed.
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'atomicWriteFile: noFollow ownership fallback opens the target with O_NOFOLLOW and mutates only through the handle',
+    async () => {
+      const target = path.join(tmpDir, 'ownership-nofollow.json');
+      await fs.writeFile(target, 'OLD');
+      const targetStat = await fs.stat(target);
+
+      const openSpy = vi.fn(fs.open);
+      const chmodSpy = vi.fn(fs.chmod);
+      const fchmodSpy = vi.fn((fh: fs.FileHandle, mode: number) =>
+        fh.chmod(mode),
+      );
+
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => targetStat.uid + 1;
+      try {
+        await atomicWriteFile(
+          target,
+          'NEW',
+          { mode: 0o600, forceMode: true, noFollow: true },
+          { open: openSpy, chmod: chmodSpy, fchmod: fchmodSpy },
+        );
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      const [openedPath, flags] = openSpy.mock.calls[0] as [string, number];
+      expect(openedPath).toBe(target);
+      expect(flags & fsSync.constants.O_NOFOLLOW).toBe(
+        fsSync.constants.O_NOFOLLOW,
+      );
+      expect(flags & fsSync.constants.O_TRUNC).toBe(fsSync.constants.O_TRUNC);
+      // No O_CREAT: this branch runs precisely because the file is there,
+      // and keeping its inode is the point — a rename would reset the uid.
+      expect(flags & fsSync.constants.O_CREAT).toBe(0);
+
+      // The mode goes on through the fd, never through the pathname.
+      expect(fchmodSpy).toHaveBeenCalledTimes(1);
+      expect(chmodSpy).not.toHaveBeenCalled();
+
+      // The inode is preserved (that is what the fallback exists for) and
+      // holds the new content at the forced mode.
+      expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
+      expect((await fs.stat(target)).ino).toBe(targetStat.ino);
+      expect((await fs.stat(target)).mode & 0o7777).toBe(0o600);
+    },
+  );
 
   it('atomicWriteFileSync: noFollow EXDEV opens the target with O_EXCL (no-clobber create)', () => {
     const target = path.join(tmpDir, 'oexcl-sync.txt');

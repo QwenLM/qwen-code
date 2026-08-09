@@ -124,12 +124,19 @@ export async function startInteractiveUI(
       kind: 'interactive',
       qwenVersion: version,
       onOriginConflict: ({ filePath }) => {
-        startupWarnings.push(
+        const warning =
           `This session will not appear in \`qwen sessions ps\`: ${filePath} ` +
-            `holds a session record from another machine or PID namespace, ` +
-            `which Qwen Code will not overwrite. Remove that file if the ` +
-            `session it describes is gone.`,
-        );
+          `holds a session record from another machine or PID namespace, ` +
+          `which Qwen Code will not overwrite. Remove that file if the ` +
+          `session it describes is gone.`;
+        startupWarnings.push(warning);
+        // The array alone is not enough. `gemini.tsx` flushes
+        // startupWarnings to stderr *before* it calls into this module, so
+        // anything appended here reaches only the TUI's notification area —
+        // which the onboarding flow can cover, and which scrolls away.
+        // That is the wrong channel for a blackout that never lifts, so
+        // emit it on the durable one too.
+        writeStderrLine(warning);
       },
     })
   ) {

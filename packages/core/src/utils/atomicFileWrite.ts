@@ -261,12 +261,65 @@ export async function atomicWriteFile(
     return existingStat.uid !== euid;
   };
 
+  // Write `data` through an already-open handle, then fsync and fchmod it.
+  // Shared by the two paths that must not re-resolve `targetPath` after
+  // validating it — the ownership fallback and the noFollow EXDEV
+  // fallback. The narrowed chmod catch is FAT/exFAT only, so a sandbox
+  // EPERM, a transient EIO or a read-only EROFS fails loudly instead of
+  // leaving a credential file at the umask-masked mode with no trail.
+  const writeThroughHandle = async (fd: fs.FileHandle): Promise<void> => {
+    await fd.writeFile(
+      typeof data === 'string' ? Buffer.from(data, encoding) : data,
+    );
+    if (flush) await fd.sync();
+    if (desiredMode !== undefined) {
+      try {
+        await fchmodImpl(fd, desiredMode);
+      } catch (chmodErr) {
+        if (
+          !isNodeError(chmodErr) ||
+          (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
+        ) {
+          throw chmodErr;
+        }
+      }
+    }
+  };
+
   if (
     existingStat !== undefined &&
     existingStat.isFile() &&
     ownershipWouldChange()
   ) {
     options?.assertCanCommit?.();
+    if (options?.noFollow) {
+      // The lstat above proved this entry was a regular file, but
+      // `writeFile` and `chmod` name a *path*, and re-resolve it. On the
+      // shared directory noFollow exists for, an attacker who swaps in a
+      // symlink inside that window gets both the payload and the forced
+      // mode delivered to a file of their choosing — the same clobber the
+      // EXDEV fallback below already had to close.
+      //
+      // O_NOFOLLOW makes the kernel refuse a symlink at the final
+      // component, and every mutation then goes through the resulting
+      // handle, which is pinned to the inode that was validated. No
+      // O_CREAT: this branch exists because the file is already there, and
+      // preserving its inode is the entire point (a rename would reset the
+      // owner). O_NOFOLLOW is absent on Windows, which never reaches here
+      // anyway — `ownershipWouldChange` returns false on win32.
+      const fd = await openImpl(
+        targetPath,
+        fsSync.constants.O_WRONLY |
+          fsSync.constants.O_TRUNC |
+          (fsSync.constants.O_NOFOLLOW ?? 0),
+      );
+      try {
+        await writeThroughHandle(fd);
+      } finally {
+        await fd.close();
+      }
+      return;
+    }
     await fs.writeFile(targetPath, data, writeOptions);
     await tryChmod(targetPath);
     return;
@@ -330,32 +383,11 @@ export async function atomicWriteFile(
           let writeOk = false;
           try {
             try {
-              await fd.writeFile(
-                typeof data === 'string' ? Buffer.from(data, encoding) : data,
-              );
-              if (flush) await fd.sync();
-              // fchmod via the open fd — immune to symlink swap between
-              // close and a path-based chmod, which would otherwise redirect
-              // the 0o600 onto an attacker-pointed target and silently
-              // defeat noFollow on the EXDEV fallback path.
-              //
-              // Narrow the catch to FAT/exFAT signatures (ENOSYS / ENOTSUP).
-              // Operations on credential files are security-sensitive enough
-              // that a sandbox EPERM, transient EIO, or read-only EROFS
-              // should fail loudly rather than leave the file at the
-              // umask-masked open() mode with no diagnostic trail.
-              if (desiredMode !== undefined) {
-                try {
-                  await fchmodImpl(fd, desiredMode);
-                } catch (chmodErr) {
-                  if (
-                    !isNodeError(chmodErr) ||
-                    (chmodErr.code !== 'ENOSYS' && chmodErr.code !== 'ENOTSUP')
-                  ) {
-                    throw chmodErr;
-                  }
-                }
-              }
+              // fchmod via the open fd — immune to a symlink swap between
+              // close and a path-based chmod, which would otherwise
+              // redirect the 0o600 onto an attacker-pointed target and
+              // silently defeat noFollow on this fallback path.
+              await writeThroughHandle(fd);
               writeOk = true;
             } finally {
               await fd.close();

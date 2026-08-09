@@ -28,7 +28,6 @@ export const AGE_COL = 10;
 
 interface PsArgs {
   json?: boolean;
-  all?: boolean;
 }
 
 /**
@@ -103,7 +102,13 @@ function outputHuman(records: SessionRegistryRecord[], now: number): void {
 async function handlePs(argv: PsArgs): Promise<void> {
   let records: SessionRegistryRecord[];
   try {
-    records = await listLiveSessions({ includeSelf: argv.all ?? false });
+    // No `includeSelf`: this process is not a session and never registers
+    // one. `qwen sessions ps` is resolved and run during yargs' argument
+    // parsing, which finishes and exits long before `startInteractiveUI`
+    // — the only caller of `registerSession` — would run. So there is no
+    // record at this PID to include, and a flag offering to include it
+    // would be a switch with nothing on the other end.
+    records = await listLiveSessions();
   } catch (err) {
     writeStderrLine(
       `Error: failed to read the session registry: ${
@@ -135,17 +140,11 @@ export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
   describe: 'List Qwen Code sessions running right now',
   builder: (yargs: Argv) =>
-    yargs
-      .option('json', {
-        type: 'boolean',
-        describe: 'Output as JSON Lines',
-        default: false,
-      })
-      .option('all', {
-        type: 'boolean',
-        describe: 'Include this process, if it is itself a registered session',
-        default: false,
-      }),
+    yargs.option('json', {
+      type: 'boolean',
+      describe: 'Output as JSON Lines',
+      default: false,
+    }),
   handler: async (argv) => {
     await handlePs(argv);
   },
