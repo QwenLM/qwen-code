@@ -801,11 +801,10 @@ export const npmToolchainAdapter: ReviewToolchainAdapter = {
   // actually scope something: MODELED workspaces that resolve to at least one
   // package, or a root build/test script. Mirroring the run-side gate here
   // matters at mixed roots: an unmodeled-glob declaration (`packages/**`,
-  // `foo-*`) or a zero-package glob used to apply npm anyway, block a second
-  // adapter's selection, and drop the repo to the very `unsupported` handoff
-  // this guard exists to prevent — even though npm.run would immediately
-  // concede unsupported and the other adapter alone would have succeeded.
-  // When ZERO adapters
+  // `foo-*`) or a zero-package glob used to apply npm anyway, block Maven
+  // selection, and drop the repo to the very `unsupported` handoff this guard
+  // exists to prevent — even though npm.run would immediately concede
+  // unsupported and mvn.run alone would have succeeded. When ZERO adapters
   // apply at an npm-shaped root, runBuildTest delegates here anyway so the
   // report carries runNpmToolchain's precise handoff note (the unmodeled-glob
   // gate below is that diagnostic path, not dead code).

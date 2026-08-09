@@ -14,6 +14,7 @@ import {
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
+import { mavenToolchainAdapter } from './lib/maven-toolchain.js';
 import {
   npmToolchainAdapter,
   unresolvedWorkspaceDeps as toolchainUnresolvedWorkspaceDeps,
@@ -134,9 +135,9 @@ describe('runBuildTest', () => {
 
   it('treats a package.json with no build role as no npm project at all', () => {
     // Docs sites, husky, and lint configs put a script-less package.json in
-    // repos with nothing npm can scope. It must not make npm apply, or such a
-    // root would claim the selection away from a second adapter that could
-    // have verified the diff.
+    // repos with nothing npm can scope. It must not make npm apply — that is
+    // what used to collide with a root pom.xml and drop the whole repo to
+    // `unsupported` where the Maven adapter could have verified the diff.
     // The handoff note is still npm's precise one: the repo IS npm-shaped,
     // and naming why it cannot be scoped beats a generic "no project here".
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
@@ -203,16 +204,40 @@ describe('runBuildTest', () => {
       ok: true,
       timedOut: [],
       note:
-        'No supported npm project here to scope. Fall back to the ' +
+        'No supported npm or Maven project here to scope. Fall back to the ' +
         'build/test precedence in your brief — installing dependencies first — ' +
         'and give each command a deadline it can actually meet.',
     });
+  });
+
+  it('fails closed when npm and Maven both apply at the root', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
+
+    expect(rep.toolchain).toBe('unsupported');
+    expect(rep.build).toEqual([]);
+    expect(rep.test).toEqual([]);
+    expect(rep.note).toContain('Both npm and Maven apply');
+    expect(rep.note).toContain('will not guess');
   });
 
   it('coerces fractional and zero deadlines at the spawn boundary', () => {
     // spawnSync validates `timeout` as an unsigned integer: a decimal
     // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no
     // report, no --out file), and --timeout 0 armed no kill timer at all.
+    // The boundary is in build-test.ts, above every adapter, so the fixture
+    // stays npm — this case must not move when a toolchain is added.
     pkg('.', { name: 'r', scripts: { test: 'vitest run' } });
     writePlan(['src/a.ts']);
 
@@ -270,6 +295,62 @@ describe('runBuildTest', () => {
     ).toThrow(/--budget must be a finite number/);
   });
 
+  it('leaves a Maven repo with a build-less package.json to the Maven adapter', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'husky-only', scripts: { prepare: 'husky' } }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
+  });
+
+  it('delegates Maven-only repositories through the facade', () => {
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 7,
+      install: false,
+      buildOnly: true,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    expect(runSpy).toHaveBeenCalledWith({
+      root,
+      changedFiles: ['src/Main.java'],
+      timeout: 7,
+      install: false,
+      buildOnly: true,
+      exec,
+    });
+  });
+
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {
     // `packages/**` matches real paths that the walker cannot resolve, so a diff
     // inside it would otherwise yield an empty affected set and a confident green.
@@ -298,6 +379,61 @@ describe('runBuildTest', () => {
       'uses a workspace glob shape this command does not model',
     );
     expect(rep.note).not.toContain('no package to build');
+  });
+
+  it('selects Maven when the npm half uses unmodeled workspace globs', () => {
+    // The guard exists for exactly this root: npm cannot scope `packages/**`,
+    // and applying anyway would block Maven selection into the same
+    // unsupported handoff this test's sibling pins.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'frontend', workspaces: ['packages/**'] }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
+  });
+
+  it('selects Maven when the npm glob matches zero packages', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'frontend', workspaces: ['packages/*'] }),
+    );
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const exec = vi.fn();
+    const sentinel = { toolchain: 'maven' } as ReturnType<typeof runBuildTest>;
+    const runSpy = vi
+      .spyOn(mavenToolchainAdapter, 'run')
+      .mockReturnValue(sentinel);
+
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec,
+    });
+
+    expect(report).toBe(sentinel);
+    expect(runSpy).toHaveBeenCalledOnce();
+    runSpy.mockRestore();
   });
 
   it('reinstalls when node_modules exists but is INCOMPLETE (no .package-lock.json)', () => {
@@ -803,6 +939,73 @@ describe('runBuildTest', () => {
         'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
       ),
     ).toContain(colored);
+  });
+
+  it('rescues Maven dependency-failure lines from a trimmed middle', () => {
+    // Maven infra classification runs on trimmed output; when the error
+    // summary lands in the omitted middle, the rescue is what keeps a
+    // network outage classified as infrastructure instead of a Critical.
+    const line =
+      '[ERROR] Could not resolve dependencies for project example:core:jar:1';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('dependency failures');
+    // The colored form a `-Dstyle.color=always` reactor delivers — the SGR
+    // strip is what the predicate runs on, and the rescued line keeps its
+    // original bytes.
+    const colored =
+      '\x1b[1;31m[ERROR]\x1b[m Could not resolve dependencies for project example:core:jar:1';
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
+  });
+
+  it('rescues Maven source-failure lines from a trimmed middle', () => {
+    // The source markers outrank the infra carve-out; one lost to the trim
+    // would launder a compile failure into infrastructure.
+    const line = '[ERROR] COMPILATION ERROR :';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('source failures');
+    // The colored form too — losing the SGR strip here would drop the marker
+    // that keeps a compile failure from laundering into infrastructure.
+    const colored = '\x1b[1;31m[ERROR]\x1b[m COMPILATION ERROR :';
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
+  });
+
+  it('rescues Maven goal-failure lines from a trimmed middle', () => {
+    // The swallowed-failure check runs on trimmed output; a fail-never
+    // plugin goal failure lost to the trim would read the run green.
+    const line =
+      '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check (validate) on project core: You have 1 Checkstyle violation.';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('goal failures');
+  });
+
+  it('rescues Maven disk-failure lines from a trimmed middle', () => {
+    // The launch-failure classification runs on trimmed output; an ENOSPC
+    // line lost to the trim would file a disk failure against the PR (or,
+    // under fail-never, read the run green).
+    const line =
+      '[ERROR] Failed to write target/x.txt: No space left on device';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('disk failures');
   });
 
   it('caps the rescue so hostile prose cannot void the trim', () => {

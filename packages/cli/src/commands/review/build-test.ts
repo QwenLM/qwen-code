@@ -42,6 +42,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  isDependencyFailureLine,
+  isDiskFailureLine,
+  isGoalFailureLine,
+  isSourceFailureLine,
+  mavenToolchainAdapter,
+} from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
@@ -49,13 +56,29 @@ import {
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
 
-/**
- * The root toolchains build-test can select. One today; the registry exists so
- * the next one is a registration rather than another branch in this file.
- */
+/** The root toolchains build-test can select. */
 export const toolchainAdapters: readonly ReviewToolchainAdapter[] = [
   npmToolchainAdapter,
+  mavenToolchainAdapter,
 ];
+
+/**
+ * What a Maven lifecycle command this run generated actually scopes.
+ *
+ * The adapter builds the command line FROM these values, so a consumer that
+ * needs them reads them here rather than parsing the string back. Parsing is
+ * for the free text a PR author writes in a Test Plan; re-deriving our own
+ * command's meaning from its rendering adds a second grammar that can drift
+ * from the one that produced it.
+ */
+export interface MavenCommandFacts {
+  /** The lifecycle phase the command ends in — `test` or `test-compile`. */
+  lifecycle: string;
+  /** Repo-relative `-pl` module dirs, or null for a reactor-wide run. */
+  modules: string[] | null;
+  /** Whether `-am` upstream expansion was passed. */
+  alsoMake: boolean;
+}
 
 /** A command this run actually executed, and what it did. */
 export interface CommandResult {
@@ -67,6 +90,23 @@ export interface CommandResult {
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
   /**
+   * The adapter classified this failure as infrastructure — Maven/Java or
+   * dependency acquisition, an unlaunchable wrapper: a result `test-plan`
+   * must not settle a Test Plan claim against.
+   */
+  infrastructure?: boolean;
+  /**
+   * The command exited 0 but its output records failures Maven did not fail
+   * on (a fail-never setting swallowed them): `test-plan` must not rule a
+   * Test Plan claim reproduced against this run.
+   */
+  swallowedFailure?: boolean;
+  /**
+   * Present on a Maven LIFECYCLE command (not the dependency warm-up): what
+   * it scopes, as the adapter knew it when it built the command line.
+   */
+  maven?: MavenCommandFacts;
+  /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
    * quote the number that fired, not the flag default.
@@ -76,8 +116,8 @@ export interface CommandResult {
 
 export interface BuildTestReport {
   /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
-  toolchain: 'npm' | 'unsupported';
-  /** Workspace dirs the diff changed. */
+  toolchain: 'npm' | 'maven' | 'unsupported';
+  /** Workspace or Maven module dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
   buildSet: string[];
@@ -179,12 +219,24 @@ export function trimOutput(s: string): string {
     .filter(
       (l) =>
         MODULE_ERROR_RE.test(l) ||
-        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')),
+        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')) ||
+        // Maven infra classification runs on this trimmed output; a
+        // dependency-failure line lost to the trim would file a network
+        // outage against the PR, a source-failure line lost there would
+        // launder a compile error into infrastructure, a goal-failure line
+        // lost there would read a fail-never plugin failure green, and a
+        // disk-failure line lost there would file an ENOSPC death against
+        // the PR (or, under fail-never, read the run green) — the exact
+        // errors this command prevents.
+        isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+        isSourceFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+        isGoalFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+        isDiskFailureLine(l.replace(ANSI_SGR_RE, '')),
     )
     .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
@@ -343,10 +395,6 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   );
   if (!adapter) {
     if (applicable.length > 1) {
-      // Unreachable with one registered adapter, and deliberately kept: the
-      // selection contract is "exactly one, or nothing", and the second
-      // adapter must land in a file that already refuses to guess between
-      // them rather than one that has to grow the branch.
       return {
         toolchain: 'unsupported',
         affected: [],
@@ -358,8 +406,8 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         ok: true,
         timedOut: [],
         note:
-          'More than one toolchain applies at the repository root. build-test will ' +
-          'not guess which one owns this diff, so it ran nothing — report the ' +
+          'Both npm and Maven apply at the repository root. build-test will not ' +
+          'guess which toolchain owns this diff, so it ran nothing — report the ' +
           'ambiguity as a handoff instead of substituting ad hoc build or test ' +
           'commands.',
       };
@@ -386,7 +434,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ok: true,
       timedOut: [],
       note:
-        'No supported npm project here to scope. Fall back to the ' +
+        'No supported npm or Maven project here to scope. Fall back to the ' +
         'build/test precedence in your brief — installing dependencies first — ' +
         'and give each command a deadline it can actually meet.',
     };
@@ -445,7 +493,9 @@ export const buildTestCommand: CommandModule = {
         type: 'boolean',
         default: true,
         describe:
-          'Fetch dependencies first: `npm ci` when node_modules is absent',
+          'Fetch dependencies first: `npm ci` when node_modules is absent (npm), ' +
+          'or a best-effort `dependency:go-offline` warm-up with its own deadline ' +
+          '(Maven)',
       })
       .option('build-only', {
         type: 'boolean',

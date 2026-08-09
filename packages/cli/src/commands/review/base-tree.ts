@@ -60,6 +60,10 @@ import {
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
+import {
+  hasUnmodeledWorkspaceGlob,
+  workspaceDirFor,
+} from './lib/workspaces.js';
 
 export interface BaseTreeReport {
   /**
@@ -104,6 +108,154 @@ function git(cwd: string, ...args: string[]): void {
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
   }
+}
+
+function gitHasPath(cwd: string, sha: string, path: string): boolean {
+  // A BLOB, not mere existence: `cat-file -e` exits 0 for a DIRECTORY
+  // too, and a dir named `pom.xml` is not a Maven project — reading one
+  // as such misfires the gate into a false "Maven base" note that
+  // permanently disables A/B attribution for that base.
+  const r = spawnSync('git', ['cat-file', '-t', `${sha}:${path}`], {
+    cwd,
+    encoding: 'utf8',
+  });
+  return !r.error && r.status === 0 && (r.stdout ?? '').trim() === 'blob';
+}
+
+function gitBlob(cwd: string, sha: string, path: string): string | null {
+  const r = spawnSync('git', ['cat-file', 'blob', `${sha}:${path}`], {
+    cwd,
+    encoding: 'utf8',
+  });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout ?? '';
+}
+
+/**
+ * The base-tree twin of readWorkspacePackages' manifest gate: a member
+ * counts only when its manifest parses and has a usable `name` — the disk
+ * side puts every other manifest in `skipped`, not `packages`, and
+ * `npmToolchainAdapter.applies` requires at least one package.
+ */
+function hasUsableManifestAt(cwd: string, sha: string, path: string): boolean {
+  const blob = gitBlob(cwd, sha, path);
+  if (blob === null) return false;
+  try {
+    const pkg = JSON.parse(blob) as { name?: unknown } | null;
+    return pkg !== null && typeof pkg.name === 'string' && pkg.name !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A root package.json the npm adapter would actually apply to — mirroring
+ * `npmToolchainAdapter.applies` against the BASE tree: MODELED workspace
+ * globs that resolve to at least one package there, or a root build/test
+ * script. A husky/lint-config/docs-tooling-only manifest applies to nothing,
+ * and an unmodeled glob (`packages/**`, `foo-*`) or a zero-package glob
+ * scopes nothing either, so suppressing the nested-pom probe for any of them
+ * would let a standalone-module Maven base pay the cold checkout this gate
+ * exists to prevent.
+ */
+function blobIsNpmProject(blob: string, cwd: string, sha: string): boolean {
+  try {
+    const pkg = JSON.parse(blob) as {
+      workspaces?: unknown;
+      scripts?: Record<string, unknown>;
+    };
+    const ws = pkg.workspaces;
+    const globs = (
+      Array.isArray(ws)
+        ? ws
+        : Array.isArray((ws as { packages?: unknown } | undefined)?.packages)
+          ? ((ws as { packages: unknown[] }).packages as unknown[])
+          : []
+    ).filter((g): g is string => typeof g === 'string');
+    if (globs.length > 0) {
+      return (
+        !hasUnmodeledWorkspaceGlob(globs) &&
+        workspaceDirsAt(cwd, sha, globs).some(
+          (dir) =>
+            // A directory a negation excludes is not a workspace — the same
+            // check readWorkspacePackages applies on disk.
+            workspaceDirFor(`${dir}/package.json`, globs) === dir &&
+            hasUsableManifestAt(cwd, sha, `${dir}/package.json`),
+        )
+      );
+    }
+    return (
+      typeof pkg.scripts === 'object' &&
+      pkg.scripts !== null &&
+      ('build' in pkg.scripts || 'test' in pkg.scripts)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The dirs the workspace globs expand to in the tree at `sha` — the base-tree
+ * twin of readWorkspacePackages' on-disk expansion (negations excluded there,
+ * as here, by the caller's workspaceDirFor check).
+ */
+function workspaceDirsAt(cwd: string, sha: string, globs: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const glob of globs) {
+    if (glob.startsWith('!')) continue;
+    // Strip a leading `./` exactly as workspaceDirCandidates does on disk.
+    const g = glob.replace(/^\.\//, '').replace(/\/$/, '');
+    if (g.endsWith('/*')) {
+      const base = g.slice(0, -2);
+      for (const child of gitTreeChildDirs(cwd, sha, base)) {
+        dirs.add(base ? `${base}/${child}` : child);
+      }
+    } else {
+      dirs.add(g);
+    }
+  }
+  return [...dirs];
+}
+
+/** Direct children (mode 040000) of `dir` in the tree at `sha` — all of them
+ * when `dir` is empty. */
+function gitTreeChildDirs(cwd: string, sha: string, dir: string): string[] {
+  // `sha:dir` lists the CHILDREN of dir with bare names (a pathspec without
+  // the colon lists dir itself); `sha:` alone lists the root tree.
+  const r = spawnSync('git', ['ls-tree', '-z', `${sha}:${dir}`], {
+    cwd,
+    encoding: 'utf8',
+  });
+  if (r.error || r.status !== 0) return [];
+  const dirs: string[] = [];
+  // `-z` output is NUL-delimited and NEVER C-quoted, so names with non-ASCII
+  // bytes, quotes, tabs, backslashes — or line terminators — survive. Parse
+  // structurally, not with a regex: `.` cannot span a line terminator, and a
+  // `\n` in a name is the standard core.quotePath escape. The first tab ends
+  // the OID: an object id is hex and contains no tab.
+  for (const entry of (r.stdout ?? '').split('\0')) {
+    if (!entry.startsWith('040000 tree ')) continue;
+    const tab = entry.indexOf('\t');
+    if (tab >= 0) dirs.push(entry.slice(tab + 1));
+  }
+  return dirs;
+}
+
+/**
+ * Nested-pom bases (standalone modules, no root aggregator) miss the root
+ * `pom.xml` probe but are Maven just the same; when the base carries no
+ * npm-applicable root `package.json` either, a depth-1 listing settles it
+ * before checkout. Only a DIRECT child counts: a pom deeper than
+ * `<dir>/pom.xml` is a vendored sample, an archetype fixture, or a
+ * maven-invoker IT, and counting one would permanently — and silently —
+ * disable A/B attribution for a repo that merely ships one.
+ */
+function gitTreeHasNestedPom(cwd: string, sha: string): boolean {
+  // Only mode 040000 entries are probed: file, symlink, and gitlink entries
+  // cannot hold a child pom.xml.
+  return gitTreeChildDirs(cwd, sha, '').some((dir) =>
+    gitHasPath(cwd, sha, `${dir}/pom.xml`),
+  );
 }
 
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
@@ -200,6 +352,31 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
     }
   } catch {
     // No failed-marker: proceed to build.
+  }
+  // A/B attribution reruns the recorded npm test commands (test-delta); no
+  // other toolchain has a delta consumer in this release — Agent 7's brief
+  // says the same for Maven. The gate sits AFTER the marker checks: step 4
+  // launches its verifier shards together, and once a tree stands (built or
+  // failed) every later shard is answered by its marker without re-scanning.
+  // It still runs before the checkout, so a Maven base never pays for a tree
+  // that would not be built — including the nested-pom shape (standalone
+  // modules, no root aggregator), settled by a depth-1 listing when the base
+  // has no npm-applicable root package.json either. A husky-only manifest
+  // leaves no consumable npm half, so it must not suppress the probe.
+  const npmAtBase = (() => {
+    if (!gitHasPath(worktree, baseSha, 'package.json')) return false;
+    const blob = gitBlob(worktree, baseSha, 'package.json');
+    return blob !== null && blobIsNpmProject(blob, worktree, baseSha);
+  })();
+  if (
+    gitHasPath(worktree, baseSha, 'pom.xml') ||
+    (!npmAtBase && gitTreeHasNestedPom(worktree, baseSha))
+  ) {
+    return unavailable(
+      `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
+        'commands — a base-side Maven build could not be consumed, so it was not run ' +
+        '(never a finding against the PR)',
+    );
   }
   // A real mutual-exclusion lock around sweep+add+build, not just the marker.
   // The reuse fast path covers the AFTER-build window; this covers the build
@@ -367,7 +544,9 @@ export const baseTreeCommand: CommandModule = {
       .option('install', {
         type: 'boolean',
         default: true,
-        describe: 'Run `npm ci` first when node_modules is absent',
+        describe:
+          'Run `npm ci` first when node_modules is absent (npm toolchain only; ' +
+          'Maven resolves dependencies inside its lifecycle command)',
       }),
   handler: (argv) => {
     const args = argv as unknown as BaseTreeArgs;

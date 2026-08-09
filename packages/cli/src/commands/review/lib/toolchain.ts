@@ -11,7 +11,9 @@ export interface ToolchainRunArgs {
   changedFiles: string[];
   timeout: number;
   /**
-   * Gates the adapter's dependency-acquisition step — npm's `npm ci` today.
+   * Gates the dependency-acquisition step: npm's `npm ci` and Maven's
+   * best-effort `dependency:go-offline` warm-up. Maven still resolves
+   * whatever the warm-up misses inside its lifecycle command.
    */
   install: boolean;
   buildOnly?: boolean;
