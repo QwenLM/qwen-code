@@ -1431,15 +1431,15 @@ describe('docs-only medium gate', () => {
   });
 
   function floorSource() {
-    const anchor = run.indexOf('# Medium measures at one-third to one-half');
-    expect(anchor).toBeGreaterThan(-1);
-    const start = run.indexOf('EFFECTIVE_TIMEOUT_MINUTES=$((', anchor);
-    // The YAML parser strips the block scalar's base indentation, so the
-    // floor's closing `fi` sits at four spaces in the parsed text.
-    const end = run.indexOf('\n    fi', start) + '\n    fi'.length;
+    // The arithmetic lives in ONE function shared by the docs-only branch
+    // and the micro tightening; extract the definition plus one call, so
+    // these cases execute the same implementation both branches run.
+    const start = run.indexOf('halve_budget_floor() {');
+    const endAnchor = '\n}';
+    const end = run.indexOf(endAnchor, start) + endAnchor.length;
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    return run.slice(start, end);
+    return `${run.slice(start, end)}\nhalve_budget_floor`;
   }
 
   it.each([
@@ -1707,7 +1707,11 @@ describe('docs-only gate and relay, executed', () => {
     expect(r.stdout).toContain('timeout=90');
   });
 
-  it('twenty-five changed lines is not micro — the boundary is the sweep floor', () => {
+  it('twenty-five changed lines is not micro — churn rides the sweep floor conservatively', () => {
+    // The gate measures TOTAL churn while the skill's SWEEP_FLOOR gates a
+    // source-weighted measure; churn < 25 implies the weighted measure is
+    // < 25, so the tightening only ever lands on diffs whose pipeline the
+    // skill has already shrunk. 25 itself must not tighten.
     const r = runGate({
       autoReview: 'true',
       wrapper: '#!/bin/bash\necho full\n',
@@ -1716,6 +1720,22 @@ describe('docs-only gate and relay, executed', () => {
     });
     expect(r.stdout).not.toContain('micro diff');
     expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('both downgrades share one halve-with-floor implementation', () => {
+    // Two verbatim copies once let a one-sided divisor edit diverge micro
+    // runs from docs-only runs while the comments claimed they matched —
+    // probe: a / 2 → / 3 mutant survived every test because both micro
+    // inputs land on the floor under any divisor ≥ 2. One named function,
+    // called from both branches, makes the invariant structural.
+    const gate = gateSource();
+    expect(gate.match(/halve_budget_floor\(\)/g)).toHaveLength(1);
+    expect(gate.match(/halve_budget_floor$/gm)).toHaveLength(2);
+    expect(
+      gate.match(
+        /EFFECTIVE_TIMEOUT_MINUTES=\$\(\( EFFECTIVE_TIMEOUT_MINUTES \/ 2 \)\)/g,
+      ),
+    ).toHaveLength(1);
   });
 
   it('a docs-only micro diff is halved once, by the docs gate, not twice', () => {
@@ -1728,6 +1748,36 @@ describe('docs-only gate and relay, executed', () => {
     expect(r.output).toBe('docs_only_medium=true');
     expect(r.stdout).toContain('timeout=180');
     expect(r.stdout).not.toContain('micro diff');
+  });
+
+  it('a manually requested review is never tightened, whatever its size', () => {
+    // Production-reachable: an @qwen-code /review comment without --timeout
+    // populates PR_SIZE_LINES but is not an automatic review — its budget
+    // is the caller's. A mutant dropping the AUTO_REVIEW guard survived the
+    // suite until this pin.
+    const r = runGate({
+      autoReview: 'false',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 10,
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('a failed docs classification still tightens a micro automatic run', () => {
+    // DOCS_ONLY_MEDIUM stays '' when the classifier fails; the micro guard
+    // keys on != "true", not = "false" — a mutant conflating the two kept
+    // 180 on exactly the runs the tightening exists for.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\nexit 2\n',
+      prSizeLines: 10,
+      timeoutMinutes: 180,
+    });
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('micro diff (10 changed lines)');
+    expect(r.stdout).toContain('timeout=90');
   });
 
   it('an unknown size never tightens — and neither does an explicit run', () => {

@@ -1053,6 +1053,17 @@ jobs:
           # would retire a still-accurate badge on a transient classifier
           # failure or a dry run.
           DOCS_ONLY_MEDIUM=""
+          # One implementation for both downgrades' arithmetic: the docs-only
+          # branch and the micro tightening below both halve with the same
+          # 90-minute floor, and two verbatim copies once let a one-sided
+          # divisor edit diverge them silently while the comments still
+          # claimed they matched.
+          halve_budget_floor() {
+            EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
+            if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
+              EFFECTIVE_TIMEOUT_MINUTES=90
+            fi
+          }
           if [ "${AUTO_REVIEW:-false}" = "true" ]; then
             # Fetch + classify through the shared wrapper so this gate and
             # ci.yml's profile gate cannot drift on the classifier's input
@@ -1068,34 +1079,33 @@ jobs:
               DOCS_ONLY_MEDIUM=true
               # Medium measures at one-third to one-half of high, so halve
               # the size-aware budget with a 90-minute floor.
-              EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
-              if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
-                EFFECTIVE_TIMEOUT_MINUTES=90
-              fi
+              halve_budget_floor
               echo "PR #${PR_NUMBER} is docs-only; automatic review runs at --effort medium (${EFFECTIVE_TIMEOUT_MINUTES}-minute budget)."
             else
               DOCS_ONLY_MEDIUM=false
             fi
           fi
-          # A micro automatic review (churn below the review skill's sweep
-          # floor of 25 changed lines) keeps its full high-effort posting
-          # run — a medium downgrade would drop the inline comments a source
-          # fix deserves, and the pipeline itself is what shrinks on a micro
-          # diff (file-scoped suites, a one-round reverse audit). What a
-          # micro run must not keep is a multi-hour kill switch: halve the
-          # small-PR budget with the same 90-minute floor the docs downgrade
-          # uses, so a hung run dies at the scale of its work. Skipped when
-          # the size lookup failed (an unknown size must not tighten
-          # anything), on explicit runs (their timeout is the caller's), and
-          # for docs-only runs, which are already halved.
+          # A micro automatic review — total churn (additions + deletions)
+          # strictly below 25 — keeps its full high-effort posting run: a
+          # medium downgrade would drop the inline comments a source fix
+          # deserves, and the pipeline itself is what shrinks on a micro
+          # diff (file-scoped suites, a one-round reverse audit). The
+          # threshold rides the skill's sweep floor in the direction that
+          # cannot over-tighten: SWEEP_FLOOR (budget.ts) gates a
+          # source-weighted measure, max(srcDiffLines, diffLines/8), and
+          # total churn < 25 implies that measure is < 25 — so every diff
+          # this tightens is one whose sweep and reverse-audit loop the
+          # skill has already shrunk. What a micro run must not keep is a
+          # multi-hour kill switch: the same halve-with-floor the docs
+          # downgrade uses, so a hung run dies at the scale of its work.
+          # Skipped when the size lookup failed (an unknown size must not
+          # tighten anything), on explicit runs (their timeout is the
+          # caller's), and for docs-only runs, which are already halved.
           if [ "${AUTO_REVIEW:-false}" = "true" ] \
             && [ "$DOCS_ONLY_MEDIUM" != "true" ] \
             && [ -n "${PR_SIZE_LINES:-}" ] \
             && [ "$PR_SIZE_LINES" -lt 25 ]; then
-            EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
-            if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
-              EFFECTIVE_TIMEOUT_MINUTES=90
-            fi
+            halve_budget_floor
             echo "PR #${PR_NUMBER} is a micro diff (${PR_SIZE_LINES} changed lines); the automatic review keeps --effort high and inline posting, with a tightened ${EFFECTIVE_TIMEOUT_MINUTES}-minute budget."
           fi
           echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
