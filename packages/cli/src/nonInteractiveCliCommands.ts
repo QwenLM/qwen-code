@@ -352,11 +352,23 @@ async function registerModelInvocableCommands(
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
  */
+/**
+ * Session-scoped callbacks a caller can expose to the commands it runs.
+ * Only the ACP host supplies these: it keeps one long-lived session object
+ * across `/clear`, so commands that switch sessions have to be able to tell
+ * it to re-attach.
+ */
+export interface NonInteractiveSlashCommandSessionHooks {
+  /** @see CommandContext['session']['startNewSession'] */
+  startNewSession?: (sessionId: string) => void;
+}
+
 export const handleSlashCommand = async (
   rawQuery: string,
   abortController: AbortController,
   config: Config,
   settings: LoadedSettings,
+  sessionHooks?: NonInteractiveSlashCommandSessionHooks,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -577,6 +589,9 @@ export const handleSlashCommand = async (
     session: {
       stats: sessionStats,
       sessionShellAllowlist: new Set(),
+      ...(sessionHooks?.startNewSession
+        ? { startNewSession: sessionHooks.startNewSession }
+        : {}),
     },
     invocation: {
       raw: trimmed,

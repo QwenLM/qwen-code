@@ -1653,6 +1653,28 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Re-attach this session to the Goal runtime after `/clear`.
+   *
+   * `Config.startNewSession()` disposes the old runtime and builds a fresh
+   * one, so the `subscribe` callback installed by `#bindGoalRuntime` — the
+   * only path that reaches `MessageEmitter.emitGoalState` — would stay
+   * registered on the abandoned instance and the client would never receive
+   * another `_meta.goalState` update. The retained turn host survives the
+   * switch, but the subscription and the publication de-duplication state
+   * belong to the old runtime and have to be rebuilt.
+   */
+  rebindGoalRuntimeForNewSession(): void {
+    if (this.disposed || this.closing) return;
+    this.goalRuntimeUnsubscribe?.();
+    this.goalRuntimeUnsubscribe = undefined;
+    this.goalHostUnbind?.();
+    this.goalHostUnbind = undefined;
+    this.lastGoalSnapshot = undefined;
+    this.lastGoalPublicationKey = undefined;
+    this.#bindGoalRuntime();
+  }
+
   async #publishGoalState(
     snapshot: GoalSnapshotV2,
     cause?: GoalStateCause,
@@ -3739,6 +3761,12 @@ export class Session implements SessionContext {
                 pendingSend,
                 this.config,
                 this.settings,
+                {
+                  // `/clear` swaps in a new Goal runtime under this
+                  // long-lived Session; without this the goal-state
+                  // subscription stays on the disposed instance.
+                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
+                },
               );
 
               parts = await this.#processSlashCommandResult(

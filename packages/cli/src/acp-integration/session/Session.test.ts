@@ -13418,6 +13418,71 @@ describe('Session', () => {
         });
       });
 
+      // `/clear` makes Config dispose the Goal runtime and build a new one
+      // under this same long-lived Session, so the constructor's subscription
+      // is left on the abandoned instance and no `_meta.goalState` update
+      // would ever be delivered again.
+      it('re-subscribes to the replacement Goal runtime after a session switch', async () => {
+        const replacementRuntime = {
+          ...mockGoalRuntime,
+          subscribe: vi.fn().mockReturnValue(() => {}),
+        };
+        let capturedHooks:
+          | { startNewSession?: (sessionId: string) => void }
+          | undefined;
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            capturedHooks = hooks;
+            vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(
+              replacementRuntime as unknown as core.GoalRuntime,
+            );
+            hooks?.startNewSession?.('new-session-id');
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Conversation cleared.',
+            };
+          },
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/clear' }],
+        });
+
+        expect(capturedHooks?.startNewSession).toBeInstanceOf(Function);
+        expect(replacementRuntime.subscribe).toHaveBeenCalledTimes(1);
+
+        const goal = {
+          goalId: 'goal-2',
+          revision: 1,
+          objective: 'check weather',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        };
+        const listener = replacementRuntime.subscribe.mock.calls[0]?.[0] as (
+          snapshot: core.GoalSnapshotV2,
+          cause?: core.GoalStateCause,
+        ) => void;
+        vi.mocked(mockClient.sessionUpdate).mockClear();
+        listener({ v: 2, activity: 'running', goal }, 'create');
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        });
+        expect(
+          vi.mocked(mockClient.sessionUpdate).mock.calls[0]?.[0].update._meta?.[
+            'goalState'
+          ],
+        ).toMatchObject({ goal: { goalId: 'goal-2' } });
+      });
+
       it('preserves canonical Goal state publication order', async () => {
         const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
           snapshot: core.GoalSnapshotV2,
