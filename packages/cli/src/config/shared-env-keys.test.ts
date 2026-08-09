@@ -94,10 +94,12 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes the git command-execution env family', () => {
     for (const key of [
       'GIT_SSH_COMMAND',
+      'GIT_SSH',
       'GIT_EXTERNAL_DIFF',
       'GIT_CONFIG_GLOBAL',
       'GIT_CONFIG_SYSTEM',
       'GIT_CONFIG_COUNT',
+      'GIT_CONFIG_PARAMETERS',
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }
@@ -149,6 +151,10 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('ssl_cert_file')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_SSH_COMMAND')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('git_ssh_command')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_SSH')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_ssh')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_PARAMETERS')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_config_parameters')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('PYTHON')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('python')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('npm_config_python')).toBe(true);
@@ -162,8 +168,9 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('git_config_key_12')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_VALUE_7')).toBe(true);
     // A key that merely starts with GIT_CONFIG but is not a KEY_/VALUE_ pair
-    // (and not a listed literal) is not excluded.
-    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_PARAMETERS')).toBe(false);
+    // (and not a listed literal) is not excluded: GIT_CONFIG_NOSYSTEM only
+    // skips the system gitconfig read and injects nothing.
+    expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_NOSYSTEM')).toBe(false);
   });
 });
 

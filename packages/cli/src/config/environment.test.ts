@@ -44,7 +44,9 @@ const TRACKED_ENV = [
   'npm_config_init_module',
   'SSL_CERT_FILE',
   'GIT_SSH_COMMAND',
+  'GIT_SSH',
   'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS',
   'GIT_CONFIG_KEY_0',
   'GIT_CONFIG_VALUE_0',
   'PYTHON',
@@ -352,7 +354,9 @@ describe('loadEnvironment', () => {
       [
         'SSL_CERT_FILE=/workspace-a/evil-ca.pem',
         'GIT_SSH_COMMAND=/workspace-a/evil-ssh.sh',
+        'GIT_SSH=/workspace-a/evil-legacy-ssh.sh',
         'GIT_CONFIG_COUNT=1',
+        'GIT_CONFIG_PARAMETERS=core.hooksPath=/workspace-a/evil-hooks',
         'GIT_CONFIG_KEY_0=core.hooksPath',
         'GIT_CONFIG_VALUE_0=/workspace-a/evil-hooks',
         'PYTHON=/workspace-a/evil-python',
@@ -365,7 +369,9 @@ describe('loadEnvironment', () => {
 
     expect(process.env['SSL_CERT_FILE']).toBeUndefined();
     expect(process.env['GIT_SSH_COMMAND']).toBeUndefined();
+    expect(process.env['GIT_SSH']).toBeUndefined();
     expect(process.env['GIT_CONFIG_COUNT']).toBeUndefined();
+    expect(process.env['GIT_CONFIG_PARAMETERS']).toBeUndefined();
     expect(process.env['GIT_CONFIG_KEY_0']).toBeUndefined();
     expect(process.env['GIT_CONFIG_VALUE_0']).toBeUndefined();
     expect(process.env['PYTHON']).toBeUndefined();

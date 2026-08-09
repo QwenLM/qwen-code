@@ -58,18 +58,23 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'REQUESTS_CA_BUNDLE',
   'GIT_SSL_CAINFO',
   // The git command-execution env family: git runs these on any invocation in
-  // a session subprocess. GIT_SSH_COMMAND / GIT_EXTERNAL_DIFF execute a
-  // shell command directly; GIT_CONFIG_* injects arbitrary config
+  // a session subprocess. GIT_SSH_COMMAND / GIT_SSH (its documented legacy
+  // counterpart, still exec'd by git for SSH transports) / GIT_EXTERNAL_DIFF
+  // execute a command directly; GIT_CONFIG_* injects arbitrary config
   // (`core.hooksPath`, `core.fsmonitor`, …) that turns a routine `git commit`
-  // into attacker-code execution as the daemon user. core/utils/git-branches.ts
+  // into attacker-code execution as the daemon user — GIT_CONFIG_PARAMETERS
+  // carries the same injection as one quoted string, so it is blocked with
+  // GIT_CONFIG_COUNT and the numbered pairs. core/utils/git-branches.ts
   // already scrubs exactly these from the repo's own git invocations, so a
   // project `.env` setting them contradicts that model. Numbered
   // GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are matched by prefix below.
   'GIT_SSH_COMMAND',
+  'GIT_SSH',
   'GIT_EXTERNAL_DIFF',
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS',
   // node-gyp interpreter selection: node-gyp's find-python.js executes
   // NODE_GYP_FORCE_PYTHON / npm_config_python / PYTHON as the build Python,
   // so a project `.env` pointing them at an attacker script is code execution
