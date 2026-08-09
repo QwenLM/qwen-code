@@ -93,6 +93,9 @@ type ChatEditorTestProps = {
   gitStatus?: DaemonWorkspaceGitStatus;
   onOpenGitDiff?: () => void;
   visibleToolbarActions?: string[];
+  tokenCount?: number;
+  contextWindow?: number;
+  onShowContextUsage?: () => void;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
 };
 
@@ -4918,6 +4921,50 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
       'gitBranch',
     );
+  });
+
+  it('wires the composer context ring from the connection and opens /context on click', async () => {
+    const usageConnection = mockConnection as typeof mockConnection & {
+      tokenCount?: number;
+      contextWindow?: number;
+    };
+    usageConnection.tokenCount = 338;
+    usageConnection.contextWindow = 1000;
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'contextUsage',
+    );
+    expect(testState.latestChatEditorProps?.tokenCount).toBe(338);
+    expect(testState.latestChatEditorProps?.contextWindow).toBe(1000);
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onShowContextUsage?.();
+    });
+    await flush();
+
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: false,
+    });
+  });
+
+  it('defaults the composer ring props to 0 before any usage arrives', async () => {
+    // The state right after connecting (or for sessions that never emit
+    // usage): the `?? 0` fallbacks must keep NaN out of the ring math.
+    const usageConnection = mockConnection as typeof mockConnection & {
+      tokenCount?: number;
+      contextWindow?: number;
+    };
+    usageConnection.tokenCount = undefined;
+    usageConnection.contextWindow = undefined;
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.tokenCount).toBe(0);
+    expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
   });
 
   it('keeps legacy task status for a custom header without explicit header configuration', () => {

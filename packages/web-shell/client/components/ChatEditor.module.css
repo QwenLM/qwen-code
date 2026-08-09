@@ -1421,6 +1421,12 @@
   stroke: var(--error-color);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .contextRingValue {
+    transition: none;
+  }
+}
+
 .widthModeBtn .toolBtnIcon svg {
   width: 18px;
   height: 18px;

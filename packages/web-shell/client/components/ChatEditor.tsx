@@ -51,6 +51,8 @@ import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { getContextUsageLevel } from '../utils/contextUsage';
+import { formatContextUsageDetail } from '../utils/formatTokenCount';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -505,29 +507,18 @@ function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
   );
 }
 
-/** `53.6k / 1.0M tokens (5.4%)` — the context ring's hover detail. */
-export function formatContextUsageDetail(used: number, size: number): string {
-  const fmt = (n: number) => {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-    return `${n}`;
-  };
-  const pct = size > 0 ? ((used / size) * 100).toFixed(1) : '0.0';
-  return `${fmt(used)} / ${fmt(size)} tokens (${pct}%)`;
-}
-
 const CONTEXT_RING_RADIUS = 6;
 const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
 
-// Same thresholds as the /context panel's progress bar (ContextUsageMessage):
-// >80% error, >60% warning. The arc is visually capped at 100%; the numeric
-// label keeps reporting real overflow.
+// The arc is visually capped at 100%; the numeric label keeps reporting
+// real overflow.
 function ContextUsageRing({ pct }: { pct: number }) {
   const capped = Math.min(pct, 100);
+  const level = getContextUsageLevel(pct);
   const valueClass =
-    pct > 80
+    level === 'error'
       ? `${styles.contextRingValue} ${styles.contextRingValueError}`
-      : pct > 60
+      : level === 'warning'
         ? `${styles.contextRingValue} ${styles.contextRingValueWarning}`
         : styles.contextRingValue;
   return (

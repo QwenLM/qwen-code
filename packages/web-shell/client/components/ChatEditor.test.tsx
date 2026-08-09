@@ -16,11 +16,8 @@ import type {
   SlashMenuState,
 } from '../hooks/useComposerCore';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
-import {
-  ChatEditor,
-  formatContextUsageDetail,
-  type ComposerToolbarAction,
-} from './ChatEditor';
+import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { formatContextUsageDetail } from '../utils/formatTokenCount';
 import { WebShellPortalRootContext } from '../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -445,11 +442,16 @@ describe('ChatEditor context usage ring', () => {
     const warn = renderChatEditor({ tokenCount: 61, contextWindow: 100 });
     const error = renderChatEditor({ tokenCount: 81, contextWindow: 100 });
     const normal = renderChatEditor({ tokenCount: 60, contextWindow: 100 });
+    // Both thresholds are strict: exactly 80% is still warning, matching the
+    // /context panel.
+    const atError = renderChatEditor({ tokenCount: 80, contextWindow: 100 });
 
     expect(arcClass(warn)).toContain('contextRingValueWarning');
     expect(arcClass(error)).toContain('contextRingValueError');
     expect(arcClass(normal)).not.toContain('Warning');
     expect(arcClass(normal)).not.toContain('Error');
+    expect(arcClass(atError)).toContain('contextRingValueWarning');
+    expect(arcClass(atError)).not.toContain('contextRingValueError');
   });
 
   it('caps the arc at 100% while the label keeps the real overflow', () => {
