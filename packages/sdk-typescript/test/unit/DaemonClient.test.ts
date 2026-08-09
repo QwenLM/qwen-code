@@ -4040,6 +4040,115 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setWorkspaceSkillsEnabled', () => {
+    const response = {
+      enabled: false,
+      activation: 'applied',
+      sessionsRefreshed: 2,
+      sessionsFailed: 0,
+      results: [
+        {
+          skillName: 'review',
+          enabled: false,
+          changed: true,
+        },
+      ],
+      errors: [],
+    };
+
+    it('POSTs the Skill names, flag, and client id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspaceSkillsEnabled(['review', 'deploy'], false, {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual(response);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          skillNames: ['review', 'deploy'],
+          enabled: false,
+        }),
+      });
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('supports the workspace-qualified helper', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/tmp/work space')
+        .setWorkspaceSkillsEnabled(['review', 'deploy'], false, {
+          clientId: 'client-2',
+        });
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/skills/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          skillNames: ['review', 'deploy'],
+          enabled: false,
+        }),
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-2');
+    });
+
+    it('POSTs enabled:true unchanged on the primary and qualified helpers', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.setWorkspaceSkillsEnabled(['review', 'deploy'], true);
+      await client
+        .workspaceByCwd('/tmp/work space')
+        .setWorkspaceSkillsEnabled(['review', 'deploy'], true);
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/skills/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          skillNames: ['review', 'deploy'],
+          enabled: true,
+        }),
+      });
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/skills/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          skillNames: ['review', 'deploy'],
+          enabled: true,
+        }),
+      });
+    });
+
+    it('passes request-level errors through', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: '`skillNames` must be a non-empty string array (max 100)',
+          code: 'invalid_skill_names',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setWorkspaceSkillsEnabled([], false),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: expect.objectContaining({ code: 'invalid_skill_names' }),
+      });
+    });
+  });
+
   describe('workspace Skill management', () => {
     it('uploads a Skill package', async () => {
       const response = {
