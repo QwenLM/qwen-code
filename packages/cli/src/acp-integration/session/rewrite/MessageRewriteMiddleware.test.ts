@@ -73,6 +73,7 @@ describe('MessageRewriteMiddleware', () => {
       expect(mockSendUpdate).toHaveBeenCalledWith(msgUpdate, {
         turnIndex: 1,
         rewritten: false,
+        replacesMessageText: true,
       });
     });
   });
@@ -103,7 +104,7 @@ describe('MessageRewriteMiddleware', () => {
             content: { type: 'text', text: 'rewritten text' },
             _meta: { rewritten: true, turnIndex: 1 },
           },
-          { turnIndex: 1, rewritten: true },
+          { turnIndex: 1, rewritten: true, replacesMessageText: true },
         );
 
         const { LlmRewriter } = await import('./LlmRewriter.js');
@@ -179,6 +180,37 @@ describe('MessageRewriteMiddleware', () => {
     });
   });
 
+  describe('discardTurn', () => {
+    it('drops buffered automatic-turn content before the next prompt', async () => {
+      const { middleware } = createMiddleware('message');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'aborted background residue' },
+      } as unknown as SessionUpdate);
+      middleware.discardTurn();
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'new prompt answer' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      expect(rewriter.rewrite).toHaveBeenCalledWith(
+        {
+          thoughts: [],
+          messages: ['new prompt answer'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+    });
+  });
+
   describe('flushTurn — tool_call boundary', () => {
     it('should flush before passing through tool_call', async () => {
       const { middleware, mockSendUpdate } = createMiddleware();
@@ -246,7 +278,12 @@ describe('MessageRewriteMiddleware', () => {
       expect(mockSendUpdate.mock.calls).toEqual([
         [
           original,
-          { ownerPromptId: 'prompt-a', turnIndex: 1, rewritten: false },
+          {
+            ownerPromptId: 'prompt-a',
+            turnIndex: 1,
+            rewritten: false,
+            replacesMessageText: true,
+          },
         ],
         [
           {
@@ -254,7 +291,12 @@ describe('MessageRewriteMiddleware', () => {
             content: { type: 'text', text: 'rewritten text' },
             _meta: { rewritten: true, turnIndex: 1 },
           },
-          { ownerPromptId: 'prompt-a', turnIndex: 1, rewritten: true },
+          {
+            ownerPromptId: 'prompt-a',
+            turnIndex: 1,
+            rewritten: true,
+            replacesMessageText: true,
+          },
         ],
       ]);
     });

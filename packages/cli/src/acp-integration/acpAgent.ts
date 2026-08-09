@@ -10417,8 +10417,9 @@ class QwenAgent implements Agent {
           } catch {
             // Fall through to the scan.
           }
+          let reader: SessionTranscriptReader | undefined;
           try {
-            const reader = new SessionTranscriptReader(cwd);
+            reader = new SessionTranscriptReader(cwd);
             const turnResult = await findSettledTurnResult(
               reader,
               sessionId,
@@ -10436,6 +10437,23 @@ class QwenAgent implements Agent {
               // persisted). Scoped to the read so an unrelated ENOENT
               // (settings/runtime resolution) still surfaces.
               return { v: 1, sessionId, turnResult: null };
+            }
+            if (
+              error instanceof SessionTranscriptSnapshotUnavailableError &&
+              reader
+            ) {
+              try {
+                const transcript = await fs.stat(
+                  reader.getSessionFilePath(sessionId),
+                );
+                if (transcript.size === 0) {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              } catch (statError) {
+                if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              }
             }
             throw error;
           }

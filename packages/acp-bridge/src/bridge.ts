@@ -6238,7 +6238,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () => undefined,
         );
         const onDeadline = () => {
-          if (pendingEntry.terminalPublished) return;
+          if (
+            pendingEntry.terminalPublished &&
+            !(pendingEntry.removed && pendingEntry.state === 'running')
+          ) {
+            return;
+          }
           const deadlineErr = new PromptDeadlineExceededError(deadlineMs);
           writeStderrLine(
             `sendPrompt: prompt ${promptId} exceeded ${deadlineMs}ms deadline ` +
@@ -8428,9 +8433,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // getPendingPrompts.
       resolveTrustedClientId(entry, context?.clientId);
 
-      // Live state wins: a prompt on the pending list has not settled yet,
-      // so no `turn_result` record can exist for it.
-      const live = entry.pendingPromptList.filter((p) => !p.removed);
+      // Live state wins for non-terminal pending prompts, for which no
+      // `turn_result` record can exist yet.
+      const live = entry.pendingPromptList.filter(
+        (p) => !p.removed && !p.terminalPublished,
+      );
       if (promptId !== undefined) {
         const match = live.find((p) => p.promptId === promptId);
         if (match) return liveTurnStatus(sessionId, match);

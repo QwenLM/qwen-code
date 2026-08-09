@@ -4240,6 +4240,110 @@ describe('Session', () => {
         expect(payload.resultTruncated).toBeUndefined();
       });
 
+      it('keeps the main answer when only thoughts are rewritten', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'thought',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten thought');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        { text: 'private reasoning', thought: true },
+                        { text: 'main answer' },
+                      ],
+                    },
+                  },
+                ],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'main answer' }),
+        );
+      });
+
+      it('does not persist framework diagnostics as the main answer', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'too large' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'completed',
+          stopReason: 'max_tokens',
+        });
+        expect(payload.resultText).toBeUndefined();
+      });
+
+      it('discards automatic-turn rewrite residue before recording a prompt', async () => {
+        const discardTurn = vi.fn();
+        session.messageRewriter = {
+          discardTurn,
+          interceptUpdate: vi.fn().mockResolvedValue(undefined),
+          flushTurn: vi.fn().mockResolvedValue(undefined),
+          waitForPendingRewrites: vi.fn().mockResolvedValue(undefined),
+        } as unknown as Session['messageRewriter'];
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'fresh prompt' }],
+          },
+          trustedContext,
+        );
+
+        expect(discardTurn).toHaveBeenCalledOnce();
+      });
+
       it.each([
         ['empty output', () => Promise.resolve('')],
         ['rewrite failure', () => Promise.reject(new Error('rewrite failed'))],
@@ -4504,6 +4608,47 @@ describe('Session', () => {
         );
       });
 
+      it('records a cancelled turn when session disposal aborts a Stop hook', async () => {
+        const messageBus = {
+          request: vi.fn().mockImplementation(
+            (request: { signal?: AbortSignal }) =>
+              new Promise((_resolve, reject) => {
+                request.signal?.addEventListener(
+                  'abort',
+                  () => reject(new Error('Request was aborted.')),
+                  { once: true },
+                );
+              }),
+          ),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'dispose me' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() => expect(messageBus.request).toHaveBeenCalled());
+        session.dispose();
+
+        await expect(prompt).rejects.toThrow('Request was aborted.');
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
+      });
+
       it('does not record a turn_result without an invocation context', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -4610,6 +4755,59 @@ describe('Session', () => {
           promptText: 'second prompt',
           resultText: 'second answer',
         });
+      });
+
+      it('records a superseded signal-aware stream as cancelled', async () => {
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              Promise.resolve(
+                (async function* () {
+                  await new Promise<void>((_resolve, reject) => {
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => reject(new Error('Request was aborted.')),
+                      { once: true },
+                    );
+                  });
+                  yield* createEmptyStream();
+                })(),
+              ),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+        );
+
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          { ...trustedContext, promptId: 'second-prompt-id' },
+        );
+
+        await expect(first).resolves.toEqual({ stopReason: 'cancelled' });
+        await expect(second).resolves.toEqual({ stopReason: 'end_turn' });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
       });
 
       it('records a cancelled turn when cancelled while waiting for the predecessor', async () => {

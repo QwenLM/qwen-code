@@ -39,6 +39,7 @@ export interface MessageRewriteEmissionContext {
   ownerPromptId?: string;
   turnIndex: number;
   rewritten: boolean;
+  replacesMessageText: boolean;
 }
 
 export class MessageRewriteMiddleware {
@@ -103,6 +104,9 @@ export class MessageRewriteMiddleware {
       ...(ownerPromptId !== undefined ? { ownerPromptId } : {}),
       turnIndex: this.turnIndex + 1,
       rewritten: false,
+      replacesMessageText:
+        updateType === 'agent_message_chunk' &&
+        (this.target === 'message' || this.target === 'all'),
     });
 
     if (
@@ -192,6 +196,7 @@ export class MessageRewriteMiddleware {
               ...(ownerPromptId !== undefined ? { ownerPromptId } : {}),
               turnIndex: turnIdx,
               rewritten: true,
+              replacesMessageText: content.messages.length > 0,
             },
           );
         } catch (error) {
@@ -201,6 +206,12 @@ export class MessageRewriteMiddleware {
         }
       })(),
     );
+  }
+
+  discardTurn(): void {
+    this.turnBuffer.discard();
+    this.turnMeta = undefined;
+    this.turnOwnerPromptId = undefined;
   }
 
   private captureTurnMeta(update: Record<string, unknown>): void {

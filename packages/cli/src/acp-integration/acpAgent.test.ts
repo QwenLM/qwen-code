@@ -9237,6 +9237,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('treats only an empty unavailable transcript as having no turn result', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-empty-turn-status-'),
+    );
+    const transcriptPath = path.join(tempDir, `${sessionId}.jsonl`);
+    await fs.writeFile(transcriptPath, '');
+    const snapshotError = new SessionTranscriptSnapshotUnavailableError(
+      sessionId,
+    );
+    const readPage = vi.fn().mockRejectedValue(snapshotError);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+          getSessionFilePath: () => transcriptPath,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+          sessionId,
+          promptId: 'prompt-1',
+        }),
+      ).resolves.toEqual({ v: 1, sessionId, turnResult: null });
+
+      await fs.writeFile(transcriptPath, '{partial');
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+          sessionId,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toBe(snapshotError);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects turn status reads with invalid params or non-live sessions', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);

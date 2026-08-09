@@ -318,6 +318,16 @@ const permissionRequestTails = new WeakMap<
 >();
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+const PROMPT_SUPERSEDED_ABORT_REASON = 'qwen:prompt-superseded';
+
+function isControlledPromptAbort(signal: AbortSignal): boolean {
+  return (
+    signal.aborted &&
+    (signal.reason === USER_CANCEL_ABORT_REASON ||
+      signal.reason === SESSION_DISPOSE_ABORT_REASON ||
+      signal.reason === PROMPT_SUPERSEDED_ABORT_REASON)
+  );
+}
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
@@ -2911,7 +2921,7 @@ export class Session implements SessionContext {
     // After writer admission, install this prompt's AbortController before
     // awaiting the previous prompt so a session/cancel during that wait
     // targets us. A cancel during admission cannot target this pending prompt.
-    this.pendingPrompt?.abort();
+    this.pendingPrompt?.abort(PROMPT_SUPERSEDED_ABORT_REASON);
     const pendingSend = new AbortController();
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
@@ -2977,6 +2987,8 @@ export class Session implements SessionContext {
         // Notification errors are surfaced through the session stream.
       }
     }
+
+    this.messageRewriter?.discardTurn?.();
 
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
@@ -3044,14 +3056,14 @@ export class Session implements SessionContext {
       }
       return result;
     } catch (error) {
-      // An explicit user cancel can surface as a non-AbortError (e.g. the
+      // A controlled prompt abort can surface as a non-AbortError (e.g. the
       // provider SDK's "Request was aborted."), so classify the recording
-      // by the cancel reason instead of the error shape.
-      const userCancelled =
-        pendingSend.signal.aborted &&
-        pendingSend.signal.reason === USER_CANCEL_ABORT_REASON;
+      // by the abort reason instead of the error shape.
+      const controlledCancellation = isControlledPromptAbort(
+        pendingSend.signal,
+      );
       this.#settleTurnRecording(
-        userCancelled ? 'cancelled' : 'error',
+        controlledCancellation ? 'cancelled' : 'error',
         turnRecording,
         undefined,
         error,
@@ -3793,14 +3805,13 @@ export class Session implements SessionContext {
                     strippedOrphanEntries = null;
                   }
 
-                  // Explicit user cancellation and session disposal are
-                  // controlled aborts. Other AbortErrors still surface so
-                  // infrastructure failures are not hidden as cancellations.
-                  const isControlledCancellation =
-                    pendingSend.signal.aborted &&
-                    (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-                      pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON);
+                  // User cancellation, session disposal, and prompt
+                  // supersession are controlled aborts. Other AbortErrors
+                  // still surface so infrastructure failures are not hidden
+                  // as cancellations.
+                  const isControlledCancellation = isControlledPromptAbort(
+                    pendingSend.signal,
+                  );
                   if (isControlledCancellation) {
                     this.todoStopGuard.suspend();
                     return { stopReason: 'cancelled' };
@@ -4754,10 +4765,9 @@ export class Session implements SessionContext {
             true,
           );
         }
-        const isControlledCancellation =
-          pendingSend.signal.aborted &&
-          (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+        const isControlledCancellation = isControlledPromptAbort(
+          pendingSend.signal,
+        );
         if (isControlledCancellation) {
           this.todoStopGuard.suspend();
           return {
@@ -4966,8 +4976,11 @@ export class Session implements SessionContext {
   async #deliverUpdate(
     update: SessionUpdate,
     rewriteContext?: MessageRewriteEmissionContext,
+    captureResultText = true,
   ): Promise<void> {
-    this.#accumulateTurnResultText(update, rewriteContext);
+    if (captureResultText) {
+      this.#accumulateTurnResultText(update, rewriteContext);
+    }
     const params: SessionNotification = {
       sessionId: this.sessionId,
       update: projectAcpToolResultUpdate(update),
@@ -5086,7 +5099,11 @@ export class Session implements SessionContext {
       return;
     }
 
-    const segmentKey = rewriteContext
+    if (rewriteContext?.rewritten && !rewriteContext.replacesMessageText) {
+      return;
+    }
+
+    const segmentKey = rewriteContext?.replacesMessageText
       ? `rewrite:${rewriteContext.turnIndex}`
       : `direct:${recording.nextDirectResultSegmentId++}`;
     let segment = recording.resultSegments.get(segmentKey);
@@ -5585,10 +5602,14 @@ export class Session implements SessionContext {
   }
 
   async #emitAgentDiagnosticMessage(text: string): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text },
-    });
+    await this.#deliverUpdate(
+      {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text },
+      },
+      undefined,
+      false,
+    );
   }
 
   async #drainMidTurnUserMessages(

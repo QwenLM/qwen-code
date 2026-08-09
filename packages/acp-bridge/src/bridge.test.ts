@@ -9192,6 +9192,10 @@ describe('createAcpSessionBridge', () => {
           }
           return { stopReason: 'end_turn' } as PromptResponse;
         },
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? { v: 1, sessionId: 'ignored', turnResult: null }
+            : {},
       });
 
     const subscribe = (
@@ -9364,6 +9368,47 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('lets a removed running prompt deadline release the FIFO when cancel wedges', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const wedged = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-removed-wedge', deadlineMs: 60 },
+      );
+      wedged.catch(() => {});
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-removed-wedge'),
+      ).toEqual({ removed: true });
+
+      const followup = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'after removed wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-after-removed-wedge' },
+      );
+
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+      await expect(followup).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(terminalsFor(events, 'prompt-removed-wedge')).toHaveLength(1);
+      expect(terminalsFor(events, 'prompt-removed-wedge')[0]?.type).toBe(
+        'turn_complete',
+      );
+      await bridge.shutdown();
+    });
+
     it('does not publish a stale deadline terminal for a prompt that completed in time (DAEMON-003)', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
@@ -9426,6 +9471,16 @@ describe('createAcpSessionBridge', () => {
         expect((terms[0]?.data as { code?: string }).code).toBe(
           'prompt_deadline_exceeded',
         );
+      });
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-queued-deadline',
+        ),
+      ).resolves.toMatchObject({
+        state: 'error',
+        error: { code: 'prompt_deadline_exceeded' },
       });
       await new Promise((r) => setTimeout(r, 60));
       expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
