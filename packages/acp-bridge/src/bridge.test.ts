@@ -8986,6 +8986,45 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('falls back to a terminal status when persisted lookup fails', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            throw new Error('agent transport closed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'completed before disconnect' }],
+        },
+        undefined,
+        { promptId: 'prompt-disconnected' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-disconnected',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-disconnected',
+        promptText: 'completed before disconnect',
+        stopReason: 'end_turn',
+      });
+      await bridge.shutdown();
+    });
+
     it('reports removed queued and running prompts as cancelled immediately', async () => {
       let rejectRunning: ((err: Error) => void) | undefined;
       const runningGate = new Promise<PromptResponse>((_resolve, reject) => {

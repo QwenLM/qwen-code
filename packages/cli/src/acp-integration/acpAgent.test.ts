@@ -9038,7 +9038,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('propagates oversized pages from bounded turn_result scans', async () => {
+  it('maps oversized pages from bounded turn_result scans to structured errors', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
     const pageError = new SessionTranscriptPageTooLargeError(
@@ -9072,11 +9072,82 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId,
         promptId: 'prompt-1',
       }),
-    ).rejects.toBe(pageError);
+    ).rejects.toMatchObject({
+      code: -32012,
+      data: {
+        errorKind: 'transcript_page_too_large',
+        sessionId,
+        pageBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES + 1,
+        maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+      },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    {
+      name: 'oversized snapshots',
+      error: new SessionTranscriptTooLargeError(
+        '11111111-1111-1111-1111-111111111111',
+        300,
+        200,
+      ),
+      expected: {
+        code: -32011,
+        data: {
+          errorKind: 'transcript_too_large',
+          sessionId: '11111111-1111-1111-1111-111111111111',
+          snapshotSize: 300,
+          maxBytes: 200,
+        },
+      },
+    },
+    {
+      name: 'invalid internal cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+  ])(
+    'maps $name from bounded turn_result scans',
+    async ({ error, expected }) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      await setupSessionMocks(sessionId);
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+          sessionId,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('still scans the transcript when the pre-read flush fails', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
@@ -9284,7 +9355,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sessionId,
           promptId: 'prompt-1',
         }),
-      ).rejects.toBe(snapshotError);
+      ).rejects.toMatchObject({
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId,
+        },
+      });
     } finally {
       mockConnectionState.resolve();
       await agentPromise;

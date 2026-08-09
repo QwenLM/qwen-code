@@ -10455,6 +10455,33 @@ class QwenAgent implements Agent {
                 }
               }
             }
+            if (error instanceof InvalidSessionTranscriptCursorError) {
+              throw new RequestError(-32602, error.message, {
+                errorKind: 'invalid_transcript_cursor',
+              });
+            }
+            if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+              throw new RequestError(-32010, error.message, {
+                errorKind: 'transcript_snapshot_unavailable',
+                sessionId,
+              });
+            }
+            if (error instanceof SessionTranscriptTooLargeError) {
+              throw new RequestError(-32011, error.message, {
+                errorKind: 'transcript_too_large',
+                sessionId,
+                snapshotSize: error.snapshotSize,
+                maxBytes: error.maxBytes,
+              });
+            }
+            if (error instanceof SessionTranscriptPageTooLargeError) {
+              throw new RequestError(-32012, error.message, {
+                errorKind: 'transcript_page_too_large',
+                sessionId,
+                pageBytes: error.pageBytes,
+                maxBytes: error.maxBytes,
+              });
+            }
             throw error;
           }
         });

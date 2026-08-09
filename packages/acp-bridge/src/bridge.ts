@@ -8450,25 +8450,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       // Settled state is durable: read the agent's persisted `turn_result`
       // records. This survives daemon restarts (the pending list does not).
-      const result = await requestSessionStatus<{
+      const terminal =
+        promptId !== undefined
+          ? entry.terminalTurnStatuses.get(promptId)
+          : latestTerminalTurnStatus(entry);
+      let result: {
         v: number;
         sessionId: string;
         turnResult: TurnResultRecordPayload | null;
-      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
-        ...(promptId !== undefined ? { promptId } : {}),
-      });
+      };
+      try {
+        result = await requestSessionStatus(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionTurnStatus,
+          { ...(promptId !== undefined ? { promptId } : {}) },
+        );
+      } catch (error) {
+        if (terminal) return terminal;
+        throw error;
+      }
       const persisted = result.turnResult
         ? settledTurnStatus(sessionId, result.turnResult)
         : undefined;
       if (promptId !== undefined) {
-        const terminal = entry.terminalTurnStatuses.get(promptId);
         if (terminal && persisted) {
           return enrichTerminalTurnStatus(terminal, persisted);
         }
         if (terminal) return terminal;
         if (persisted) return persisted;
       } else {
-        const terminal = latestTerminalTurnStatus(entry);
         if (terminal && persisted && persisted.promptId === terminal.promptId) {
           return enrichTerminalTurnStatus(terminal, persisted);
         }
