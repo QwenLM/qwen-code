@@ -34,6 +34,11 @@ returns the requested replay semantics.
   its in-flight build, but its completed value is not cached and its byte-budget
   admission does not evict already-cached values. Retain existing pending
   coalescing and entry-count or aggregate LRU behavior.
+- Keep a cold fresh index request-local until selected-record validation and the
+  final signature/lease checks succeed, then offer it to the cache only if the
+  key is still empty and admission does not evict existing values. Use pending
+  identity checks on resolve/reject so a stale pending build cannot overwrite or
+  delete a newer entry.
 - Add a single cold restore-projection read that selects and deduplicates runtime,
   replay, file-history, artifact, goal, telemetry, attribution, recorder, and ACP
   state records.
@@ -47,7 +52,8 @@ returns the requested replay semantics.
   bulk-replay ceiling.
 - Reuse the exact prompt-id/turn helper semantics, stream every active
   file-history batch through the existing reducer while retaining only its final
-  100-snapshot state, and sort selected segment reads by physical offset.
+  100-snapshot state, and derive a side-task source boundary from the completed
+  active chain rather than the last physical source record.
 - Normalize Goal inputs while dispatching selected records: retain parsed v2
   lifecycle state and only the raw legacy `goal_status` candidates needed by the
   existing reducers, including malformed candidates that affect precedence;
@@ -55,6 +61,13 @@ returns the requested replay semantics.
 - Dispatch aggregated records directly to consumer reducers instead of building
   a catch-all selected-record array. Stream artifact inputs into an incremental
   form of the existing reducer and retain only the rebuilt snapshot.
+- Process the deduplicated UUID union in consumer logical order, reading only one
+  UUID's segments in physical-offset order at a time. Release its aggregate
+  after dispatch and use only a fixed tiny glued-line cache; do not globally
+  physical-sort selected segments, hold multiple unfinished aggregates, spill,
+  or rescan. Extract and share the existing artifact adjacency/blocker selector
+  and stateful reducer rather than approximating artifact activity from UUID
+  membership.
 - Add parity tests against the current full loader and reducers before changing
   ACP lifecycle code, including the existing malformed-compression selection and
   failure behavior.
@@ -85,22 +98,27 @@ returns the requested replay semantics.
   runtime directly from the ready projection.
 - Expose the completed projection to ACP initialization without changing
   `ResumedSessionData` semantics.
-- Make projection handoff one-shot. Force the existing lazy Config owner to
-  consume the projected file-history state before publishing the `Session`, so
-  the first resumed turn cannot create a snapshot from empty state. Then release
-  API history, goal records, telemetry arrays, replay records, artifact inputs,
-  and other pending projection payloads on success, failure, and
-  `startNewSession()`.
+- Make projection handoff one-shot and clear it on consume, success, failure,
+  shutdown, and `startNewSession()`. Keep Goal hook/state setup synchronous and
+  best-effort: leased mode starts/replaces it after recorder activation, but
+  Session publication does not await subsequent checkpoint execution or another
+  long-lived Goal future. Failure cleanup disposes outstanding work.
+- Preserve each normalized Goal candidate's source UUID and have the shared
+  recovery reducer identify the determining record, so replay bootstrap checks
+  page membership without duplicating Goal precedence.
 
 ## Phase 3: Migrate every load/resume consumer
 
 - Initialize Gemini model history, token counts, UI telemetry, and attribution
   from runtime state.
-- Restore file history exactly once before Session publication; do not defer it
-  until `/rewind` or the first file operation. Restore turn parents, initial
-  turn, background notification ids, goal runtime/hooks, and artifact state from
-  their explicit projection fields;
-  feed the normalized minimal Goal records through the existing recovery and
+- Build and validate the response-mode replay envelope before hydrating the
+  runtime FileHistoryService. Then synchronously restore file history exactly
+  once before Session publication; do not defer it until `/rewind` or the first
+  file operation. Start its best-effort missing-backup validation once only
+  after publication, because that validation may append a transcript record.
+  Restore turn parents, initial turn, background notification ids, goal
+  runtime/hooks, and artifact state from their explicit projection fields; feed
+  the normalized minimal Goal records through the existing recovery and
   legacy-card helpers.
 - Remove daemon attempts to rebuild recorder boundaries or ACP state from the
   recent replay page.
@@ -111,8 +129,13 @@ returns the requested replay semantics.
   `resumeSession`.
 - Replace live load/resume full reloads with consumer-limited projections under
   the existing drain and write barrier.
-- Extend the internal load-replay envelope only as needed to populate the
-  existing public history anchor.
+- Keep internal load-replay envelope version 1, add optional
+  `anchorRecordId?: string`, validate/strip it in the bridge, and use it only as
+  the last fallback for the existing public history anchor.
+- Normalize the bridge in-flight key as discriminated `all`, `recent(limit)`, or
+  `none` replay plus action, response/stream mode, and inherited-history policy.
+  Coalesce only identical shapes; omitted versus explicit page size and unequal
+  recent limits return `restore_in_progress`.
 - For cold loads, enforce the shared serialized byte cap and existing
   10,000-update cap on explicitly recent bulk replay before transport and before
   session registration. Any individual or collective overflow returns ACP
@@ -120,6 +143,12 @@ returns the requested replay semantics.
   `413 transcript_page_too_large`; preserve the typed limit error past the
   collector's ordinary `partial`/`replayError` downgrade and do not add
   transformed-update trimming.
+- Put both internal protocol constants in shared bridge types. Incrementally
+  account each serialized update, then exactly verify UTF-8 bytes for the final
+  version-1 envelope including every optional field, delimiter, bootstrap,
+  synthetic, and finalization update. Accept exactly 32 MiB and 10,000 updates;
+  reject the first extra byte or the 10,001st update with a dedicated typed
+  reason while preserving the existing public error kind/code.
 - Treat the shared 32 MiB explicitly recent serialized replay ceiling as a fixed
   transformed-envelope policy in this PR; do not add a configuration knob,
   transformed-update trimming, or server-side auto-paging. A caller may retry
@@ -131,11 +160,25 @@ returns the requested replay semantics.
   mutating, unregistering, or closing the already-live Session on overflow. Keep
   the daemon bridge's existing live-attach fallback to in-memory replay instead
   of surfacing that direct-ACP error as REST 413.
+- Reserve a cold session id before configuration/scanning and hold it until
+  atomic publication or failure. Run all fallible preparation before replacing
+  the reservation with `sessions.set` plus reporter notification. Use a
+  map-independent teardown for provisional state: dispose Session and Goal
+  hooks/observers, release MCP and telemetry ownership, then shut down Config,
+  recorder, and lease without replacing the original failure.
+- Arm notification drain, cron work, command timers, and file-history validation
+  only after publication. A callback registered earlier may buffer but must not
+  drain while the target is provisional; post-publication best-effort activation
+  failure does not roll back the committed Session.
 
 ## Phase 4: Errors and observability
 
-- Map selective reader failures through existing ACP error kinds and REST
-  responses.
+- Add one restore-error mapper used after cleanup by preloaded/deferred cold
+  projection, cold replay collection, and direct-ACP live projection/collection:
+  snapshot unavailable becomes ACP -32010/REST 409, transcript over 256 MiB
+  becomes ACP -32011/REST 413 `transcript_too_large`, and recent envelope
+  overflow becomes ACP -32012/REST 413 `transcript_page_too_large`. Preserve
+  typed data for coalesced waiters and do not expand the public success schema.
 - Assert that transcripts over 256 MiB return request-scoped ACP
   `errorKind: transcript_too_large`, map to REST `413 transcript_too_large`,
   never call the old loader, and do not affect a sibling session.
@@ -166,6 +209,19 @@ returns the requested replay semantics.
   `packages/core`.
 - Run focused ACP agent/session and daemon route/bridge tests from their package
   directories.
+- Instrument reader tests to prove one full sequential index scan plus bounded
+  selected seeks, no internal public-page/cache read, at most one aggregate
+  record plus the fixed line cache, and no second scan for recent replay or Goal
+  bootstrap. Cover a dead-branch side-task source, glued fragments, concurrent
+  fresh/cached builds, stale pending completion, and failed-read cache admission.
+- Exercise both lease modes, recorder-disabled mode, same-id reservation races,
+  every post-model/post-Session teardown point, and Goal migration complete or
+  pending when a later step fails. A same-id retry must observe no stale hook,
+  observer, pool, telemetry, Config, lease, or map state.
+- Exercise missing file-history backups and due autonomous work: envelope or
+  prepare failure appends nothing and emits nothing; successful publication
+  restores once, validates once, and arms each buffered notification/cron/timer
+  exactly once.
 - Run `npm run build && npm run typecheck` from the repository root.
 - Record a benchmark-only full-loader baseline and run the selective projection
   on 64 KiB, 1 MiB, and 4 MiB fixtures under the same runtime. Report absolute
@@ -191,8 +247,10 @@ returns the requested replay semantics.
       ship as one end-to-end implementation; no intermediate production PR leaves
       an unused projection or removes the post-lease authoritative read without
       replacing it.
-- [ ] One fresh cold-restore snapshot scan occurs after lease acquisition when
-      the recorder will acquire it, or before `Config` construction otherwise.
+- [ ] One full sequential cold-restore index scan plus bounded selected-record
+      seeks occurs after lease acquisition when the recorder will acquire it, or
+      before `Config` construction otherwise; no projection path performs a
+      second scan through paging/cache helpers.
 - [ ] No production selective cold or live `session/load`/`session/resume` path
       calls the old full loader, including under a small-transcript threshold;
       benchmark-only comparisons are the only exception.
@@ -202,9 +260,15 @@ returns the requested replay semantics.
       no retained completed value and its byte-budget admission does not evict
       cached values, while pending coalescing and existing LRU behavior remain
       unchanged.
+- [ ] Cold cache offer occurs only after all selected-read and final snapshot or
+      lease checks, never replaces an existing pending/completed entry, and
+      cannot be overwritten or deleted by a stale pending completion.
 - [ ] Compressed and uncompressed API histories match current behavior.
 - [ ] Rewind, fork, side-task, gap, fragment, artifact, file-history, goal,
       telemetry, attribution, and interruption fixtures pass parity tests.
+- [ ] A dead-branch side-task source cannot replace the source boundary derived
+      from the active runtime chain; artifact adjacency/blocker selection and
+      incremental accumulation match the existing batch reducer.
 - [ ] Explicit initial replay is count- and byte-bounded.
 - [ ] Cold collective transformed replay byte and update-count expansion is
       bounded and fails before session registration.
@@ -216,6 +280,8 @@ returns the requested replay semantics.
 - [ ] Oversized individual cold replay records return the typed ACP error, map
       to REST 413, and never leave a half-registered runtime.
 - [ ] Active goals older than a recent page get one correct bootstrap update.
+- [ ] Goal recovery returns the determining source UUID so bootstrap membership
+      uses the shared precedence result rather than a second implementation.
 - [ ] Goal projection retains no unrelated slash-command history items while
       preserving malformed-candidate precedence and legacy hook state.
 - [ ] Goal precedence matches `recoverGoalFromRecords()`: newer malformed v2
@@ -223,8 +289,10 @@ returns the requested replay semantics.
       blocks legacy fallback.
 - [ ] Active file-history batches preserve last-write-wins, first-insertion,
       100-snapshot cap, and whole-record malformed-skip semantics.
-- [ ] File history is restored exactly once before Session publication and is
-      not deferred until `/rewind` or the first file operation.
+- [ ] Transcript file-history records are reduced inside the single projection;
+      after envelope validation the runtime service restores exactly once before
+      Session publication, and missing-backup validation starts once afterward.
+      Envelope/prepare failure performs no file-history append.
 - [ ] Selected-read tests prove file-history and artifact inputs are reduced
       incrementally and are not retained in a transcript-sized intermediate
       array.
@@ -248,6 +316,17 @@ returns the requested replay semantics.
 - [ ] Successful load, failed load, and `startNewSession()` release all pending
       projection payloads; Config does not become a second lifetime history
       cache.
+- [ ] Session-id reservation covers scan through atomic publication; concurrent
+      direct-ACP restores of one id cannot both prepare, and every failure frees
+      the reservation for a clean retry.
+- [ ] Provisional teardown is independent of the sessions map and leaves no
+      Session/Goal hook, observer, MCP pool ownership, telemetry state, Config,
+      recorder, or lease after any pre-publication failure.
+- [ ] Notification drain, cron, command timers, and file-history validation do
+      not execute before publication and arm exactly once after it.
+- [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
+      limits, none, action, stream/response mode, and inherited-history policy;
+      only identical shapes share a restore and its typed result.
 - [ ] Both intentional caps (256 MiB transcript index and 32 MiB transformed
       explicit-page replay) have maintainer sign-off.
 - [ ] The fixed 32 MiB explicit-replay policy has no configuration, transformed
@@ -255,6 +334,9 @@ returns the requested replay semantics.
       boundary tests accept values within the cap and reject the first value
       above it for individual and collective expansion; omitted-`historyPageSize`
       compatibility remains unchanged.
+- [ ] Exact limit tests accept 10,000 updates and reject 10,001; envelope byte
+      accounting includes version, arrays/delimiters, optional metadata, anchor,
+      bootstrap, synthetic, and finalization updates.
 - [ ] Collective transformed-replay overflow permits an explicit smaller-page
       retry without server auto-paging, but recovery is not promised when the
       minimum aligned replay group remains oversized; a single oversized source
