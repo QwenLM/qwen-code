@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Buffer } from 'node:buffer';
+
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { CLIAssistantMessage, CLIMessage } from '../types.js';
 import {
@@ -11,6 +13,7 @@ import {
   type JsonOutputAdapterInterface,
   type ResultOptions,
 } from './BaseJsonOutputAdapter.js';
+import { observeToolResultBoundaryWriter } from '../../serve/tool-result-boundary-diagnostics.js';
 
 /**
  * JSON output adapter that collects all messages and emits them
@@ -74,7 +77,12 @@ export class JsonOutputAdapter
     } else {
       // Emit the entire messages array as JSON (includes all main agent + subagent messages)
       const json = JSON.stringify(this.messages);
-      process.stdout.write(`${json}\n`);
+      const payload = `${json}\n`;
+      process.stdout.write(payload);
+      observeToolResultBoundaryWriter(
+        this.messages,
+        Buffer.byteLength(payload, 'utf8'),
+      );
     }
   }
 

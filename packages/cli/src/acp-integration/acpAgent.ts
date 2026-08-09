@@ -199,6 +199,7 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../serve/live/session-source.js';
+import { observeToolResultBoundaryWire } from '../serve/tool-result-boundary-diagnostics.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -3084,7 +3085,10 @@ export async function runAcpAgent(
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
     const stream = ndJsonStream(stdout, stdin, {
-      onMessageObserved: ({ direction, message }) => {
+      onMessageObserved: ({ direction, bytes, message }) => {
+        if (direction === 'sent') {
+          observeToolResultBoundaryWire(message, bytes);
+        }
         if (
           direction === 'received' &&
           'id' in message &&

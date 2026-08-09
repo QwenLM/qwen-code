@@ -159,6 +159,7 @@ import {
 import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
+import { observeToolResultBoundaryWire } from './tool-result-boundary-diagnostics.js';
 import type {
   ChannelWorkerSupervisor,
   ChannelWorkerSnapshot,
@@ -3714,12 +3715,14 @@ async function runQwenServeImpl(
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
         onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
-        onMessageObserved: ({ direction, bytes, message }) =>
+        onMessageObserved: ({ direction, bytes, message }) => {
           observeLargePipeFrame({
             direction: daemonPipeDirection(direction),
             bytes,
             message,
-          }),
+          });
+          observeToolResultBoundaryWire(message, bytes);
+        },
       },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }
@@ -4417,12 +4420,14 @@ async function runQwenServeImpl(
         pipeHooks: {
           onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
           onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
-          onMessageObserved: ({ direction, bytes, message }) =>
+          onMessageObserved: ({ direction, bytes, message }) => {
             observeLargePipeFrame({
               direction: daemonPipeDirection(direction),
               bytes,
               message,
-            }),
+            });
+            observeToolResultBoundaryWire(message, bytes);
+          },
         },
         ...(opts.experimentalLsp === true
           ? { extraArgs: ['--experimental-lsp'] }
@@ -4955,12 +4960,14 @@ async function runQwenServeImpl(
         pipeHooks: {
           onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
           onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
-          onMessageObserved: ({ direction, bytes, message }) =>
+          onMessageObserved: ({ direction, bytes, message }) => {
             observeLargePipeFrame({
               direction: daemonPipeDirection(direction),
               bytes,
               message,
-            }),
+            });
+            observeToolResultBoundaryWire(message, bytes);
+          },
         },
         ...(opts.experimentalLsp === true
           ? { extraArgs: ['--experimental-lsp'] }

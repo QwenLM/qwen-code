@@ -90,6 +90,7 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
+import { observeToolResultBoundary } from './serve/tool-result-boundary-diagnostics.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -2103,6 +2104,18 @@ export async function runNonInteractive(
         for (let index = 0; index < orderedResponses.length; index++) {
           const { request, response } = orderedResponses[index];
           const finalizedParts = finalized[index].responseParts;
+          observeToolResultBoundary({
+            boundary: 'finalizer',
+            representation: finalizedParts,
+            mutated: finalizedParts !== response.responseParts,
+            artifactState:
+              response.persistedOutputFiles === undefined
+                ? 'unknown'
+                : response.persistedOutputFiles.length > 0
+                  ? 'present'
+                  : 'absent',
+            identifiers: { callId: request.callId, toolName: request.name },
+          });
           toolResponseParts.push(...finalizedParts);
           chatRecordingService?.recordToolResult?.(finalizedParts, {
             callId: request.callId,
@@ -2113,6 +2126,17 @@ export async function runNonInteractive(
             error: response.error,
             errorType: response.errorType,
             executionStatus: response.executionStatus,
+          });
+          observeToolResultBoundary({
+            boundary: 'recorder',
+            representation: finalizedParts,
+            artifactState:
+              response.persistedOutputFiles === undefined
+                ? 'unknown'
+                : response.persistedOutputFiles.length > 0
+                  ? 'present'
+                  : 'absent',
+            identifiers: { callId: request.callId, toolName: request.name },
           });
         }
 

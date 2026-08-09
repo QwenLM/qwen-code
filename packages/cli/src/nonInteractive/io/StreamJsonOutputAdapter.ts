@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Buffer } from 'node:buffer';
+
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
@@ -29,6 +31,7 @@ import {
   type ResultOptions,
   type JsonOutputAdapterInterface,
 } from './BaseJsonOutputAdapter.js';
+import { observeToolResultBoundaryWriter } from '../../serve/tool-result-boundary-diagnostics.js';
 
 /**
  * Stream JSON output adapter that emits messages immediately
@@ -67,7 +70,12 @@ export class StreamJsonOutputAdapter
     }
 
     // Emit messages immediately in stream mode
-    this.outputStream.write(`${JSON.stringify(message)}\n`);
+    const payload = `${JSON.stringify(message)}\n`;
+    this.outputStream.write(payload);
+    observeToolResultBoundaryWriter(
+      message,
+      Buffer.byteLength(payload, 'utf8'),
+    );
   }
 
   /**
@@ -75,7 +83,12 @@ export class StreamJsonOutputAdapter
    * same transport as data messages in stream mode.
    */
   protected override emitControlMessageImpl(message: ControlMessage): void {
-    this.outputStream.write(`${JSON.stringify(message)}\n`);
+    const payload = `${JSON.stringify(message)}\n`;
+    this.outputStream.write(payload);
+    observeToolResultBoundaryWriter(
+      message,
+      Buffer.byteLength(payload, 'utf8'),
+    );
   }
 
   /**

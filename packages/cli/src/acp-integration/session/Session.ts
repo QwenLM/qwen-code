@@ -287,6 +287,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { observeToolResultBoundary } from '../../serve/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -4849,9 +4850,24 @@ export class Session implements SessionContext {
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
+    const projectedUpdate = projectAcpToolResultUpdate(update);
+    if (update.sessionUpdate === 'tool_call_update') {
+      const updateRecord = update as unknown as Record<string, unknown>;
+      observeToolResultBoundary({
+        boundary: 'projection',
+        representation: projectedUpdate,
+        mutated: projectedUpdate !== update,
+        identifiers: {
+          callId:
+            typeof updateRecord['toolCallId'] === 'string'
+              ? updateRecord['toolCallId']
+              : undefined,
+        },
+      });
+    }
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update: projectAcpToolResultUpdate(update),
+      update: projectedUpdate,
     };
 
     if (update.sessionUpdate === 'plan') {
@@ -7247,9 +7263,32 @@ export class Session implements SessionContext {
         })),
       );
       orderedRecords.forEach((record, index) => {
+        observeToolResultBoundary({
+          boundary: 'finalizer',
+          representation: finalized[index].responseParts,
+          mutated: finalized[index].responseParts !== record.responseParts,
+          artifactState:
+            record.persistedOutputFiles === undefined
+              ? 'unknown'
+              : record.persistedOutputFiles.length > 0
+                ? 'present'
+                : 'absent',
+          identifiers: { callId: record.callId, toolName: record.toolName },
+        });
         this.config
           .getChatRecordingService()
           ?.recordToolResult(finalized[index].responseParts, record.metadata);
+        observeToolResultBoundary({
+          boundary: 'recorder',
+          representation: finalized[index].responseParts,
+          artifactState:
+            record.persistedOutputFiles === undefined
+              ? 'unknown'
+              : record.persistedOutputFiles.length > 0
+                ? 'present'
+                : 'absent',
+          identifiers: { callId: record.callId, toolName: record.toolName },
+        });
       });
       return {
         ...result,
@@ -9311,6 +9350,18 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                 );
+
+          observeToolResultBoundary({
+            boundary: 'producer',
+            representation: responseParts,
+            artifactState:
+              toolResult.persistedOutputFiles === undefined
+                ? 'unknown'
+                : toolResult.persistedOutputFiles.length > 0
+                  ? 'present'
+                  : 'absent',
+            identifiers: { callId, toolName },
+          });
 
           // A tool can fail "softly" by returning toolResult.error without
           // throwing, and can be cancelled mid-flight. Compute the real outcome
