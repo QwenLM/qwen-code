@@ -64,6 +64,17 @@ export function selectedBaseUrlEnvKey(
   return provider.envKey;
 }
 
+export function selectedBaseUrlDocumentationUrl(
+  provider: DaemonAuthProviderDescriptor,
+  baseUrl: string,
+): string | undefined {
+  if (Array.isArray(provider.baseUrl)) {
+    const option = provider.baseUrl.find((item) => item.url === baseUrl);
+    if (option?.documentationUrl) return option.documentationUrl;
+  }
+  return provider.documentationUrl;
+}
+
 export function shouldResetApiKeyAfterBaseUrlChange(
   provider: DaemonAuthProviderDescriptor,
   currentBaseUrl: string,

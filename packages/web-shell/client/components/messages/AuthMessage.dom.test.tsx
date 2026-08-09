@@ -582,6 +582,51 @@ describe('AuthMessage model field preservation', () => {
     expect(document.body.textContent).not.toContain('C_SHARED_KEY');
   });
 
+  it('points the documentation link at the selected endpoint', async () => {
+    const documented: DaemonAuthProviderDescriptor = {
+      ...providerC,
+      documentationUrl: 'https://docs.example/default',
+      baseUrl: [
+        {
+          id: 'c-one',
+          label: 'Gamma One',
+          url: 'https://c-one.example/v1',
+          envKey: 'C_SHARED_KEY',
+          documentationUrl: 'https://docs.example/one',
+        },
+        {
+          id: 'c-two',
+          label: 'Gamma Two',
+          url: 'https://c-two.example/v1',
+          envKey: 'C_SHARED_KEY',
+          documentationUrl: 'https://docs.example/two',
+        },
+      ],
+    };
+    actions.getAuthProviders.mockResolvedValue({
+      ...gammaCatalog,
+      providers: [documented],
+    });
+    await renderAuthMessage();
+
+    click(findButtonContaining('Third-party Providers'));
+    click(findButtonContaining('Provider Gamma'));
+    click(findButtonContaining('Gamma Two'));
+
+    const docLinkHrefs = () =>
+      Array.from(document.querySelectorAll('a'))
+        .map((anchor) => anchor.href)
+        .filter((href) => href.startsWith('https://docs.example/'));
+    expect(docLinkHrefs()).toEqual(['https://docs.example/two']);
+    expect(document.body.textContent).not.toContain('https://docs.example/one');
+
+    // Switching endpoints must swap the link instead of keeping the stale one.
+    click(findButtonContaining('previous'));
+    click(findButtonContaining('Gamma One'));
+    expect(docLinkHrefs()).toEqual(['https://docs.example/one']);
+    expect(document.body.textContent).not.toContain('https://docs.example/two');
+  });
+
   it('seeds the first endpoint defaults without an endpoint selection', async () => {
     actions.getAuthProviders.mockResolvedValue(catalog);
     await renderAuthMessage();

@@ -11,6 +11,7 @@ import {
   apiKeyAfterBaseUrlChange,
   baseUrlOptionModelIds,
   normalizeModelIds,
+  selectedBaseUrlDocumentationUrl,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
   selectedBaseUrlOptionIndex,
@@ -607,6 +608,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           setOptionIndex,
         );
       }
+      const documentationUrl = selectedBaseUrlDocumentationUrl(
+        provider,
+        baseUrl,
+      );
       return (
         <>
           <div className={styles.text}>{t('auth.baseUrlPrompt')}</div>
@@ -627,10 +632,10 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             }}
             autoFocus
           />
-          {provider.documentationUrl && (
+          {documentationUrl && (
             <a
               className={styles.link}
-              href={provider.documentationUrl}
+              href={documentationUrl}
               target="_blank"
               rel="noreferrer"
             >
@@ -641,16 +646,20 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
       );
     }
     if (currentStep === 'apiKey') {
+      const documentationUrl = selectedBaseUrlDocumentationUrl(
+        provider,
+        baseUrl,
+      );
       return (
         <>
-          {provider.documentationUrl && (
+          {documentationUrl && (
             <a
               className={styles.link}
-              href={provider.documentationUrl}
+              href={documentationUrl}
               target="_blank"
               rel="noreferrer"
             >
-              {t('auth.documentation')}: {provider.documentationUrl}
+              {t('auth.documentation')}: {documentationUrl}
             </a>
           )}
           <input

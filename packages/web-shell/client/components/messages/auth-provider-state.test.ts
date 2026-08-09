@@ -4,6 +4,7 @@ import {
   apiKeyAfterBaseUrlChange,
   baseUrlOptionModelIds,
   normalizeModelIds,
+  selectedBaseUrlDocumentationUrl,
   selectedBaseUrlEnvKey,
   selectedBaseUrlModelIds,
   selectedBaseUrlOptionIndex,
@@ -304,6 +305,74 @@ describe('auth provider endpoint state', () => {
     expect(
       selectedBaseUrlEnvKey(mimo, 'https://token-plan-cn.xiaomimimo.com/v1'),
     ).toBe('MIMO_API_KEY');
+  });
+
+  it('resolves endpoint-specific documentation URLs', () => {
+    const documented = {
+      ...kimi,
+      documentationUrl: 'https://www.kimi.com/code/docs/en/',
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: 'https://api.kimi.com/coding/v1',
+          documentationUrl: 'https://www.kimi.com/code/docs/en/',
+        },
+        {
+          id: 'api-cn',
+          label: 'API Key (China)',
+          url: 'https://api.moonshot.cn/v1',
+          documentationUrl: 'https://platform.kimi.com/docs/api/overview',
+        },
+      ],
+    } satisfies DaemonAuthProviderDescriptor;
+
+    expect(
+      selectedBaseUrlDocumentationUrl(documented, 'https://api.moonshot.cn/v1'),
+    ).toBe('https://platform.kimi.com/docs/api/overview');
+    expect(
+      selectedBaseUrlDocumentationUrl(
+        documented,
+        'https://api.kimi.com/coding/v1',
+      ),
+    ).toBe('https://www.kimi.com/code/docs/en/');
+    expect(
+      selectedBaseUrlDocumentationUrl(documented, 'https://unknown.example/v1'),
+    ).toBe('https://www.kimi.com/code/docs/en/');
+  });
+
+  it('falls back to the provider-level documentation URL for options without one', () => {
+    const documented = {
+      ...mimo,
+      documentationUrl:
+        'https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call',
+      baseUrl: [
+        {
+          id: 'pay-as-you-go',
+          label: 'Pay-as-you-go API',
+          url: 'https://api.xiaomimimo.com/v1',
+        },
+        {
+          id: 'token-plan-china',
+          label: 'Token Plan (China)',
+          url: 'https://token-plan-cn.xiaomimimo.com/v1',
+          documentationUrl: 'https://mimo.mi.com/docs/tokenplan/subscription',
+        },
+      ],
+    } satisfies DaemonAuthProviderDescriptor;
+
+    expect(
+      selectedBaseUrlDocumentationUrl(
+        documented,
+        'https://token-plan-cn.xiaomimimo.com/v1',
+      ),
+    ).toBe('https://mimo.mi.com/docs/tokenplan/subscription');
+    expect(
+      selectedBaseUrlDocumentationUrl(
+        documented,
+        'https://api.xiaomimimo.com/v1',
+      ),
+    ).toBe('https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call');
   });
 
   it('restores the highlighted endpoint from the selected base URL', () => {
