@@ -1272,6 +1272,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'debug-1',
         kind: 'debug',
+        debugReason: 'unrecognized_event',
         text:
           'language_changed (unrecognized daemon event): ' +
           '{"sessionId":"dd699cc0-6ef7-4882-92d9-1076ac5b87e9",' +
@@ -1283,6 +1284,80 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([]);
+  });
+
+  it('filters unrecognized session_update kinds the daemon adds later', () => {
+    // The event kind here is deliberately one no normalizer case handles: the
+    // filter must key off `debugReason`, not a list of known-noisy prefixes.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-2',
+        kind: 'debug',
+        debugReason: 'unrecognized_session_update',
+        text: 'some_future_kind: {"payload":{"nested":"json"}}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('keeps malformed-payload debug blocks visible', () => {
+    // A frame the client *does* know about arrived broken — that is a real
+    // defect signal, not forward-compatibility noise.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-3',
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+        text: 'memory_changed: malformed memory_changed payload',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'debug-3',
+        role: 'system',
+        content: 'memory_changed: malformed memory_changed payload',
+        variant: 'info',
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('keeps client-dispatched debug blocks that carry no debugReason', () => {
+    // Web Shell dispatches its own `debug` event for the model-switch summary.
+    // Only the normalizer stamps `debugReason`, so client-side debug blocks
+    // must not be swept up by the unrecognized-event filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-4',
+        kind: 'debug',
+        text: 'Model switched to qwen3-coder-plus',
+        source: 'model_switch_summary',
+        data: { modelId: 'qwen3-coder-plus' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'debug-4',
+        role: 'system',
+        content: 'Model switched to qwen3-coder-plus',
+        variant: 'info',
+        timestamp: 1,
+        source: 'model_switch_summary',
+        data: { modelId: 'qwen3-coder-plus' },
+      },
+    ]);
   });
 
   it('filters SDK model switch status noise', () => {

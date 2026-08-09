@@ -156,6 +156,7 @@ export type {
   DaemonUiAuthDeviceFlowFailedEvent,
   DaemonUiAuthDeviceFlowStartedEvent,
   DaemonUiAuthDeviceFlowThrottledEvent,
+  DaemonUiDebugReason,
   DaemonUiErrorEvent,
   DaemonUiEvent,
   DaemonUiEventBase,

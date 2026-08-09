@@ -109,10 +109,30 @@ function applyBackgroundAgentTaskUpdate(
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
+  // `model.changed` projects to a `status` block, not a `debug` one, so this
+  // stays text-keyed. The Web Shell renders its own richer model-switch
+  // summary (dispatched as a client-side `debug` event) instead.
+  return text.startsWith('Model switched: ');
+}
+
+/**
+ * Daemon frames the normalizer had no case for are developer diagnostics —
+ * a raw JSON dump of an event this client does not understand. They routinely
+ * appear whenever the daemon ships a new event kind ahead of the UI, and
+ * rendering them drops unreadable JSON into the middle of the conversation.
+ *
+ * Keyed on the normalizer's `debugReason` rather than the block text so new
+ * event kinds are covered automatically. Two categories are deliberately kept
+ * visible: `malformed_payload`, which means a frame this client *does* know
+ * arrived broken and is worth surfacing, and client-dispatched debug blocks
+ * (e.g. the model-switch summary), which carry no `debugReason` at all.
+ */
+function isUnrecognizedDaemonDebug(
+  block: DaemonStatusTranscriptBlock,
+): boolean {
   return (
-    text.startsWith('language_changed (unrecognized daemon event):') ||
-    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
-    text.startsWith('Model switched: ')
+    block.debugReason === 'unrecognized_event' ||
+    block.debugReason === 'unrecognized_session_update'
   );
 }
 
@@ -647,6 +667,7 @@ export function transcriptBlocksToDaemonMessages(
       case 'status':
       case 'debug': {
         const statusBlock = block;
+        if (isUnrecognizedDaemonDebug(statusBlock)) break;
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
@@ -673,10 +694,11 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = true;
           break;
         }
-        // Status/debug blocks are daemon-level diagnostics, not tool output.
-        // Keeping them in the main transcript avoids hiding global messages
-        // such as SSE lag warnings, malformed-event debug lines, or shell
-        // result notices inside whichever subAgent happened to be active.
+        // Status blocks and the debug blocks that survive the filter above are
+        // daemon-level diagnostics, not tool output. Keeping them in the main
+        // transcript avoids hiding global messages such as SSE lag warnings,
+        // malformed-event debug lines, or shell result notices inside
+        // whichever subAgent happened to be active.
         messages.push({
           id: block.id,
           role: 'system',

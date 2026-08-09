@@ -2522,6 +2522,47 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(events).toEqual([]);
   });
 
+  it('stamps debugReason on unrecognized daemon events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('some_future_event', { sessionId: 's1' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('stamps debugReason on unrecognized session_update kinds', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: { sessionUpdate: 'some_future_kind', payload: { a: 1 } },
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_session_update',
+      }),
+    ]);
+  });
+
+  it('stamps debugReason on malformed payloads of known events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', { scope: 'not-a-scope' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    ]);
+  });
+
   it('normalizes memory_changed with closed-enum scope + mode', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', {

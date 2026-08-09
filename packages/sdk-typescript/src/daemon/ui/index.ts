@@ -83,6 +83,7 @@ export type {
   DaemonTranscriptStore,
   // Chat-stream events
   DaemonUiAssistantDoneEvent,
+  DaemonUiDebugReason,
   DaemonUiErrorEvent,
   DaemonUiEvent,
   DaemonUiEventBase,
