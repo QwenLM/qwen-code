@@ -8,13 +8,13 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 
-// The real-tmux capture suite is describe.skipIf(!hasTmux)-gated and vitest
-// does not fail on skips: if the CI install step disappears (a refactor, an
-// image change) — or its `if:` condition mutates so it never RUNS — 50+
-// real-tmux behaviors — holder survival, logical matching, server reaping,
-// refusal contracts — silently skip inside the required Test check with
-// zero red signal. Pin the step's existence, its condition, and its
-// load-bearing properties.
+// A tooling step that quietly stops installing is the same outage as no
+// step at all, and it is INVISIBLE: the suites it feeds skip rather than
+// fail. The zip half serves the install-script packaging suite; the tmux
+// half is pre-landed for #8388, whose real-tmux suite is
+// describe.skipIf(!hasTmux)-gated and would silently skip every behaviour
+// it covers inside a green required check. Pin the step's existence, its
+// condition, and its load-bearing properties.
 // Logical lines the way BASH builds them, scanned character by character so
 // the pins run on the text bash actually executes. Three rules the previous
 // line-at-a-time version got wrong, each probe-verified against bash:
@@ -109,6 +109,29 @@ function unwrapCommand(stmt) {
   }
 }
 
+// The statement with quoted spans blanked out, for questions about SHELL
+// syntax (redirections): a `>` inside a warning message is message text,
+// and matching it reddened semantics-preserving rewordings — the opposite
+// of what the annotation pins are for.
+function outsideQuotes(stmt) {
+  let out = '';
+  let quote = null;
+  for (const c of stmt) {
+    if (quote) {
+      if (c === quote) quote = null;
+      out += ' ';
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      out += ' ';
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 // Is this statement a real apt-get invocation, or a mention of one? A
 // `command -v apt-get` probe names it without running it; anything else
 // that reaches apt-get — behind any wrapper, in any group — runs it.
@@ -125,7 +148,7 @@ function isAptGet(stmt) {
 // message text, and splitting on it tore an `echo '…; …' > /dev/null` into
 // fragments where the redirect no longer belonged to any echo — so the
 // annotation pins never saw it.
-function statementsOf(line) {
+function rawStatementsOf(line) {
   const parts = [];
   let cur = '';
   let quote = null;
@@ -148,8 +171,16 @@ function statementsOf(line) {
       i++;
       continue;
     }
-    // `&` separates statements, EXCEPT in a redirection like `2>&1`.
-    if (c === ';' || c === '|' || (c === '&' && line[i - 1] !== '>')) {
+    // `&` separates statements, EXCEPT in a redirection: `2>&1` (preceded
+    // by `>`) and bash's `&>file` (followed by `>`). Splitting on the
+    // latter tore `echo '::warning::…' &> /dev/null` into a clean echo and
+    // an unchecked `> /dev/null`, so the annotation pins never saw the
+    // redirect that silenced it.
+    if (
+      c === ';' ||
+      c === '|' ||
+      (c === '&' && line[i - 1] !== '>' && line[i + 1] !== '>')
+    ) {
       parts.push(cur);
       cur = '';
       continue;
@@ -164,11 +195,17 @@ function statementsOf(line) {
       .flatMap((p) =>
         /['"]/.test(p) ? [p] : p.split(/\bthen\b|\belse\b|\bdo\b|\bfi\b/),
       )
-      .map((x) =>
-        unwrapCommand(x.replace(/^[\s({]+/, '').replace(/[\s)}]+$/, '')),
-      )
+      .map((x) => x.replace(/^[\s({]+/, '').replace(/[\s)}]+$/, ''))
       .filter(Boolean)
   );
+}
+
+// The same statements with their wrappers stripped. Split and unwrap are
+// separate because some questions are about the wrapper itself — "does this
+// install run through sudo?" cannot be asked of a statement sudo has
+// already been removed from.
+function statementsOf(line) {
+  return rawStatementsOf(line).map(unwrapCommand).filter(Boolean);
 }
 
 // Does this `set` enable errexit? Any position, any spelling — `set -e`,
@@ -182,7 +219,16 @@ function enablesErrexit(stmt) {
 // `\btmux` matches across a hyphen, so `powerline-tmux` satisfied a \b
 // anchor while installing no tmux binary at all.
 function installsPackage(line, pkg) {
-  return /apt-get\s+install\b/.test(line) && line.split(/\s+/).includes(pkg);
+  // Against the install STATEMENT's own arguments: matching the whole
+  // logical line let a package dropped from the install survive as long as
+  // its bare token appeared anywhere else on that line — in the guard's
+  // warning message, for instance.
+  return statementsOf(line).some(
+    (stmt) =>
+      isAptGet(stmt) &&
+      /^apt-get\s+install\b/.test(unwrapCommand(stmt)) &&
+      unwrapCommand(stmt).split(/\s+/).includes(pkg),
+  );
 }
 
 // Flags that make `apt-get install` exit 0 having installed NOTHING — the
@@ -200,11 +246,125 @@ const NO_OP_INSTALL_FLAGS = new Set([
   '--print-uris',
 ]);
 
+// The same no-op modes reachable through apt's generic option override:
+// `-o APT::Get::Simulate=true` is exactly what `-s` sets, and the token
+// blacklist above cannot see it.
+const NO_OP_INSTALL_OPTION =
+  /-o\s*(APT::Get::)?(Simulate|Just-Print|Download-Only|Print-URIs|No-Act|Recon)\s*=\s*(true|1|yes)/i;
+
 // A branch condition that can be satisfied without the tools it claims to
 // test: a literal constant, or bash's null command `:` (status 0 always).
 function hasForcingTerm(line) {
   return /(^|[\s;&|(])(\|\|\s*(true|:)|&&\s*false)(\s|;|$)/.test(line);
 }
+
+// The helpers above are the ORACLE every pin below reasons through: if
+// they mismodel bash, the pins describe a script nothing runs. Each rule
+// here was learned from a mutation that escaped an earlier version.
+describe('the bash model these pins run on', () => {
+  it('builds logical lines the way bash does', () => {
+    // Continuations: only an ODD run of trailing backslashes continues.
+    // `\<newline>` is removed; the space BEFORE the backslash survives.
+    expect(logicalLinesOf('echo a \\\nb')).toEqual(['echo a b']);
+    expect(logicalLinesOf('echo a \\\\\nexit 1')).toEqual([
+      'echo a \\\\',
+      'exit 1',
+    ]);
+    // A comment never continues, whatever it ends with.
+    expect(logicalLinesOf('# note \\\nexit 1')).toEqual(['exit 1']);
+    // A `#` opens a comment after whitespace or a metacharacter, and is
+    // literal inside quotes.
+    expect(logicalLinesOf('echo hi;#note')).toEqual(['echo hi;']);
+    expect(logicalLinesOf("echo '::warning::a # b' && exit 1")).toEqual([
+      "echo '::warning::a # b' && exit 1",
+    ]);
+  });
+
+  it('splits statements on real separators only', () => {
+    expect(statementsOf('sleep 1 & exit 1')).toEqual(['sleep 1', 'exit 1']);
+    // Redirections are not separators, in either spelling.
+    expect(statementsOf('cmd > /dev/null 2>&1 && next')).toEqual([
+      'cmd > /dev/null 2>&1',
+      'next',
+    ]);
+    expect(statementsOf("echo '::warning::x' &> /dev/null")).toEqual([
+      "echo '::warning::x' &> /dev/null",
+    ]);
+    // A `;` inside a message is message text.
+    expect(statementsOf("echo 'a; b'")).toEqual(["echo 'a; b'"]);
+    // Grouping punctuation comes off: a subshell's exit is an exit.
+    expect(statementsOf('if [ x ]; then (exit 1); fi')).toEqual([
+      'if [ x ]',
+      'exit 1',
+    ]);
+  });
+
+  it('sees through wrappers to the command underneath', () => {
+    expect(unwrapCommand('sudo -n apt-get install -y tmux')).toBe(
+      'apt-get install -y tmux',
+    );
+    expect(unwrapCommand('timeout --signal=KILL 5 apt-get update')).toBe(
+      'apt-get update',
+    );
+    expect(unwrapCommand('time sudo apt-get update')).toBe('apt-get update');
+    expect(unwrapCommand('DEBIAN_FRONTEND=noninteractive apt-get update')).toBe(
+      'apt-get update',
+    );
+    // A MENTION is not an invocation.
+    expect(isAptGet('command -v apt-get')).toBe(false);
+    expect(isAptGet('( sudo apt-get install -y tmux')).toBe(true);
+  });
+
+  it('detects errexit in every spelling, and only when enabled', () => {
+    for (const on of [
+      'set -e',
+      'set -euo pipefail',
+      'set -u -e',
+      'set -o errexit',
+      'set -o pipefail -e',
+      'set -o nounset -o errexit',
+    ]) {
+      expect(enablesErrexit(on), on).toBe(true);
+    }
+    for (const off of ['set +e', 'set -u', 'set -o pipefail']) {
+      expect(enablesErrexit(off), off).toBe(false);
+    }
+  });
+
+  it('matches packages as whole install arguments', () => {
+    expect(installsPackage('sudo apt-get install -y tmux zip', 'tmux')).toBe(
+      true,
+    );
+    expect(installsPackage('sudo apt-get install -y tmuxinator', 'tmux')).toBe(
+      false,
+    );
+    expect(
+      installsPackage('sudo apt-get install -y powerline-tmux', 'tmux'),
+    ).toBe(false);
+    // Not from the guard's message, only from the install's arguments.
+    expect(
+      installsPackage(
+        "apt-get install -y zip || echo '::warning::tmux'",
+        'tmux',
+      ),
+    ).toBe(false);
+  });
+
+  it('knows a forced condition, `:` included', () => {
+    expect(hasForcingTerm('if command -v tmux || true; then')).toBe(true);
+    expect(hasForcingTerm('if command -v tmux || :; then')).toBe(true);
+    expect(hasForcingTerm('if command -v tmux && false; then')).toBe(true);
+    expect(hasForcingTerm('if command -v tmux > /dev/null 2>&1; then')).toBe(
+      false,
+    );
+  });
+
+  it('blanks quoted spans before asking about shell syntax', () => {
+    // A `>` inside a message is text; the one outside is a redirection.
+    expect(outsideQuotes("echo '::warning::a > b'")).not.toMatch(/>/);
+    expect(outsideQuotes("echo '::warning::a' > /dev/null")).toMatch(/>/);
+  });
+});
 
 describe('ci.yml capture tooling', () => {
   const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
@@ -245,15 +405,47 @@ describe('ci.yml capture tooling', () => {
     // and fails on a runner with no tty, and without root it cannot write
     // /var/lib/dpkg — both keep every structural pin green while installing
     // nothing.
-    const installStatement = installLines
-      .flatMap((l) => statementsOf(l))
-      .find((stmt) => isAptGet(stmt) && /^apt-get\s+install\b/.test(stmt));
-    expect(installStatement, 'no apt-get install statement').toBeDefined();
-    expect(installStatement.split(/\s+/)).toContain('-y');
+    // EVERY install statement, not just the first: splitting the install in
+    // two exempted the second from both requirements, and a `.find()` also
+    // let an always-failing statement short-circuit the real one.
+    const installStatements = installLines
+      .flatMap((l) => rawStatementsOf(l))
+      .filter((stmt) => /^apt-get\s+install\b/.test(unwrapCommand(stmt)));
     expect(
-      installLines.some((l) => /\bsudo\s+apt-get\s+install\b/.test(l)),
-      'the install does not run through sudo',
+      installStatements.length,
+      'no apt-get install statement',
+    ).toBeGreaterThan(0);
+    for (const stmt of installStatements) {
+      expect(unwrapCommand(stmt).split(/\s+/), stmt).toContain('-y');
+      // Through sudo, in any of its spellings: `sudo -n apt-get` is the
+      // sibling workflow's convention, and requiring literal adjacency
+      // would red the very form this suite's siblings pin.
+      expect(
+        /^sudo\b/.test(stmt.trim()),
+        `${stmt} does not run through sudo`,
+      ).toBe(true);
+      expect(NO_OP_INSTALL_OPTION.test(stmt), `${stmt} simulates`).toBe(false);
+    }
+    // The index refresh the install depends on: without it a stale list
+    // fails the install on a runner whose image is a few days old.
+    expect(
+      installLines
+        .flatMap((l) => rawStatementsOf(l))
+        .some((stmt) => /^apt-get\s+update\b/.test(unwrapCommand(stmt))),
+      'no apt-get update precedes the install',
     ).toBe(true);
+    // Nothing foreign may sit on the install's chain: only apt-get calls
+    // and the guard's echo, so no prefixed command can short-circuit it.
+    for (const line of installLines) {
+      if (!/apt-get\s+install\b/.test(line)) continue;
+      for (const stmt of rawStatementsOf(line)) {
+        const bare = unwrapCommand(stmt);
+        expect(
+          /^(apt-get|echo)\b/.test(bare),
+          `${bare} shares the install chain`,
+        ).toBe(true);
+      }
+    }
     // And it must really install: `-s`/`--download-only` and friends exit 0
     // having installed nothing, with no warning — the step stays green while
     // the real-tmux suite skips inside the required check.
@@ -291,6 +483,10 @@ describe('ci.yml capture tooling', () => {
     const install = steps[nameIndex(INSTALL)];
     expect(install['continue-on-error']).toBe(true);
     expect(install['timeout-minutes']).toBe(5);
+    // The interpreter that parses the whole run block: every pin in this
+    // file reasons in bash, and `shell: powershell` would leave them
+    // describing a script nothing runs.
+    expect(install['shell'] ?? 'bash').toMatch(/^bash/);
   });
 
   it('keeps the install branch REACHABLE — the conditions, not just the lines', () => {
@@ -330,8 +526,14 @@ describe('ci.yml capture tooling', () => {
     // tooling is missing. Deleting it passed every other pin.
     const elseIdx = lines.findIndex((l) => l === 'else');
     expect(elseIdx, 'no `else` fallback branch').toBeGreaterThan(-1);
+    // And the conditional is CLOSED: without `fi`, bash rejects the block
+    // and the step runs nothing at all — which passed every other pin.
+    expect(lines, 'the if/elif/else block is never closed').toContain('fi');
     expect(
-      lines.slice(elseIdx + 1).some((l) => l.includes('::warning::')),
+      lines
+        .slice(elseIdx + 1)
+        .flatMap((l) => statementsOf(l))
+        .some((stmt) => /^echo\b/.test(stmt) && stmt.includes('::warning::')),
       'the else branch emits no ::warning:: annotation',
     ).toBe(true);
   });
@@ -409,9 +611,10 @@ describe('ci.yml capture tooling', () => {
         // runner parses stdout, so bytes sent to a file or /dev/null, or to
         // stderr, are just log noise — and `::warning::` must open the
         // line, since the runner does not scan mid-line.
-        expect(stmt, `annotation redirected away :: ${line}`).not.toMatch(
-          /\d?>(>|&\d)?\s*\S/,
-        );
+        expect(
+          outsideQuotes(stmt),
+          `annotation redirected away :: ${line}`,
+        ).not.toMatch(/\d?>(>|&\d)?\s*\S/);
         expect(stmt, `annotation not at line start :: ${line}`).toMatch(
           /^echo\s+(-[a-zA-Z]+\s+)*['"]?::warning::/,
         );

@@ -444,14 +444,16 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node --test ${{ env.HELPER_TESTS }}'
 
-      # capture-tui's real-tmux suite is describe.skipIf(!hasTmux)-gated: on a
-      # runner without tmux (the hosted ubuntu-latest image ships none) it
-      # silently skips every real-tmux behavior — holder survival, matching,
-      # server reaping, refusal contracts. The install-script packaging suite
-      # needs zip/unzip the same way — and throws on a CI host that ships
-      # neither, so a silent skip there is impossible. Install the tooling
-      # where apt exists so the Linux lane actually executes both
-      # (qwen-autofix.yml does the same for tmux).
+      # The install-script packaging suite needs zip/unzip, and throws on a
+      # CI host that ships neither, so a silent skip there is impossible.
+      # tmux is PRE-LANDED for #8388: that PR's capture-tui carries a
+      # describe.skipIf(!hasTmux)-gated real-tmux suite which, on a runner
+      # without tmux (the hosted ubuntu-latest image ships none), would
+      # silently skip every real-tmux behaviour — holder survival, matching,
+      # server reaping, refusal contracts — inside a green required check.
+      # Until it lands, the tmux half installs a tool nothing here uses;
+      # that is deliberate, so the tooling is in place before the suite that
+      # depends on it (qwen-autofix.yml already installs tmux the same way).
       - name: 'Install tmux and zip tooling'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
         # Bounded AND advisory: a stalled mirror or dpkg lock must neither
