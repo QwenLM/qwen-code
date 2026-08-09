@@ -272,4 +272,29 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       '/qwen/memories/user/role.md',
     ]);
   });
+
+  it('bounds the model manifest by UTF-8 bytes', async () => {
+    const largeDocs = Array.from({ length: 200 }, (_, index) => ({
+      ...docs[0],
+      filePath: `/tmp/bounded-${index}.md`,
+      relativePath: `bounded-${index}.md`,
+      filename: `bounded-${index}.md`,
+      description: '界'.repeat(500),
+      mtimeMs: index,
+    }));
+    vi.mocked(runSideQuery).mockResolvedValue({ selected_memories: [] });
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'semantic-only request',
+      largeDocs,
+      5,
+    );
+
+    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
+    const text = content?.parts?.[0]?.text ?? '';
+    const manifest = text.split('Available memories:\n')[1] ?? '';
+    expect(manifest).toContain('/tmp/bounded-0.md');
+    expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThanOrEqual(25_000);
+  });
 });
