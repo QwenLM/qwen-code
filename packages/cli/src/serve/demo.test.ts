@@ -146,6 +146,7 @@ describe('demo page usage_update handling', () => {
         { sessionUpdate: 'usage_update', used: 70, size: 0 },
         { sessionUpdate: 'usage_update', size: 200 },
         { sessionUpdate: 'usage_update', used: 52, size: 208 },
+        { sessionUpdate: 'usage_update', used: 40, size: '100' },
       ),
     ]);
     const doc = dom.window.document;
@@ -185,5 +186,33 @@ describe('demo page usage_update handling', () => {
     const entries = ctxEntries(doc);
     expect(entries[1].textContent).toContain('50 / 200 (25%)');
     expect(contextUsage.style.display).toBe('block');
+  });
+
+  it('hides the context meter when a new session is created', async () => {
+    dom = createDemoPage([
+      sseStream({ sessionUpdate: 'usage_update', used: 50, size: 200 }),
+      sseStream(),
+    ]);
+    const doc = dom.window.document;
+    await attachSession(doc);
+
+    const contextUsage = doc.querySelector('#contextUsage') as HTMLElement;
+    await waitFor(
+      () => contextUsage.textContent === 'Context: 50 / 200 (25%)',
+      'meter for the first session',
+    );
+    expect(contextUsage.style.display).toBe('block');
+
+    (doc.querySelector('#btnCreateSession') as HTMLButtonElement).click();
+    await waitFor(
+      () =>
+        [...doc.querySelectorAll('#eventLog .log-entry')].filter((entry) =>
+          entry.textContent?.includes('Stream ended by server'),
+        ).length === 2,
+      'second session stream to end',
+    );
+
+    expect(contextUsage.style.display).toBe('none');
+    expect(ctxEntries(doc)).toHaveLength(1);
   });
 });
