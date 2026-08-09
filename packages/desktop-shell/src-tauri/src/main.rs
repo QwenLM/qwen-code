@@ -124,7 +124,16 @@ fn main() {
             stop_runtime(app_handle);
         }
         #[cfg(target_os = "macos")]
-        RunEvent::Reopen { .. } => focus_main_window(app_handle),
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } if !has_visible_windows
+            || app_handle.get_webview_window("main").is_some_and(|window| {
+                !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false)
+            }) =>
+        {
+            focus_main_window(app_handle)
+        }
         _ => {}
     });
 }
