@@ -41,7 +41,7 @@ export interface MarketplaceInstallResult {
  * - It's not part of a URL scheme (http://, https://, git@, sso://)
  * - It appears after the repo portion
  */
-function parseSourceAndPluginName(source: string): {
+export function parseSourceAndPluginName(source: string): {
   repo: string;
   pluginName?: string;
 } {

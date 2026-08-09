@@ -14,8 +14,13 @@ import {
   discoverPlugins,
   type ExtensionSource,
 } from './sourceRegistry.js';
-import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseSourceAndPluginName,
+} from './marketplace.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
+import { convertCompatibleExtension } from './extension-converter.js';
+import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 
 vi.mock('./marketplace.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./marketplace.js')>();
@@ -308,6 +313,44 @@ describe('discoverPlugins', () => {
             url: 'https://github.com/someone/other-root-plugin',
           },
         },
+        {
+          name: 'selected-string-plugin',
+          version: '1.0.0',
+          source: 'someone/repo:selected',
+        },
+        {
+          name: 'selected-url-plugin',
+          version: '1.0.0',
+          source: {
+            source: 'url',
+            url: 'https://github.com/someone/repo:selected',
+          },
+        },
+        {
+          name: 'port-root',
+          version: '1.0.0',
+          source: 'https://example.com:8443/root-plugin',
+        },
+        {
+          name: 'port-selected',
+          version: '1.0.0',
+          source: 'https://example.com:8443/repo:selected',
+        },
+        {
+          name: 'bare-root',
+          version: '1.0.0',
+          source: 'someone/direct-root',
+        },
+        {
+          name: 'git-root',
+          version: '1.0.0',
+          source: 'git@github.com:someone/direct-root.git',
+        },
+        {
+          name: 'sso-root',
+          version: '1.0.0',
+          source: 'sso://team/direct-root',
+        },
       ]),
     );
 
@@ -340,6 +383,101 @@ describe('discoverPlugins', () => {
     expect(
       discovered.find((p) => p.name === 'url-github-root')!.pluginSourceKind,
     ).toBe('extension-root');
+    expect(
+      discovered.find((p) => p.name === 'selected-string-plugin')!
+        .installSource,
+    ).toBe('someone/repo:selected');
+    expect(
+      discovered.find((p) => p.name === 'selected-string-plugin')!
+        .pluginSourceKind,
+    ).toBe('marketplace-entry');
+    expect(
+      discovered.find((p) => p.name === 'selected-url-plugin')!.installSource,
+    ).toBe('https://github.com/someone/repo:selected');
+    expect(
+      discovered.find((p) => p.name === 'selected-url-plugin')!
+        .pluginSourceKind,
+    ).toBe('marketplace-entry');
+    expect(discovered.find((p) => p.name === 'port-root')!.installSource).toBe(
+      'https://example.com:8443/root-plugin',
+    );
+    expect(
+      discovered.find((p) => p.name === 'port-root')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(
+      discovered.find((p) => p.name === 'port-selected')!.installSource,
+    ).toBe('https://example.com:8443/repo:selected');
+    expect(
+      discovered.find((p) => p.name === 'port-selected')!.pluginSourceKind,
+    ).toBe('marketplace-entry');
+    expect(discovered.find((p) => p.name === 'bare-root')).toMatchObject({
+      installSource: 'someone/direct-root:bare-root',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(discovered.find((p) => p.name === 'git-root')).toMatchObject({
+      installSource: 'git@github.com:someone/direct-root.git:git-root',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(discovered.find((p) => p.name === 'sso-root')).toMatchObject({
+      installSource: 'sso://team/direct-root:sso-root',
+      pluginSourceKind: 'extension-root',
+    });
+  });
+
+  it('keeps a structured GitHub Qoder plugin installable as a direct root', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        {
+          name: 'qoder-alias',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'someone/qoder-plugin' },
+        },
+      ]),
+    );
+    const [plugin] = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set(),
+    );
+    const parsed = parseSourceAndPluginName(plugin.installSource);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-discovery-'));
+    let convertedDir: string | undefined;
+
+    try {
+      fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, QODER_PLUGIN_MANIFEST),
+        JSON.stringify({ name: 'qoder-root', version: '1.2.3' }),
+        'utf-8',
+      );
+
+      const converted = await convertCompatibleExtension(
+        root,
+        parsed.pluginName,
+        undefined,
+        undefined,
+        plugin.pluginSourceKind,
+      );
+      convertedDir = converted.extensionDir;
+
+      expect(plugin).toMatchObject({
+        installSource: 'someone/qoder-plugin:qoder-alias',
+        pluginSourceKind: 'extension-root',
+      });
+      expect(converted.originSource).toBe('Qoder');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(converted.extensionDir, 'qwen-extension.json'),
+            'utf-8',
+          ),
+        ),
+      ).toMatchObject({ name: 'qoder-root', version: '1.2.3' });
+    } finally {
+      if (convertedDir && convertedDir !== root) {
+        fs.rmSync(convertedDir, { recursive: true, force: true });
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects local-path sources from a remote (http) marketplace', async () => {

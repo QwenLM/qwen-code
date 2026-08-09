@@ -10,7 +10,10 @@ import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
-import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseSourceAndPluginName,
+} from './marketplace.js';
 import { quarantineCorruptFile } from './corruptFile.js';
 import type {
   ExtensionInstallMetadata,
@@ -156,6 +159,35 @@ function isOwnerRepoShorthand(source: string): boolean {
   return /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(source);
 }
 
+function classifyRemotePluginSource(
+  source: string,
+  fallbackPluginName?: string,
+): {
+  installSource: string;
+  pluginSourceKind: ExtensionPluginSourceKind;
+} {
+  const parsed = parseSourceAndPluginName(source);
+  if (parsed.pluginName) {
+    return {
+      installSource: source,
+      pluginSourceKind: 'marketplace-entry',
+    };
+  }
+  if (fallbackPluginName) {
+    return {
+      installSource: `${source}:${fallbackPluginName}`,
+      // The appended name is only an install alias for a direct plugin root.
+      // It must not turn a plain repo/transport source into a marketplace
+      // selector: Claude and Qoder roots do not contain marketplace.json.
+      pluginSourceKind: 'extension-root',
+    };
+  }
+  return {
+    installSource: source,
+    pluginSourceKind: 'extension-root',
+  };
+}
+
 /**
  * Builds the install-source string fed to `parseInstallSource` for a discovered
  * plugin. For repo/local sources this is `<marketplace>:<pluginName>`,
@@ -189,16 +221,14 @@ function resolveInstallSource(
         pluginSourceKind: 'extension-root',
       };
     }
-    return {
-      installSource: src.includes(':') ? src : `${src}:${plugin.name}`,
-      pluginSourceKind: 'extension-root',
-    };
+    const isDirectUrl = /^https?:\/\//i.test(src);
+    return classifyRemotePluginSource(
+      src,
+      isDirectUrl ? undefined : plugin.name,
+    );
   }
   if (src && src.source === 'github') {
-    return {
-      installSource: `${src.repo}:${plugin.name}`,
-      pluginSourceKind: 'extension-root',
-    };
+    return classifyRemotePluginSource(src.repo, plugin.name);
   }
   if (src && src.source === 'url') {
     // Same local-path guard as the string-source branch above: a remote
@@ -218,10 +248,7 @@ function resolveInstallSource(
         pluginSourceKind: 'extension-root',
       };
     }
-    return {
-      installSource: src.url,
-      pluginSourceKind: 'extension-root',
-    };
+    return classifyRemotePluginSource(src.url);
   }
   return {
     installSource: plugin.name,
