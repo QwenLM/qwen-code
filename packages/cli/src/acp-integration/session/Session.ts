@@ -2954,8 +2954,7 @@ export class Session implements SessionContext {
     }
 
     const recording = this.config.getChatRecordingService();
-    const branchTurnStartRecordUuid =
-      recording?.getTranscriptCursor().recordId ?? null;
+    const branchCheckpointCursor = recording?.getBranchCheckpointCursor();
 
     if (todoStopGuardPreparation.startsWorkChain) {
       this.#clearTodoStopGuardQueuedPromptWait();
@@ -2987,9 +2986,8 @@ export class Session implements SessionContext {
       if (recording) {
         try {
           branchPoint = await recording.recordBranchCheckpointTransaction({
-            startExclusiveRecordUuid: branchTurnStartRecordUuid,
+            cursor: branchCheckpointCursor!,
             stopReason: result.stopReason,
-            promptId: channelDelivery?.deliveryId,
           });
         } catch (error) {
           debugLogger.warn(

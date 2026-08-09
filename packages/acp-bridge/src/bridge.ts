@@ -6839,9 +6839,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       const isSideTask = source.sourceType === 'side_task';
 
-      let originatorClientId: string | undefined;
       if (context?.clientId !== undefined) {
-        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+        resolveTrustedClientId(entry, context.clientId);
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
@@ -6859,26 +6858,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
 
-        if (
-          byId.size + inFlightSpawns.size + inFlightRestores.size >=
-          maxSessions
-        ) {
-          throw new SessionLimitExceededError(maxSessions);
+        let admission: ReturnType<typeof reserveFreshSession> | undefined;
+        if (isSideTask) {
+          if (
+            byId.size + inFlightSpawns.size + inFlightRestores.size >=
+            maxSessions
+          ) {
+            throw new SessionLimitExceededError(maxSessions);
+          }
+          admission = reserveFreshSession({
+            operation: 'branch',
+            workspaceCwd: boundWorkspace,
+            sourceSessionId: sessionId,
+          });
         }
-
-        const admission = reserveFreshSession({
-          operation: 'branch',
-          workspaceCwd: boundWorkspace,
-          sourceSessionId: sessionId,
-        });
         let admissionReleased = false;
         const releaseAdmissionOnce = () => {
-          if (admissionReleased) return;
+          if (admissionReleased || !admission) return;
           admissionReleased = true;
           releaseFreshSessionReservation(admission);
         };
         try {
-          const ci = await ensureChannel();
           // HAZARD: dispatch the source-session mutation on the entry's
           // OWN connection, not `ci.connection` (the current attach
           // target). During the channel-overlap window (A dying, B
@@ -6925,6 +6925,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? rawBranchName
               : result.newSessionId.slice(0, 8);
 
+          if (!isSideTask) {
+            return {
+              sessionId: result.newSessionId,
+              displayName: branchDisplayName,
+              forkedFrom: {
+                sessionId,
+                displayName: entry.displayName ?? sessionId.slice(0, 8),
+              },
+            };
+          }
+
+          const ci = await ensureChannel();
           let restored;
           try {
             const hideInheritedHistory = req.replayInheritedHistory === false;
@@ -6996,21 +7008,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }
           }
 
-          if (!isSideTask) {
-            const eventData = {
-              sourceSessionId: sessionId,
-              newSessionId: result.newSessionId,
-              displayName: branchDisplayName,
-            };
-            const branchEnvelope = {
-              type: 'session_branched' as const,
-              data: eventData,
-              ...(originatorClientId ? { originatorClientId } : {}),
-            };
-            // The branch announcement belongs to the new session only.
-            newEntry?.events.publish(branchEnvelope);
-          }
-
           return {
             ...restored,
             displayName: branchDisplayName,
@@ -7044,7 +7041,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         context,
       );
-      const { forkedFrom: _forkedFrom, ...sideTask } = result;
+      const restoredResult = result as typeof result & BridgeRestoredSession;
+      const { forkedFrom: _forkedFrom, ...sideTask } = restoredResult;
       return {
         ...sideTask,
         parentSessionId: sessionId,

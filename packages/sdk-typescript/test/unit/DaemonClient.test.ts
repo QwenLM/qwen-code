@@ -2705,10 +2705,6 @@ describe('DaemonClient', () => {
     it('posts the historical checkpoint to the encoded session route', async () => {
       const reply = {
         sessionId: 'branch-1',
-        workspaceCwd: '/work/a',
-        attached: false,
-        clientId: 'branch-client',
-        state: {},
         displayName: 'Historical branch',
         forkedFrom: {
           sessionId: 'source/1',
@@ -2738,26 +2734,18 @@ describe('DaemonClient', () => {
       });
     });
 
-    it('does not detach a dispatched branch when the generic fetch timeout elapses', async () => {
-      const reply = {
-        sessionId: 'slow-branch',
-        workspaceCwd: '/work/a',
-        attached: false,
-        clientId: 'branch-client',
-        state: {},
-        displayName: 'Slow branch',
-        forkedFrom: {
-          sessionId: 'source-1',
-          displayName: 'Source session',
-        },
-      };
-      let releaseFetch: (() => void) | undefined;
+    it('aborts a branch request after the branch-specific deadline', async () => {
+      vi.useFakeTimers();
       let requestSignal: AbortSignal | null | undefined;
       const fetch = vi.fn(
         (_input: RequestInfo | URL, init?: RequestInit) =>
-          new Promise<Response>((resolve) => {
+          new Promise<Response>((_resolve, reject) => {
             requestSignal = init?.signal;
-            releaseFetch = () => resolve(jsonResponse(201, reply));
+            requestSignal?.addEventListener(
+              'abort',
+              () => reject(requestSignal?.reason),
+              { once: true },
+            );
           }),
       ) as unknown as typeof globalThis.fetch;
       const client = new DaemonClient({
@@ -2766,17 +2754,16 @@ describe('DaemonClient', () => {
         fetchTimeoutMs: 1,
       });
 
-      let settled = false;
-      const branch = client.branchSession('source-1').finally(() => {
-        settled = true;
-      });
-      await vi.waitFor(() => expect(releaseFetch).toBeDefined());
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(settled).toBe(false);
-      expect(requestSignal?.aborted ?? false).toBe(false);
-
-      releaseFetch!();
-      await expect(branch).resolves.toEqual(reply);
+      try {
+        const branch = client.branchSession('source-1');
+        await Promise.all([
+          expect(branch).rejects.toBeDefined(),
+          vi.advanceTimersByTimeAsync(120_000),
+        ]);
+        expect(requestSignal?.aborted ?? false).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

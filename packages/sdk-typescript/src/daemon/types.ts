@@ -975,7 +975,8 @@ export interface DaemonBranchPoint {
   checkpointUuid: string;
 }
 
-export interface DaemonBranchedSession extends DaemonRestoredSession {
+export interface DaemonBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }

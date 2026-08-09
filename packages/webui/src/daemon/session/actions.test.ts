@@ -804,16 +804,12 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
-  it('keeps waiting for a dispatched branch beyond the generic action timeout', async () => {
+  it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
     vi.useFakeTimers();
     try {
       const session = createMockSession('session-a');
       const branchResult = createDeferred<{
         sessionId: string;
-        clientId: string;
-        workspaceCwd: string;
-        attached: boolean;
-        state: Record<string, never>;
         displayName: string;
       }>();
       session.client.branchSession.mockReturnValueOnce(branchResult.promise);
@@ -835,10 +831,6 @@ describe('createDaemonSessionActions', () => {
 
       branchResult.resolve({
         sessionId: 'session-b',
-        clientId: 'client-session-b',
-        workspaceCwd: '/workspace',
-        attached: false,
-        state: {},
         displayName: 'Historical branch',
       });
       await expect(branch).resolves.toEqual({
@@ -854,6 +846,39 @@ describe('createDaemonSessionActions', () => {
       vi.clearAllTimers();
       vi.useRealTimers();
     }
+  });
+
+  it('does not let a late branch result supersede newer navigation', async () => {
+    const session = createMockSession('session-a');
+    const branchResult = createDeferred<{
+      sessionId: string;
+      displayName: string;
+    }>();
+    session.client.branchSession.mockReturnValueOnce(branchResult.promise);
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      session,
+    });
+
+    const branch = actions.branchSession(undefined, 'checkpoint-1');
+    const newerLoad = actions.loadSession('session-b');
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+
+    branchResult.resolve({
+      sessionId: 'session-c',
+      displayName: 'Historical branch',
+    });
+    await expect(branch).resolves.toEqual({
+      sessionId: 'session-c',
+      displayName: 'Historical branch',
+    });
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+
+    if (pendingSessionLoadRef.current) {
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.resolve();
+      pendingSessionLoadRef.current = undefined;
+    }
+    await expect(newerLoad).resolves.toBeUndefined();
   });
 });
 

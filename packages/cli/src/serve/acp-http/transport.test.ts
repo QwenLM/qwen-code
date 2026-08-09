@@ -187,6 +187,11 @@ class FakeBridge {
   loadState: Record<string, unknown> = { replayed: true };
   loadPartial: true | undefined;
   loadReplayError: string | undefined;
+  branchRequests: Array<{
+    sessionId: string;
+    name?: string;
+    clientId?: string;
+  }> = [];
 
   closedSessions: string[] = [];
 
@@ -225,6 +230,25 @@ class FakeBridge {
       state: this.loadState,
       ...(this.loadPartial ? { partial: this.loadPartial } : {}),
       ...(this.loadReplayError ? { replayError: this.loadReplayError } : {}),
+    };
+  }
+
+  async branchSession(
+    sessionId: string,
+    req: { name?: string },
+    context?: { clientId?: string },
+  ) {
+    this.branchRequests.push({
+      sessionId,
+      ...(req.name !== undefined ? { name: req.name } : {}),
+      ...(context?.clientId !== undefined
+        ? { clientId: context.clientId }
+        : {}),
+    });
+    return {
+      sessionId: 'branch-1',
+      displayName: req.name ?? 'Branch',
+      forkedFrom: { sessionId, displayName: sessionId },
     };
   }
 
@@ -3330,6 +3354,43 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sess = await openStream(connId, 'loaded-1');
     expect(sess.status).toBe(200);
     await sess.body?.cancel(); // release the long-lived SSE socket
+  });
+
+  it('session/fork explicitly loads and owns the persisted branch', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 2);
+    await new Promise((r) => setTimeout(r, 50));
+    await newSession(connId);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'session/fork',
+      params: { sessionId: 'sess-1', name: 'Forked' },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      result: { sessionId: string };
+    }>;
+    expect(frames[1]).toMatchObject({
+      id: 21,
+      result: { sessionId: 'branch-1' },
+    });
+    expect(bridge.branchRequests).toEqual([
+      {
+        sessionId: 'sess-1',
+        name: 'Forked',
+        clientId: 'client-1',
+      },
+    ]);
+    expect(bridge.loadRequests).toContainEqual({
+      sessionId: 'branch-1',
+      workspaceCwd: TEST_WORKSPACE,
+      clientId: 'client-1',
+    });
+    const sessionStream = await openStream(connId, 'branch-1');
+    expect(sessionStream.status).toBe(200);
+    await sessionStream.body?.cancel();
   });
 
   it('session/load reports partial replay status under qwen _meta', async () => {

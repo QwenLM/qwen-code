@@ -1279,7 +1279,7 @@ async function handleDaemonRoute(
       }
       const branch = scenario.branch;
       const response: DaemonBranchedSession = {
-        ...restoredSessionEnvelope(scenario, branch.sessionId),
+        sessionId: branch.sessionId,
         displayName: branch.displayName,
         forkedFrom: {
           sessionId,

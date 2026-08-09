@@ -1829,11 +1829,28 @@ export class AcpDispatcher {
               ctx,
             );
             if (conn.destroyed) {
-              this.killOrphanSession(result.sessionId);
+              return;
+            }
+            const restored = await this.bridge.loadSession({
+              sessionId: result.sessionId,
+              workspaceCwd: this.boundWorkspace,
+              clientId: ctx.clientId,
+            });
+            if (conn.destroyed) {
+              const cleanup = restored.attached
+                ? this.bridge.detachClient(result.sessionId, restored.clientId)
+                : this.bridge.killSession(result.sessionId, {
+                    requireZeroAttaches: true,
+                  });
+              void cleanup.catch((err) =>
+                writeStderrLine(
+                  `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(result.sessionId)}) fork-race: ${logSafe(errMsg(err))}`,
+                ),
+              );
               return;
             }
             conn.getOrCreateSession(result.sessionId).clientId =
-              result.clientId;
+              restored.clientId;
             conn.ownSession(result.sessionId);
             const configOptions = await this.configOptionsFor(result.sessionId);
             const models = this.extractModelState(configOptions);

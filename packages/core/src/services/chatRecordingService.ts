@@ -49,9 +49,12 @@ import type {
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
 import {
-  resolveCompletedTurnBranchCandidate,
+  collectPendingBranchToolCalls,
+  resolveCompletedTurnBranchCandidateFromRecords,
+  updatePendingBranchToolCalls,
   type BranchCheckpointRecordPayloadV1,
   type BranchPoint,
+  type BranchToolCallIdentity,
 } from './branch-points.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
@@ -581,6 +584,12 @@ interface TranscriptTopologyFence {
   buffered: BufferedRecordAppend[];
 }
 
+export interface BranchCheckpointCursor {
+  recordId: string | null;
+  activeRecordCount: number;
+  pendingToolCalls: readonly BranchToolCallIdentity[];
+}
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -610,6 +619,10 @@ export class ChatRecordingService {
   private lastRecordUuid: string | null = null;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
+  /** Active chain mirrored in memory so end-of-turn validation is incremental. */
+  private activeBranchRecords: ChatRecord[] = [];
+  /** Unclosed tool calls at the current active tail. */
+  private pendingBranchToolCalls: BranchToolCallIdentity[] = [];
   private readonly config: Config;
   /**
    * Tracks the `lastRecordUuid` value just before each user turn was recorded.
@@ -829,6 +842,8 @@ export class ChatRecordingService {
     this.currentParentSessionId = undefined;
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
+    this.activeBranchRecords = [];
+    this.pendingBranchToolCalls = [];
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
@@ -958,6 +973,27 @@ export class ChatRecordingService {
     return this.integrityFailure ?? this.writeFailure;
   }
 
+  private updateActiveBranch(record: ChatRecord): void {
+    const currentTail = this.activeBranchRecords.at(-1)?.uuid ?? null;
+    if (record.parentUuid !== currentTail) {
+      const parentIndex =
+        record.parentUuid === null
+          ? -1
+          : this.activeBranchRecords.findIndex(
+              (candidate) => candidate.uuid === record.parentUuid,
+            );
+      this.activeBranchRecords =
+        parentIndex < 0
+          ? []
+          : this.activeBranchRecords.slice(0, parentIndex + 1);
+      this.pendingBranchToolCalls = collectPendingBranchToolCalls(
+        this.activeBranchRecords,
+      );
+    }
+    this.activeBranchRecords.push(record);
+    updatePendingBranchToolCalls(this.pendingBranchToolCalls, record);
+  }
+
   private enqueueRecordWrite(
     record: ChatRecord,
     legacyConversationFile?: string,
@@ -1009,6 +1045,7 @@ export class ChatRecordingService {
     const updateActiveTail = options?.updateActiveTail !== false;
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
+      this.updateActiveBranch(record);
     }
     this.enqueueRecordWrite(record, legacyConversationFile, updateActiveTail);
     this.updateTitleAnchorTracking(record);
@@ -1039,6 +1076,7 @@ export class ChatRecordingService {
       : this.ensureConversationFile();
     if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
+      this.updateActiveBranch(record);
     }
     const pendingWrite = this.enqueueRecordWrite(
       record,
@@ -1166,6 +1204,20 @@ export class ChatRecordingService {
     if (this.writeFailure) throw this.writeFailure;
   }
 
+  async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
+    await this.flush();
+    const sessionId = this.getSessionId();
+    const session = await this.config
+      .getSessionService()
+      .loadSession(sessionId);
+    if (!session) {
+      throw new Error(
+        `Unable to load active transcript for session ${sessionId}`,
+      );
+    }
+    return session.conversation.messages;
+  }
+
   async runWithWriteBarrier<T>(operation: () => Promise<T>): Promise<T> {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active') {
@@ -1281,28 +1333,23 @@ export class ChatRecordingService {
     return this.binding !== undefined;
   }
 
-  async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
-    await this.flush();
-    const sessionId = this.getSessionId();
-    const session = await this.config
-      .getSessionService()
-      .loadSession(sessionId);
-    if (!session) {
-      throw new Error(
-        `Unable to load active transcript for session ${sessionId}`,
-      );
-    }
-    return session.conversation.messages;
-  }
-
   getTranscriptCursor(): TranscriptCursor {
     return { recordId: this.lastRecordUuid };
   }
 
+  getBranchCheckpointCursor(): BranchCheckpointCursor {
+    return {
+      recordId: this.lastRecordUuid,
+      activeRecordCount: this.activeBranchRecords.length,
+      pendingToolCalls: this.pendingBranchToolCalls.map((call) => ({
+        ...call,
+      })),
+    };
+  }
+
   async recordBranchCheckpointTransaction(input: {
-    startExclusiveRecordUuid: string | null;
+    cursor: BranchCheckpointCursor;
     stopReason: string;
-    promptId?: string;
   }): Promise<BranchPoint | undefined> {
     if (input.stopReason !== 'end_turn') return undefined;
     if (this.writeFailure) throw this.writeFailure;
@@ -1315,13 +1362,22 @@ export class ChatRecordingService {
     this.topologyFence = fence;
     try {
       await this.flush();
-      const activeChain = await this.readActiveTranscriptChain();
       const endInclusiveRecordUuid = this.lastRecordUuid;
       if (endInclusiveRecordUuid === null) return undefined;
-      const candidate = resolveCompletedTurnBranchCandidate({
-        activeChain,
-        startExclusiveRecordUuid: input.startExclusiveRecordUuid,
-        endInclusiveRecordUuid,
+      const cursorRecordId =
+        input.cursor.activeRecordCount === 0
+          ? null
+          : this.activeBranchRecords[input.cursor.activeRecordCount - 1]?.uuid;
+      if (
+        cursorRecordId !== input.cursor.recordId ||
+        this.activeBranchRecords.at(-1)?.uuid !== endInclusiveRecordUuid
+      ) {
+        throw new Error('Transcript changed while recording branch checkpoint');
+      }
+      const candidate = resolveCompletedTurnBranchCandidateFromRecords({
+        records: this.activeBranchRecords.slice(input.cursor.activeRecordCount),
+        startExclusiveRecordUuid: input.cursor.recordId,
+        pendingCallsAtStart: input.cursor.pendingToolCalls,
       });
       if (!candidate) return undefined;
 
@@ -1334,9 +1390,8 @@ export class ChatRecordingService {
         subtype: 'branch_checkpoint',
         systemPayload: {
           v: 1,
-          startExclusiveRecordUuid: input.startExclusiveRecordUuid,
+          startExclusiveRecordUuid: input.cursor.recordId,
           assistantRecordUuid: candidate.assistantRecordUuid,
-          ...(input.promptId === undefined ? {} : { promptId: input.promptId }),
         },
       };
 
@@ -1887,6 +1942,8 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
+    this.activeBranchRecords = [...messages];
+    this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];

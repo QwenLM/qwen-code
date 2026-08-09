@@ -8296,7 +8296,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('dispatches branchSession on the source channel during channel overlap', async () => {
+    it('dispatches branchSession on the source channel without restoring it', async () => {
       // Overlap construction: channel A hosts two sessions; killing the
       // first one fails at the agent close, so the bridge marks A dying
       // and starts a kill that never completes (factory override). The
@@ -8351,95 +8351,49 @@ describe('createAcpSessionBridge', () => {
       });
       expect(branch.sessionId).toBe('branch-overlap');
 
-      // The source-session mutation landed on A (the owner channel), not
-      // on the freshly spawned attach target B.
-      expect(handles).toHaveLength(2);
+      // The source-session mutation landed on A (the owner channel) and did
+      // not spawn a second channel just to restore the persisted branch.
+      expect(handles).toHaveLength(1);
       expect(handles[0]?.agent.extMethodCalls).toContainEqual(
         expect.objectContaining({
           method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
           params: expect.objectContaining({ sessionId: second.sessionId }),
         }),
       );
-      expect(handles[1]?.agent.extMethodCalls).not.toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
-        }),
-      );
-      // Second half of the invariant: the NEW session's restore lands on
-      // the fresh channel B, not on the dying source channel A (whose
-      // pending kill would reap the just-created branch on exit).
-      expect(handles[1]?.agent.loadSessionCalls).toContainEqual(
-        expect.objectContaining({ sessionId: 'branch-overlap' }),
-      );
-      expect(handles[0]?.agent.loadSessionCalls).not.toContainEqual(
-        expect.objectContaining({ sessionId: 'branch-overlap' }),
-      );
+      expect(handles[0]?.agent.loadSessionCalls).toEqual([]);
 
       // Cleanup: the kill and the dying channel never settle — same
       // fire-and-forget pattern as the other hanging-kill overlap tests.
       void killPromise;
     });
 
-    it('publishes session_branched only on the new session stream', async () => {
-      const factory: ChannelFactory = async () =>
-        makeChannel({
-          extMethodImpl: async (method) => {
-            if (method !== 'qwen/control/session/branch') return {};
-            return { newSessionId: 'branch-1', title: 'Branch 1' };
-          },
-          resumeSessionImpl: () => ({}),
-        }).channel;
-      const bridge = makeBridge({ channelFactory: factory });
+    it('creates a persisted branch even when live session capacity is full', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/branch') return {};
+          return { newSessionId: 'branch-1', title: 'Branch 1' };
+        },
+        resumeSessionImpl: () => new Promise(() => {}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxSessions: 1,
+      });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const sourceAbort = new AbortController();
-      const sourceIter = bridge
-        .subscribeEvents(session.sessionId, { signal: sourceAbort.signal })
-        [Symbol.asyncIterator]();
 
       const branch = await bridge.branchSession(session.sessionId, {
         name: 'Branch 1',
       });
 
-      const sourceEvent = await Promise.race([
-        sourceIter.next(),
-        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
-      ]);
-      expect(sourceEvent).toBe('timeout');
-      sourceAbort.abort();
-
-      const sourceReplayAbort = new AbortController();
-      const sourceReplayIter = bridge
-        .subscribeEvents(session.sessionId, {
-          lastEventId: 0,
-          signal: sourceReplayAbort.signal,
-        })
-        [Symbol.asyncIterator]();
-      const sourceReplayEvent = await Promise.race([
-        sourceReplayIter.next(),
-        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
-      ]);
-      expect(sourceReplayEvent).toMatchObject({
-        value: { type: 'replay_complete' },
-      });
-      const sourceReplayNext = await Promise.race([
-        sourceReplayIter.next(),
-        new Promise<'timeout'>((resolve) => setTimeout(resolve, 25, 'timeout')),
-      ]);
-      expect(sourceReplayNext).toBe('timeout');
-      sourceReplayAbort.abort();
-
-      const branchedIter = bridge
-        .subscribeEvents(branch.sessionId, { lastEventId: 0 })
-        [Symbol.asyncIterator]();
-      const replayed = await branchedIter.next();
-      expect(replayed.value).toMatchObject({
-        type: 'session_branched',
-        data: {
-          sourceSessionId: session.sessionId,
-          newSessionId: branch.sessionId,
-          displayName: 'Branch 1',
+      expect(branch).toEqual({
+        sessionId: 'branch-1',
+        displayName: 'Branch 1',
+        forkedFrom: {
+          sessionId: session.sessionId,
+          displayName: session.sessionId.slice(0, 8),
         },
       });
+      expect(handle.agent.loadSessionCalls).toEqual([]);
 
       await bridge.shutdown();
     });
@@ -16923,21 +16877,18 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('reserves branchSession before branch extMethod and skips a second restore reservation', async () => {
+    it('does not reserve live capacity for a persisted branch', async () => {
       const contexts: Array<{
         operation: string;
         workspaceCwd: string;
         sourceSessionId?: string;
       }> = [];
       const releases: string[] = [];
-      let branchExtMethodSawReservation = false;
       const bridge = makeBridge({
         channelFactory: async () =>
           makeChannel({
             extMethodImpl: (method) => {
               if (method !== 'qwen/control/session/branch') return {};
-              branchExtMethodSawReservation =
-                contexts.at(-1)?.operation === 'branch';
               return { newSessionId: 'branch-1', title: 'Branch 1' };
             },
             loadSessionImpl: () => ({}),
@@ -16957,20 +16908,13 @@ describe('createAcpSessionBridge', () => {
         name: 'Branch 1',
       });
 
-      expect(branchExtMethodSawReservation).toBe(true);
       expect(branch).toMatchObject({ sessionId: 'branch-1' });
-      expect(contexts).toEqual([
-        {
-          operation: 'branch',
-          workspaceCwd: WS_A,
-          sourceSessionId: session.sessionId,
-        },
-      ]);
-      expect(releases).toEqual(['branch']);
+      expect(contexts).toEqual([]);
+      expect(releases).toEqual([]);
       await bridge.shutdown();
     });
 
-    it('releases branchSession admission when the branch extMethod fails', async () => {
+    it('does not acquire live admission when persisted branch creation fails', async () => {
       const contexts: Array<{ operation: string; workspaceCwd: string }> = [];
       const releases: string[] = [];
       const bridge = makeBridge({
@@ -17000,10 +16944,8 @@ describe('createAcpSessionBridge', () => {
         }),
       ).rejects.toThrow();
 
-      expect(contexts).toMatchObject([
-        { operation: 'branch', workspaceCwd: WS_A },
-      ]);
-      expect(releases).toEqual(['branch']);
+      expect(contexts).toEqual([]);
+      expect(releases).toEqual([]);
       await bridge.shutdown();
     });
 

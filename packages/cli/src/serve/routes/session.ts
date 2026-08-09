@@ -2561,41 +2561,7 @@ export function registerSessionRoutes(
           },
           { clientId },
         );
-        // Core has already committed the branch transcript. From this point,
-        // failures release only live Bridge ownership; the complete persisted
-        // session remains recoverable from the session picker. Another client
-        // may already have discovered or attached it, so deleting it here risks
-        // cross-client data loss.
-        try {
-          runtime.generationGuard?.assertOpen();
-        } catch (error) {
-          if (!result.attached) {
-            await runtime.bridge
-              .killSession(result.sessionId, { requireZeroAttaches: true })
-              .catch(() => false);
-          } else {
-            await runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {});
-          }
-          throw error;
-        }
-        if (!res.writable) {
-          if (!result.attached) {
-            runtime.bridge
-              .killSession(result.sessionId, { requireZeroAttaches: true })
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          } else {
-            runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          }
-          return;
-        }
+        if (!res.writable) return;
         res.status(201).json(result);
       },
     ),

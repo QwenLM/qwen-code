@@ -419,7 +419,8 @@ export interface BridgeBranchSessionRequest {
   atRecordId?: string;
 }
 
-export interface BridgeBranchedSession extends BridgeRestoredSession {
+export interface BridgeBranchedSession {
+  sessionId: string;
   displayName: string;
   forkedFrom: { sessionId: string; displayName: string };
 }
@@ -1071,8 +1072,8 @@ export interface AcpSessionBridge {
   ): Promise<BridgeRestoredSession>;
 
   /**
-   * Fork a live session's JSONL transcript and load the fork via resume
-   * semantics (no history replay). Source must be idle (no active prompt).
+   * Persist a fork of a live session's JSONL transcript. The caller may load
+   * the returned session separately. Source must be idle (no active prompt).
    */
   branchSession(
     sessionId: string,

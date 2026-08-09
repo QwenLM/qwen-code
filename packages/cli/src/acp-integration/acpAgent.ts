@@ -78,7 +78,6 @@ import {
   redactUrlCredentials,
   computeUniqueBranchTitle,
   BranchPointInvalidError,
-  BranchPublicationUnsupportedError,
   getActiveGoal,
   unregisterGoalHook,
   ToolNames,
@@ -10992,12 +10991,6 @@ class QwenAgent implements Agent {
                 recordId: error.recordId,
               });
             }
-            if (error instanceof BranchPublicationUnsupportedError) {
-              throw new RequestError(-32010, error.message, {
-                errorKind: error.errorKind,
-                causeCode: error.causeCode,
-              });
-            }
             throw error;
           }
         }
@@ -11016,20 +11009,10 @@ class QwenAgent implements Agent {
             },
             title,
           });
-        try {
-          if (recording) {
-            await recording.runWithWriteBarrier(fork);
-          } else {
-            await fork();
-          }
-        } catch (error) {
-          if (error instanceof BranchPublicationUnsupportedError) {
-            throw new RequestError(-32010, error.message, {
-              errorKind: error.errorKind,
-              causeCode: error.causeCode,
-            });
-          }
-          throw error;
+        if (recording) {
+          await recording.runWithWriteBarrier(fork);
+        } else {
+          await fork();
         }
         return { newSessionId, title, displayName: title };
       }

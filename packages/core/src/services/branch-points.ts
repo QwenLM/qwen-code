@@ -16,7 +16,6 @@ export interface BranchCheckpointRecordPayloadV1 {
   v: 1;
   startExclusiveRecordUuid: string | null;
   assistantRecordUuid: string;
-  promptId?: string;
 }
 
 export interface BranchCandidate {
@@ -29,7 +28,7 @@ export interface BranchPoint extends BranchCandidate {
   checkpointUuid: string;
 }
 
-interface ToolCallIdentity {
+export interface BranchToolCallIdentity {
   id?: string;
   name?: string;
 }
@@ -46,7 +45,7 @@ function parts(record: BranchPointRecord): readonly Part[] {
   );
 }
 
-function functionCalls(record: BranchPointRecord): ToolCallIdentity[] {
+function functionCalls(record: BranchPointRecord): BranchToolCallIdentity[] {
   return parts(record).flatMap((part) => {
     const call = part.functionCall;
     if (!call) return [];
@@ -59,7 +58,9 @@ function functionCalls(record: BranchPointRecord): ToolCallIdentity[] {
   });
 }
 
-function functionResponses(record: BranchPointRecord): ToolCallIdentity[] {
+function functionResponses(
+  record: BranchPointRecord,
+): BranchToolCallIdentity[] {
   return parts(record).flatMap((part) => {
     const response = part.functionResponse;
     if (!response) return [];
@@ -81,7 +82,7 @@ function hasVisibleText(record: BranchPointRecord): boolean {
   );
 }
 
-interface PendingToolCall extends ToolCallIdentity {
+interface PendingToolCall extends BranchToolCallIdentity {
   carriedFromPrefix?: boolean;
 }
 
@@ -101,7 +102,7 @@ function uniqueNameMatch(
 
 function closeToolCall(
   pending: PendingToolCall[],
-  response: ToolCallIdentity,
+  response: BranchToolCallIdentity,
 ): boolean {
   let index = -1;
   if (response.id !== undefined) {
@@ -130,7 +131,7 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
   startIndex: number;
   endIndex: number;
   startExclusiveRecordUuid: string | null;
-  pendingCallsAtStart: readonly ToolCallIdentity[];
+  pendingCallsAtStart: readonly BranchToolCallIdentity[];
 }): BranchCandidate | undefined {
   const {
     activeChain,
@@ -206,7 +207,7 @@ export function resolveCompletedTurnBranchCandidate(input: {
     return undefined;
   }
 
-  const pendingCalls: ToolCallIdentity[] = [];
+  const pendingCalls: BranchToolCallIdentity[] = [];
   for (let index = 0; index <= startIndex; index++) {
     const record = activeChain[index]!;
     pendingCalls.push(...functionCalls(record));
@@ -223,6 +224,41 @@ export function resolveCompletedTurnBranchCandidate(input: {
   });
 }
 
+export function updatePendingBranchToolCalls(
+  pendingCalls: BranchToolCallIdentity[],
+  record: BranchPointRecord,
+): void {
+  pendingCalls.push(...functionCalls(record));
+  for (const response of functionResponses(record)) {
+    closeToolCall(pendingCalls, response);
+  }
+}
+
+export function collectPendingBranchToolCalls(
+  records: readonly BranchPointRecord[],
+): BranchToolCallIdentity[] {
+  const pendingCalls: BranchToolCallIdentity[] = [];
+  for (const record of records) {
+    updatePendingBranchToolCalls(pendingCalls, record);
+  }
+  return pendingCalls;
+}
+
+export function resolveCompletedTurnBranchCandidateFromRecords(input: {
+  records: readonly BranchPointRecord[];
+  startExclusiveRecordUuid: string | null;
+  pendingCallsAtStart: readonly BranchToolCallIdentity[];
+}): BranchCandidate | undefined {
+  if (input.records.length === 0) return undefined;
+  return resolveCompletedTurnBranchCandidateInRange({
+    activeChain: input.records,
+    startIndex: -1,
+    endIndex: input.records.length - 1,
+    startExclusiveRecordUuid: input.startExclusiveRecordUuid,
+    pendingCallsAtStart: input.pendingCallsAtStart,
+  });
+}
+
 export function parseBranchCheckpointPayload(
   value: ChatRecord['systemPayload'],
 ): BranchCheckpointRecordPayloadV1 | undefined {
@@ -230,13 +266,11 @@ export function parseBranchCheckpointPayload(
   const payload = value as unknown as Record<string, unknown>;
   const start = payload['startExclusiveRecordUuid'];
   const assistantRecordUuid = payload['assistantRecordUuid'];
-  const promptId = payload['promptId'];
   if (
     payload['v'] !== 1 ||
     (start !== null && (typeof start !== 'string' || start.length === 0)) ||
     typeof assistantRecordUuid !== 'string' ||
-    assistantRecordUuid.length === 0 ||
-    (promptId !== undefined && typeof promptId !== 'string')
+    assistantRecordUuid.length === 0
   ) {
     return undefined;
   }
@@ -244,7 +278,6 @@ export function parseBranchCheckpointPayload(
     v: 1,
     startExclusiveRecordUuid: start,
     assistantRecordUuid,
-    ...(promptId === undefined ? {} : { promptId }),
   };
 }
 
@@ -303,8 +336,8 @@ export function resolveBranchPoints(
     if (startIndex >= 0) boundaryIndexes.add(startIndex);
   }
 
-  const pendingCallsAtBoundary = new Map<number, ToolCallIdentity[]>();
-  const pendingCalls: ToolCallIdentity[] = [];
+  const pendingCallsAtBoundary = new Map<number, BranchToolCallIdentity[]>();
+  const pendingCalls: BranchToolCallIdentity[] = [];
   for (let index = 0; index < activeChain.length; index++) {
     const record = activeChain[index]!;
     pendingCalls.push(...functionCalls(record));

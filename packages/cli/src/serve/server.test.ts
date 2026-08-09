@@ -15369,10 +15369,6 @@ describe('createServeApp', () => {
       const atRecordId = '11111111-1111-4111-8111-111111111111';
       const branchSession = vi.fn(async () => ({
         sessionId: 'branch-session',
-        workspaceCwd: WS_BOUND,
-        attached: true,
-        clientId: 'branch-client',
-        state: {},
         displayName: 'Branch',
         forkedFrom: { sessionId: 'session-A', displayName: 'Source' },
       }));
@@ -15413,34 +15409,6 @@ describe('createServeApp', () => {
       });
     });
 
-    it('returns a typed error when atomic branch publication is unsupported', async () => {
-      const bridge = fakeBridge();
-      bridge.branchSession = vi.fn(async () => {
-        throw Object.assign(
-          new Error('Atomic branch publication is unsupported'),
-          {
-            data: {
-              errorKind: 'branch_publication_unsupported',
-              causeCode: 'ENOTSUP',
-            },
-          },
-        );
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-
-      const res = await request(app)
-        .post('/session/session-A/branch')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ atRecordId: '11111111-1111-4111-8111-111111111111' });
-
-      expect(res.status).toBe(501);
-      expect(res.body).toMatchObject({
-        code: 'branch_publication_unsupported',
-        errorKind: 'branch_publication_unsupported',
-        causeCode: 'ENOTSUP',
-      });
-    });
-
     it('rejects a non-string checkpoint id before calling the bridge', async () => {
       const bridge = fakeBridge();
       const branchSession = vi.fn();
@@ -15457,7 +15425,7 @@ describe('createServeApp', () => {
       expect(branchSession).not.toHaveBeenCalled();
     });
 
-    it('preserves the persisted branch when generation cleanup fires', async () => {
+    it('returns a committed branch even if the runtime generation closes afterward', async () => {
       const runtimeDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
       );
@@ -15486,10 +15454,6 @@ describe('createServeApp', () => {
         generationGuard.close();
         return {
           sessionId: staleBranchId,
-          workspaceCwd: WS_BOUND,
-          attached: false,
-          clientId: 'stale-client',
-          state: {},
           displayName: 'Stale branch',
           forkedFrom: { sessionId, displayName: 'Source' },
         };
@@ -15518,11 +15482,9 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({});
 
-        expect(res.status).toBe(503);
-        expect(res.body.code).toBe('workspace_runtime_unavailable');
-        expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
-          requireZeroAttaches: true,
-        });
+        expect(res.status).toBe(201);
+        expect(res.body.sessionId).toBe(staleBranchId);
+        expect(killSpy).not.toHaveBeenCalled();
         expect(removeSpy).not.toHaveBeenCalled();
       } finally {
         killSpy.mockRestore();

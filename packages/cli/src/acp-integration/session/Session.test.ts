@@ -394,7 +394,7 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
-    getTranscriptCursor: ReturnType<typeof vi.fn>;
+    getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
@@ -621,7 +621,11 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
-      getTranscriptCursor: vi.fn().mockReturnValue({ recordId: null }),
+      getBranchCheckpointCursor: vi.fn().mockReturnValue({
+        recordId: null,
+        activeRecordCount: 0,
+        pendingToolCalls: [],
+      }),
       recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
     };
     mockFileHistoryService = {
@@ -4062,9 +4066,14 @@ describe('Session', () => {
   describe('prompt', () => {
     it('completes the turn when branch checkpoint recording fails', async () => {
       const checkpointError = new Error('checkpoint storage unavailable');
-      mockChatRecordingService.getTranscriptCursor = vi
+      const cursor = {
+        recordId: 'turn-start',
+        activeRecordCount: 3,
+        pendingToolCalls: [],
+      };
+      mockChatRecordingService.getBranchCheckpointCursor = vi
         .fn()
-        .mockReturnValue({ recordId: 'turn-start' });
+        .mockReturnValue(cursor);
       mockChatRecordingService.recordBranchCheckpointTransaction = vi
         .fn()
         .mockRejectedValue(checkpointError);
@@ -4083,7 +4092,7 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordBranchCheckpointTransaction,
       ).toHaveBeenCalledWith({
-        startExclusiveRecordUuid: 'turn-start',
+        cursor,
         stopReason: 'end_turn',
       });
       expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
@@ -4097,9 +4106,13 @@ describe('Session', () => {
         assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
         checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
       };
-      mockChatRecordingService.getTranscriptCursor = vi
+      mockChatRecordingService.getBranchCheckpointCursor = vi
         .fn()
-        .mockReturnValue({ recordId: 'turn-start' });
+        .mockReturnValue({
+          recordId: 'turn-start',
+          activeRecordCount: 3,
+          pendingToolCalls: [],
+        });
       mockChatRecordingService.recordBranchCheckpointTransaction = vi
         .fn()
         .mockResolvedValue(branchPoint);

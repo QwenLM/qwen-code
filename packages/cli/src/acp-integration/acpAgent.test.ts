@@ -183,12 +183,6 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
-  BranchPublicationUnsupportedError: class BranchPublicationUnsupportedError extends Error {
-    readonly errorKind = 'branch_publication_unsupported';
-    constructor(readonly causeCode?: string) {
-      super('Atomic branch publication is unsupported');
-    }
-  },
   BranchPointInvalidError: class BranchPointInvalidError extends Error {
     constructor(readonly recordId: string) {
       super(`Invalid or inactive branch point: ${recordId}`);
@@ -843,7 +837,6 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
-  BranchPublicationUnsupportedError,
   BranchPointInvalidError,
   SessionEndReason,
   MCPServerConfig,
@@ -13920,40 +13913,6 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
-  it('maps unsupported atomic branch publication to a typed ACP error', async () => {
-    const recording = makeRecordingService();
-    const sessionService = {
-      forkSession: vi
-        .fn()
-        .mockRejectedValue(new BranchPublicationUnsupportedError('ENOTSUP')),
-      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
-    };
-    const innerConfig = makeLiveSessionInnerConfig(recording);
-    innerConfig.getSessionService.mockReturnValue(
-      sessionService as unknown as SessionService,
-    );
-    const { agent, agentPromise } = await bootAgent(innerConfig);
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
-        cwd: '/tmp',
-        sessionId: liveSessionId,
-      }),
-    ).rejects.toMatchObject({
-      code: -32010,
-      data: {
-        errorKind: 'branch_publication_unsupported',
-        causeCode: 'ENOTSUP',
-      },
-    });
-    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
   it('branches a live session through its pinned SessionService', async () => {
     const recording = makeRecordingService();
     const sessionService = {
@@ -14118,39 +14077,6 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(result).toMatchObject({
       title: 'Side task',
       displayName: 'Side task',
-    });
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('maps unsupported side-task publication to a typed ACP error', async () => {
-    const recording = makeRecordingService();
-    const sessionService = {
-      forkSession: vi
-        .fn()
-        .mockRejectedValue(new BranchPublicationUnsupportedError('EPERM')),
-    };
-    const innerConfig = makeLiveSessionInnerConfig(recording);
-    innerConfig.getSessionService.mockReturnValue(
-      sessionService as unknown as SessionService,
-    );
-    const { agent, agentPromise } = await bootAgent(innerConfig);
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSideTask, {
-        cwd: '/tmp',
-        sessionId: liveSessionId,
-        name: 'Side task',
-      }),
-    ).rejects.toMatchObject({
-      code: -32010,
-      data: {
-        errorKind: 'branch_publication_unsupported',
-        causeCode: 'EPERM',
-      },
     });
 
     mockConnectionState.resolve();

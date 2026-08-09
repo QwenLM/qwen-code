@@ -6,10 +6,11 @@
 - Date: 2026-07-30
 - Scope: Web Shell, daemon session protocol, ACP bridge, session recording,
   transcript replay, and session persistence
-- Review status: design v6 passed strict review; the 2026-08-01 PR review
-  amendments preserve the architecture while making checkpoint emission and
-  already-missing backup handling best-effort, hiding Branch during active
-  turns, and restoring the cross-process writer barrier around fork creation
+- Review status: simplified after implementation review to remove branch-only
+  claims/GC, full-history validation on every turn, unbounded client waits, and
+  unused checkpoint correlation fields
+- Simplicity stance: the feature needs the minimum sufficient invariants, not
+  branch-specific recovery, job-ledger, or speculative schema subsystems
 
 ## 1. Summary
 
@@ -34,6 +35,31 @@ The design uses four rules:
 Branching truncates conversation history. It does not rewind or replace the
 current working directory, Git state, or working files.
 
+### 1.1 Simplicity boundary: no branch-specific overdesign
+
+This feature intentionally uses the minimum machinery needed to preserve its
+user-visible invariants. It does not need a dedicated subsystem for every
+theoretical failure mode. Complete-before-visible publication, deterministic
+transcript ordering, bounded UI waiting, and backward-compatible checkpoint
+parsing are sufficient for the current product contract.
+
+The implementation applies that boundary in four places:
+
+| Concern                           | Minimum sufficient mechanism                                                                                                | Why additional machinery is not needed                                                                                                                                                                                                                                      |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Branch publication                | Hidden operation-specific staging, publish backups first, and publish the complete transcript last                          | A random server-generated session ID and transcript-last visibility already prevent a partial session from appearing. Claims, manifests, owner markers, and a branch-only garbage collector would add a second lifecycle without improving the visible atomicity guarantee. |
+| Turn completion validation        | Initialize active-chain state once on restore, capture an in-memory cursor, and scan only records appended during the turn  | The recorder already owns append ordering through its coordinator and topology fence. Reloading and reconstructing the complete JSONL file after every `end_turn` repeats authoritative work and makes a long session cumulatively O(T²).                                   |
+| Request completion and navigation | Persist the branch, return its identity, load it separately, use a 120-second SDK bound, and reject stale navigation intent | The REST/WebUI flow does not require a live restored session before it can acknowledge creation. A durable operation ledger, query API, cancellation protocol, and exactly-once delivery are not current requirements.                                                      |
+| Checkpoint correlation            | Persist the checkpoint UUID, turn boundary, and Assistant UUID                                                              | These fields fully authenticate the branch point. `promptId` had no checkpoint consumer, so retaining it would be speculative schema growth.                                                                                                                                |
+
+The accepted trade-off is that a process crash before transcript publication
+may leave a hidden temporary file or orphan backup directory, and a client may
+lose an HTTP response for a branch that later becomes visible in the picker.
+Neither case exposes a partial session or loses source-session data. Do not add
+branch-specific recovery machinery unless production evidence shows material
+storage accumulation, or the product explicitly requires queryable,
+cancellable, or exactly-once branch operations.
+
 ## 2. Motivation
 
 The existing path is:
@@ -46,7 +72,8 @@ Web Shell
   -> ACP session bridge
   -> qwen/control/session/branch
   -> SessionService.forkSession()
-  -> restore and attach the new session
+  -> return the persisted session id
+  -> WebUI separately loads the new session
 ```
 
 `SessionService` already stores records as a `uuid`/`parentUuid` tree and can
@@ -120,7 +147,7 @@ turns. Legacy responses without a checkpoint do not display the action.
 ```mermaid
 flowchart TD
   A["User submits an interactive prompt"] --> B["Session admits the prompt and preempts the previous prompt"]
-  B --> C["Recorder captures startExclusiveRecordUuid"]
+  B --> C["Recorder captures an in-memory branch cursor"]
   C --> D["Execute model, tools, and stop hooks"]
   D --> E{"stopReason is end_turn?"}
   E -- "No" --> F["Return without a branch point"]
@@ -140,13 +167,13 @@ flowchart TD
   S --> T{"Still valid?"}
   T -- "No" --> U["409 branch_point_invalid"]
   T -- "Yes" --> V["Physically truncate raw records at the checkpoint"]
-  V --> W["Build titled transcript and referenced backups in staging"]
-  W --> X["Validate, fsync, and publish backups"]
+  V --> W["Build titled transcript and referenced backups in temporary paths"]
+  W --> X["Validate and publish available backups"]
   X --> Y["Atomically publish transcript last"]
-  Y --> Z["Session ownership transfers to the user"]
-  Z --> AA["Restore and attach the new session"]
-  AA --> AB["Web Shell switches sessions"]
-  AA -. "Restore or attach failure" .-> AC["Keep the complete session in the picker"]
+  Y --> Z["Return the persisted session id"]
+  Z --> AA{"User still on the source with the same navigation intent?"}
+  AA -- "Yes" --> AB["Web Shell loads the new session"]
+  AA -- "No" --> AC["Keep the branch in the session picker"]
 ```
 
 ## 7. Durable Branch Checkpoint
@@ -161,8 +188,6 @@ export interface BranchCheckpointRecordPayloadV1 {
   v: 1;
   startExclusiveRecordUuid: string | null;
   assistantRecordUuid: string;
-  /** Diagnostic correlation only. Never used as authorization. */
-  promptId?: string;
 }
 ```
 
@@ -182,10 +207,18 @@ const checkpoint: ChatRecord = {
     v: 1,
     startExclusiveRecordUuid,
     assistantRecordUuid,
-    promptId,
   },
 };
 ```
+
+Older v1 records may contain an extra `promptId`. Readers ignore that unknown
+field, and new writers and forks do not persist it.
+
+The checkpoint UUID is the API anchor and `assistantRecordUuid` is the replay
+projection key; no branch resolver, fork builder, protocol adapter, or UI path
+uses checkpoint `promptId`. Keeping an unconsumed field would create a false
+compatibility obligation, so the schema deliberately omits it instead of
+designing for a hypothetical future consumer.
 
 The checkpoint record's own `uuid` is the branch leaf sent to the branch API.
 Using the checkpoint rather than the Assistant UUID retains all required
@@ -274,9 +307,8 @@ Add:
 
 ```ts
 recordBranchCheckpointTransaction(input: {
-  startExclusiveRecordUuid: string | null;
+  cursor: BranchCheckpointCursor;
   stopReason: string;
-  promptId?: string;
 }): Promise<BranchPoint | undefined>;
 ```
 
@@ -287,9 +319,10 @@ intents; they do not advance `lastRecordUuid` or write to disk.
 The transaction then:
 
 1. waits for append work admitted before the fence;
-2. reads the recorder's real active tail and active chain;
-3. invokes `resolveCompletedTurnBranchCandidate()` for the exact start/tail
-   interval;
+2. verifies that the captured cursor still identifies the in-memory active
+   chain boundary;
+3. invokes the shared eligibility resolver only for records appended since
+   that cursor, using the cursor's snapshot of pending tool calls;
 4. strictly appends and flushes the checkpoint with the current tail as parent;
 5. advances the tail only after the checkpoint is accepted by the writer; and
 6. releases buffered intents in arrival order, assigning their parent UUIDs
@@ -313,19 +346,30 @@ still ordered by the central coordinator.
 
 ### 8.3 Session timing
 
-`Session.prompt()` captures `startExclusiveRecordUuid` after admission and
-after the previous prompt, cron turn, and notification turn have settled, but
-before `#executePrompt()` writes anything for the new turn.
+`Session.prompt()` captures `BranchCheckpointCursor` after admission and after
+the previous prompt, cron turn, and notification turn have settled, but before
+`#executePrompt()` writes anything for the new turn. The cursor contains the
+active tail UUID, active-record count, and a copy of pending tool-call state.
 
 After `#executePrompt()` and stop hooks finish, Session immediately awaits the
 checkpoint transaction before starting cron or notification drains and before
 emitting the completed branch point. The prompt holds the Agent history
 mutation lock for this entire interval.
 
-Recorder-side eligibility validation scans the current active chain while the
-topology fence is held. This linear scan is the authoritative restored/rewound
-state check; replacing it with an incremental cursor requires a separate
-ownership and invalidation design.
+The recorder initializes its active-chain and pending-tool state once from the
+restored session, then updates both through the existing append coordinator.
+Ordinary appends are O(1); rewind truncates to the selected parent and rebuilds
+pending-tool state for that exceptional topology change. Each completed turn
+therefore scans only its newly appended records instead of rereading and
+reconstructing the entire JSONL transcript.
+
+This is not a weaker cache in front of a separate authority. The recorder is
+the component that serializes and durably appends these records, and the
+topology fence prevents later appends from entering the checkpoint interval.
+Consequently, another full disk read inside every `end_turn` adds cost without
+adding an independent consistency guarantee. A full reconstruction remains
+appropriate once when restoring a session or after an exceptional rewind, not
+on the normal turn-completion path.
 
 ## 9. Live Protocol
 
@@ -436,6 +480,15 @@ The TypeScript SDK surface becomes conceptually:
 branchSession(name?: string, atRecordId?: string): Promise<BranchResult>;
 ```
 
+`BranchResult` contains only `sessionId`, `displayName`, and `forkedFrom`.
+Branch creation does not restore or attach the new session in the daemon. This
+keeps persistence separate from live-session admission; side-task creation,
+which requires an immediately usable live session, retains its explicit
+restore/attach path.
+The ACP-standard `session/fork` adapter also performs an explicit load after
+the persisted branch is created because that protocol promises an immediately
+owned live session; this composition does not change the daemon REST result.
+
 If `atRecordId` is omitted, the endpoint retains the current latest-state
 branch behavior. If it is present, Core requires it to be a checkpoint in the
 source session's current active branch catalog.
@@ -463,10 +516,20 @@ currently active. Temporarily hiding the action while a later turn is running
 prevents the request from waiting behind that turn longer than the client action
 timeout and then committing a branch after the client has given up.
 
-While a branch request is pending, disable the selected action. On success,
-switch to the returned session. On `branch_point_invalid`, refresh the source
-transcript and explain that the response is no longer on the active history
-path.
+While a branch request is pending, disable the selected action. The SDK bounds
+the request to 120 seconds. On success, switch to the returned session only if
+the user is still on the captured source session and no newer session-load
+generation has started. A late result never supersedes newer navigation; the
+persisted branch remains available in the session picker. On
+`branch_point_invalid`, refresh the source transcript and explain that the
+response is no longer on the active history path.
+
+The 120-second bound prevents an indefinitely pending UI action; it is not an
+exactly-once protocol. If the underlying non-cancellable ACP mutation commits
+after the client stops waiting, the complete branch remains discoverable in
+the picker and the navigation-generation check prevents a late automatic
+switch. An operation-ID ledger would be justified only if the product later
+requires explicit status lookup, cancellation, or idempotent retry.
 
 Legacy Assistant responses and automatic turns have no field and therefore no
 action.
@@ -580,8 +643,7 @@ For each referenced name:
 1. validate it as a filename, not an arbitrary path;
 2. resolve source and destination paths and verify their directory boundary;
 3. if the source is already missing or is no longer a regular file, warn and
-   omit it from backup staging (the claim manifest keeps listing every
-   referenced name);
+   omit it from backup staging;
 4. asynchronously copy or link every available source into staging; and
 5. treat an access or copy failure for an existing backup as a fork failure.
 
@@ -591,7 +653,7 @@ An older source session may already have lost backups to retention cleanup;
 that pre-existing degradation must not prevent ordinary or historical
 branching, although the affected rewind snapshot remains unavailable.
 
-## 14. Crash-safe Publication
+## 14. Complete-before-visible Publication
 
 ### 14.1 Visibility rule
 
@@ -602,126 +664,96 @@ Before creating target resources, compute and sanitize the final title. The
 Core fork input includes that title, and Core appends its `custom_title` record
 inside the staged transcript. There is no post-publication rename transaction.
 
-### 14.2 Staging and claim
+### 14.2 Temporary resources
 
-For a randomly generated `newSessionId`, create an exclusive branch claim with
-a random owner token. If the claim cannot be acquired or any target resource
-already exists, stop without deleting anything under that session ID.
+Branch session IDs are generated internally as random UUIDs. Before writing,
+Core rejects an existing target transcript or backup directory. It then uses
+operation-specific hidden temporary paths:
 
-Use invisible staging locations on the same filesystems as their destinations:
+- the transcript temporary file sits directly in the chats directory; and
+- the backup temporary directory sits beside the file-history destination.
 
-- transcript staging below the chats filesystem; and
-- backup staging beside the file-history backup destination.
+The complete target transcript is written with exclusive creation and
+restrictive permissions. There are no branch claims, manifests, owner markers,
+or activity-triggered branch garbage collector.
 
-A manifest and backup owner marker bind both staging locations to the owner
-token. Staged transcript and backup files use restrictive permissions.
+The correctness requirement is that no incomplete transcript becomes visible,
+not that every pre-commit crash artifact is synchronously reclaimed. Because
+the temporary paths include both a random session ID and operation ID, ordinary
+failure paths can clean them directly. Maintaining durable claims and a
+periodic ownership-aware GC for rare process-crash leftovers would be
+overdesign for this feature and would introduce more states and failure modes
+than it removes.
 
 ### 14.3 Commit sequence
 
 All filesystem operations in this sequence use asynchronous promise APIs so a
-large transcript, backup set, or stale-claim cleanup does not block the daemon
-event loop.
+large transcript or backup set does not block the daemon event loop.
 
 1. Write the complete titled transcript to staging.
-2. Copy or link every available referenced backup to backup staging. The
-   claim manifest lists every referenced name; backups whose source is
-   missing are warned and omitted from staging, and consumers must not treat
-   a listed-but-unstaged name as corruption.
-3. Re-run target branch-point validation.
-4. Flush staged files and relevant staging directories.
-5. Publish the complete backup directory with claim-guarded, no-overwrite
-   semantics and flush its parent directory.
-6. Atomically publish the transcript last with a same-filesystem no-overwrite
-   primitive, such as `link(temp, target)` or a platform
-   `RENAME_NOREPLACE` equivalent.
-7. Flush the chats directory.
-
-The current implementation deliberately uses a hard link for the transcript
-commit point. If the backing filesystem reports that hard links are unsupported
-or disallowed, or the staging and destination paths cannot share a link, Core
-returns the typed, actionable `branch_publication_unsupported` error. ACP
-preserves that error and HTTP maps it to `501`; the implementation must not
-silently fall back to a non-atomic copy or overwrite-capable rename.
+2. Copy or link every available referenced backup to backup staging; warn and
+   omit source backups that are already missing.
+3. Publish the complete backup directory.
+4. Publish the transcript last. Prefer a hard link for no-overwrite semantics;
+   if hard links are unavailable or disallowed, use same-directory rename so
+   the complete file still becomes visible atomically.
+5. Treat chats-directory `fsync` as best-effort after commit. A durability
+   warning must not turn a successfully published branch into an API failure.
 
 The transcript publication is the commit point. Before it, the session is not
 discoverable. After it, the session is complete, titled, and owns every
-available referenced backup declared by its creation manifest.
+available referenced backup copied during the operation.
 
 ### 14.4 Ownership after commit
 
-Once the transcript is published, persisted-session ownership transfers
-immediately and irreversibly to the user. Agent and Bridge failures after that
-point must not delete it.
+Once the transcript is published, the branch endpoint returns its identity and
+does not acquire Bridge live-session admission. Loading is a separate WebUI
+action. A post-commit generation change does not delete or hide the branch.
 
-If restore, attach, a generation guard, or HTTP response delivery fails:
+## 15. Cleanup
 
-- release partial live state and reservations;
-- include `newSessionId` in the error or structured log; and
-- leave the complete session available in the picker.
-
-This rule prevents a title or restore compensation path from deleting a
-session that another client has already discovered and attached.
-
-## 15. Cleanup and Garbage Collection
-
-Pre-commit failures use a token-aware purge primitive. It independently
-attempts to clean:
+The operation's `finally` block independently attempts to clean:
 
 - transcript staging;
 - backup staging;
-- a backup directory published before the transcript commit;
-- branch claim and owner markers; and
-- staging organization metadata.
+- and a backup directory published before a failed transcript commit.
 
-The result reports status per resource and is idempotent. Cleanup failure does
-not replace the original operation error, but logs the session ID, owner token
-fingerprint, and resource statuses.
-
-On bounded, activity-triggered list and fork entry points, garbage collection
-asynchronously scans stale branch claims and staging manifests. Construction
-itself performs no filesystem scan, and the scan, ownership verification, and
-cleanup use promise-based filesystem APIs so they do not synchronously stall
-the event loop:
-
-- if the final transcript exists, preserve the session and formal backup
-  directory and remove only stale staging, claim, and owner markers;
-- if the transcript does not exist, remove operation resources only when the
-  claim and every relevant marker match the manifest's owner token; and
-- if ownership is ambiguous or a token does not match, preserve the data and
-  emit a warning.
-
-An age threshold prevents garbage collection from touching a live creation.
-Normal session deletion remains separate from this pre-commit cleanup path.
+Cleanup failures do not replace the operation result and are logged with the
+session ID. A process crash can leave an operation-specific hidden temporary
+file or an orphan backup directory; the implementation accepts this rare
+storage leak instead of maintaining a branch-only ownership and GC subsystem.
+Normal session deletion remains responsible for committed session backups.
 
 ## 16. Failure Semantics
 
-| Failure point                                                       | Visible session? | Required result                                     |
-| ------------------------------------------------------------------- | ---------------- | --------------------------------------------------- |
-| Invalid or inactive checkpoint                                      | No new session   | `409 branch_point_invalid`                          |
-| Filesystem cannot atomically hard-link the transcript               | No               | `501 branch_publication_unsupported`; clean staging |
-| Title computation                                                   | No               | Return error; create no target resources            |
-| Staged transcript write                                             | No               | Token-aware pre-commit cleanup                      |
-| Referenced backup already missing                                   | Yes, degraded    | Warn, omit backup, preserve branch                  |
-| Backup partially copied                                             | No               | Fail and clean staging                              |
-| Target checkpoint revalidation                                      | No               | Fail and clean staging                              |
-| Process exits before backup publication                             | No               | Activity-triggered GC reclaims owned staging        |
-| Process exits after backup publication but before transcript commit | No               | Activity-triggered GC removes owned orphan backup   |
-| Process exits after transcript commit                               | Yes, complete    | Preserve session; GC removes stale markers only     |
-| Restore or attach fails after commit                                | Yes, complete    | Keep session in picker; clean only live state       |
-| HTTP response fails after commit                                    | Yes, complete    | Detach requesting client; never delete session      |
+| Failure point                                         | Visible session? | Required result                                   |
+| ----------------------------------------------------- | ---------------- | ------------------------------------------------- |
+| Invalid or inactive checkpoint                        | No new session   | `409 branch_point_invalid`                        |
+| Transcript hard link unsupported                      | Yes              | Fall back to same-directory atomic rename         |
+| Title computation                                     | No               | Return error; create no target resources          |
+| Staged transcript write                               | No               | Best-effort cleanup                               |
+| Referenced backup already missing                     | Yes, degraded    | Warn, omit backup, preserve branch                |
+| Backup partially copied                               | No               | Fail and clean staging                            |
+| Target checkpoint revalidation                        | No               | Fail and clean staging                            |
+| Process exits before transcript commit                | No               | May leave hidden staging or an orphan backup      |
+| Chats-directory `fsync` fails after transcript commit | Yes, complete    | Return success and log a durability warning       |
+| User navigates elsewhere before branch result arrives | Yes, complete    | Preserve newer navigation; leave branch in picker |
+| Separate WebUI load fails                             | Yes, complete    | Keep session in picker                            |
+| HTTP response fails after commit                      | Yes, complete    | Never delete the persisted branch                 |
 
 ## 17. Implementation Map
 
 | Area                                                              | Primary responsibility                                                                    |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | `packages/core/src/services/chatRecordingService.ts`              | Checkpoint schema, central append coordinator, topology transaction                       |
-| `packages/core/src/services/sessionService.ts`                    | Shared resolver integration, bounded fork, backup whitelist, staging, commit, cleanup, GC |
+| `packages/core/src/services/sessionService.ts`                    | Shared resolver integration, bounded fork, backup whitelist, staging, commit, and cleanup |
 | `packages/core/src/services/session-transcript-reader.ts`         | Same-snapshot branch-point catalog for paged replay                                       |
 | `packages/cli/src/acp-integration/session/Session.ts`             | Prompt preemption, branch admission flag, turn capture, and checkpoint timing             |
 | `packages/cli/src/acp-integration/session/history-replay-page.ts` | Attach branch metadata while projecting Assistant records                                 |
 | `packages/cli/src/acp-integration/acpAgent.ts`                    | Exclusive-mutation lock, branch parameters, typed error mapping, titled fork invocation   |
-| `packages/acp-bridge/src/bridge.ts`                               | Per-session mutation queue and live branch-point forwarding                               |
-| `packages/cli/src/serve/routes/session.ts`                        | Optional `atRecordId`, validation, and typed HTTP error mapping                           |
+| `packages/acp-bridge/src/bridge.ts`                               | Persisted branch mutation; explicit restore/admission only for live side-task sessions    |
+| `packages/cli/src/serve/routes/session.ts`                        | Optional `atRecordId`, validation, and minimal persisted-branch result                    |
+| `packages/cli/src/serve/acp-http/dispatch.ts`                     | Compose ACP-standard fork with an explicit load and connection ownership                  |
 | `packages/sdk-typescript`                                         | Branch request and live/replay metadata types                                             |
 | `packages/webui/src/daemon/session`                               | Preserve metadata and expose the extended action                                          |
 | `packages/web-shell/client`                                       | Branch action on every block with `branchRecordId`                                        |
@@ -742,6 +774,10 @@ Normal session deletion remains separate from this pre-commit cleanup path.
   writer failure.
 - Verify a rejected checkpoint transaction still returns the completed
   `end_turn` without branch metadata.
+- Verify successive turns validate records from their captured in-memory
+  cursors without reloading the transcript from disk.
+- Verify legacy checkpoints containing `promptId` remain readable while newly
+  written checkpoints omit it.
 
 ### 18.2 Replay and protocol
 
@@ -785,23 +821,26 @@ Normal session deletion remains separate from this pre-commit cleanup path.
   target session.
 - Current working files remain unchanged.
 - Rewind in the fork can consume retained backups.
-- Fork publication and stale-claim GC do not call synchronous filesystem APIs.
-- Unsupported transcript hard links produce the typed ACP error and HTTP 501.
+- Fork publication does not call synchronous filesystem APIs.
+- Unsupported or cross-device transcript hard links fall back to
+  same-directory rename without creating branch claims or owner markers.
 
-### 18.5 Crash and lifecycle injection
+### 18.5 Publication and lifecycle injection
 
 Terminate creation after:
 
 - transcript staging;
 - the first of multiple backup copies;
 - complete backup staging;
-- formal backup publication;
-- transcript commit; and
-- commit before restore/attach.
+- backup publication;
+- transcript hard-link fallback; and
+- transcript commit followed by chats-directory `fsync` failure.
 
-Verify picker visibility, backup completeness, claim ownership, and GC behavior
-at every boundary. Also verify that a restore failure cannot remove a committed
-session already attached by another client.
+Verify picker visibility, backup completeness, best-effort staging cleanup, and
+commit-point behavior at every boundary. Also verify that ordinary branching
+does not restore or consume live-session admission, side-task creation still
+returns a loaded session, and a late branch result cannot override a newer
+navigation intent.
 
 ### 18.6 Web Shell E2E
 
@@ -827,8 +866,8 @@ Roll out in dependency order:
 2. Agent and Bridge locking plus optional protocol metadata.
 3. SDK and WebUI metadata preservation.
 4. Web Shell action and error UX.
-5. Crash-injection and full Web Shell E2E coverage before enabling the UI by
-   default.
+5. Publication-failure and full Web Shell E2E coverage before enabling the UI
+   by default.
 
 No migration synthesizes checkpoints for legacy records. New successful turns
 in an old resumed session become branchable as they receive new checkpoints.
@@ -863,7 +902,8 @@ partially copied target appear successful.
 
 Rejected because the session picker could discover an incomplete session.
 
-### Delete a committed fork when restore or HTTP delivery fails
+### Delete a committed fork when load or HTTP delivery fails
 
-Rejected because another client may already have discovered or attached the
-session. A committed fork is retained and recoverable instead.
+Rejected because branch creation and loading are separate operations, and
+another client may already have discovered the session. A committed fork is
+retained and recoverable instead.

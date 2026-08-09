@@ -1313,24 +1313,30 @@ export function createDaemonSessionActions({
         'Branch session failed',
         'branch_session',
       );
+      const sourceSessionId = session.sessionId;
+      const loadGeneration = pendingSessionLoadIdRef.current;
       try {
         const result = await session.client.branchSession(
-          session.sessionId,
+          sourceSessionId,
           { name, atRecordId },
           session.clientId,
         );
-        persistStableClientId(result.clientId, result.sessionId);
-        void startSessionSwitch(result.sessionId, 'load').catch(
-          (switchError: unknown) => {
-            if (isAbortError(switchError)) return;
-            dispatchActionError(
-              addNotice,
-              'Branch session failed',
-              switchError,
-              'branch_session',
-            );
-          },
-        );
+        if (
+          sessionRef.current?.sessionId === sourceSessionId &&
+          pendingSessionLoadIdRef.current === loadGeneration
+        ) {
+          void startSessionSwitch(result.sessionId, 'load').catch(
+            (switchError: unknown) => {
+              if (isAbortError(switchError)) return;
+              dispatchActionError(
+                addNotice,
+                'Branch session failed',
+                switchError,
+                'branch_session',
+              );
+            },
+          );
+        }
         return {
           sessionId: result.sessionId,
           displayName: result.displayName,

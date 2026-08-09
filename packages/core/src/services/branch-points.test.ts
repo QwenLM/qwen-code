@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
+  parseBranchCheckpointPayload,
   resolveBranchPoints,
   resolveCompletedTurnBranchCandidate,
 } from './branch-points.js';
@@ -39,6 +40,21 @@ function record(
 }
 
 describe('branch points', () => {
+  it('ignores a legacy promptId while parsing checkpoint v1', () => {
+    expect(
+      parseBranchCheckpointPayload({
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+        promptId: 'legacy-prompt',
+      } as unknown as ChatRecord['systemPayload']),
+    ).toEqual({
+      v: 1,
+      startExclusiveRecordUuid: null,
+      assistantRecordUuid: 'a1',
+    });
+  });
+
   it('resolves a completed text turn and its checkpoint', () => {
     const user = record('u1', null, 'user', [{ text: 'question' }]);
     const assistant = record('a1', 'u1', 'assistant', [{ text: 'answer' }]);

@@ -391,20 +391,8 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordBranchCheckpointTransaction', () => {
-    beforeEach(() => {
-      vi.mocked(mockConfig.getSessionService).mockReturnValue({
-        loadSession: vi.fn(async () => ({
-          conversation: {
-            messages: vi
-              .mocked(mockLease.appendJsonLine)
-              .mock.calls.map((call) => call[0] as ChatRecord),
-          },
-        })),
-      } as unknown as ReturnType<Config['getSessionService']>);
-    });
-
     it('durably records a checkpoint for a completed text turn', async () => {
-      const start = chatRecordingService.getTranscriptCursor().recordId;
+      const cursor = chatRecordingService.getBranchCheckpointCursor();
       chatRecordingService.recordUserMessage([{ text: 'hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
@@ -413,9 +401,8 @@ describe('ChatRecordingService', () => {
 
       const point =
         await chatRecordingService.recordBranchCheckpointTransaction({
-          startExclusiveRecordUuid: start,
+          cursor,
           stopReason: 'end_turn',
-          promptId: 'prompt-1',
         });
 
       expect(point).toEqual({
@@ -435,12 +422,43 @@ describe('ChatRecordingService', () => {
           v: 1,
           startExclusiveRecordUuid: null,
           assistantRecordUuid: point?.assistantRecordUuid,
-          promptId: 'prompt-1',
         },
       });
+      expect(checkpoint.systemPayload).not.toHaveProperty('promptId');
+      expect(mockConfig.getSessionService).not.toHaveBeenCalled();
+    });
+
+    it('validates successive turns from in-memory cursors without reloading history', async () => {
+      const firstCursor = chatRecordingService.getBranchCheckpointCursor();
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'first answer' }],
+      });
+      const first =
+        await chatRecordingService.recordBranchCheckpointTransaction({
+          cursor: firstCursor,
+          stopReason: 'end_turn',
+        });
+
+      const secondCursor = chatRecordingService.getBranchCheckpointCursor();
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'second answer' }],
+      });
+      const second =
+        await chatRecordingService.recordBranchCheckpointTransaction({
+          cursor: secondCursor,
+          stopReason: 'end_turn',
+        });
+
+      expect(second?.startExclusiveRecordUuid).toBe(first?.checkpointUuid);
+      expect(mockConfig.getSessionService).not.toHaveBeenCalled();
     });
 
     it('orders metadata arriving during validation after the checkpoint', async () => {
+      const cursor = chatRecordingService.getBranchCheckpointCursor();
       chatRecordingService.recordUserMessage([{ text: 'hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
@@ -449,7 +467,7 @@ describe('ChatRecordingService', () => {
 
       const checkpoint = chatRecordingService.recordBranchCheckpointTransaction(
         {
-          startExclusiveRecordUuid: null,
+          cursor,
           stopReason: 'end_turn',
         },
       );
@@ -470,40 +488,17 @@ describe('ChatRecordingService', () => {
     });
 
     it('releases buffered appends with a continuous chain when no candidate exists', async () => {
-      let validationStarted!: () => void;
-      let releaseValidation!: () => void;
-      const started = new Promise<void>((resolve) => {
-        validationStarted = resolve;
-      });
-      const validationGate = new Promise<void>((resolve) => {
-        releaseValidation = resolve;
-      });
-      vi.mocked(mockConfig.getSessionService).mockReturnValue({
-        loadSession: vi.fn(async () => {
-          validationStarted();
-          await validationGate;
-          return {
-            conversation: {
-              messages: vi
-                .mocked(mockLease.appendJsonLine)
-                .mock.calls.map((call) => call[0] as ChatRecord),
-            },
-          };
-        }),
-      } as unknown as ReturnType<Config['getSessionService']>);
-
+      const cursor = chatRecordingService.getBranchCheckpointCursor();
       chatRecordingService.recordUserMessage([{ text: 'no assistant yet' }]);
       const checkpoint = chatRecordingService.recordBranchCheckpointTransaction(
         {
-          startExclusiveRecordUuid: null,
+          cursor,
           stopReason: 'end_turn',
         },
       );
-      await started;
       const title = chatRecordingService.recordCustomTitle('Title', 'manual');
       chatRecordingService.recordUserMessage([{ text: 'next turn' }]);
 
-      releaseValidation();
       await expect(checkpoint).resolves.toBeUndefined();
       await expect(title).resolves.toBe(true);
       await chatRecordingService.flush();
@@ -537,7 +532,7 @@ describe('ChatRecordingService', () => {
 
         await expect(
           chatRecordingService.recordBranchCheckpointTransaction({
-            startExclusiveRecordUuid: null,
+            cursor: chatRecordingService.getBranchCheckpointCursor(),
             stopReason,
           }),
         ).resolves.toBeUndefined();
@@ -549,6 +544,7 @@ describe('ChatRecordingService', () => {
 
     it('settles buffered appends without stalling when the checkpoint write fails', async () => {
       const writeError = new Error('disk full');
+      const cursor = chatRecordingService.getBranchCheckpointCursor();
       chatRecordingService.recordUserMessage([{ text: 'hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
@@ -567,7 +563,7 @@ describe('ChatRecordingService', () => {
 
       const checkpoint = chatRecordingService.recordBranchCheckpointTransaction(
         {
-          startExclusiveRecordUuid: null,
+          cursor,
           stopReason: 'end_turn',
         },
       );
@@ -600,13 +596,14 @@ describe('ChatRecordingService', () => {
       // write failure, not with 'topology transaction already active'.
       await expect(
         chatRecordingService.recordBranchCheckpointTransaction({
-          startExclusiveRecordUuid: null,
+          cursor: chatRecordingService.getBranchCheckpointCursor(),
           stopReason: 'end_turn',
         }),
       ).rejects.toBe(writeError);
     });
 
     it('rejects a concurrent recordBranchCheckpointTransaction', async () => {
+      const cursor = chatRecordingService.getBranchCheckpointCursor();
       chatRecordingService.recordUserMessage([{ text: 'hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
@@ -614,13 +611,13 @@ describe('ChatRecordingService', () => {
       });
 
       const first = chatRecordingService.recordBranchCheckpointTransaction({
-        startExclusiveRecordUuid: null,
+        cursor,
         stopReason: 'end_turn',
       });
 
       await expect(
         chatRecordingService.recordBranchCheckpointTransaction({
-          startExclusiveRecordUuid: null,
+          cursor,
           stopReason: 'end_turn',
         }),
       ).rejects.toThrow('Transcript topology transaction already active');
@@ -801,41 +798,6 @@ describe('ChatRecordingService', () => {
         subtype: 'rewind',
         parentUuid: null,
       });
-    });
-
-    it('flushes before reading the canonical active transcript', async () => {
-      const order: string[] = [];
-      const activeChain = [
-        {
-          uuid: 'active-record',
-          parentUuid: null,
-          sessionId: 'test-session-id',
-          timestamp: '2026-07-21T00:00:00.000Z',
-          type: 'user' as const,
-          provenance: 'real_user' as const,
-          cwd: '/test/project/root',
-          version: '1.0.0',
-          message: { role: 'user' as const, parts: [{ text: 'active' }] },
-        },
-      ];
-      const originalFlush =
-        chatRecordingService.flush.bind(chatRecordingService);
-      vi.spyOn(chatRecordingService, 'flush').mockImplementation(async () => {
-        order.push('flush');
-        await originalFlush();
-      });
-      const loadSession = vi.fn().mockImplementation(async () => {
-        order.push('load');
-        return { conversation: { messages: activeChain } };
-      });
-      vi.mocked(mockConfig.getSessionService).mockReturnValue({
-        loadSession,
-      } as unknown as ReturnType<Config['getSessionService']>);
-
-      await expect(
-        chatRecordingService.readActiveTranscriptChain(),
-      ).resolves.toEqual(activeChain);
-      expect(order).toEqual(['flush', 'load']);
     });
   });
 
