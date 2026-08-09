@@ -2083,6 +2083,20 @@ describe('PermissionManager', () => {
   });
 
   describe('compound command evaluation', () => {
+    it('keeps Git after a directory change in the confirmation boundary', async () => {
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(cd *)'] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd /tmp && git status',
+          cwd: process.cwd(),
+        }),
+      ).toBe('ask');
+    });
+
     it('all sub-commands allowed → allow', async () => {
       pm = new PermissionManager(
         makeConfig({

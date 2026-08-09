@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getLocalGitConfigRisk } from './git-config-safety.js';
 import { hasShellSubstitution } from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
@@ -1099,12 +1100,60 @@ function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
   return childrenSafety(node, 'unknown');
 }
 
-async function classifyInternal(command: string): Promise<Safety> {
+function localGitConfigMakesCommandUnsafe(
+  root: SyntaxNode,
+  cwd: string,
+): boolean {
+  let changedDirectory = false;
+  let usesDiff = false;
+  let usesStatus = false;
+
+  for (const command of collectDescendants(root, new Set(['command']))) {
+    const name = getCommandName(command);
+    if (name === 'cd' || name === 'pushd') {
+      changedDirectory = true;
+      continue;
+    }
+    if (name !== 'git') continue;
+    const subcommand = stripOuterQuotes(
+      getArgumentNodes(command)[0]?.text ?? '',
+    ).toLowerCase();
+    if (subcommand !== 'diff' && subcommand !== 'status') continue;
+    if (changedDirectory) return true;
+    usesDiff ||= subcommand === 'diff';
+    usesStatus ||= subcommand === 'status';
+  }
+
+  if (!usesDiff && !usesStatus) return false;
+  const risk = getLocalGitConfigRisk(cwd);
+  return (usesDiff && risk.diffExternal) || (usesStatus && risk.fsmonitor);
+}
+
+function fallbackGitConfigMakesCommandUnsafe(
+  command: string,
+  cwd: string,
+): boolean {
+  if (/\b(?:cd|pushd)\b[\s\S]*\bgit\b/i.test(command)) return true;
+  if (!/\bgit\b/i.test(command)) return false;
+  const risk = getLocalGitConfigRisk(cwd);
+  return risk.diffExternal || risk.fsmonitor;
+}
+
+async function classifyInternal(
+  command: string,
+  cwd?: string,
+): Promise<Safety> {
   const tree = await parseShellCommand(command);
   try {
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
-    return mergeSafety(...root.namedChildren.map(evaluateStatementSafety));
+    const safety = mergeSafety(
+      ...root.namedChildren.map(evaluateStatementSafety),
+    );
+    if (safety !== 'read-only' || !cwd) return safety;
+    return localGitConfigMakesCommandUnsafe(root, cwd)
+      ? 'unknown'
+      : 'read-only';
   } finally {
     tree.delete();
   }
@@ -1112,8 +1161,22 @@ async function classifyInternal(command: string): Promise<Safety> {
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
+  return classifyShellCommandSafetyInternal(command);
+}
+
+export async function classifyShellCommandSafetyInDirectory(
+  command: string,
+  cwd: string,
+): Promise<ShellCommandSafety> {
+  return classifyShellCommandSafetyInternal(command, cwd);
+}
+
+async function classifyShellCommandSafetyInternal(
+  command: string,
+  cwd?: string,
+): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  const safety = await classifyInternal(command).catch(
+  const safety = await classifyInternal(command, cwd).catch(
     (): ShellCommandSafety => 'unknown',
   );
   return safety === 'read-only' && hasShellSubstitution(command)
@@ -1137,6 +1200,20 @@ export async function classifyShellCommandSafety(
 export async function isShellCommandReadOnlyAST(
   command: string,
 ): Promise<boolean> {
+  return isShellCommandReadOnlyInternal(command);
+}
+
+export async function isShellCommandReadOnlyASTInDirectory(
+  command: string,
+  cwd: string,
+): Promise<boolean> {
+  return isShellCommandReadOnlyInternal(command, cwd);
+}
+
+async function isShellCommandReadOnlyInternal(
+  command: string,
+  cwd?: string,
+): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
   if (hasShellSubstitution(command)) return false;
 
@@ -1144,15 +1221,21 @@ export async function isShellCommandReadOnlyAST(
   // after a symlinked install), fall back to the regex-based checker so the
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
-    return isShellCommandReadOnly(command);
+    return (
+      isShellCommandReadOnly(command) &&
+      !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
+    );
   }
 
   try {
-    return (await classifyInternal(command)) === 'read-only';
+    return (await classifyInternal(command, cwd)) === 'read-only';
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
-    return isShellCommandReadOnly(command);
+    return (
+      isShellCommandReadOnly(command) &&
+      !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
+    );
   }
 }
 

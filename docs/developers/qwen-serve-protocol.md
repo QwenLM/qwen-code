@@ -181,6 +181,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
  'session_approval_mode_control', 'workspace_tool_toggle', 'workspace_skill_toggle',
+ 'workspace_skill_batch_toggle',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
  'mcp_workspace_pool', 'mcp_pool_restart',
@@ -243,7 +244,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_info` advertises `GET /workspace/:id/session-info` and its `/workspaces/:workspace/session-info` twin. The response aggregates persisted active and archived session counts without hydrating list metadata. It is an explicit O(n) disk scan and must not be polled; clients should treat `truncated: true` as a lower-bound result.
 
-`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_toggle`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
+`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_toggle`, `workspace_skill_batch_toggle`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
 `mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
 
@@ -2703,6 +2704,53 @@ Errors:
 - `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?: 'system' | 'user' | 'systemDefaults'}` — the CLI panel would not allow the target to be toggled. `lockedScope` is present only when `reason` is `locked`.
 
 The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
+
+#### `POST /workspace/skills/enable`
+
+Capability tag: `workspace_skill_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
+
+Toggle up to 100 loaded Skills in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order. The daemon validates against one Skill status snapshot, persists all valid changes in one locked settings write, and refreshes active sessions once. Processing is best-effort for expected target errors: an unknown, hidden, inactive-extension, or locked target is recorded in `errors` without preventing other valid targets from being applied. Unexpected persistence or runtime-generation failures still fail the whole request.
+
+Request:
+
+```json
+{
+  "skillNames": ["review", "deploy", "missing"],
+  "enabled": false
+}
+```
+
+Response (200):
+
+```json
+{
+  "enabled": false,
+  "activation": "applied",
+  "sessionsRefreshed": 2,
+  "sessionsFailed": 0,
+  "results": [
+    {
+      "skillName": "review",
+      "enabled": false,
+      "changed": true
+    },
+    {
+      "skillName": "deploy",
+      "enabled": false,
+      "changed": true
+    }
+  ],
+  "errors": [
+    {
+      "skillName": "missing",
+      "code": "skill_not_found",
+      "error": "Skill not found: missing"
+    }
+  ]
+}
+```
+
+Target errors use `skill_not_found`, `skill_not_toggleable`, or `skill_inactive_extension`. Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe the single live-session refresh shared by all changed results. `activation` reports the refresh attempt rather than the outcome: a batch in which no target changed (for example, every target errored) still answers `applied` when a session is live, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag and the `errors` array.
 
 #### `POST /workspace/init`
 
