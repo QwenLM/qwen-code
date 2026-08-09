@@ -841,6 +841,15 @@ function normalizeSessionUpdate(
     case 'current_mode_update':
     case 'usage_update':
       return [];
+    // Qwen-private A2UI frame. The bridge splits A2UI command payloads out of
+    // the tool result precisely so raw command JSON never reaches transcripts
+    // (`prepareSessionUpdateFrames` in acp-bridge), then republishes them here
+    // for renderer clients. No first-party renderer consumes the frame yet, so
+    // the debug projection below would put that same JSON straight back into
+    // the transcript it was split out of. Drop it from transcript projection;
+    // raw daemon event subscribers still receive the frame unchanged.
+    case 'a2ui':
+      return [];
     default:
       return [
         {

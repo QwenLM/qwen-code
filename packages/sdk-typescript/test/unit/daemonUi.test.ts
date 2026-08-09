@@ -2522,6 +2522,40 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(events).toEqual([]);
   });
 
+  it('does not surface a2ui bridge frames as debug transcript events', () => {
+    // Exact shape published by acp-bridge `prepareSessionUpdateFrames` when an
+    // A2UI-over-MCP tool result is split out of the tool frame.
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'a2ui',
+          a2ui: {
+            surfaceId: 'surface-1',
+            callId: 'call_a2ui_0',
+            commands: [
+              { createSurface: { surfaceId: 'surface-1', root: 'root-col' } },
+              {
+                updateComponents: {
+                  surfaceId: 'surface-1',
+                  components: [
+                    {
+                      id: 'root-col',
+                      componentProperties: {
+                        text: { text: 'A2UI surface' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          _meta: { serverTimestamp: 1_786_268_283_279, source: 'a2ui-bridge' },
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
   it('normalizes memory_changed with closed-enum scope + mode', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', {
