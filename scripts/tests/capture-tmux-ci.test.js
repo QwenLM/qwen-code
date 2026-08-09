@@ -210,9 +210,13 @@ function statementsOf(line) {
 
 // Does this `set` enable errexit? Any position, any spelling — `set -e`,
 // clustered `set -euo pipefail`, `set -u -e`, `set -o errexit`,
-// `set -o pipefail -e`. `set +e` DISABLES it and must not match.
+// `set -o pipefail -e`. `set +e` DISABLES it and must not match, and
+// `--` ends option parsing: `set -- -e` assigns `-e` as a positional
+// parameter, it does not enable errexit.
 function enablesErrexit(stmt) {
-  return /^set\b.*?(\s-\w*e\w*|\s-o\s+errexit)(\s|$)/.test(stmt);
+  return /^set\b.*?(\s-\w*e\w*|\s-o\s+errexit)(\s|$)/.test(
+    stmt.split(/\s--(?:\s|$)/)[0],
+  );
 }
 
 // Whether this argv-ish line installs the EXACT package, as a whole token:
@@ -252,6 +256,14 @@ const NO_OP_INSTALL_FLAGS = new Set([
 const NO_OP_INSTALL_OPTION =
   /-o\s*(APT::Get::)?(Simulate|Just-Print|Download-Only|Print-URIs|No-Act|Recon)\s*=\s*(true|1|yes)/i;
 
+// Statements that HARD-FAIL the step, so nothing may BE one. `exit` and
+// `false` were the known pair; `return` and `exec` are the same family
+// under the runner's `bash -e` — `return 0` errors outside a function and
+// `-e` makes that fatal before the first branch runs, `exec true` replaces
+// the shell — and either one leaves the required check green with nothing
+// installed and not even the else-branch warning emitted.
+const HARD_FAIL = /^(exit(\s+\d+)?|false|return(\s+\d+)?|exec(\s.*)?)$/;
+
 // A branch condition that can be satisfied without the tools it claims to
 // test: a literal constant, or bash's null command `:` (status 0 always).
 function hasForcingTerm(line) {
@@ -278,6 +290,9 @@ describe('the bash model these pins run on', () => {
     expect(logicalLinesOf("echo '::warning::a # b' && exit 1")).toEqual([
       "echo '::warning::a # b' && exit 1",
     ]);
+    // A quoted string spanning a newline folds into one logical line, as
+    // bash does (the model joins the fold with a space).
+    expect(logicalLinesOf("echo 'a\nb'")).toEqual(["echo 'a b'"]);
   });
 
   it('splits statements on real separators only', () => {
@@ -307,6 +322,10 @@ describe('the bash model these pins run on', () => {
       'apt-get update',
     );
     expect(unwrapCommand('time sudo apt-get update')).toBe('apt-get update');
+    // Nested wrappers with wrapper options, all stripped in one pass.
+    expect(unwrapCommand('timeout -k 1 5 sudo apt-get update')).toBe(
+      'apt-get update',
+    );
     expect(unwrapCommand('DEBIAN_FRONTEND=noninteractive apt-get update')).toBe(
       'apt-get update',
     );
@@ -326,7 +345,7 @@ describe('the bash model these pins run on', () => {
     ]) {
       expect(enablesErrexit(on), on).toBe(true);
     }
-    for (const off of ['set +e', 'set -u', 'set -o pipefail']) {
+    for (const off of ['set +e', 'set -u', 'set -o pipefail', 'set -- -e']) {
       expect(enablesErrexit(off), off).toBe(false);
     }
   });
@@ -406,15 +425,19 @@ describe('ci.yml capture tooling', () => {
     // /var/lib/dpkg — both keep every structural pin green while installing
     // nothing.
     // EVERY install statement, not just the first: splitting the install in
-    // two exempted the second from both requirements, and a `.find()` also
-    // let an always-failing statement short-circuit the real one.
-    const installStatements = installLines
-      .flatMap((l) => rawStatementsOf(l))
-      .filter((stmt) => /^apt-get\s+install\b/.test(unwrapCommand(stmt)));
+    // two exempted the second from both requirements.
+    const branchStatements = installLines.flatMap((l) => rawStatementsOf(l));
+    const installStatements = branchStatements.filter((stmt) =>
+      /^apt-get\s+install\b/.test(unwrapCommand(stmt)),
+    );
     expect(
       installStatements.length,
       'no apt-get install statement',
     ).toBeGreaterThan(0);
+    // …and EXACTLY one: an always-failing `apt-get install` prefixed in the
+    // same && chain short-circuits the real install, and every per-statement
+    // pin binds to a statement on the line — none of them sees the skip.
+    expect(installStatements.length).toBe(1);
     for (const stmt of installStatements) {
       expect(unwrapCommand(stmt).split(/\s+/), stmt).toContain('-y');
       // Through sudo, in any of its spellings: `sudo -n apt-get` is the
@@ -427,13 +450,23 @@ describe('ci.yml capture tooling', () => {
       expect(NO_OP_INSTALL_OPTION.test(stmt), `${stmt} simulates`).toBe(false);
     }
     // The index refresh the install depends on: without it a stale list
-    // fails the install on a runner whose image is a few days old.
+    // fails the install on a runner whose image is a few days old — and it
+    // must come FIRST, or the install still reads the stale list.
+    const updateIdx = branchStatements.findIndex((stmt) =>
+      /^apt-get\s+update\b/.test(unwrapCommand(stmt)),
+    );
     expect(
-      installLines
-        .flatMap((l) => rawStatementsOf(l))
-        .some((stmt) => /^apt-get\s+update\b/.test(unwrapCommand(stmt))),
-      'no apt-get update precedes the install',
-    ).toBe(true);
+      updateIdx,
+      'no apt-get update in the install branch',
+    ).toBeGreaterThan(-1);
+    expect(
+      updateIdx,
+      'apt-get update must come before the install',
+    ).toBeLessThan(
+      branchStatements.findIndex((stmt) =>
+        /^apt-get\s+install\b/.test(unwrapCommand(stmt)),
+      ),
+    );
     // Nothing foreign may sit on the install's chain: only apt-get calls
     // and the guard's echo, so no prefixed command can short-circuit it.
     for (const line of installLines) {
@@ -548,13 +581,11 @@ describe('ci.yml capture tooling', () => {
       if (/\btmux -V\b/.test(line)) {
         expect(line, line).toMatch(/tmux -V[^;&|]*\|\|\s*echo\b/);
       }
-      // NOTHING may hard-fail the step: no statement may BE an exit/false
-      // (including a subshell-wrapped one, whose status is the branch's),
-      // and no `set` may enable errexit in any spelling or position.
+      // NOTHING may hard-fail the step: no statement may BE one (including
+      // a subshell-wrapped one, whose status is the branch's), and no `set`
+      // may enable errexit in any spelling or position.
       for (const stmt of statementsOf(line)) {
-        expect(stmt, `${stmt} :: ${line}`).not.toMatch(
-          /^(exit(\s+\d+)?|false)$/,
-        );
+        expect(HARD_FAIL.test(stmt), `${stmt} :: ${line}`).toBe(false);
         expect(enablesErrexit(stmt), `${stmt} :: ${line}`).toBe(false);
       }
       // Each apt-get invocation — behind any wrapper — must be guarded by
@@ -585,9 +616,9 @@ describe('ci.yml capture tooling', () => {
         // status the pipeline's last command: either one ends the guard's
         // reach, and the apt-get is unguarded.
         let guarded = false;
-        // Same alphabet as statementsOf, and `2>&1` is a redirection, not a
-        // separator.
-        const ops = /(\|\||&&|;|\||(?<!>)&)/g;
+        // Same alphabet as statementsOf: `2>&1` and `&>` are redirections,
+        // not separators.
+        const ops = /(\|\||&&|;|\||(?<!>)&(?!>))/g;
         for (let m = ops.exec(rest); m !== null; m = ops.exec(rest)) {
           if (m[1] === '&&') continue;
           guarded = m[1] === '||' && /^\|\|\s*echo\b/.test(rest.slice(m.index));
@@ -619,6 +650,23 @@ describe('ci.yml capture tooling', () => {
           /^echo\s+(-[a-zA-Z]+\s+)*['"]?::warning::/,
         );
       }
+    }
+  });
+
+  it('catches a hard-fail statement spliced into the step', () => {
+    // The axis HARD_FAIL pins, end to end: splice one in as the first run
+    // line and the oracle must surface it as a statement. Under the runner's
+    // `bash -e` either one kills the step before its first branch — a green
+    // check with nothing installed and no ::warning:: anywhere.
+    const run = steps[nameIndex(INSTALL)].run;
+    for (const splice of ['return 0', 'exec true']) {
+      const stmts = logicalLinesOf(splice + '\n' + run).flatMap((l) =>
+        statementsOf(l),
+      );
+      expect(
+        stmts.some((s) => HARD_FAIL.test(s)),
+        splice,
+      ).toBe(true);
     }
   });
 });
