@@ -58,6 +58,10 @@ returns the requested replay semantics.
   lifecycle state and only the raw legacy `goal_status` candidates needed by the
   existing reducers, including malformed candidates that affect precedence;
   discard unrelated slash-command output.
+- Treat a pending Goal checkpoint as a restore consumer. Extract a bounded
+  evidence accumulator shared with the existing Goal evidence-window builder,
+  include its result in the projection, and prohibit restore-time fallback to
+  `readActiveTranscriptChain()` or the old loader.
 - Dispatch aggregated records directly to consumer reducers instead of building
   a catch-all selected-record array. Stream artifact inputs into an incremental
   form of the existing reducer and retain only the rebuilt snapshot.
@@ -99,18 +103,21 @@ returns the requested replay semantics.
 - Expose the completed projection to ACP initialization without changing
   `ResumedSessionData` semantics.
 - Make projection handoff one-shot and clear it on consume, success, failure,
-  shutdown, and `startNewSession()`. Keep Goal hook/state setup synchronous and
-  best-effort: leased mode starts/replaces it after recorder activation, but
-  Session publication does not await subsequent checkpoint execution or another
-  long-lived Goal future. Failure cleanup disposes outstanding work.
+  shutdown, and `startNewSession()`. Split Goal recovery into state-only
+  `prepareRestore(records, checkpointWindow?)` and idempotent post-publication
+  `activateRestoredWork()`; retain `restore()` as the non-daemon compatibility
+  wrapper. Leased mode prepares after recorder activation, publication does not
+  await long-lived work, and failure cleanup disposes outstanding work.
 - Preserve each normalized Goal candidate's source UUID and have the shared
   recovery reducer identify the determining record, so replay bootstrap checks
   page membership without duplicating Goal precedence.
 
 ## Phase 3: Migrate every load/resume consumer
 
-- Initialize Gemini model history, token counts, UI telemetry, and attribution
-  from runtime state.
+- Initialize Gemini model history, token counts, and session-scoped UI telemetry
+  from runtime state. Retain the process-global attribution snapshot until the
+  final synchronous commit block; a failed provisional target must not apply or
+  attempt to roll it back.
 - Build and validate the response-mode replay envelope before hydrating the
   runtime FileHistoryService. Then synchronously restore file history exactly
   once before Session publication; do not defer it until `/rewind` or the first
@@ -162,14 +169,19 @@ returns the requested replay semantics.
   of surfacing that direct-ACP error as REST 413.
 - Reserve a cold session id before configuration/scanning and hold it until
   atomic publication or failure. Run all fallible preparation before replacing
-  the reservation with `sessions.set` plus reporter notification. Use a
-  map-independent teardown for provisional state: dispose Session and Goal
-  hooks/observers, release MCP and telemetry ownership, then shut down Config,
-  recorder, and lease without replacing the original failure.
-- Arm notification drain, cron work, command timers, and file-history validation
-  only after publication. A callback registered earlier may buffer but must not
-  drain while the target is provisional; post-publication best-effort activation
-  failure does not roll back the committed Session.
+  the reservation with `sessions.set`. Prebuild modes, models, config options,
+  artifact/replay metadata, and the complete ACP success value before that
+  commit. Apply attribution, publish the map entry, clear initializing state, and
+  best-effort notify the reporter in one no-`await` block. Use a map-independent
+  teardown for provisional state: dispose Session and Goal hooks/observers,
+  release MCP and telemetry ownership, then shut down Config, recorder, and lease
+  without replacing the original failure.
+- Arm Goal checkpoint/continuation work, file-history validation, notification
+  drains, cron, command timers, and every session-visible callback only after
+  publication. Background/monitor/shell/workflow/title/recording/subsession and
+  MCP-budget callbacks may buffer but cannot emit while provisional;
+  post-publication activation/reporting failure is logged and cannot roll back
+  the committed Session or its prebuilt response.
 
 ## Phase 4: Errors and observability
 
@@ -195,6 +207,12 @@ returns the requested replay semantics.
 - Verify replay overflow after legacy Goal migration leaves only the expected v2
   migration record, invalidates the old projection cache key, and still does not
   register a Session.
+- Verify a pending Goal checkpoint performs no restore-time full load and starts
+  no verifier or continuation before publication; successful publication
+  activates it once from the projected bounded window, while failure disposes it.
+- Verify a provisional failure leaves the process-global attribution singleton
+  unchanged, successful publication applies the projected snapshot once, and a
+  response-builder failure occurs before any Session map entry.
 - Verify live projection and envelope-limit failures release the close gate and
   preserve the registered Session, client accounting, and runtime services.
 - Add #8691 child restore phases for index, state selection, selected reads,
@@ -211,13 +229,17 @@ returns the requested replay semantics.
   directories.
 - Instrument reader tests to prove one full sequential index scan plus bounded
   selected seeks, no internal public-page/cache read, at most one aggregate
-  record plus the fixed line cache, and no second scan for recent replay or Goal
-  bootstrap. Cover a dead-branch side-task source, glued fragments, concurrent
+  record in progress plus the fixed line cache and declared final outputs, and
+  no second scan for recent replay, Goal bootstrap, or pending-checkpoint
+  evidence. Cover a dead-branch side-task source, glued fragments, concurrent
   fresh/cached builds, stale pending completion, and failed-read cache admission.
 - Exercise both lease modes, recorder-disabled mode, same-id reservation races,
   every post-model/post-Session teardown point, and Goal migration complete or
   pending when a later step fails. A same-id retry must observe no stale hook,
   observer, pool, telemetry, Config, lease, or map state.
+- Exercise pending Goal checkpoint recovery, attribution commit timing, and a
+  throwing response builder. No restore-time old-loader call, verifier,
+  continuation, attribution mutation, or half-published Session is permitted.
 - Exercise missing file-history backups and due autonomous work: envelope or
   prepare failure appends nothing and emits nothing; successful publication
   restores once, validates once, and arms each buffered notification/cron/timer
@@ -287,6 +309,9 @@ returns the requested replay semantics.
 - [ ] Goal precedence matches `recoverGoalFromRecords()`: newer malformed v2
       records do not hide an earlier valid v2, but unsupported-only v2 history
       blocks legacy fallback.
+- [ ] Pending Goal checkpoint evidence is reduced during the single projection,
+      matches the production evidence-window helper, never calls the old loader,
+      and activates checkpoint/continuation work only after publication.
 - [ ] Active file-history batches preserve last-write-wins, first-insertion,
       100-snapshot cap, and whole-record malformed-skip semantics.
 - [ ] Transcript file-history records are reduced inside the single projection;
@@ -322,8 +347,14 @@ returns the requested replay semantics.
 - [ ] Provisional teardown is independent of the sessions map and leaves no
       Session/Goal hook, observer, MCP pool ownership, telemetry state, Config,
       recorder, or lease after any pre-publication failure.
-- [ ] Notification drain, cron, command timers, and file-history validation do
-      not execute before publication and arm exactly once after it.
+- [ ] Provisional failure leaves process-global attribution unchanged; the
+      projected snapshot is applied once in the successful no-`await` commit.
+- [ ] The complete ACP success value is built before `sessions.set`; a response
+      builder failure leaves no Session, while post-publication activation or
+      reporter failure does not turn the successful restore into an error.
+- [ ] Goal work, notification drains, cron, command timers, file-history
+      validation, and all session-visible callbacks do not execute or emit before
+      publication and arm exactly once after it.
 - [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
       limits, none, action, stream/response mode, and inherited-history policy;
       only identical shapes share a restore and its typed result.
