@@ -115,6 +115,21 @@ export function readPidNamespaceId(): string | null {
 const MACHINE_ID_FILES = ['/etc/machine-id', '/var/lib/dbus/machine-id'];
 
 /**
+ * The literal systemd writes into `/etc/machine-id` when the file is
+ * provisioned but no id has been committed yet — `machine-id(5)` reserves
+ * it for exactly that state, and OSTree-style images (Fedora CoreOS,
+ * rpm-ostree) plus any host between `systemd-firstboot` and
+ * `machine-id-setup --commit` sit in it.
+ *
+ * It has to be rejected explicitly rather than left to the empty-string
+ * check: the file *exists* and is readable, so nothing else would fall
+ * through to the next source. Treating it as an identity would hand every
+ * such host the same `machineId`, which is precisely the "one machine"
+ * verdict {@link readMachineId} exists to withhold.
+ */
+const UNINITIALIZED_MACHINE_ID = 'uninitialized';
+
+/**
  * An opaque identifier for the machine this process is running on, or
  * `null` when none could be read.
  *
@@ -144,7 +159,7 @@ export function readMachineId(): string | null {
   for (const file of MACHINE_ID_FILES) {
     try {
       const id = fs.readFileSync(file, 'utf8').trim();
-      if (id !== '') return id;
+      if (id !== '' && id !== UNINITIALIZED_MACHINE_ID) return id;
     } catch {
       // Not this one; try the next source.
     }

@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readlinkSync } from 'node:fs';
+import { hostname } from 'node:os';
 import {
   isPidAlive,
   isSameProcess,
+  readMachineId,
   readPidNamespaceId,
   readProcStartToken,
 } from './process-liveness.js';
@@ -23,12 +25,30 @@ const procReadFails = vi.hoisted(() => ({ value: false }));
 /** The same, for the `/proc/self/ns/pid` readlink. */
 const nsReadFails = vi.hoisted(() => ({ value: false }));
 
+/**
+ * Stands in for the machine-id sources, which cannot be arranged on the
+ * real filesystem: a path present here is served from the map (a string
+ * is the file's contents, `null` means ENOENT), anything absent falls
+ * through to the real `node:fs`.
+ */
+const machineIdFiles = vi.hoisted(() => new Map<string, string | null>());
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
     default: actual,
     readFileSync: ((...args: unknown[]) => {
+      if (typeof args[0] === 'string' && machineIdFiles.has(args[0])) {
+        const contents = machineIdFiles.get(args[0]);
+        if (contents === null) {
+          throw Object.assign(
+            new Error(`ENOENT: no such file, open '${args[0]}'`),
+            { code: 'ENOENT' },
+          );
+        }
+        return contents;
+      }
       if (procReadFails.value) {
         throw Object.assign(new Error('EACCES: /proc unreadable'), {
           code: 'EACCES',
@@ -214,5 +234,48 @@ describe('readPidNamespaceId', () => {
     } finally {
       nsReadFails.value = false;
     }
+  });
+});
+
+describe('readMachineId', () => {
+  const ETC = '/etc/machine-id';
+  const DBUS = '/var/lib/dbus/machine-id';
+
+  afterEach(() => {
+    machineIdFiles.clear();
+  });
+
+  it('returns the committed id from /etc/machine-id', () => {
+    machineIdFiles.set(ETC, 'd2f0e4b1c3a54e6f8a9b0c1d2e3f4a5b\n');
+    expect(readMachineId()).toBe('d2f0e4b1c3a54e6f8a9b0c1d2e3f4a5b');
+  });
+
+  it("does not accept systemd's 'uninitialized' sentinel as an identity", () => {
+    // OSTree/CoreOS images and any host before `machine-id-setup --commit`
+    // ship this readable, non-empty file. Accepting it makes every such
+    // host report one machineId, so their origin gates open to each other
+    // and one host's sweep unlinks the other's live session records.
+    machineIdFiles.set(ETC, 'uninitialized\n');
+    machineIdFiles.set(DBUS, null);
+    expect(readMachineId()).not.toBe('uninitialized');
+    expect(readMachineId()).toBe(hostname().trim());
+  });
+
+  it('falls through the sentinel to the dbus copy when that one is committed', () => {
+    machineIdFiles.set(ETC, 'uninitialized\n');
+    machineIdFiles.set(DBUS, 'ab12cd34ef56ab78cd90ef12ab34cd56\n');
+    expect(readMachineId()).toBe('ab12cd34ef56ab78cd90ef12ab34cd56');
+  });
+
+  it('falls back to the hostname when no source is readable', () => {
+    machineIdFiles.set(ETC, null);
+    machineIdFiles.set(DBUS, null);
+    expect(readMachineId()).toBe(hostname().trim());
+  });
+
+  it('treats an empty file the same as a missing one', () => {
+    machineIdFiles.set(ETC, '\n');
+    machineIdFiles.set(DBUS, null);
+    expect(readMachineId()).toBe(hostname().trim());
   });
 });
