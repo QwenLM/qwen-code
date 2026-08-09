@@ -259,56 +259,13 @@ function sanitizeProviderWarning(warning: string): string {
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
     const segment = warning.slice(next.index, segmentEnd);
-    const { urlToken, trailing } = splitProviderWarningUrlToken(segment);
-    result += sanitizeProviderBaseUrl(urlToken) + trailing;
+    result += sanitizeProviderBaseUrl(segment);
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
   }
 
   return result + warning.slice(index);
-}
-
-/**
- * Split a URL-leading warning segment into the URL token and trailing prose.
- *
- * Whitespace usually ends the URL, but a space inside userinfo
- * (`https://user:sec ret@host/v1`) must stay in the token so credential
- * stripping can see the terminating `@`. Multi-word gaps before `@`
- * (e.g. ` — contact admin@example.com`) stay in trailing prose.
- */
-function splitProviderWarningUrlToken(segment: string): {
-  urlToken: string;
-  trailing: string;
-} {
-  const urlBreak = segment.search(/[\s'"`<>]/);
-  if (urlBreak === -1) {
-    return { urlToken: segment, trailing: '' };
-  }
-
-  let end = urlBreak;
-  const scheme = segment.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
-  if (scheme && !segment.slice(scheme[0].length, urlBreak).includes('@')) {
-    const rest = segment.slice(urlBreak);
-    const userinfoAt = rest.indexOf('@');
-    if (userinfoAt !== -1) {
-      const gap = rest.slice(0, userinfoAt);
-      if (/^\s*\S+$/.test(gap)) {
-        const afterAt = rest.slice(userinfoAt + 1);
-        const hostPathBreak = afterAt.search(/[\s'"`<>]/);
-        end =
-          urlBreak +
-          userinfoAt +
-          1 +
-          (hostPathBreak === -1 ? afterAt.length : hostPathBreak);
-      }
-    }
-  }
-
-  return {
-    urlToken: segment.slice(0, end),
-    trailing: segment.slice(end),
-  };
 }
 
 function findNextUrlStart(

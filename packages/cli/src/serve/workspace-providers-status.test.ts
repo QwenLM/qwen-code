@@ -588,6 +588,16 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       'Cannot reach https://user:pass@host.io please contact admin@corp.io',
       'Cannot reach https://host.io please contact admin@corp.io',
     ],
+    [
+      'strips multi-word password userinfo from warning URLs',
+      'Failed loading provider https://user:pa ss word@host.io/v1',
+      'Failed loading provider https://host.io/v1',
+    ],
+    [
+      'strips password with embedded at-sign before host',
+      'Failed loading provider https://user:p ss@real@host.io/v1',
+      'Failed loading provider https://host.io/v1',
+    ],
   ])('%s', async (_name, message, expected) => {
     coreMock.throwModelsConfigError = true;
     coreMock.modelsConfigErrorMessage = message;

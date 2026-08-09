@@ -171,9 +171,8 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
   const stripAt = (at: number) =>
     `${baseUrl.slice(0, authorityStart)}${baseUrl.slice(at + 1)}`;
   const authorityEnd = findAuthorityEnd(baseUrl, authorityStart);
-  const authorityAt = baseUrl
-    .slice(authorityStart, authorityEnd)
-    .lastIndexOf('@');
+  const authoritySlice = baseUrl.slice(authorityStart, authorityEnd);
+  const authorityAt = authoritySlice.lastIndexOf('@');
   const authorityAtIndex =
     authorityAt === -1 ? -1 : authorityStart + authorityAt;
 
@@ -185,15 +184,10 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
     if (authorityAtIndex >= authorityStart) {
       return stripAt(authorityAtIndex);
     }
-    // WHATWG accepts spaces in userinfo (encoded as %20), but our authority
-    // span stops at raw whitespace — so `@` can sit past authorityEnd for a
-    // password that contains a space. Strip at the first `@` after authorityEnd
-    // when the gap still looks like userinfo, not trailing prose.
-    const userinfoAt = baseUrl.indexOf('@', authorityEnd);
-    if (userinfoAt !== -1) {
-      const gap = baseUrl.slice(authorityEnd, userinfoAt);
-      if (parsed.password || /^\s*\S+$/.test(gap)) {
-        return stripAt(userinfoAt);
+    if (shouldExtendUserInfoSearch(authoritySlice, parsed)) {
+      const userInfoAt = findExtendedUserInfoAt(baseUrl, authorityEnd);
+      if (userInfoAt !== -1) {
+        return stripAt(userInfoAt);
       }
     }
     return baseUrl;
@@ -211,13 +205,83 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
   return fallbackAt === -1 ? baseUrl : stripAt(fallbackAt);
 }
 
+function shouldExtendUserInfoSearch(
+  authoritySlice: string,
+  parsed: URL,
+): boolean {
+  if (parsed.password) {
+    return true;
+  }
+  if (authoritySlice.includes(':')) {
+    return true;
+  }
+  // A dotted token without ':' is a complete host; trailing prose may follow.
+  return !(authoritySlice.includes('.') && !authoritySlice.includes(':'));
+}
+
+function findExtendedUserInfoAt(baseUrl: string, authorityEnd: number): number {
+  const terminator = baseUrl.charAt(authorityEnd);
+  if (terminator === '/' || terminator === '?' || terminator === '#') {
+    return findLastAtAfter(baseUrl, authorityEnd);
+  }
+  return findHostAtBeforePathOrProse(baseUrl, authorityEnd);
+}
+
+function findHostAtBeforePathOrProse(
+  baseUrl: string,
+  authorityEnd: number,
+): number {
+  const pathStart = findPathDelimiterStart(baseUrl, authorityEnd);
+  let proseEnd = baseUrl.length;
+  for (let i = authorityEnd + 1; i < baseUrl.length; i++) {
+    if (
+      /\s/.test(baseUrl.charAt(i)) &&
+      baseUrl.indexOf('@', authorityEnd) < i
+    ) {
+      proseEnd = i;
+      break;
+    }
+  }
+  const searchEnd = Math.min(pathStart, proseEnd);
+  return findLastAtBefore(baseUrl, authorityEnd, searchEnd);
+}
+
+function findPathDelimiterStart(
+  baseUrl: string,
+  authorityStart: number,
+): number {
+  const slash = baseUrl.indexOf('/', authorityStart);
+  const query = baseUrl.indexOf('?', authorityStart);
+  const hash = baseUrl.indexOf('#', authorityStart);
+  let end = baseUrl.length;
+  if (slash !== -1) end = Math.min(end, slash);
+  if (query !== -1) end = Math.min(end, query);
+  if (hash !== -1) end = Math.min(end, hash);
+  return end;
+}
+
+function findLastAtBefore(baseUrl: string, start: number, end: number): number {
+  const at = baseUrl.slice(start, end).lastIndexOf('@');
+  return at === -1 ? -1 : start + at;
+}
+
+function findLastAtAfter(baseUrl: string, from: number): number {
+  let last = -1;
+  for (let i = from; i < baseUrl.length; i++) {
+    if (baseUrl.charAt(i) === '@') {
+      last = i;
+    }
+  }
+  return last;
+}
+
 function findUnescapedUserInfoFallbackAt(
   baseUrl: string,
   authorityStart: number,
   authorityEnd: number,
 ): number {
-  const at = baseUrl.indexOf('@', authorityEnd);
-  if (at === -1 || at < authorityStart) {
+  const at = findLastAtAfter(baseUrl, authorityEnd);
+  if (at === -1) {
     return -1;
   }
 
