@@ -268,6 +268,14 @@ describe('auto-memory relevant recall', () => {
     }
   });
 
+  it('normalizes document text before matching', () => {
+    expect(
+      selectRelevantAutoMemoryDocuments('API', [
+        memoryDoc('fw-api.md', 'reference', 'ＡＰＩ', '', ''),
+      ])[0]?.filename,
+    ).toBe('fw-api.md');
+  });
+
   it('weights title and description matches above body-only matches', () => {
     const bodyMatch = memoryDoc(
       'body.md',
@@ -288,6 +296,13 @@ describe('auto-memory relevant recall', () => {
       selectRelevantAutoMemoryDocuments('latency dashboard', [
         bodyMatch,
         titleMatch,
+      ])[0]?.filename,
+    ).toBe('title.md');
+
+    expect(
+      selectRelevantAutoMemoryDocuments('user preferences background role', [
+        memoryDoc('body.md', 'user', '', '', 'Background'),
+        memoryDoc('title.md', 'project', 'Background', '', ''),
       ])[0]?.filename,
     ).toBe('title.md');
   });

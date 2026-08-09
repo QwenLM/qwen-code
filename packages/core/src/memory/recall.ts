@@ -195,9 +195,11 @@ function scoreDocument(
     return 0;
   }
 
-  const typeBoost = queryTokens.filter((token) =>
-    TYPE_KEYWORDS[doc.type]?.includes(token),
-  ).length;
+  const typeBoost = Math.min(
+    queryTokens.filter((token) => TYPE_KEYWORDS[doc.type]?.includes(token))
+      .length,
+    2,
+  );
   return lexicalScore + typeBoost;
 }
 
