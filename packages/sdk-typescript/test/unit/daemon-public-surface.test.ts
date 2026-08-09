@@ -19,6 +19,7 @@ import {
 // `src/daemon/index.ts` but not re-exported by the published entry"
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
+  DaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
@@ -27,6 +28,7 @@ import type {
   DaemonChannelNotifyRequest,
   DaemonChannelNotifyResult,
   DaemonChannelPairingApprovalsSnapshot,
+  DaemonChannelPairingSubject,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelDeliveryErrorCode,
@@ -77,6 +79,10 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionRecapResult,
+  DaemonSkillBatchToggleError,
+  DaemonSkillBatchToggleErrorCode,
+  DaemonSkillBatchToggleItem,
+  DaemonSkillBatchToggleResult,
   DaemonSessionRecordingDegradedData,
   DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
@@ -224,6 +230,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelNotifyRequest>().not.toBeNever();
     expectTypeOf<DaemonChannelNotifyResult>().not.toBeNever();
     expectTypeOf<DaemonChannelPairingApprovalsSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingSubject>().not.toBeNever();
     expectTypeOf<DaemonChannelPairingRevocationRequest>().not.toBeNever();
     expectTypeOf<DaemonChannelPairingRevocationResult>().not.toBeNever();
     expectTypeOf<DaemonChannelDeliveryErrorCode>().not.toBeNever();
@@ -291,6 +298,27 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    // Batch Skill toggle surface: type-only imports are erased at vitest
+    // runtime, so the prototype check is the fence that actually executes
+    // here; the shape assertions pin the contract for any tsc pass.
+    expect(typeof Public.DaemonClient.prototype.setWorkspaceSkillsEnabled).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setWorkspaceSkillsEnabled']>>
+    >().toEqualTypeOf<DaemonSkillBatchToggleResult>();
+    expectTypeOf<DaemonSkillBatchToggleItem>().toEqualTypeOf<{
+      skillName: string;
+      enabled: boolean;
+      changed: boolean;
+    }>();
+    expectTypeOf<DaemonSkillBatchToggleError>().toEqualTypeOf<{
+      skillName: string;
+      code: DaemonSkillBatchToggleErrorCode;
+      error: string;
+      reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
@@ -339,6 +367,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // mismatch.
     expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('restore_timeout');
   });
 });
 

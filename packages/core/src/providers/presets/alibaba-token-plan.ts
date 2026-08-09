@@ -45,7 +45,7 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     enableThinking: true,
   },
   { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
-  { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
+  { id: 'deepseek-v4-flash-0731', contextWindowSize: 1000000 },
   { id: 'deepseek-v3.2', contextWindowSize: 131072 },
   {
     id: 'kimi-k2.7-code',
