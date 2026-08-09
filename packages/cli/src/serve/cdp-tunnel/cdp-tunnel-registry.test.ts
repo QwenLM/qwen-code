@@ -189,6 +189,20 @@ describe('CdpTunnelRegistry (Plan C #5626, multi-client #8737)', () => {
     expect(reg.linkCount()).toBe(1);
   });
 
+  it('drops inbound frames from a superseded bridge', () => {
+    const reg = new CdpTunnelRegistry();
+    const stale = endpoint('stale', true);
+    const active = endpoint('active', true);
+    reg.register(stale);
+    reg.register(active);
+    const link = acquire(reg)!;
+    const frame = { type: 'cdp_event', method: 'Page.loadEventFired' };
+
+    expect(reg.routeInboundFrom(stale, frame)).toBe(false);
+    expect(reg.routeInboundFrom(active, frame)).toBe(true);
+    expect(link.frames).toEqual([frame]);
+  });
+
   it('acquireLink without an active bridge returns undefined', () => {
     const reg = new CdpTunnelRegistry();
     expect(acquire(reg)).toBeUndefined();

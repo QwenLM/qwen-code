@@ -53,9 +53,8 @@ lifetime instead of once per session.
 
 `linkId?: string` is added to `cdp_attach`, `cdp_command`, `cdp_release`
 (daemon → extension) and `cdp_result`, `cdp_attached` (extension → daemon).
-`cdp_event` and `cdp_detach` stay untagged: they are broadcast to every link
-(shared single tab — every client observes the same page events, mirroring
-multiple puppeteer clients on one browser).
+`cdp_event` stays untagged and is broadcast to every link. `cdp_detach` is
+tagged for links that held the detached tab; legacy frames remain untagged.
 
 Negotiation: the extension's ACP `initialize` carries
 `clientInfo.cdpMultiClient: true`. The daemon records this on the registered
@@ -68,9 +67,9 @@ the absent `linkId` as the single default link.
 
 - `packages/cli/src/serve/cdp-tunnel/cdp-tunnel-registry.ts` — endpoint gains
   `multiClient` and a link registry; `routeInbound` dispatches tagged
-  `cdp_result`/`cdp_attached` frames to the owning link and broadcasts
-  `cdp_event`/`cdp_detach` to all links; legacy (single-link) routing is
-  preserved for non-multi-client bridges.
+  `cdp_result`/`cdp_attached`/`cdp_detach` frames to the owning link and
+  broadcasts `cdp_event` to all links; legacy (single-link) routing is preserved
+  for non-multi-client bridges.
 - `packages/cli/src/serve/cdp-tunnel/cdp-ws.ts` — `attachCdpClient` acquires a
   link instead of setting exclusive `cdpBound`; per-link teardown on socket
   close; all-links teardown when the extension bridge is superseded/dropped.
@@ -84,13 +83,13 @@ the absent `linkId` as the single default link.
   daemon's `/cdp` requires auth a plain puppeteer client cannot supply).
 - `packages/chrome-extension/src/background/cdp-bridge.ts` — per-link attach
   refcount over the single `chrome.debugger` attachment; results/acks tagged
-  with the requesting `linkId`; events/detach broadcast; `cdp_release`
-  decrements and detaches only when the last link releases; absent `linkId`
-  maps to the default link (old-daemon compat). Tab-switch semantics are
-  unchanged (attach targets the active tab; switching tabs detaches the
-  previous one and broadcasts `cdp_detach`).
+  with the requesting `linkId`; events broadcast and detach notices target
+  links that held the tab; `cdp_release` decrements and detaches only when the
+  last link releases; absent `linkId` maps to the default link (old-daemon
+  compat). Tab-switch semantics are unchanged (attach targets the active tab;
+  switching tabs detaches the previous one and notifies its links).
 - `packages/cli/src/gemini.tsx` + new
-  `packages/cli/src/config/sharedChromeBridge.ts` — after `loadCliConfig`,
+  `packages/cli/src/config/shared-chrome-bridge.ts` — after `loadCliConfig`,
   before `config.initialize()`: probe
   `${QWEN_DAEMON_URL || http://127.0.0.1:4170}/cdp/status` (bounded, ~750 ms
   timeout); when `usable`, rewrite a stdio `chrome-devtools` server whose args

@@ -75,12 +75,13 @@ export function isAutoConnectChromeDevToolsServer(
 ): boolean {
   if (!isStdioLike(cfg)) return false;
   const command = cfg.command;
+  const args = cfg.args ?? [];
   const matchesAdapter =
     name === CHROME_DEVTOOLS_SERVER_NAME ||
     /(^|[\\/])chrome-devtools-mcp(\.(cmd|exe|js))?$/.test(command) ||
-    command.includes('chrome-devtools-mcp');
+    command.includes('chrome-devtools-mcp') ||
+    args.some((arg) => arg.includes('chrome-devtools-mcp'));
   if (!matchesAdapter) return false;
-  const args = cfg.args ?? [];
   const hasExplicitEndpoint = args.some(
     (a) => a === '--wsEndpoint' || a.startsWith('--wsEndpoint='),
   );
@@ -143,7 +144,9 @@ export async function probeDaemonCdpStatus(
 /** The `/cdp` WS endpoint a rerouted adapter should dial. */
 export function cdpWsEndpointFor(env: Readonly<NodeJS.ProcessEnv>): string {
   const base = resolveDaemonUrl(env);
-  const wsBase = base.replace(/^http/i, 'ws');
+  const wsBase = base.replace(/^https?:/i, (scheme) =>
+    scheme.toLowerCase() === 'https:' ? 'wss:' : 'ws:',
+  );
   return `${wsBase}/cdp`;
 }
 
@@ -163,8 +166,9 @@ export async function maybeRouteChromeDevToolsViaDaemonBridge(
 ): Promise<void> {
   try {
     if (env[SHARED_CHROME_BRIDGE_OPT_OUT_ENV]) return;
+    if (config.isSafeMode()) return;
 
-    const servers = config.getMcpServers();
+    const servers = config.getSettingsMcpServers();
     if (!servers) return;
     const candidates = Object.entries(servers).filter(([name, cfg]) =>
       isAutoConnectChromeDevToolsServer(name, cfg),

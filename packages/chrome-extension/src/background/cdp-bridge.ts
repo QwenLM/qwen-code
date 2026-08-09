@@ -17,10 +17,10 @@
  * Single tab, single debugger — but since issue #8737 several `/cdp` clients
  * (links, tagged by `linkId`) share that one debugger attachment: every link
  * that attaches refcounts the attachment, results/acks echo the requesting
- * link, and `cdp_release` detaches only when the last link lets go. Events
- * and detach notices are broadcast — one shared tab means every client sees
- * the same page. Frames without a `linkId` (old daemon) map to the default
- * link and keep the legacy single-client behavior.
+ * link, and `cdp_release` detaches only when the last link lets go. Events are
+ * broadcast because every client sees the same page; detach notices go only
+ * to links that held the detached tab. Frames without a `linkId` (old daemon)
+ * map to the default link and keep the legacy single-client behavior.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
@@ -84,7 +84,7 @@ type CdpOutbound =
       error?: { message: string };
       linkId?: string;
     }
-  | { type: 'cdp_detach'; reason: string };
+  | { type: 'cdp_detach'; reason: string; linkId?: string };
 
 /** Sink that pushes one outbound frame down the daemon `/acp` socket. */
 type CdpSend = (frame: CdpOutbound) => void;
@@ -177,8 +177,8 @@ function onDebuggerEvent(
 
 /**
  * The debugger detached (user opened DevTools, clicked the banner Cancel, the
- * page crashed, or we detached). Notify the daemon so every puppeteer client
- * observes the disconnect, then drop our attachment.
+ * page crashed, or we detached). Notify the links that held this attachment,
+ * then drop it.
  */
 function onDebuggerDetach(
   source: chrome.debugger.Debuggee,
@@ -186,10 +186,19 @@ function onDebuggerDetach(
 ): void {
   if (attachedTabId === null || source.tabId !== attachedTabId) return;
   console.log(LOG_PREFIX, 'debugger detached:', reason);
-  if (activeSend) {
-    activeSend({ type: 'cdp_detach', reason: reason || 'target_closed' });
-  }
+  notifyAttachedLinksOfDetach(reason || 'target_closed');
   teardownAttachment();
+}
+
+function notifyAttachedLinksOfDetach(reason: string): void {
+  if (!activeSend) return;
+  for (const linkId of attachedLinks) {
+    activeSend({
+      type: 'cdp_detach',
+      reason,
+      ...(linkId !== DEFAULT_LINK_ID ? { linkId } : {}),
+    });
+  }
 }
 
 /** Remove our debugger listeners and forget the attached tab and all links. */
@@ -291,13 +300,11 @@ async function runAttachFlow(
 
     // Switching to a different tab (or first attach): the previous tab's
     // links lose their debugger, so tell the daemon (it closes their
-    // puppeteer sockets) before we move on. The explicit broadcast keeps
-    // every client's view consistent — Chrome's own onDetach for a
-    // self-detach is racy with the re-attach below, so don't rely on it.
+    // puppeteer sockets) before we move on. Chrome's own onDetach for a
+    // self-detach is racy with the re-attach below, so notify those links
+    // explicitly instead of relying on it.
     if (attachedTabId !== null) {
-      if (activeSend) {
-        activeSend({ type: 'cdp_detach', reason: 'target_switched' });
-      }
+      notifyAttachedLinksOfDetach('target_switched');
       const prev = attachedTabId;
       teardownAttachment();
       await new Promise<void>((resolve) => {
@@ -338,7 +345,7 @@ async function runAttachFlow(
     chrome.debugger.onDetach.addListener(onDebuggerDetach);
     startAttachKeepalive();
 
-    return tabInfoOf(tabId);
+    return await tabInfoOf(tabId);
   } finally {
     attachInFlight = null;
   }
@@ -374,7 +381,9 @@ async function handleAttach(
         ...(frame.linkId !== undefined ? { linkId: frame.linkId } : {}),
       });
       if (attachedLinks.size === 0) {
-        shutdownCdpBridge();
+        queueMicrotask(() => {
+          if (attachedLinks.size === 0) shutdownCdpBridge();
+        });
       }
       return;
     }
@@ -394,6 +403,7 @@ async function handleAttach(
       ...(frame.linkId !== undefined ? { linkId: frame.linkId } : {}),
     });
   } catch (e) {
+    releasedDuringAttach.delete(linkId);
     const message = e instanceof Error ? e.message : String(e);
     console.warn(LOG_PREFIX, 'attach failed:', message);
     send({

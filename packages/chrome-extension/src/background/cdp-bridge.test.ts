@@ -20,12 +20,17 @@ interface ChromeHarness {
 
 function installChromeHarness(options?: {
   deferAttach?: boolean;
+  deferTabGet?: boolean;
   deferTabQuery?: boolean;
 }): ChromeHarness & {
   finishAttach(): void;
+  finishTabGet(): void;
   finishTabQuery(): void;
 } {
   let attachCallback: (() => void) | undefined;
+  const tabGetResolvers: Array<
+    (tab: { id: number; url: string; title: string }) => void
+  > = [];
   const tabQueryResolvers: Array<(tabs: Array<{ id: number }>) => void> = [];
   const debuggerEventListeners: ChromeHarness['debuggerEventListeners'] = [];
   const debuggerDetachListeners: ChromeHarness['debuggerDetachListeners'] = [];
@@ -73,10 +78,15 @@ function installChromeHarness(options?: {
           ? new Promise((res) => tabQueryResolvers.push(res))
           : Promise.resolve([{ id: 7 }]),
       ),
-      get: vi.fn().mockResolvedValue({
-        id: 7,
-        url: 'https://example.test',
-        title: 'Page',
+      get: vi.fn(() => {
+        const tab = {
+          id: 7,
+          url: 'https://example.test',
+          title: 'Page',
+        };
+        return options?.deferTabGet
+          ? new Promise((resolve) => tabGetResolvers.push(resolve))
+          : Promise.resolve(tab);
       }),
     },
     runtime: {
@@ -93,6 +103,15 @@ function installChromeHarness(options?: {
     debuggerDetachListeners,
     finishAttach() {
       attachCallback?.();
+    },
+    finishTabGet() {
+      while (tabGetResolvers.length) {
+        tabGetResolvers.shift()!({
+          id: 7,
+          url: 'https://example.test',
+          title: 'Page',
+        });
+      }
     },
     finishTabQuery() {
       while (tabQueryResolvers.length) {
@@ -370,6 +389,132 @@ describe('CDP bridge', () => {
     );
   });
 
+  it('keeps a concurrent joiner attached when the owner releases in flight', async () => {
+    const chromeHarness = installChromeHarness({ deferAttach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() => expect(chromeHarness.attach).toHaveBeenCalledOnce());
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+    chromeHarness.finishAttach();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cdp_attached',
+          id: 2,
+          linkId: 'cdp-link-2',
+        }),
+      ),
+    );
+    expect(chromeHarness.detach).not.toHaveBeenCalled();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 }),
+    );
+  });
+
+  it('does not retain a joiner released while tab metadata is pending', async () => {
+    const chromeHarness = installChromeHarness({ deferTabGet: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-2' }),
+      send,
+    );
+    chromeHarness.finishTabGet();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 2,
+        error: { message: 'released during attach' },
+        linkId: 'cdp-link-2',
+      }),
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 }),
+    );
+  });
+
+  it('clears an in-flight release after a failed attach', async () => {
+    const chromeHarness = installChromeHarness({ deferAttach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() => expect(chromeHarness.attach).toHaveBeenCalledOnce());
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+    (chrome.runtime as { lastError: unknown }).lastError = {
+      message: 'attach failed',
+    };
+    chromeHarness.finishAttach();
+    (chrome.runtime as { lastError: unknown }).lastError = undefined;
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 1,
+        error: { message: 'attach failed' },
+        linkId: 'cdp-link-1',
+      }),
+    );
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.attach).toHaveBeenCalledTimes(2),
+    );
+    chromeHarness.finishAttach();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cdp_attached',
+          id: 2,
+          linkId: 'cdp-link-1',
+        }),
+      ),
+    );
+  });
+
   it('results echo the requesting linkId', async () => {
     installChromeHarness();
     const bridge = await loadBridge();
@@ -494,7 +639,7 @@ describe('CDP bridge', () => {
     );
   });
 
-  it('attaching to a switched tab broadcasts cdp_detach and re-attaches', async () => {
+  it('attaching to a switched tab detaches its old links and re-attaches', async () => {
     const chromeHarness = installChromeHarness();
     const bridge = await loadBridge();
     const send = vi.fn();
@@ -518,7 +663,12 @@ describe('CDP bridge', () => {
       expect(send).toHaveBeenCalledWith({
         type: 'cdp_detach',
         reason: 'target_switched',
+        linkId: 'cdp-link-1',
       }),
+    );
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
     );
     await vi.waitFor(() =>
       expect(chromeHarness.attach).toHaveBeenCalledWith(

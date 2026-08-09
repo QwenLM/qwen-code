@@ -44,8 +44,8 @@ export const CDP_FRAME_TYPES = {
 /**
  * Routing key for multi-client bridges (issue #8737): identifies the `/cdp`
  * puppeteer connection a frame belongs to. Optional on every frame — absent on
- * legacy single-client bridges, and `cdp_event`/`cdp_detach` are broadcast to
- * every link (one shared tab), so they never carry it.
+ * legacy single-client bridges. Events remain untagged and are broadcast;
+ * detach notices carry the link that held the detached tab.
  */
 export type CdpLinkId = string;
 
@@ -131,6 +131,8 @@ export interface CdpAttachedFrame {
 export interface CdpDetachFrame {
   type: 'cdp_detach';
   reason?: string;
+  /** Link that held the detached tab; absent on legacy bridges. */
+  linkId?: CdpLinkId;
 }
 
 type CdpInboundFrame =

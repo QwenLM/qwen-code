@@ -16,10 +16,10 @@
  * Multi-client (issue #8737): a bridge whose extension negotiated
  * `clientInfo.cdpMultiClient` hosts N concurrent `/cdp` puppeteer links, each
  * identified by a minted `linkId` carried on `cdp_*` frames. Tagged
- * `cdp_result`/`cdp_attached` frames route to the owning link;
- * `cdp_event`/`cdp_detach` broadcast to every link (one shared tab). A legacy
- * bridge (no flag) keeps exact single-client semantics: the second link is
- * refused, and untagged frames route to the sole link.
+ * `cdp_result`/`cdp_attached`/`cdp_detach` frames route to the owning link;
+ * `cdp_event` broadcasts to every link (one shared tab). A legacy bridge (no
+ * flag) keeps exact single-client semantics: the second link is refused, and
+ * untagged frames route to the sole link.
  */
 
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -198,6 +198,13 @@ export class CdpTunnelRegistry {
       return true;
     }
     return false;
+  }
+
+  routeInboundFrom(
+    endpoint: CdpBridgeEndpoint,
+    frame: Record<string, unknown>,
+  ): boolean {
+    return this.active === endpoint && this.routeInbound(frame);
   }
 
   /** Notify and unbind every link (bridge gone / superseded). */

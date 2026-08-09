@@ -421,11 +421,14 @@ Example:
   `--autoConnect` dials Chrome from every Qwen Code process, so each session
   (and every MCP restart) pops the dialog again. To get one consent per
   machine instead of one per session, run `qwen serve` with the Qwen Code
-  Chrome extension connected and keep the same `chrome-devtools` config: the
-  CLI automatically routes the server through the daemon’s shared `/cdp`
-  bridge (`chrome.debugger`-based, no consent dialog) when it is available.
+  Chrome extension connected via
+  `qwen serve --allow-origin chrome-extension://<extension-id>` and keep the
+  same `chrome-devtools` config: the CLI automatically routes the server
+  through the daemon's shared `/cdp` bridge (`chrome.debugger`-based, no
+  consent dialog) when it is available.
   See [Qwen Serve](../qwen-serve.md) and the
   [Chrome extension README](../../../packages/chrome-extension/README.md).
+  Restart Qwen Code after editing MCP settings to reapply the shared route.
   Set `QWEN_NO_SHARED_CHROME_BRIDGE=1` to keep dialing Chrome directly.
 
 ## Reference

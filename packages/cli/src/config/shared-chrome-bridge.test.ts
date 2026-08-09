@@ -37,6 +37,12 @@ describe('isAutoConnectChromeDevToolsServer', () => {
     ).toBe(true);
   });
 
+  it('matches an npx-wrapped adapter under another server name', () => {
+    expect(
+      isAutoConnectChromeDevToolsServer('my-chrome', AUTO_CONNECT_SERVER),
+    ).toBe(true);
+  });
+
   it('ignores servers without --autoConnect', () => {
     expect(
       isAutoConnectChromeDevToolsServer('chrome-devtools', {
@@ -126,6 +132,12 @@ describe('cdpWsEndpointFor', () => {
       cdpWsEndpointFor({ QWEN_DAEMON_URL: 'http://127.0.0.1:5999/' }),
     ).toBe('ws://127.0.0.1:5999/cdp');
   });
+
+  it('normalizes an uppercase HTTPS daemon URL', () => {
+    expect(cdpWsEndpointFor({ QWEN_DAEMON_URL: 'HTTPS://daemon:4170' })).toBe(
+      'wss://daemon:4170/cdp',
+    );
+  });
 });
 
 function statusResponse(status: number, body: CdpStatusResponse): typeof fetch {
@@ -187,6 +199,8 @@ function configStub(servers: Record<string, MCPServerConfig>): {
   const setMcpServers = vi.fn();
   const config = {
     getMcpServers: () => servers,
+    getSettingsMcpServers: () => servers,
+    isSafeMode: () => false,
     setMcpServers,
   } as unknown as Config;
   return { config, setMcpServers };
@@ -235,6 +249,33 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
     });
   });
 
+  it('preserves settings servers hidden by the allow-list', async () => {
+    const settingsServers = {
+      'chrome-devtools': AUTO_CONNECT_SERVER,
+      filesystem: { command: 'npx', args: ['-y', 'some-fs-server'] },
+    };
+    const setMcpServers = vi.fn();
+    const config = {
+      getMcpServers: () => ({
+        'chrome-devtools': AUTO_CONNECT_SERVER,
+      }),
+      getSettingsMcpServers: () => settingsServers,
+      isSafeMode: () => false,
+      setMcpServers,
+    } as unknown as Config;
+
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      {},
+      () => {},
+      statusResponse(200, USABLE),
+    );
+
+    expect(setMcpServers.mock.calls[0]?.[0]).toMatchObject({
+      filesystem: settingsServers.filesystem,
+    });
+  });
+
   it('keeps the user config when the bridge is not usable', async () => {
     const { config, setMcpServers } = configStub({
       'chrome-devtools': AUTO_CONNECT_SERVER,
@@ -245,6 +286,24 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
       () => {},
       statusResponse(200, { ...USABLE, usable: false }),
     );
+    expect(setMcpServers).not.toHaveBeenCalled();
+  });
+
+  it('does not reroute MCP servers in safe mode', async () => {
+    const { config, setMcpServers } = configStub({
+      'chrome-devtools': AUTO_CONNECT_SERVER,
+    });
+    vi.spyOn(config, 'isSafeMode').mockReturnValue(true);
+    const fetchImpl = vi.fn();
+
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      {},
+      () => {},
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
     expect(setMcpServers).not.toHaveBeenCalled();
   });
 

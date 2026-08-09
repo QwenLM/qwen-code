@@ -102,7 +102,7 @@ export function attachCdpClient(
   link.bindEmulator(emulator);
 
   // Inbound extension `cdp_*` frames tagged with this `linkId` (plus broadcast
-  // events/detach) route through THIS link while the puppeteer client is bound.
+  // events) route through THIS link while the puppeteer client is bound.
   binding.routeInbound = (frame: Record<string, unknown>) =>
     link.handleInbound(frame);
 

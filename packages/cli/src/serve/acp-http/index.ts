@@ -1877,7 +1877,8 @@ export function mountAcpHttp(
               parsed !== null &&
               typeof parsed === 'object' &&
               isCdpInboundFrameType(frameType) &&
-              opts.cdpTunnelRegistry.routeInbound(
+              opts.cdpTunnelRegistry.routeInboundFrom(
+                cdpEndpoint,
                 parsed as Record<string, unknown>,
               )
             ) {
@@ -2087,7 +2088,8 @@ export function mountAcpHttp(
             typeof parsed === 'object' &&
             isCdpInboundFrameType((parsed as { type?: unknown }).type)
           ) {
-            opts.cdpTunnelRegistry.routeInbound(
+            opts.cdpTunnelRegistry.routeInboundFrom(
+              cdpEndpoint,
               parsed as Record<string, unknown>,
             );
             return;
