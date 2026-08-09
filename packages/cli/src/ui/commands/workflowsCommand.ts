@@ -26,27 +26,68 @@ type WorkflowDisplayEntry = Omit<WorkflowTask, 'status'> & {
   resumeBlockedReason?: string;
 };
 
+/**
+ * Sanitize a persisted string that is interpolated into a single line.
+ *
+ * `sanitizeTerminalText` deliberately keeps TAB and LF, because they
+ * legitimately structure multi-line output — but every field sanitized
+ * through this helper renders inside one line, where a surviving LF lets
+ * a crafted record forge extra listing rows or extra detail fields. Strip
+ * the control bytes first, then flatten the layout characters.
+ */
+function sanitizeLine(value: string): string {
+  return sanitizeTerminalText(value).replace(/[\t\n]+/g, ' ');
+}
+
 function recordToDisplay(s: WorkflowRunRecord): WorkflowDisplayEntry {
+  // Every string below is untrusted content rather than a runId: a v2
+  // `manifest.json` or a legacy `wf_<hex>.json` in the project's workflows
+  // dir is parsed with string type-checks only, so ESC/OSC bytes in any of
+  // these fields survive into `rowLine` (whose 80-char slices keep ESC)
+  // and `detailLines` — enough for cursor/title manipulation, OSC 52
+  // clipboard writes and output spoofing. This function is the one
+  // boundary where a record becomes display text, so the whole rendered
+  // family is sanitized here rather than at each render site.
+  const phases = (s.phases ?? []).map(sanitizeLine);
+  const meta = s.meta
+    ? {
+        ...s.meta,
+        name: sanitizeLine(s.meta.name),
+        description: sanitizeLine(s.meta.description),
+        ...(s.meta.whenToUse === undefined
+          ? {}
+          : { whenToUse: sanitizeLine(s.meta.whenToUse) }),
+      }
+    : s.meta;
+
   return {
     id: s.runId,
     kind: 'workflow',
     runId: s.runId,
-    description: s.meta?.name ?? s.runId,
-    meta: s.meta,
+    description: meta?.name ?? s.runId,
+    meta,
     status: s.status,
     currentPhase: null,
-    phases: s.phases ?? [],
+    phases,
     agentsDispatched: s.agentsDispatched ?? 0,
     agentsCompleted: s.agentsCompleted ?? 0,
-    recentLogs: s.recentLogs ?? [],
+    recentLogs: (s.recentLogs ?? []).map(sanitizeLine),
     tokensSpent: s.tokensSpent ?? 0,
     tokenBudgetTotal: s.tokenBudgetTotal ?? null,
-    perPhaseTokens: new Map(s.perPhaseTokens ?? []),
+    // Keyed by phase name, and `detailLines` looks each phase up by the
+    // sanitized string — so the keys have to go through the same pass or
+    // a phase carrying control bytes silently loses its token chip.
+    perPhaseTokens: new Map(
+      (s.perPhaseTokens ?? []).map(([phase, tokens]) => [
+        phase === null ? null : sanitizeLine(phase),
+        tokens,
+      ]),
+    ),
     pendingApprovals: [],
     script: s.script ?? '',
     scriptPath: s.scriptPath,
     result: s.result,
-    error: s.error,
+    error: s.error === undefined ? undefined : sanitizeLine(s.error),
     startTime: s.startTime,
     endTime: s.endTime,
     outputFile: '',
@@ -54,18 +95,10 @@ function recordToDisplay(s: WorkflowRunRecord): WorkflowDisplayEntry {
     notified: true,
     abortController: new AbortController(),
     canResume: s.canResume,
-    // Both sources of this string are untrusted content, not a runId: a
-    // legacy `wf_<hex>.json` whose JSON.parse error message quotes the
-    // raw input back, and a v2 manifest whose `resumeBlockedReason`
-    // parseManifest only checks is a string. Both reach the terminal
-    // verbatim through `rowLine` (the 80-char slice keeps ESC) and the
-    // detail view, which is enough for OSC 52 clipboard writes and
-    // output spoofing. Sanitized here, at the one boundary where a
-    // record becomes display text.
     resumeBlockedReason:
       s.resumeBlockedReason === undefined
         ? undefined
-        : sanitizeTerminalText(s.resumeBlockedReason),
+        : sanitizeLine(s.resumeBlockedReason),
   } as WorkflowDisplayEntry;
 }
 

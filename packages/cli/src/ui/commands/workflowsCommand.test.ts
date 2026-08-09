@@ -789,6 +789,69 @@ describe('workflowsCommand', () => {
       expect(detail.content).toContain('disk write failed');
     });
 
+    // Same vector as the recovery-reason case, through the rest of the
+    // rendered family. `parseManifest` type-checks these as strings only,
+    // so a crafted manifest in the project's workflows dir carries ESC/OSC
+    // bytes all the way into both render paths.
+    it('strips terminal control bytes from every rendered manifest string', async () => {
+      getMock.mockReturnValue(undefined);
+      const esc = '\u001b]0;pwned\u0007';
+      const ctx = await ctxWithManifest({
+        runId: 'wf_badc0de',
+        status: 'failed',
+        meta: {
+          name: `${esc}evil-name`,
+          description: `${esc}evil-description`,
+          whenToUse: `${esc}evil-when`,
+        },
+        error: `${esc}boom`,
+        recentLogs: [`${esc}log line`],
+        phases: [`${esc}phase one`],
+        perPhaseTokens: new Map([[`${esc}phase one`, 42]]),
+      });
+
+      const listing = await workflowsCommand.action!(ctx, '');
+      const detail = await workflowsCommand.action!(ctx, 'wf_badc0de');
+      if (!listing || listing.type !== 'message') throw new Error('no result');
+      if (!detail || detail.type !== 'message') throw new Error('no result');
+
+      expect(listing.content).not.toContain('\u001b');
+      expect(detail.content).not.toContain('\u001b');
+      // Sanitizing must not swallow the content itself.
+      expect(detail.content).toContain('evil-name');
+      expect(detail.content).toContain('evil-description');
+      expect(detail.content).toContain('evil-when');
+      expect(detail.content).toContain('boom');
+      expect(detail.content).toContain('log line');
+      expect(detail.content).toContain('phase one');
+      // The token chip still resolves, so the map keys went through the
+      // same sanitizing pass as the phase list.
+      expect(detail.content).toContain('42t');
+    });
+
+    // A kept LF would let a crafted record forge extra rows and extra
+    // detail fields, which is why the single-line helper flattens it.
+    it('flattens newlines in single-line manifest fields', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithManifest({
+        runId: 'wf_badc0de',
+        status: 'failed',
+        error: 'boom\n  status      : completed',
+      });
+
+      const detail = await workflowsCommand.action!(ctx, 'wf_badc0de');
+      if (!detail || detail.type !== 'message') throw new Error('no result');
+
+      const lines = detail.content.split('\n');
+      // The payload stays inside the error row instead of becoming a row
+      // of its own, so it cannot impersonate a real status field.
+      expect(lines.some((l) => l.startsWith('  error       : boom'))).toBe(
+        true,
+      );
+      expect(lines).not.toContain('  status      : completed');
+      expect(lines).toContain('  status      : failed');
+    });
+
     it('never routes pause or resume to an interrupted persisted run', async () => {
       getMock.mockReturnValue(undefined);
       const ctx = await ctxWithManifest({
