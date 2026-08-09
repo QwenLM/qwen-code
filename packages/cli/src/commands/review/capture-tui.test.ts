@@ -7,11 +7,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -634,9 +632,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         '--cwd',
       ],
       ['settle bound', { settleMs: -1 }, '--settle-ms'],
-    ] as ReadonlyArray<
-      readonly [string, Record<string, unknown>, string]
-    >) {
+    ] as ReadonlyArray<readonly [string, Record<string, unknown>, string]>) {
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-boundstale-'));
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
@@ -992,41 +988,59 @@ describe('capture-tui without tmux (probe seam)', () => {
       // signature cannot be verified — and unverified is not permission to
       // delete: the artifact names are not reserved, so what sits there may
       // be the user's. This run refuses; the files stay. (The sentinel is
-      // this tool's alone and clears unconditionally.) Real fd exhaustion
-      // drives the EMFILE: vi.spyOn on node:fs does not reach this module's
-      // named imports. (win32 skipped: its handle limit is high enough to
-      // exhaust the loop's budget before the process's.)
+      // this tool's alone and clears unconditionally.)
+      //
+      // Driven from a CHILD, and that is not incidental: vitest runs test
+      // files in worker THREADS that share one process fd table, so
+      // exhausting it in-process starves whatever else happens to be
+      // running — measured, this test passed alone 3/3 while the full
+      // review suite failed here and timed out an unrelated hadolint test
+      // in the same run. A child contains the blast radius, and real
+      // exhaustion is still what drives the EMFILE (vi.spyOn on node:fs
+      // does not reach this module's named imports).
+      let captureTuiTs = join(
+        process.cwd(),
+        'src/commands/review/capture-tui.ts',
+      );
+      if (!existsSync(captureTuiTs)) {
+        captureTuiTs = join(
+          process.cwd(),
+          'packages/cli/src/commands/review/capture-tui.ts',
+        );
+      }
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-staleprobe-'));
-      const fds: number[] = [];
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
         writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
         writeFileSync(join(dir, 'cap.holder-ready'), '');
-        const fdSource = join(dir, 'fd-source');
-        writeFileSync(fdSource, 'x');
-        for (;;) {
-          try {
-            fds.push(openSync(fdSource, 'r'));
-          } catch {
-            break; // EMFILE/ENFILE — the process is out of descriptors
-          }
-        }
-        const { stderr } = await withStdio(() =>
-          runCaptureTui({
-            command: 'printf hi',
-            cwd: undefined,
-            cols: 80,
-            rows: 24,
-            settleMs: 0,
-            until: undefined,
-            keys: undefined,
-            out: join(dir, 'cap'),
-            timeoutMs: 1000,
-          } as never),
+        const driver = join(dir, 'driver-emfile.mts');
+        writeFileSync(
+          driver,
+          [
+            `const { openSync, writeFileSync } = await import('node:fs');`,
+            `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
+            `mod.probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' });`,
+            `const fdSource = ${JSON.stringify(join(dir, 'fd-source'))};`,
+            `writeFileSync(fdSource, 'x');`,
+            `for (;;) { try { openSync(fdSource, 'r'); } catch { break; } }`,
+            `await mod.runCaptureTui({ command: 'printf hi', cwd: undefined, cols: 80, rows: 24, settleMs: 0, until: undefined, keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 1000 } as never);`,
+          ].join('\n'),
         );
-        expect(process.exitCode).toBe(3);
-        expect(stderr).toContain('not writable');
+        const { spawn } = await import('node:child_process');
+        const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+          cwd: process.cwd(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        child.stdout.on('data', (b: Buffer) => (out += b.toString()));
+        child.stderr.on('data', (b: Buffer) => (out += b.toString()));
+        const code = await new Promise<number | null>((resolve) =>
+          child.once('exit', (c) => resolve(c)),
+        );
+        expect(code).toBe(3);
+        expect(out).toContain('not writable');
+        // Unverifiable is not permission to delete.
         expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
         expect(existsSync(join(dir, 'cap.png'))).toBe(true);
         expect(existsSync(join(dir, 'cap.json'))).toBe(true);
@@ -1034,18 +1048,11 @@ describe('capture-tui without tmux (probe seam)', () => {
         // here, by design, outside the signature guard.
         expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
       } finally {
-        for (const fd of fds) {
-          try {
-            closeSync(fd);
-          } catch {
-            // Already closed — every descriptor is tried exactly once.
-          }
-        }
         rmSync(dir, { recursive: true, force: true });
       }
     },
+    60_000,
   );
-
   it('holds the exit-3 contract when the stdout reader is GONE — EPIPE-proof', async () => {
     // withStdio mocks the streams, so no in-process test can raise a real
     // EPIPE; a child whose stdout pipe closes early can. Without the guard
