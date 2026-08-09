@@ -1162,6 +1162,19 @@ function classifyContentOnlyThinkingTagPrefix(
     if (tagLength === null) return 'pending';
     if (tagLength === undefined) return 'clean';
     rest = rest.slice(tagLength).trimStart();
+    // An opening tag followed by ordinary text is only a legitimate literal
+    // if a closing tag still balances it later. Without one, the turn is an
+    // unclosed thinking block — the exact shape of the recorded production
+    // leaks (issue #6666). Hold it mid-stream (a closing tag may still
+    // arrive) and reject it once the stream finishes. Whitespace-only tails
+    // stay undecided: they may still resolve into a closing tag.
+    if (
+      closing === false &&
+      /\S/.test(rest) &&
+      !/<\/think(?:ing)?\s*>/i.test(rest)
+    ) {
+      return streamFinished ? 'leaked' : 'pending';
+    }
   }
 
   let depth = 1;
@@ -1564,11 +1577,24 @@ export function convertOpenAIChunkToGemini(
         Boolean(choice.finish_reason) &&
         !closingTagName &&
         !/\S/.test(combinedCandidateText);
+      // The length cap releases undecided prefixes (e.g. a literal "<t" that
+      // never resolves) so ordinary content is not buffered forever. Once the
+      // candidate has committed to a complete opening tag with real content,
+      // though, releasing it leaks the whole block — production thinking-tag
+      // leaks are longer than the cap (issue #6666). Keep those held; the
+      // finish-time branch below rejects them as PROTOCOL_TAG_LEAK.
+      const confirmedOpeningTagCandidate =
+        LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
+        !combinedCandidateText.trimStart().startsWith('</') &&
+        /\S/.test(
+          combinedCandidateText.replace(LEADING_THINKING_TAG_PATTERN, ''),
+        );
       const releaseContentOnlyCandidate =
         contentOnlyThinkingState === 'pending' &&
         (Boolean(choice.finish_reason) ||
-          combinedCandidateText.trimStart().length >
-            MAX_THINKING_TAG_CANDIDATE_LENGTH);
+          (!confirmedOpeningTagCandidate &&
+            combinedCandidateText.trimStart().length >
+              MAX_THINKING_TAG_CANDIDATE_LENGTH));
 
       if (contentOnlyThinkingState === 'leaked') {
         throwProtocolTagLeak(requestContext);

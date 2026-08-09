@@ -15,7 +15,6 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
-import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import {
@@ -43,11 +42,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     cliConfig: Config,
   ) {
     super(contentGeneratorConfig, cliConfig);
-  }
-
-  getResponseParsingOptions(): OpenAIResponseParsingOptions {
-    // ponytail: DashScope-only fallback; remove after provider output stabilizes.
-    return { contentOnlyThinkingTagLeaks: true };
   }
 
   /**

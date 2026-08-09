@@ -544,6 +544,57 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('rejects the recorded production unclosed <thinking> content leak (issue #6666)', () => {
+      // Production capture shape (sanitized): a hybrid-thinking model
+      // skipped the reasoning channel entirely and streamed its thinking as
+      // literal <thinking> text inside content — no reasoning_content on
+      // any chunk, no tool calls, and the tag is never closed before stop.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thi' }),
+        stream,
+      );
+      const body = converter.convertOpenAIChunkToGemini(
+        streamChunk('body', {
+          content:
+            'nking>\nThe user wants to query the compute resources for ' +
+            'project space 10088. Let me check the available APIs.',
+        }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(body.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('leaks the production <thinking> shape without provider provenance', () => {
+      // Control for the test above: without contentOnlyThinkingTagLeaks the
+      // same stream passes through verbatim — the defense is provider-gated,
+      // so endpoints whose provider does not opt in remain exposed.
+      const stream = withStreamParser();
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'literal',
+          {
+            content:
+              '<thinking>\nThe user wants to query the compute resources.',
+          },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        {
+          text: '<thinking>\nThe user wants to query the compute resources.',
+        },
+      ]);
+    });
+
     it.each([
       ['split literal block', ['<thi', 'nk>literal</think>']],
       ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],

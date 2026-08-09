@@ -4,6 +4,7 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
+import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
@@ -121,6 +122,17 @@ export class DefaultOpenAICompatibleProvider
 
   getDefaultGenerationConfig(): GenerateContentConfig {
     return {};
+  }
+
+  getResponseParsingOptions(): OpenAIResponseParsingOptions {
+    // Hybrid-thinking models occasionally bypass the reasoning channel and
+    // emit their thinking as literal <think>/<thinking> tags inside content
+    // (observed in production on qwen3-class models, issue #6666). Enable
+    // the conservative content-only leak fallback for every OpenAI-compatible
+    // endpoint: the converter gates it to turns that START with a thinking
+    // tag and carry no structured reasoning or prior visible content, so
+    // literal tag text inside normal replies is untouched.
+    return { contentOnlyThinkingTagLeaks: true };
   }
 
   /**
