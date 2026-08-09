@@ -282,14 +282,24 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       description: '界'.repeat(500),
       mtimeMs: index,
     }));
-    vi.mocked(runSideQuery).mockResolvedValue({ selected_memories: [] });
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      const error = options.validate?.({
+        selected_memories: ['/tmp/bounded-199.md'],
+      });
+      if (error) {
+        throw new Error(error);
+      }
+      return { selected_memories: [] };
+    });
 
-    await selectRelevantAutoMemoryDocumentsByModel(
-      mockConfig,
-      'semantic-only request',
-      largeDocs,
-      5,
-    );
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'semantic-only request',
+        largeDocs,
+        5,
+      ),
+    ).rejects.toThrow('Recall selector returned unknown file path');
 
     const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
     const text = content?.parts?.[0]?.text ?? '';
