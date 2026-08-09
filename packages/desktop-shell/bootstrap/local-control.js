@@ -26,7 +26,7 @@ function render(state) {
   qr.innerHTML = enabled ? state.qrSvg || '' : '';
   url.textContent = enabled ? state.url || '' : '';
   sleep.textContent = state.sleepInhibited
-    ? 'Your Mac will stay awake while Local Control is on.'
+    ? 'Your computer will stay awake while Local Control is on.'
     : 'Local Control is on, but sleep prevention is unavailable.';
   error.hidden = true;
   error.textContent = '';

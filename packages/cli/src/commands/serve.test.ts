@@ -180,6 +180,11 @@ describe('serve command args', () => {
     expect(() => buildParser().parseSync('--local-control --port 0')).toThrow(
       /Local Control requires a fixed port/,
     );
+    for (const port of ['-1', '1.5', '65536']) {
+      expect(() =>
+        buildParser().parseSync(`--local-control --port ${port}`),
+      ).toThrow(/Local Control requires a fixed port/);
+    }
     expect(() =>
       buildParser().parseSync('--local-control --hostname 192.168.1.2'),
     ).toThrow(/Local Control manages its hostname/);
@@ -446,6 +451,7 @@ describe('serve rate limit env parsing', () => {
     expect(options.allowOrigins).not.toContain('*');
     expect(options.allowOrigins).toContain('https://127.0.0.1');
     expect(stdoutWrites.join('')).toContain('Local Control is on');
+    expect(stdoutWrites.join('')).toContain('Restart after changing networks');
     expect(stdoutWrites.join('')).toContain('Sleep inhibition is best effort');
     expect(stdoutWrites.join('')).toContain(
       'Traffic is encrypted only when --tls-cert and --tls-key are set',

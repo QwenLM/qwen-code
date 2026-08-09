@@ -96,7 +96,7 @@ async function showLocalControlPairing(
     });
   }
   writeStdoutLine(
-    '\nKeep this terminal open. Sleep inhibition is best effort. Traffic is encrypted only when --tls-cert and --tls-key are set. Press Ctrl+C to turn Local Control off.',
+    '\nKeep this terminal open. Restart after changing networks. Sleep inhibition is best effort. Traffic is encrypted only when --tls-cert and --tls-key are set. Press Ctrl+C to turn Local Control off.',
   );
 }
 
@@ -355,7 +355,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
-        if (argv['local-control'] === true && argv['port'] === 0) {
+        if (
+          argv['local-control'] === true &&
+          (!Number.isInteger(argv['port']) ||
+            argv['port'] < 1 ||
+            argv['port'] > 65535)
+        ) {
           throw new Error('Local Control requires a fixed port.');
         }
         if (

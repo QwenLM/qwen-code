@@ -65,7 +65,9 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_menu_event(|app, event| {
             if event.id() == "local-control" {
-                let _ = show_local_control_window(app);
+                if let Err(error) = show_local_control_window(app) {
+                    eprintln!("{error}");
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
