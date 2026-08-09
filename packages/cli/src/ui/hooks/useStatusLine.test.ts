@@ -396,6 +396,13 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
+    it('keeps an automatic indicator when a long preset is clipped', () => {
+      mockUIState.branchName = `feature/${'very-long-branch-'.repeat(10)}`;
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
     it('keeps the footer over-limit warning for an automatically hidden preset', () => {
       mockUIState.sessionStats.lastPromptTokenCount = 131073;
       setStatusLineConfig({

@@ -12,6 +12,8 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
+import { useTerminalSize } from './useTerminalSize.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -242,6 +244,7 @@ export function useStatusLine(keepAutomaticContextIndicator = false): {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
 
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -770,7 +773,13 @@ export function useStatusLine(keepAutomaticContextIndicator = false): {
       statusLineConfig,
       uiState.sessionStats.lastPromptTokenCount >
         (config.getContentGeneratorConfig()?.contextWindowSize ?? Infinity),
-      keepAutomaticContextIndicator,
+      keepAutomaticContextIndicator ||
+        output.some(
+          (line) =>
+            getCachedStringWidth(line) >
+            // Footer uses two columns of horizontal padding on each side.
+            MAX_STATUS_LINES * Math.max(1, terminalWidth - 4),
+        ),
     ),
   };
 }
