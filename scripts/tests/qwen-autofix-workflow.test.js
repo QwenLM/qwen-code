@@ -11148,9 +11148,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
   // pre-existing ONLY when the baseline fails with a MATCHING failure
   // signature (tsc diagnostics normalized to file + code): a bare nonzero
   // baseline can be a different defect or an infrastructure hiccup, and
-  // gitignored dist survives the detach — which is why only the full
-  // `npm run build` (which rebuilds dist from checked-out sources) is
-  // A/B-eligible at all; typecheck, lint, and package tests consume
+  // gitignored dist survives the detach — which is why only the builds
+  // (root `npm run build` and the pre-commit core rebuild, which remake
+  // dist from checked-out sources) are A/B-eligible; typecheck, lint, and
+  // package tests consume
   // round-built dist and are exempt. These tests execute the REAL script in
   // a real git repo, config-isolated (a global core.hooksPath or
   // pre-commit hook must not reach the fixture), with a stubbed npm whose
@@ -11169,6 +11170,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     noisySuccess = false,
     touchCore = false,
     baselineCode = '',
+    baselineMsg = '',
+    restoreClash = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -11204,6 +11207,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             `printf '{"name":"newpkg","scripts":{"test":"vitest run"}}' > packages/newpkg/package.json`,
           );
           g('git add . && git commit -qm agent');
+        } else if (restoreClash) {
+          // A file the branch TRACKS but the baseline lacks: the baseline
+          // leg recreates it untracked, and the restore checkout refuses.
+          g('echo tracked > clash.txt && git add . && git commit -qm agent');
         } else {
           g('echo agent > f.txt && git commit -qam agent');
         }
@@ -11229,9 +11236,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '  for s in ${FAIL_BUILD_SHAS}; do',
           '    if [[ "$s" == "$head" ]]; then',
           '      code=9999',
-          '      if [[ "$head" == "${BASELINE_SHA:-}" && -n "${BASELINE_CODE:-}" ]]; then code="${BASELINE_CODE}"; fi',
+          '      pos="(1,1)"; msg="stub failure"',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" ]]; then',
+          // The baseline leg emits a SHIFTED position — the strip is what
+          // makes the two legs comparable, so the fixture must exercise it.
+          '        pos="(7,3)"',
+          '        if [[ -n "${BASELINE_CODE:-}" ]]; then code="${BASELINE_CODE}"; fi',
+          '        if [[ -n "${BASELINE_MSG:-}" ]]; then msg="${BASELINE_MSG}"; fi',
+          '        if [[ "${RESTORE_CLASH:-}" == "1" ]]; then echo untracked > clash.txt; fi',
+          '      fi',
           '      echo "stub build FAILED at $head"',
-          '      echo "src/f.ts(1,1): error TS${code}: stub failure"',
+          '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
           '      exit 1',
           '    fi',
           '  done',
@@ -11287,6 +11302,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             FAIL_BUILD_SHAS: failShas,
             BASELINE_SHA: baselineSha,
             BASELINE_CODE: baselineCode,
+            BASELINE_MSG: baselineMsg,
+            RESTORE_CLASH: restoreClash ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
             NOISY_SUCCESS: noisySuccess ? '1' : '',
@@ -11336,6 +11353,35 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // verdict — it must reach the rejection document.
     expect(r.rejection).toContain(`stub build FAILED at ${r.baselineSha}`);
     expect(r.headAfter).toBe('feature');
+  });
+
+  it('charges the round when the codes match but the messages differ', () => {
+    // Identity is file + code + MESSAGE: common codes (TS2339) collide
+    // across unrelated defects in one file, and a code-only signature would
+    // skip a repair that could have produced a green fix.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineMsg: 'an entirely different defect',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+  });
+
+  it('rejects retryably when the baseline leg breaks the restore', () => {
+    // The baseline run recreates (untracked) a file the branch tracks, so
+    // `git checkout` back refuses — the tree can no longer be trusted, and
+    // the guard must reject WITHOUT the pre-existing label: a transient
+    // git failure is not a verdict about the failure's origin.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      restoreClash: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('could not restore the verification tree');
   });
 
   it('charges the round when the baseline fails for a DIFFERENT reason', () => {

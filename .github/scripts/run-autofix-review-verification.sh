@@ -66,7 +66,7 @@ reject_fix() {
   local preamble tail_budget
   preamble="**${label}**"
   if [[ "${preexisting}" == 'true' ]]; then
-    preamble+="$(printf '\n\nMeasured fact: the same check also fails at \`origin/%s\` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass was skipped because it may only amend the round'"'"'s own fix. If the branch is behind \`main\`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
+    preamble+="$(printf '\n\nMeasured fact: the same check also fails at \`origin/%s\` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind \`main\`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
   fi
   tail_budget=$(( 3300 - ${#preamble} ))
   (( tail_budget < 500 )) && tail_budget=500
@@ -96,8 +96,9 @@ baseline_also_fails() {
   current="$(git rev-parse HEAD)" || return 1
   baseline="$(git rev-parse --quiet --verify "origin/${BRANCH}^{commit}")" ||
     return 1
-  # No round commit (schema/contract checks run before the commit gate) —
-  # the baseline IS the tree under test; nothing to compare.
+  # No round commit (the core-rebuild check runs before the commit gate and
+  # is A/B-eligible) — the baseline IS the tree under test; nothing to
+  # compare.
   [[ "${baseline}" != "${current}" ]] || return 1
   echo "🔁 Baseline A/B: re-running the failed check at origin/${BRANCH}" \
     "(${baseline})" | tee -a "${GATE_LOG}"
@@ -131,8 +132,13 @@ baseline_also_fails() {
   # diagnostics on either side means identity cannot be established, and
   # the rejection stays charged to the round (fail closed).
   local sig_head sig_base
-  sig_head="$(fail_signature "${GATE_LOG}.check")"
-  sig_base="$(fail_signature "${ab_log}")"
+  # `|| true`: grep exits 1 on the NORMAL no-match case, and these
+  # assignments only survive `set -e` today because this function is called
+  # from an `if` condition (which suspends errexit). A future unconditional
+  # call site would otherwise turn the documented fail-closed path into a
+  # verdict-less gate crash.
+  sig_head="$(fail_signature "${GATE_LOG}.check")" || true
+  sig_base="$(fail_signature "${ab_log}")" || true
   if [[ -z "${sig_head}" || -z "${sig_base}" ]] ||
     ! comm -12 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}") \
       | grep -q .; then
@@ -147,9 +153,17 @@ baseline_also_fails() {
 }
 fail_signature() {
   # Stable identity of a failed check: tsc-style diagnostics with the
-  # position stripped ("src/a.ts: error TS2504"). Sorted unique so two
-  # transcripts compare with comm(1).
-  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+" "${1}" 2> /dev/null \
+  # position stripped but the MESSAGE kept ("src/a.ts: error TS2504: …").
+  # Position strips because line/column shift with the round's edits; the
+  # message stays because file + code alone collide — two unrelated defects
+  # in one file sharing a common code (TS2339 is everywhere) would compare
+  # as "the same failure" and skip a repair that could have worked. A
+  # message naming a round-renamed identifier then under-matches — the
+  # fail-closed direction. Sorted unique so two transcripts compare with
+  # comm(1). KNOWN LIMIT: only tsc diagnostics carry identity; vite/esbuild
+  # failures yield an empty signature and deliberately fail closed (charged
+  # to the round) — widening needs their position formats normalized first.
+  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+[^\n]*" "${1}" 2> /dev/null \
     | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
 }
 run_check() {

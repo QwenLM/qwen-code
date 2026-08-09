@@ -5305,9 +5305,9 @@ jobs:
                   # changes nothing. The compare already ran; use it.
                   if [[ "${PREEXISTING}" == 'true' ]]; then
                     if [[ "${CMP_R:-}" == 'behind' || "${CMP_R:-}" == 'diverged' ]]; then
-                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass was skipped and the branch needs a base update (merge main)'
+                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the branch needs a base update (merge main)'
                     else
-                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass was skipped and the branch'"'"'s own pre-round code needs attention'
+                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the branch'"'"'s own pre-round code needs attention'
                     fi
                   fi
                   HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
@@ -5485,10 +5485,12 @@ jobs:
                 echo '<!-- autofix-gate-rejection-start -->'
                 echo "**Why it was not pushed:**"
                 echo
-                # Must stay >= reject_fix's tail -c 3000 + label + the
-                # pre-existing paragraph (~456 bytes + branch name) + two
-                # four-backtick fences (~3.8 KB), or the closing fence is
-                # silently truncated.
+                # reject_fix sizes its own document: the evidence tail is
+                # dynamic (budget 3300 minus the preamble, floored at 500),
+                # so the finished file tops out ≈3.3 KB. 3900 is headroom,
+                # not arithmetic — retune it only together with the
+                # script's tail_budget formula, or the closing fence gets
+                # silently truncated again.
                 head -c 3900 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
                 echo '<!-- autofix-gate-rejection-end -->'
               fi
