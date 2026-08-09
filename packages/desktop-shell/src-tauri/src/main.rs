@@ -55,6 +55,7 @@ struct RuntimeStopped {
 // so a stop during that window kills the in-flight daemon instead of
 // orphaning it in its own process group.
 struct PendingRuntime {
+    generation: u64,
     child: Arc<Mutex<Option<GroupChild>>>,
     stopping: Arc<AtomicBool>,
 }
@@ -409,6 +410,7 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
 }
 
 fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bool) {
+    stop_runtime(&app);
     let generation = {
         let state = app.state::<ApplicationState>();
         *lock(&state.last_workspace) = Some(workspace.clone());
@@ -416,7 +418,6 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
         state.starting.store(generation, Ordering::SeqCst);
         generation
     };
-    stop_runtime(&app);
     *lock(&app.state::<ApplicationState>().last_error) = None;
     let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
     tauri::async_runtime::spawn_blocking(move || {
@@ -443,18 +444,31 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
         }
         let registered = app.clone();
         match DesktopRuntime::start(&app, &canonical, &state.log_path, move |child, stopping| {
-            *lock(&registered.state::<ApplicationState>().pending_runtime) =
-                Some(PendingRuntime { child, stopping });
+            let state = registered.state::<ApplicationState>();
+            let pending = PendingRuntime {
+                generation,
+                child,
+                stopping,
+            };
+            let mut slot = lock(&state.pending_runtime);
+            if state.start_generation.load(Ordering::SeqCst) == generation {
+                *slot = Some(pending);
+            } else {
+                drop(slot);
+                pending.stop();
+            }
         }) {
             Ok(runtime) => {
                 if state.start_generation.load(Ordering::SeqCst) != generation {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     return;
                 }
                 let origin = match origin_of(runtime.base_url()) {
                     Ok(origin) => origin,
                     Err(error) => {
                         runtime.stop();
+                        clear_pending_runtime(&state, generation);
                         emit_runtime_failure(&app, generation, error);
                         return;
                     }
@@ -462,6 +476,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                 *lock(&state.origin) = Some(origin);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
                         generation,
@@ -471,6 +486,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                 };
                 if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
                         generation,
@@ -478,15 +494,28 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                     );
                     return;
                 }
-                *lock(&state.runtime) = Some(runtime);
-                *lock(&state.pending_runtime) = None;
-                state
+                let mut runtime_slot = lock(&state.runtime);
+                if state.start_generation.load(Ordering::SeqCst) != generation {
+                    drop(runtime_slot);
+                    runtime.stop();
+                    clear_pending_runtime(&state, generation);
+                    return;
+                }
+                *runtime_slot = Some(runtime);
+                drop(runtime_slot);
+                clear_pending_runtime(&state, generation);
+                if state
                     .starting
                     .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
-                    .ok();
-                let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+                    .is_ok()
+                {
+                    let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+                }
             }
-            Err(error) => emit_runtime_failure(&app, generation, error),
+            Err(error) => {
+                clear_pending_runtime(&state, generation);
+                emit_runtime_failure(&app, generation, error);
+            }
         }
     });
 }
@@ -509,6 +538,8 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 fn stop_runtime(app: &AppHandle) {
     stop_local_control(app);
     let state = app.state::<ApplicationState>();
+    state.start_generation.fetch_add(1, Ordering::SeqCst);
+    state.starting.store(0, Ordering::SeqCst);
     let runtime = lock(&state.runtime).take();
     if let Some(runtime) = runtime {
         runtime.stop();
@@ -519,6 +550,13 @@ fn stop_runtime(app: &AppHandle) {
     let pending = lock(&state.pending_runtime).take();
     if let Some(pending) = pending {
         pending.stop();
+    }
+}
+
+fn clear_pending_runtime(state: &ApplicationState, generation: u64) {
+    let mut pending = lock(&state.pending_runtime);
+    if pending.as_ref().map(|runtime| runtime.generation) == Some(generation) {
+        pending.take();
     }
 }
 
