@@ -1,14 +1,22 @@
 # Selective session restore implementation plan
 
-- Status: Proposed; implementation must wait for design approval and #8691
+- Status: Proposed; the design may land independently, but implementation must
+  land after #8691 and transactional WebUI session switching
 - Design: `docs/design/2026-08-08-selective-session-restore.md`
 - Tracks: #8678
 
 ## Delivery rule
 
-Implement one end-to-end daemon fix. Do not merge an unused projection API, do
-not change TUI/export/fork loading, and do not add checkpoint persistence in this
-PR.
+The delivery order is #8691, transactional WebUI session switching, this
+selective-restore implementation, and then the durable checkpoint.
+
+Implement selective restore as one end-to-end daemon fix. Reviewable commits may
+follow the phases below, but do not merge an intermediate PR that only removes a
+pre-lease load or moves `historyPageSize`: the post-lease read remains
+authoritative until the selective projection replaces it, and early I/O bounding
+is incomplete until every runtime consumer uses that projection. Do not merge an
+unused projection API, change TUI/export/fork loading, or add checkpoint
+persistence in this PR.
 
 The implementation is complete only when the cold daemon path no longer calls
 `SessionService.loadSession()`, constructs one fresh transcript index in the
@@ -19,6 +27,13 @@ returns the requested replay semantics.
 
 - Extend the existing `SessionTranscriptReader` index with separate runtime and
   replay UUID chains plus the minimum projection hints named in the design.
+- Extend `estimateIndexCacheBytes()` for all newly retained index metadata,
+  including container, key, value, and base-object overhead. Add hint-heavy
+  cache-budget tests that exercise every new category and prove that an index
+  whose own estimate exceeds the entire cache budget may serve requests sharing
+  its in-flight build, but its completed value is not cached and its byte-budget
+  admission does not evict already-cached values. Retain existing pending
+  coalescing and entry-count or aggregate LRU behavior.
 - Add a single cold restore-projection read that selects and deduplicates runtime,
   replay, file-history, artifact, goal, telemetry, attribution, recorder, and ACP
   state records.
@@ -28,7 +43,8 @@ returns the requested replay semantics.
 - Reuse existing fragment aggregation, chain walking, page alignment, cursor
   snapshot checks, artifact reducers, goal recovery, and error classes.
 - Preserve the 256 MiB index cap, 4 MiB recent-page source budget, 16 MiB bounded
-  expansion ceiling, and a shared 32 MiB serialized bulk-replay ceiling.
+  expansion ceiling, and a shared 32 MiB explicitly recent serialized
+  bulk-replay ceiling.
 - Reuse the exact prompt-id/turn helper semantics, stream every active
   file-history batch through the existing reducer while retaining only its final
   100-snapshot state, and sort selected segment reads by physical offset.
@@ -55,7 +71,9 @@ returns the requested replay semantics.
   frozen projection before `Config` construction so the default daemon path is
   also fixed.
 - Never implicitly enable the experimental writer protocol and never read the
-  transcript with the old loader in either mode.
+  transcript with the old loader in either writer mode or behind a
+  small-transcript threshold. Parity tests and benchmark-only baselines may
+  invoke the old loader; no production cold or live restore path may do so.
 - Preserve selected-runtime ownership: cold reads use the route-pinned runtime
   and live reads use the owning session Config, with no primary-runtime or
   latest-settings fallback.
@@ -67,18 +85,21 @@ returns the requested replay semantics.
   runtime directly from the ready projection.
 - Expose the completed projection to ACP initialization without changing
   `ResumedSessionData` semantics.
-- Make projection handoff one-shot. Force lazy file-history consumption, then
-  release API history, goal records, telemetry arrays, replay records, artifact
-  inputs, and other pending projection payloads on success, failure, and
+- Make projection handoff one-shot. Force the existing lazy Config owner to
+  consume the projected file-history state before publishing the `Session`, so
+  the first resumed turn cannot create a snapshot from empty state. Then release
+  API history, goal records, telemetry arrays, replay records, artifact inputs,
+  and other pending projection payloads on success, failure, and
   `startNewSession()`.
 
 ## Phase 3: Migrate every load/resume consumer
 
 - Initialize Gemini model history, token counts, UI telemetry, and attribution
   from runtime state.
-- Restore file history exactly once through its lazy Config owner. Restore turn
-  parents, initial turn, background notification ids, goal runtime/hooks, and
-  artifact state from their explicit projection fields;
+- Restore file history exactly once before Session publication; do not defer it
+  until `/rewind` or the first file operation. Restore turn parents, initial
+  turn, background notification ids, goal runtime/hooks, and artifact state from
+  their explicit projection fields;
   feed the normalized minimal Goal records through the existing recovery and
   legacy-card helpers.
 - Remove daemon attempts to rebuild recorder boundaries or ACP state from the
@@ -99,6 +120,13 @@ returns the requested replay semantics.
   `413 transcript_page_too_large`; preserve the typed limit error past the
   collector's ordinary `partial`/`replayError` downgrade and do not add
   transformed-update trimming.
+- Treat the shared 32 MiB explicitly recent serialized replay ceiling as a fixed
+  transformed-envelope policy in this PR; do not add a configuration knob,
+  transformed-update trimming, or server-side auto-paging. A caller may retry
+  collective overflow with a smaller `historyPageSize`, but recovery requires
+  the resulting aligned selection to fit. A single source record or minimum
+  aligned group that remains oversized keeps the typed failure. Omitted
+  `historyPageSize` retains its legacy compatibility semantics.
 - Apply the same explicit-page envelope limits to direct-ACP live loads without
   mutating, unregistering, or closing the already-live Session on overflow. Keep
   the daemon bridge's existing live-attach fallback to in-memory replay instead
@@ -115,6 +143,10 @@ returns the requested replay semantics.
   the implementation PR and obtain maintainer sign-off.
 - Call out the new 32 MiB transformed-replay ceiling for explicitly paged bulk
   loads as an intentional compatibility change and obtain maintainer sign-off.
+- Boundary-test the exact serialized `qwen.session.loadReplay` value at or below
+  32 MiB and at the first byte above it. Cover one individually oversized source
+  record and collectively oversized individually valid updates, including
+  object, array, comma, bootstrap, synthetic, and finalization overhead.
 - Verify oversized cold transformed replay cleans up the unregistered Config and
   leaves sibling sessions healthy.
 - Verify replay overflow after legacy Goal migration leaves only the expected v2
@@ -135,6 +167,12 @@ returns the requested replay semantics.
 - Run focused ACP agent/session and daemon route/bridge tests from their package
   directories.
 - Run `npm run build && npm run typecheck` from the repository root.
+- Record a benchmark-only full-loader baseline and run the selective projection
+  on 64 KiB, 1 MiB, and 4 MiB fixtures under the same runtime. Report absolute
+  wall time and peak and settled memory; treat the results as evidence rather
+  than a machine-independent latency gate. If they justify a small-file
+  optimization, keep it inside the selective reader rather than routing
+  production back to `SessionService.loadSession()`.
 - Run the opt-in approximately 80 MiB/30,000-record benchmark with a live
   sibling and report wall time, peak and settled memory, event-loop lag,
   selected bytes, replay bytes, compression fallback, and sibling continuity.
@@ -146,12 +184,24 @@ returns the requested replay semantics.
 
 ## Acceptance checklist
 
-- [ ] #8691 is merged or the implementation branch is rebased onto its final
-      restore lifecycle.
+- [ ] #8691 and transactional WebUI session switching have landed, and the
+      implementation branch is rebased onto their final restore and attach
+      lifecycle.
+- [ ] Projection acquisition, runtime-consumer migration, and old-loader removal
+      ship as one end-to-end implementation; no intermediate production PR leaves
+      an unused projection or removes the post-lease authoritative read without
+      replacing it.
 - [ ] One fresh cold-restore snapshot scan occurs after lease acquisition when
       the recorder will acquire it, or before `Config` construction otherwise.
-- [ ] No selective cold or live `session/load`/`session/resume` path calls the
-      old full loader.
+- [ ] No production selective cold or live `session/load`/`session/resume` path
+      calls the old full loader, including under a small-transcript threshold;
+      benchmark-only comparisons are the only exception.
+- [ ] All newly retained index metadata, including container, key, value, and
+      base-object overhead, is included in cache-byte accounting; hint-heavy
+      tests prove an index whose own estimate exceeds the entire cache budget has
+      no retained completed value and its byte-budget admission does not evict
+      cached values, while pending coalescing and existing LRU behavior remain
+      unchanged.
 - [ ] Compressed and uncompressed API histories match current behavior.
 - [ ] Rewind, fork, side-task, gap, fragment, artifact, file-history, goal,
       telemetry, attribution, and interruption fixtures pass parity tests.
@@ -173,6 +223,8 @@ returns the requested replay semantics.
       blocks legacy fallback.
 - [ ] Active file-history batches preserve last-write-wins, first-insertion,
       100-snapshot cap, and whole-record malformed-skip semantics.
+- [ ] File history is restored exactly once before Session publication and is
+      not deferred until `/rewind` or the first file operation.
 - [ ] Selected-read tests prove file-history and artifact inputs are reduced
       incrementally and are not retained in a transcript-sized intermediate
       array.
@@ -198,6 +250,18 @@ returns the requested replay semantics.
       cache.
 - [ ] Both intentional caps (256 MiB transcript index and 32 MiB transformed
       explicit-page replay) have maintainer sign-off.
+- [ ] The fixed 32 MiB explicit-replay policy has no configuration, transformed
+      update trimming, or server-side auto-paging path. Exact serialized-envelope
+      boundary tests accept values within the cap and reject the first value
+      above it for individual and collective expansion; omitted-`historyPageSize`
+      compatibility remains unchanged.
+- [ ] Collective transformed-replay overflow permits an explicit smaller-page
+      retry without server auto-paging, but recovery is not promised when the
+      minimum aligned replay group remains oversized; a single oversized source
+      record remains a typed failure.
+- [ ] The 64 KiB, 1 MiB, and 4 MiB benchmark report compares the projection with
+      the benchmark-only full-loader baseline; any accepted small-file
+      optimization remains on the projection path.
 - [ ] Restore trace phases and bounded attributes are present.
 - [ ] Build, typecheck, focused tests, E2E result, benchmark report, self-audit,
       and code review are complete.

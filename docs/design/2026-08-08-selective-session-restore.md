@@ -2,19 +2,24 @@
 
 - Status: Draft for review
 - Tracks: #8678
-- Depends on: #8691
+- Implementation prerequisites: #8691 and transactional WebUI session switching
 
 ## Scope and ordering
 
-Issue #8678 currently describes transactional WebUI session switching as the
-next implementation PR after #8691. This draft evaluates a different next
-slice: selective cold restore and bounded initial history hydration.
+Issue #8678 orders four implementation slices: timeout safety in #8691,
+transactional WebUI session switching, bounded UI history hydration, and the
+durable checkpoint. This document uses selective runtime projection to implement
+the bounded-hydration slice without leaving full runtime materialization in
+place.
 
-The ordering is intentionally part of the review. If this design is accepted,
-the implementation PR should land after #8691 and before the durable checkpoint
-work. Transactional WebUI switching remains required because selective restore
-reduces the probability and cost of a timeout but does not preserve the old UI
-session when a target restore still fails.
+The design document may land while its prerequisites are in progress, but the
+selective-restore implementation must land after both #8691 and transactional
+switching, and before checkpoint work. The boundaries are distinct: #8691 fences
+timeouts and late results; transactional switching keeps the current UI session
+attached until the target commits; selective restore removes the leased mode's
+duplicate full read and reduces reconstruction, materialization, and replay cost
+but does not replace transactional commit semantics or make a slow restore
+responsive by itself. The lease-off path still scans the frozen transcript once.
 
 This design PR changes no runtime behavior and does not close #8678.
 
@@ -82,7 +87,9 @@ index machinery.
   the transcript once and remains O(file bytes).
 - Making restore proportional only to the JSONL tail. That is the checkpoint
   follow-up.
-- Transactional WebUI session switching or changing detach-before-commit.
+- Implementing transactional WebUI session switching. This design assumes that
+  its prepare/commit boundary lands first, but does not change attach, detach, or
+  commit ownership.
 - Changing TUI `--resume`, `--continue`, session export, archive reads, fork, or
   branch behavior.
 - Changing the standalone legacy `qwen/session/loadUpdates` extension or the
@@ -177,8 +184,11 @@ alongside the existing host policy, rather than adding another positional
 parameter. Ordinary CLI callers omit that object or leave the projection field
 unset.
 
-These are internal cross-package types, exported from core only because the ACP
-implementation consumes them. They are not a public daemon protocol contract.
+These snippets describe internal semantic and ownership boundaries, not a
+required one-declaration-per-block API or a public daemon protocol contract. The
+implementation should inline or merge single-use shapes and export only types
+that cross the core/CLI boundary, while preserving the distinctions between cold
+and live results and between preloaded and post-lease acquisition.
 `ResumedSessionData` stays unchanged for TUI, export, archive, fork, and other
 existing callers.
 
@@ -209,9 +219,12 @@ interface SessionRuntimeResumeState {
 }
 ```
 
-The concrete implementation may group these fields differently, but it must not
-reuse `conversation.messages` for a selective subset. A type whose name implies
-completeness must remain complete.
+The concrete implementation may regroup fields or derive them from existing
+index hints where that is simpler, but it must not reuse `conversation.messages`
+for a selective subset. A type whose name implies completeness must remain
+complete. `backgroundNotificationTaskIds` remains an eager reduced field because
+`Session` needs it during initialization; do not retain or expose the transcript
+index to derive it later.
 
 `SessionRestoreReplayPage` carries the selected records and existing replay
 metadata before ACP updates are generated:
@@ -249,8 +262,10 @@ of optional runtime flags.
 The cold projection is one-shot initialization state, not a new lifetime cache.
 `Config` may hold it while recorder, Goal, telemetry, attribution, Gemini, file
 history, and ACP state are initialized, but consumers should use one-shot
-accessors or an equivalent explicit handoff. `createAndStoreSession()` must force
-lazy file-history initialization before the final release.
+accessors or an equivalent explicit handoff. File-history transcript records are
+eagerly reduced into the capped snapshot state during projection;
+`createAndStoreSession()` must force the existing lazy service owner to consume
+that state before publishing the `Session` and before the final release.
 
 After successful registration and post-replay setup:
 
@@ -325,7 +340,14 @@ helpers rather than reimplement it in the scanner. In particular, prompt-turn
 hints must use the exact `record.promptId` plus UI-telemetry `prompt_id`
 semantics currently used by `computeInitialTurnFromHistory()`. Hint arrays
 should live on the existing per-UUID entries where possible so dead-branch
-filtering and cache accounting do not create parallel unbounded indexes.
+filtering and cache accounting do not create parallel unbounded indexes. Every
+newly retained piece of index metadata must also extend
+`estimateIndexCacheBytes()`, including container, key, value, and base-object
+overhead. An index whose own estimated size exceeds the entire cache byte budget
+may serve requests sharing its in-flight build, but its completed value must not
+be retained. Completed-value byte-budget admission must not evict an
+already-cached value; existing pending coalescing and entry-count or aggregate
+LRU behavior remain unchanged.
 
 ### Runtime state selection
 
@@ -369,8 +391,9 @@ segments once:
    the entire record. Apply last-write-wins replacement while preserving each
    prompt id's first insertion position, then retain the final 100 snapshots.
    The reader cannot safely choose only the final 100 records in advance because
-   prompt ids and batch validity live inside JSON payloads; active file-history
-   payloads are an explicit unavoidable selected-read cost.
+   prompt ids and batch validity live inside JSON payloads. Under the current
+   synchronous file-history initialization contract, active file-history
+   payloads are a required selected-read cost for this slice.
 6. **Artifacts.** Run the current active-side-artifact selection semantics over
    indexed metadata, then read every artifact snapshot/event record selected by
    that rule and call the existing reducer in physical order. Do not jump
@@ -503,8 +526,13 @@ registered, no replay record is appended, and sibling sessions remain usable.
 The expected legacy Goal migration described below may already have appended its
 single v2 `goal_state` during Config initialization; that existing resume-side
 normalization is the only permitted transcript mutation before this failure and
-must invalidate the projection cache normally. A caller that does not need UI
-hydration may still use `resumeSession`, whose projection kind is `none`.
+must invalidate the projection cache normally. For collective expansion, an
+explicitly paged caller may retry with a smaller `historyPageSize`; the server
+does not silently re-page or retry. A smaller page can recover only when it
+reduces the aligned selection enough to fit. A single source record or minimum
+turn/tool-aligned group that still exceeds the cap keeps the typed failure. A
+caller that does not need UI hydration may still use `resumeSession`, whose
+projection kind is `none`.
 
 ## Lifecycle integration
 
@@ -528,7 +556,7 @@ sequenceDiagram
     C->>R: "read one fresh frozen restore projection"
     R-->>C: "runtime state + optional replay page"
     C->>L: "assert owned and unchanged"
-  else "writer lease disabled"
+  else "recorder will not acquire writer lease"
     A->>R: "preload one fresh frozen restore projection"
     R-->>A: "runtime state + optional replay page"
     A->>C: "construct Config from ready projection"
@@ -538,6 +566,12 @@ sequenceDiagram
   A-->>B: "state + bounded replay envelope"
   B-->>D: "restored session"
 ```
+
+The target construction shown above runs inside transactional switching's
+prepare phase. The outer switch keeps the previous WebUI session attached until
+the target is ready and commits only after a successful return. A target-side
+failure leaves the previous attachment unchanged; selective restore does not own
+an attach or detach transition.
 
 ACP `newSessionConfig()` passes an internal projection source, including the
 `SelectiveSessionRestoreOptions`, through `loadCliConfig()`'s named host-options
@@ -579,8 +613,9 @@ replay still derives its bootstrap from the pre-migration normalized
 `GeminiClient.initialize()` consumes `apiHistory`, resume token counts, UI
 telemetry events, and attribution directly. It does not rebuild them from replay
 records. `Config.getFileHistoryService()` remains the single lazy owner of
-restoring `fileHistorySnapshots`; `createAndStoreSession()` may force service
-construction but must not restore the same snapshots a second time. Recorder
+restoring `fileHistorySnapshots`; `createAndStoreSession()` must force service
+construction before publishing the `Session`, and must not restore the same
+snapshots a second time. Recorder
 turn boundaries already come from `runtime.recording`, and ACP turn/background
 state comes from its precomputed fields, so neither may be rebuilt from a recent
 replay page. The session replays only `SessionRestoreReplayPage.records` plus
@@ -662,19 +697,19 @@ selective path rejects the largest input.
 Every current consumer of full `ResumedSessionData` on the daemon path must have
 an explicit replacement:
 
-| Consumer                          | Current dependency                                                       | Replacement                                                            |
-| --------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| `loadCliConfig()`                 | First full load                                                          | Preload one projection only when the writer protocol is disabled       |
-| `Config.activateChatRecording()`  | Optional second full authoritative load                                  | Resolve the deferred projection under the acquired lease               |
-| `ChatRecordingService.activate()` | Last UUID, turn parents, title and lineage from all messages             | `runtime.recording`                                                    |
-| `Config.initializeGoalRuntime()`  | Full message list                                                        | normalized `runtime.goalRecords`                                       |
-| `GeminiClient.initialize()`       | API history, telemetry, token counts, attribution from full conversation | Pre-reduced runtime fields                                             |
-| `Config.getFileHistoryService()`  | Lazy restore from `sessionData.fileHistorySnapshots`                     | Lazy restore once from `runtime.fileHistorySnapshots`                  |
-| `createAndStoreSession()`         | File snapshots, turn boundaries, replay records                          | Force lazy services, apply precomputed ACP state, replay optional page |
-| `Session.primeTurnFromHistory()`  | Initial turn and background notification ids                             | Precomputed ACP state                                                  |
-| daemon goal hook restore          | Slash-command cards from all messages                                    | normalized `runtime.goalRecords` through the existing helpers          |
-| load response artifact state      | Rebuilt from all physical records                                        | `runtime.artifactSnapshot`                                             |
-| live load/resume                  | Full reload under write barrier                                          | Consumer-limited live projection under the same barrier                |
+| Consumer                          | Current dependency                                                       | Replacement                                                              |
+| --------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `loadCliConfig()`                 | First full load                                                          | Preload one projection only when the writer protocol is disabled         |
+| `Config.activateChatRecording()`  | Optional second full authoritative load                                  | Resolve the deferred projection under the acquired lease                 |
+| `ChatRecordingService.activate()` | Last UUID, turn parents, title and lineage from all messages             | `runtime.recording`                                                      |
+| `Config.initializeGoalRuntime()`  | Full message list                                                        | normalized `runtime.goalRecords`                                         |
+| `GeminiClient.initialize()`       | API history, telemetry, token counts, attribution from full conversation | Pre-reduced runtime fields                                               |
+| `Config.getFileHistoryService()`  | Lazy restore from `sessionData.fileHistorySnapshots`                     | Lazy restore once from `runtime.fileHistorySnapshots`                    |
+| `createAndStoreSession()`         | File snapshots, turn boundaries, replay records                          | Initialize file history before publication, apply ACP state, replay page |
+| `Session.primeTurnFromHistory()`  | Initial turn and background notification ids                             | Precomputed ACP state                                                    |
+| daemon goal hook restore          | Slash-command cards from all messages                                    | normalized `runtime.goalRecords` through the existing helpers            |
+| load response artifact state      | Rebuilt from all physical records                                        | `runtime.artifactSnapshot`                                               |
+| live load/resume                  | Full reload under write barrier                                          | Consumer-limited live projection under the same barrier                  |
 
 The implementation is incomplete if any `session/load` or `session/resume`
 consumer named above still calls the old loader or silently treats a recent
@@ -757,6 +792,12 @@ behavior rather than inventing a new fallback.
   legacy fallback exactly as `recoverGoalFromRecords()` does today.
 - A malformed file-history batch contributes no snapshots, matching the current
   whole-record skip behavior.
+- Hint-heavy index fixtures account for all newly retained metadata and overhead
+  in the shared estimator. An index whose own estimate exceeds the entire cache
+  budget may serve requests sharing its in-flight build, but its completed value
+  is not cached. That completed-value byte-budget admission does not evict an
+  already-cached value; pending coalescing and entry-count or aggregate LRU
+  behavior remain unchanged.
 - A sparse transcript over 256 MiB fails before parsing and never invokes the
   old loader.
 - Concurrent append/growth, snapshot replacement, truncation, same-size rewrites
@@ -799,6 +840,13 @@ behavior rather than inventing a new fallback.
 Before implementation, dry-run the scenario with the installed global `qwen`
 CLI and retain the baseline result in `.qwen/e2e-tests/`.
 
+Compare the current full loader and selective projection under the same runtime
+with 64 KiB, 1 MiB, and 4 MiB fixtures. Report absolute wall time plus peak and
+settled memory. These measurements are evidence, not a latency gate. If they
+show a meaningful absolute regression, keep any small-file optimization inside
+the selective scanner and reducer rather than routing production back to the old
+loader.
+
 Use an opt-in approximately 80 MiB/30,000-record fixture containing an
 approximately 2 MiB record and at least one live sibling session. Report:
 
@@ -827,6 +875,18 @@ This is the current shape. It reduces response count while retaining the same
 parse, allocation, and reconstruction cost, so it does not address the cold-load
 hot path.
 
+### Split duplicate-load removal and early paging from the projection
+
+The second load exists only when chat recording is enabled and the recorder
+actually acquires the startup-frozen, default-off writer lease. It is the
+authoritative post-lease snapshot; reusing the pre-lease result would weaken
+fencing. Applying `historyPageSize` before full materialization also requires the
+runtime projection because model, recorder, Goal, file-history, artifact,
+telemetry, and ACP state still need complete semantics. Reviewable commits may
+follow the implementation phases, but an independently merged partial PR would
+either leave the default incident path unchanged or introduce an unused
+projection boundary.
+
 ### Default every client to a recent page
 
 That would be simpler internally but would silently change old ACP client
@@ -848,6 +908,16 @@ Too many consumers assume it is complete. Making completeness implicit would
 invite model truncation, broken rewind boundaries, and lost restore state.
 A separate projection makes every migration explicit.
 
+### Defer file-history restoration until `/rewind` or a file operation
+
+The first resumed turn can create a snapshot that must inherit restored tracked
+files and backups, so those triggers are too late. `Config.getFileHistoryService()`
+is synchronous, and retaining projection data or reopening the transcript for
+later asynchronous restoration would broaden ownership and failure semantics.
+This slice therefore reduces file-history records during projection and forces
+one service initialization before Session publication and projection release.
+An asynchronous file-history lifecycle would require a separate design.
+
 ### Add the durable checkpoint in the same PR
 
 Checkpoint validation, atomic publication, crash recovery, transcript
@@ -861,6 +931,27 @@ missing or invalid future checkpoint.
 This makes the worst input take the least safe path and defeats the cap. The
 selected behavior is ACP `errorKind: transcript_too_large`, mapped by REST to
 request-scoped `413 transcript_too_large`.
+
+### Use the old full loader for small transcripts
+
+Indexing plus selected reads may have a relative overhead on small inputs, but a
+production fallback would retain two reducer, error, and lease-semantics engines.
+Benchmark small fixtures first. If the absolute regression is meaningful,
+optimize the selective scanner to reuse records from its current scan without
+putting payloads in the index cache; do not route production through
+`SessionService.loadSession()`.
+
+### Make the transformed-replay cap configurable or trim updates
+
+The 32 MiB cap is a fixed transformed-envelope policy for explicitly recent bulk
+replay, preventing that source-bounded mode from expanding without a response
+memory bound. It is not a global child-pipe limit: legacy unpaged replay remains
+the compatibility exception described above. Raising or configuring the recent
+limit defeats its bound and makes behavior depend on runtime settings. There is
+also no reliable class of non-critical ACP updates: dropping updates can
+separate tool calls from results, change goal or turn state, or make replay
+metadata disagree with its contents. The selected behavior is a typed failure
+plus an explicit smaller-page retry when the aligned selection can be reduced.
 
 ## Risks and mitigations
 
@@ -877,7 +968,8 @@ request-scoped `413 transcript_too_large`.
   a completion checklist; repository-wide read-site audits are required for any
   changed field or getter.
 - **Index metadata grows too much.** Reuse the existing cache estimator and cap;
-  account for every added array, string, and side-record entry.
+  account for all newly retained metadata plus container, key, value, and
+  base-object overhead.
 - **Reduced payloads become a second lifetime session copy.** Treat the
   projection as one-shot state, force lazy consumers before release, and assert
   that success, failure, and `startNewSession()` clear all pending payload
@@ -907,18 +999,20 @@ request-scoped `413 transcript_too_large`.
 
 ## Rollout and follow-ups
 
-Land after #8691 so restore timeouts, late-result fencing, and tracing are
-already safe. The implementation should be one end-to-end fix PR; do not land an
-unused projection API without its daemon consumer.
+The design document may land before its implementation prerequisites. The
+selective-restore implementation lands after #8691 and transactional switching,
+followed by the durable checkpoint. Keep selective restore as one end-to-end
+implementation PR, using reviewable commits for the phases below; do not land an
+unused projection API or a partial early-paging step. `historyPageSize` cannot
+bound pre-materialization I/O without the consumer projection, and the
+writer-lease path's post-acquisition read remains authoritative.
 
 After selective restore:
 
-1. Make WebUI cross-session switching transactional so the previous session
-   remains attached and visible until the target commits.
-2. Add the durable checkpoint sidecar so valid restores read the checkpoint and
+1. Add the durable checkpoint sidecar so valid restores read the checkpoint and
    only the JSONL tail, using this selective scanner as the legacy/corrupt
    fallback.
-3. Migrate standalone `qwen/session/loadUpdates` and post-rewind artifact refresh
+2. Migrate standalone `qwen/session/loadUpdates` and post-rewind artifact refresh
    only if their independent compatibility and failure semantics justify it.
-4. Consider extending selective loading to TUI resume only after the daemon path
+3. Consider extending selective loading to TUI resume only after the daemon path
    has equivalence and operational evidence.
