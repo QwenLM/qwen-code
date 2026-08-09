@@ -1466,8 +1466,8 @@ export default {
   'to expand details': '詳細を展開',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
-  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
-    '推論対応モデルの思考の強さを設定します（{{tiers}}）。プロバイダーごとにマッピング・制限されます。',
+  'Set how hard reasoning-capable models think; available tiers depend on the active provider/model.':
+    '推論対応モデルの思考の強さを設定します。利用可能なティアは現在のプロバイダー/モデルによって異なります。',
   'Exited plan mode. Previous approval mode restored.':
     'プランモードを終了しました。以前の承認モードに戻りました。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
