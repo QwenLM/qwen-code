@@ -1289,6 +1289,27 @@ export const useGeminiStream = (
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }
 
+        // Peer envelopes are delivered by another session, so their content
+        // is attacker-influenced in a way typed input is not. They must not
+        // reach the slash/shell/@ preprocessing below for the same reason
+        // Teammate does not — with `!` shell mode active the envelope would
+        // be handed to handleShellCommand and EXECUTED with no approval
+        // prompt. Render the one-line summary the sender's envelope carries
+        // (the full envelope goes only to the model) and pass through.
+        if (submitType === SendMessageType.Peer) {
+          onDebugMessage(
+            `Received peer message (${trimmedQuery.length} chars)`,
+          );
+          addItem(
+            {
+              type: 'notification' as const,
+              text: submittedPrompt ?? trimmedQuery,
+            } as HistoryItemWithoutId,
+            userMessageTimestamp,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
         canUndoLastLoggedUserMessageRef.current =
@@ -3117,7 +3138,10 @@ export const useGeminiStream = (
         submitType === SendMessageType.ToolResult ||
         submitType === SendMessageType.Steer;
       const submittedPrompt =
-        submitType === SendMessageType.UserQuery
+        submitType === SendMessageType.UserQuery ||
+        // For a peer envelope this carries the one-line summary that gets
+        // rendered in place of the envelope itself.
+        submitType === SendMessageType.Peer
           ? metadata?.submittedPrompt
           : undefined;
 
@@ -3413,7 +3437,8 @@ export const useGeminiStream = (
         if (
           submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
-          submitType === SendMessageType.Teammate
+          submitType === SendMessageType.Teammate ||
+          submitType === SendMessageType.Peer
         ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
@@ -3437,7 +3462,8 @@ export const useGeminiStream = (
         if (
           submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
-          submitType === SendMessageType.Teammate
+          submitType === SendMessageType.Teammate ||
+          submitType === SendMessageType.Peer
         ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();

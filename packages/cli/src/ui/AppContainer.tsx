@@ -463,17 +463,31 @@ export function useQueuedSubmissionDrain({
           )
         : submitQuery(
             submission.modelText,
-            SendMessageType.UserQuery,
+            submission.origin === 'peer'
+              ? SendMessageType.Peer
+              : SendMessageType.UserQuery,
             undefined,
             {
               userAdmission: { turnKey: submission.turnKey },
               ...(submission.submittedPrompt === undefined
                 ? {}
                 : { submittedPrompt: submission.submittedPrompt }),
+              // A peer turn's `submittedPrompt` is the one-line summary
+              // `usePeerMessaging` queued alongside the envelope. It has to
+              // be handed to the recorder as well: `recordNotification`
+              // omits the system payload when the display text is
+              // undefined, and a resumed session then rebuilds the item
+              // from the model-bound parts — i.e. it renders the raw
+              // envelope where the summary belongs.
+              ...(submission.origin === 'peer' &&
+              submission.submittedPrompt !== undefined
+                ? { notificationDisplayText: submission.submittedPrompt }
+                : {}),
               onAdmissionFailed: () => {
                 restoreMessages(
                   [submission.modelText],
                   submission.submittedPrompt,
+                  submission.origin,
                 );
                 markAdmissionFailed();
               },
@@ -1210,6 +1224,27 @@ export const AppContainer = (props: AppContainerProps) => {
     QueuedUserSubmission,
     'modelText' | 'submittedPrompt'
   > | null>(null);
+  /**
+   * Whether the composer currently holds text that came from a peer.
+   *
+   * Cancelling a turn (Esc) and `popQueueIntoInput` both drain the queue
+   * into the input box, so a peer envelope can leave the queue — where it
+   * is tagged `'peer'` — and come back through `handleFinalSubmit`, which
+   * would re-enqueue it as ordinary typed input. It would then drain as a
+   * user query and reach exactly the shell/slash/@ preprocessing the tag
+   * exists to skip.
+   *
+   * This is deliberately a separate ref from `restoredSubmissionRef`,
+   * which any edit invalidates: editing peer text, or typing around it,
+   * does not make it the user's own. So the flag survives edits and is
+   * cleared only when the composer empties or its contents are submitted.
+   * A buffer mixing typed input with a peer envelope therefore submits as
+   * `'peer'` — the same fail-safe direction `aggregateUserMessages` takes
+   * for a mixed batch, and for the same reason: a typed `!command`
+   * reaching the model is recoverable, peer content reaching the shell is
+   * not.
+   */
+  const composerHoldsPeerContentRef = useRef(false);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -1227,6 +1262,8 @@ export const AppContainer = (props: AppContainerProps) => {
         setBufferTextRef.current?.('', { clearUndoHistory: true });
       }
       restoredSubmissionRef.current = null;
+      // An empty composer holds nothing, peer or otherwise.
+      composerHoldsPeerContentRef.current = false;
       submittedPromptProvenanceUnavailableRef.current = false;
       return;
     }
@@ -2261,6 +2298,9 @@ export const AppContainer = (props: AppContainerProps) => {
     const submission = popAllMessages();
     if (submission === null) return null;
     restoredSubmissionRef.current = submission;
+    if (submission.origin === 'peer') {
+      composerHoldsPeerContentRef.current = true;
+    }
     submittedPromptProvenanceUnavailableRef.current = false;
     return submission.modelText;
   }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
@@ -2294,7 +2334,10 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (!peerMessaging) return;
     peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
-      addMessage(modelText, false, displayText);
+      // Tagged 'peer' so the drain submits it as SendMessageType.Peer.
+      // Without the tag it drains as a plain user query and, with `!`
+      // shell mode active, the envelope is executed as a shell command.
+      addMessage(modelText, false, displayText, 'peer');
     });
   }, [addMessage, peerMessaging]);
 
@@ -2462,10 +2505,21 @@ export const AppContainer = (props: AppContainerProps) => {
       const submittedPromptProvenanceUnavailable =
         consumesComposerState &&
         submittedPromptProvenanceUnavailableRef.current;
+      // Deliberately NOT gated on `consumesComposerState`. Vim's Enter
+      // handler calls this as `onSubmit(value)` with no options, so that
+      // gate reads false on the one path where the composer's contents
+      // are unquestionably what is being submitted — and a peer envelope
+      // popped into the composer would drain as `UserQuery` and reach the
+      // shell. The flag already tracks composer contents on its own.
+      const submitsPeerContent = composerHoldsPeerContentRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
         submittedPromptProvenanceUnavailableRef.current = false;
       }
+      // Cleared here rather than inside the block above for the same
+      // reason: the vim path consumes the composer without saying so, and
+      // a flag left set would tag the *next* submission `'peer'` too.
+      composerHoldsPeerContentRef.current = false;
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
@@ -2490,6 +2544,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
+      // Peer content that round-tripped through the composer goes back onto
+      // the queue tagged `'peer'`, and nothing below runs for it. The drain
+      // then submits it as `SendMessageType.Peer`, which is the one path
+      // that skips slash/shell/@ preprocessing — the same route it would
+      // have taken had the user never pressed Esc. Returning here (rather
+      // than only tagging the `addMessage` at the bottom) also keeps the
+      // envelope out of the exit-word check just below, where a peer
+      // message reading `/quit` would otherwise close the session.
+      if (submitsPeerContent) {
+        addMessage(
+          submittedValue,
+          options?.deferUntilIdle ?? false,
+          submittedPrompt,
+          'peer',
+        );
+        return;
+      }
+
       // The user's raw text, captured before any `<system-reminder>` prefix is
       // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
@@ -2789,6 +2861,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const popped = popAllMessages();
       if (popped) {
         restoredSubmissionRef.current = popped;
+        if (popped.origin === 'peer') {
+          composerHoldsPeerContentRef.current = true;
+        }
         submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
         buffer.setText(
