@@ -691,6 +691,7 @@ describe('serve fast path argument parsing', () => {
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
+      ['local-control', ['--local-control']],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
@@ -734,6 +735,7 @@ describe('serve fast path argument parsing', () => {
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
       'help',
+      'local-control',
       'version',
     ]);
 
