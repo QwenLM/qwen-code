@@ -50,8 +50,16 @@ through the daemon's `POST /command` endpoint and bundled `qwen-webbridge`
 skill. This path does not require MCP or `QWEN_CDP_MCP_COMMAND`.
 
 ```bash
-curl http://127.0.0.1:4170/status
+# Terminal 1
+export QWEN_WEBBRIDGE_TOKEN='choose-a-local-secret'
+qwen serve
+
+# Terminal 2
+export QWEN_WEBBRIDGE_TOKEN='choose-a-local-secret'
+curl http://127.0.0.1:4170/status \
+  -H "Authorization: Bearer $QWEN_WEBBRIDGE_TOKEN"
 curl -X POST http://127.0.0.1:4170/command \
+  -H "Authorization: Bearer $QWEN_WEBBRIDGE_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"action":"navigate","args":{"url":"https://example.com","newTab":true},"session":"demo"}'
 ```

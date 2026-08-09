@@ -2211,11 +2211,17 @@ export function mountAcpHttp(
             const supportsWebBridge =
               Array.isArray(clientInfo?.capabilities) &&
               clientInfo.capabilities.includes(WEB_BRIDGE_CAPABILITY);
+            const webBridgeOrigin =
+              typeof origin === 'string' &&
+              typeof clientInfo?.extensionId === 'string' &&
+              origin.toLowerCase() ===
+                `chrome-extension://${clientInfo.extensionId.toLowerCase()}`;
             if (
               activeMount.primary &&
               opts.webBridgeRegistry !== undefined &&
               clientName === CDP_BRIDGE_CLIENT_NAME &&
-              supportsWebBridge
+              supportsWebBridge &&
+              webBridgeOrigin
             ) {
               webBridgeUnregister = opts.webBridgeRegistry.register({
                 connectionId: conn.connectionId,

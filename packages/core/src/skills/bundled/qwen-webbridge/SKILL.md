@@ -11,7 +11,7 @@ allowedTools:
 
 Use the local `qwen serve` WebBridge API to control the user's real Chrome. It does not require MCP or a separate Chrome DevTools adapter.
 
-The default base URL is `${QWEN_WEBBRIDGE_URL:-http://127.0.0.1:4170}`. When `QWEN_SERVER_TOKEN` is set, send `Authorization: Bearer $QWEN_SERVER_TOKEN` with every HTTP request.
+The daemon provides `QWEN_WEBBRIDGE_URL` and a route-scoped `QWEN_WEBBRIDGE_TOKEN` to its agent processes. Send `Authorization: Bearer $QWEN_WEBBRIDGE_TOKEN` with every HTTP request. If either value is missing, the current CLI process was not launched by the daemon and cannot use this WebBridge instance.
 
 ## Before the first action
 
@@ -29,22 +29,23 @@ Send JSON to `POST /command`:
     "newTab": true,
     "group_title": "Research"
   },
-  "session": "research-a7f3c2"
+  "session": "research-550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
-Use one stable, task-unique session name for the entire user task. The first `navigate` should normally use `newTab:true` and a human-readable `group_title`. At the end, call `close_session` with `close_tabs:false` to release browser state while preserving tabs. Omit `close_tabs:false` only when the user asks to close the task's tabs.
+Use one stable session name with a fresh UUID suffix for the entire user task. The first `navigate` should normally use `newTab:true` and a human-readable `group_title`. At the end, call `close_session` with `close_tabs:false` to release browser state while preserving tabs. Omit `close_tabs:false` only when the user asks to close the task's tabs.
 
 Prefer writing request JSON with `write_file`, posting it with an explicit JSON content type, then deleting that temporary request file. This preserves Unicode and avoids shell quoting errors:
 
 ```bash
-WEBBRIDGE_BASE=${QWEN_WEBBRIDGE_URL:-http://127.0.0.1:4170}
+WEBBRIDGE_BASE=$QWEN_WEBBRIDGE_URL
 curl -sS -X POST "$WEBBRIDGE_BASE/command" \
+  -H "Authorization: Bearer $QWEN_WEBBRIDGE_TOKEN" \
   -H 'Content-Type: application/json' \
   --data-binary @/absolute/path/to/request.json
 ```
 
-If `QWEN_SERVER_TOKEN` is set, also add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"`. On Windows, use `curl.exe`, a uniquely named JSON file under `$env:TEMP` (PowerShell) or `%TEMP%` (cmd.exe), and delete it after the request.
+On Windows, use `curl.exe`, a uniquely named JSON file under `$env:TEMP` (PowerShell) or `%TEMP%` (cmd.exe), and delete it after the request.
 
 ## Actions
 
@@ -64,8 +65,8 @@ If `QWEN_SERVER_TOKEN` is set, also add `-H "Authorization: Bearer $QWEN_SERVER_
 | `send_keys`     | `keys`, optional `repeat`                                                 | CDP key sequences such as `Enter`, `Mod+A`, or `Shift+Tab`                      |
 | `network`       | `cmd` (`start`, `stop`, `list`, `detail`), optional `filter`, `requestId` | Request metadata and response bodies                                            |
 | `cdp`           | `method`, optional `params`                                               | Raw CDP result                                                                  |
-| `screenshot`    | optional `format`, `quality`, `selector`, `path`                          | Local image path and metadata                                                   |
-| `save_as_pdf`   | optional `paper_format`, `landscape`, `scale`, `print_background`, `path` | Local PDF path and metadata                                                     |
+| `screenshot`    | optional `format`, `quality`, `selector`                                  | Temporary local image path and metadata                                         |
+| `save_as_pdf`   | optional `paper_format`, `landscape`, `scale`, `print_background`         | Temporary local PDF path and metadata                                           |
 | `upload`        | `selector`, `files`                                                       | Sets local paths on a file input                                                |
 
 Use `snapshot` and its `@e` refs before reaching for CSS selectors or JavaScript. Use `mouse_click`, `key_type`, and `send_keys` when a page needs CDP-level input. `click` and `fill` are DOM-synthetic and may be rejected by sites that require trusted events. Top-frame actions do not enter cross-origin iframes.

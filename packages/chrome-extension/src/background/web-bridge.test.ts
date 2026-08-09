@@ -93,7 +93,10 @@ describe('WebBridge protocol', () => {
       .filter((frame) => frame.type === 'webbridge_result_chunk')
       .map((frame) => frame.payload.chunk);
     expect(
-      frames.every((frame) => JSON.stringify(frame).length < 10_000_000),
+      frames.every(
+        (frame) =>
+          Buffer.byteLength(JSON.stringify(frame), 'utf8') < 10_000_000,
+      ),
     ).toBe(true);
     expect(JSON.parse(chunks.join(''))).toEqual(data);
     expect(frames.at(-1)).toEqual({

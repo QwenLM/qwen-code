@@ -11,6 +11,7 @@ const cdp = vi.hoisted(() => ({
   withTab: vi.fn(),
   release: vi.fn(),
   unsubscribe: vi.fn(),
+  detachListeners: [] as Array<(tabId: number) => void>,
   listeners: [] as Array<
     (method: string, params: Record<string, unknown>, tabId: number) => void
   >,
@@ -26,6 +27,10 @@ const cdp = vi.hoisted(() => ({
       return cdp.unsubscribe;
     },
   ),
+  subscribeDetach: vi.fn((listener: (tabId: number) => void) => {
+    cdp.detachListeners.push(listener);
+    return vi.fn();
+  }),
 }));
 
 vi.mock('./cdp-bridge', () => ({
@@ -33,6 +38,7 @@ vi.mock('./cdp-bridge', () => ({
   withDirectBrowserAction: <T>(operation: () => Promise<T>) => operation(),
   releaseCdpTab: cdp.release,
   subscribeCdpEvents: cdp.subscribe,
+  subscribeCdpDetaches: cdp.subscribeDetach,
 }));
 
 function installChrome(): void {
@@ -81,6 +87,7 @@ describe('WebBridge actions', () => {
     vi.resetModules();
     vi.clearAllMocks();
     cdp.listeners.length = 0;
+    cdp.detachListeners.length = 0;
     installChrome();
     cdp.withTab.mockImplementation(
       async (
@@ -450,6 +457,45 @@ describe('WebBridge actions', () => {
     );
   });
 
+  it('releases pressed modifiers when a key event fails', async () => {
+    cdp.send
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('tab closed'))
+      .mockResolvedValueOnce({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('send_keys', { keys: 'Mod+A', _tabId: 17 }),
+    ).rejects.toThrow('tab closed');
+    expect(cdp.send).toHaveBeenLastCalledWith(
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ type: 'keyUp', key: 'Meta' }),
+    );
+  });
+
+  it('retries releasing the main key before releasing modifiers', async () => {
+    cdp.send
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('key up failed'))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('send_keys', { keys: 'Mod+A', _tabId: 17 }),
+    ).rejects.toThrow('key up failed');
+    expect(cdp.send).toHaveBeenNthCalledWith(
+      4,
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ type: 'keyUp', key: 'a' }),
+    );
+    expect(cdp.send).toHaveBeenLastCalledWith(
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ type: 'keyUp', key: 'Meta' }),
+    );
+  });
+
   it('captures network metadata and reads the response body', async () => {
     cdp.send
       .mockResolvedValueOnce({})
@@ -519,6 +565,35 @@ describe('WebBridge actions', () => {
     expect(cdp.unsubscribe).toHaveBeenCalledOnce();
   });
 
+  it('invalidates network captures when Chrome detaches the debugger', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    cdp.listeners[0](
+      'Network.requestWillBeSent',
+      {
+        requestId: 'stale-request',
+        request: { url: 'https://example.test/api', method: 'GET' },
+      },
+      17,
+    );
+
+    cdp.detachListeners[0](17);
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ count: 0 });
+    expect(cdp.unsubscribe).toHaveBeenCalledOnce();
+  });
+
   it('rolls back capture state when Network.enable fails', async () => {
     cdp.send
       .mockRejectedValueOnce(new Error('debugger detached'))
@@ -579,6 +654,26 @@ describe('WebBridge actions', () => {
         _session: 'research',
       }),
     ).resolves.toMatchObject({ count: 2_000 });
+  });
+
+  it('bounds retained network captures', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    for (let index = 0; index < 32; index++) {
+      await executeWebBridgeAction('network', {
+        cmd: 'start',
+        _tabId: 17,
+        _session: `session-${index}`,
+      });
+    }
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'start',
+        _tabId: 17,
+        _session: 'overflow',
+      }),
+    ).rejects.toThrow('capture limit reached');
   });
 
   it('isolates network captures by session on a shared tab', async () => {

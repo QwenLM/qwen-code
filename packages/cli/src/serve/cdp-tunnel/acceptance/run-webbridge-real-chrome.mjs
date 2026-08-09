@@ -23,6 +23,7 @@ const fixturePort = Number(process.env.FIXTURE_PORT || 4180);
 const debugPort = Number(process.env.CHROME_DEBUG_PORT || 9223);
 const baseUrl = `http://127.0.0.1:${port}`;
 const fixtureUrl = `http://127.0.0.1:${fixturePort}`;
+const webBridgeToken = 'webbridge-e2e-token';
 
 await Promise.all([
   access(cli),
@@ -63,7 +64,10 @@ const outputOf = (child) => {
 const command = async (action, args, session = 'webbridge-e2e') => {
   const response = await fetch(`${baseUrl}/command`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      authorization: `Bearer ${webBridgeToken}`,
+      'content-type': 'application/json',
+    },
     body: JSON.stringify({ action, args, session }),
   });
   const body = await response.json();
@@ -147,7 +151,14 @@ try {
       '--allow-origin',
       `chrome-extension://${extensionId}`,
     ],
-    { cwd: repoRoot, env: { ...process.env, QWEN_HOME: qwenHome } },
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        QWEN_HOME: qwenHome,
+        QWEN_WEBBRIDGE_TOKEN: webBridgeToken,
+      },
+    },
   );
   daemonOutput = outputOf(daemon);
   await waitForJson(`${baseUrl}/health`, (value) => value.status === 'ok');
@@ -236,11 +247,12 @@ try {
       setting: 'granted',
     }).catch(() => {});
   }
-  await waitForJson(
-    `${baseUrl}/status`,
-    (value) => value.extension_connected === true,
-    30_000,
-  ).catch(async (error) => {
+  await waitFor(async () => {
+    const response = await fetch(`${baseUrl}/status`, {
+      headers: { authorization: `Bearer ${webBridgeToken}` },
+    });
+    return response.ok && (await response.json()).extension_connected === true;
+  }, 30_000).catch(async (error) => {
     const targets = await fetch(`http://127.0.0.1:${debugPort}/json/list`)
       .then((response) => response.json())
       .catch((targetError) => ({ error: String(targetError) }));
@@ -328,7 +340,16 @@ try {
     `keyboard input did not update the field: ${JSON.stringify({ sentKeys, inputValue })}`,
   );
 
+  await command('evaluate', {
+    code: "document.querySelector('#status').textContent = 'idle'",
+  });
   await command('mouse_click', { selector: '#action' });
+  await waitFor(async () => {
+    const result = await command('evaluate', {
+      code: "document.querySelector('#status').textContent",
+    });
+    return result.value === 'clicked';
+  });
   const cdp = await command('cdp', {
     method: 'Runtime.evaluate',
     params: { expression: 'document.title', returnByValue: true },
@@ -341,13 +362,18 @@ try {
     selector: '#file-input',
     files: [uploadPath],
   });
+  const uploaded = await command('evaluate', {
+    code: "document.querySelector('#file-input').files[0]?.name",
+  });
+  assert(uploaded.value === 'upload.txt', 'upload did not set the FileList');
 
   const imagePath = resolve(artifacts, 'page.png');
   const pdfPath = resolve(artifacts, 'page.pdf');
   const image = await command('screenshot', { path: imagePath });
   const pdf = await command('save_as_pdf', { path: pdfPath });
-  assert(image.path === imagePath && image.sizeBytes > 0, 'screenshot failed');
-  assert(pdf.path === pdfPath && pdf.sizeBytes > 0, 'PDF failed');
+  assert(image.path !== imagePath && image.sizeBytes > 0, 'screenshot failed');
+  assert(pdf.path !== pdfPath && pdf.sizeBytes > 0, 'PDF failed');
+  await Promise.all([access(image.path), access(pdf.path)]);
 
   const closedTab = await command('close_tab', {});
   assert(closedTab.closed === true, 'close_tab did not close the current tab');

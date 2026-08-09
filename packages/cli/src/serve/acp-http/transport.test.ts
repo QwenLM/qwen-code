@@ -8556,6 +8556,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
 // ── WebSocket transport security tests ────────────────────────────────
 describe('ACP WebSocket transport security', () => {
+  const extensionId = 'test-extension';
+  const extensionOrigin = `chrome-extension://${extensionId}`;
   let server: Server;
   let port: number;
   let bridge: FakeBridge;
@@ -8682,6 +8684,7 @@ describe('ACP WebSocket transport security', () => {
         clientInfo: {
           name: 'qwen-cdp-bridge',
           version: '1.0.0',
+          extensionId,
           capabilities,
         },
       },
@@ -8689,8 +8692,10 @@ describe('ACP WebSocket transport security', () => {
   }
 
   it('does not register an older CDP-only extension as WebBridge', async () => {
-    await startServer();
-    const ws = await wsConnect();
+    await startServer({
+      allowedOrigins: { allowAny: false, origins: new Set([extensionOrigin]) },
+    });
+    const ws = await wsConnect({ headers: { Origin: extensionOrigin } });
     await initializeCdpBridge(ws, 1, []);
     await yieldImmediate();
 
@@ -8699,8 +8704,10 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('round-trips a WebBridge command over the initialized extension socket', async () => {
-    await startServer();
-    const ws = await wsConnect();
+    await startServer({
+      allowedOrigins: { allowAny: false, origins: new Set([extensionOrigin]) },
+    });
+    const ws = await wsConnect({ headers: { Origin: extensionOrigin } });
     await initializeCdpBridge(ws);
     await yieldImmediate();
 
@@ -8728,8 +8735,10 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('rejects pending WebBridge commands when the extension disconnects', async () => {
-    await startServer();
-    const ws = await wsConnect();
+    await startServer({
+      allowedOrigins: { allowAny: false, origins: new Set([extensionOrigin]) },
+    });
+    const ws = await wsConnect({ headers: { Origin: extensionOrigin } });
     await initializeCdpBridge(ws);
     await yieldImmediate();
 
@@ -8737,6 +8746,16 @@ describe('ACP WebSocket transport security', () => {
     ws.close();
 
     await expect(pending).rejects.toThrow('disconnected');
+  });
+
+  it('does not trust WebBridge identity without a matching extension origin', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    expect(webBridgeRegistry.status().extensionConnected).toBe(false);
+    ws.close();
   });
 
   // ── Host allowlist ──────────────────────────────────────────────────

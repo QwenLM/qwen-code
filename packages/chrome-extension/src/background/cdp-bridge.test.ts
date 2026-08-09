@@ -311,7 +311,7 @@ describe('CDP bridge', () => {
     bridge.shutdownCdpBridge();
   });
 
-  it('releases raw ownership without detaching a direct WebBridge tab', async () => {
+  it('rejects raw ownership while a WebBridge tab remains attached', async () => {
     const chromeHarness = installChromeHarness();
     const bridge = await loadBridge();
     const send = vi.fn();
@@ -319,12 +319,12 @@ describe('CDP bridge', () => {
     await bridge.withCdpTab(7, async () => undefined);
     bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
     await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-    bridge.handleCdpFrame(frame({ type: 'cdp_release' }), send);
-
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_attached',
+      id: 1,
+      error: { message: 'WebBridge is currently controlling the browser' },
+    });
     expect(chromeHarness.detach).not.toHaveBeenCalled();
-    await expect(
-      bridge.withCdpTab(7, (command) => command('Runtime.evaluate')),
-    ).resolves.toEqual({ value: 'ok' });
     bridge.shutdownCdpBridge();
   });
 

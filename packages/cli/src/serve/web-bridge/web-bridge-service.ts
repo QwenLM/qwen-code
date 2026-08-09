@@ -53,9 +53,11 @@ export class WebBridgeRequestError extends Error {
   }
 }
 
-const MAX_SCREENSHOT_BYTES = 64 * 1024 * 1024;
-const MAX_PDF_BYTES = 100 * 1024 * 1024;
+const MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024;
+const MAX_PDF_BYTES = 24 * 1024 * 1024;
+const MAX_COMMAND_BYTES = 256 * 1024;
 const MAX_PENDING_COMMANDS = 32;
+const MAX_SESSIONS = 64;
 const MAX_QUEUE_WAIT_MS = 60_000;
 const STALE_TAB_ERROR = /no tab|tab not found|invalid tab id/i;
 
@@ -70,16 +72,12 @@ export class WebBridgeService {
     private readonly daemonVersion: string,
   ) {}
 
-  execute(body: unknown): Promise<unknown> {
-    let command: ParsedCommand;
-    try {
-      command = parseCommand(body);
-    } catch (error) {
-      return Promise.reject(error);
-    }
+  async execute(body: unknown): Promise<unknown> {
+    const command = parseCommand(body);
     if (this.pendingCommands >= MAX_PENDING_COMMANDS) {
-      return Promise.reject(
-        new WebBridgeRequestError('Qwen WebBridge command queue is full', 503),
+      throw new WebBridgeRequestError(
+        'Qwen WebBridge command queue is full',
+        503,
       );
     }
     this.pendingCommands++;
@@ -124,22 +122,19 @@ export class WebBridgeService {
     };
   }
 
-  sessionSnapshot(session: string): {
-    currentTabId?: number;
-    ownedTabIds: number[];
-    borrowedTabId?: number;
-  } | null {
-    const state = this.sessions.get(session);
-    if (!state) return null;
-    return {
-      currentTabId: state.currentTabId,
-      ownedTabIds: [...state.ownedTabIds],
-      borrowedTabId: state.borrowedTabId,
-    };
-  }
-
   private async executeNow(command: ParsedCommand): Promise<unknown> {
-    const state = this.sessions.get(command.session) ?? {
+    const existing = this.sessions.get(command.session);
+    if (
+      !existing &&
+      this.sessions.size >= MAX_SESSIONS &&
+      (command.action === 'navigate' || command.action === 'find_tab')
+    ) {
+      throw new WebBridgeRequestError(
+        'Qwen WebBridge session limit reached',
+        503,
+      );
+    }
+    const state = existing ?? {
       ownedTabIds: new Set<number>(),
     };
     const injectedArgs = this.injectSessionArgs(command, state);
@@ -177,7 +172,7 @@ export class WebBridgeService {
       this.sessions.delete(command.session);
     }
     if (command.action === 'screenshot' || command.action === 'save_as_pdf') {
-      return this.persistArtifact(command.action, command.args, result);
+      return this.persistArtifact(command.action, result);
     }
     return result;
   }
@@ -223,7 +218,7 @@ export class WebBridgeService {
       }
       return;
     }
-    if (command.action === 'close_tab' && data['closed'] === true) {
+    if (command.action === 'close_tab' && data['success'] === true) {
       const closed = state.currentTabId;
       if (closed !== undefined) state.ownedTabIds.delete(closed);
       if (state.borrowedTabId === closed) state.borrowedTabId = undefined;
@@ -255,7 +250,6 @@ export class WebBridgeService {
 
   private async persistArtifact(
     action: 'screenshot' | 'save_as_pdf',
-    args: Record<string, unknown>,
     result: unknown,
   ): Promise<Record<string, unknown>> {
     if (!isRecord(result) || typeof result['data'] !== 'string') {
@@ -275,17 +269,11 @@ export class WebBridgeService {
         : result['format'] === 'jpeg'
           ? 'jpg'
           : 'png';
-    const requestedPath =
-      typeof args['path'] === 'string' && args['path'].length > 0
-        ? path.resolve(args['path'])
-        : undefined;
-    const filePath =
-      requestedPath ??
-      path.join(
-        tmpdir(),
-        'qwen-webbridge',
-        `${artifactName(result['pageTitle'])}-${Date.now()}.${extension}`,
-      );
+    const filePath = path.join(
+      tmpdir(),
+      'qwen-webbridge',
+      `${artifactName(result['pageTitle'])}-${Date.now()}.${extension}`,
+    );
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, data);
     const { data: _data, dataLength: _dataLength, ...metadata } = result;
@@ -306,6 +294,9 @@ export class WebBridgeService {
 function parseCommand(body: unknown): ParsedCommand {
   if (!isRecord(body)) {
     throw new WebBridgeRequestError('Request body must be a JSON object');
+  }
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') > MAX_COMMAND_BYTES) {
+    throw new WebBridgeRequestError('Request body is too large', 413);
   }
   const action = body['action'];
   if (

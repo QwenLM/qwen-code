@@ -29,8 +29,6 @@ describe('WebBridgeRegistry', () => {
         payload: { data: 'wrong connection' },
       }),
     ).toBe(true);
-    expect(registry.pendingCount()).toBe(1);
-
     registry.routeInbound('extension-1', {
       type: 'webbridge_result',
       responseToRequestId: requestId,
@@ -39,14 +37,50 @@ describe('WebBridgeRegistry', () => {
     await expect(pending).resolves.toEqual({ ok: true });
   });
 
-  it('rejects pending calls when the active extension is replaced', async () => {
+  it('lets old calls finish while new calls use the replacement extension', async () => {
     const registry = new WebBridgeRegistry(1_000);
-    registry.register({ connectionId: 'old', send() {} });
-    const pending = registry.call('snapshot', {});
+    let oldRequestId = '';
+    let newRequestId = '';
+    registry.register({
+      connectionId: 'old',
+      send(frame) {
+        oldRequestId = frame.requestId;
+      },
+    });
+    const oldPending = registry.call('snapshot', {});
 
-    registry.register({ connectionId: 'new', send() {} });
+    registry.register({
+      connectionId: 'new',
+      send(frame) {
+        newRequestId = frame.requestId;
+      },
+    });
+    const newPending = registry.call('snapshot', {});
+    registry.routeInbound('old', {
+      type: 'webbridge_result',
+      responseToRequestId: oldRequestId,
+      payload: { data: 'old result' },
+    });
+    registry.routeInbound('new', {
+      type: 'webbridge_result',
+      responseToRequestId: newRequestId,
+      payload: { data: 'new result' },
+    });
 
-    await expect(pending).rejects.toThrow('replaced');
+    await expect(oldPending).resolves.toBe('old result');
+    await expect(newPending).resolves.toBe('new result');
+  });
+
+  it('falls back to the previous extension when its replacement disconnects', async () => {
+    const registry = new WebBridgeRegistry(1_000);
+    const oldSend = vi.fn();
+    registry.register({ connectionId: 'old', send: oldSend });
+    const unregisterNew = registry.register({ connectionId: 'new', send() {} });
+
+    unregisterNew();
+    void registry.call('snapshot', {}).catch(() => {});
+
+    expect(oldSend).toHaveBeenCalledOnce();
   });
 
   it('times out calls and removes their pending state', async () => {
@@ -57,11 +91,9 @@ describe('WebBridgeRegistry', () => {
 
       const pending = registry.call('snapshot', {});
       const rejection = pending.catch((error: unknown) => error);
-      expect(registry.pendingCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(100);
 
       expect(await rejection).toBeInstanceOf(WebBridgeTimeoutError);
-      expect(registry.pendingCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }

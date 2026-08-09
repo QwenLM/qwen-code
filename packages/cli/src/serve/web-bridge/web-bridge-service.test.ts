@@ -5,9 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { readFile, rm } from 'node:fs/promises';
 import { WebBridgeRegistry } from './web-bridge-registry.js';
 import { WebBridgeService } from './web-bridge-service.js';
 
@@ -35,10 +33,6 @@ describe('WebBridgeService', () => {
       _session: 'research',
       _tabId: 42,
       _tabIds: [42],
-    });
-    expect(service.sessionSnapshot('research')).toMatchObject({
-      currentTabId: 42,
-      ownedTabIds: [42],
     });
   });
 
@@ -96,6 +90,31 @@ describe('WebBridgeService', () => {
     await Promise.all(pending);
   });
 
+  it('bounds retained browser sessions', async () => {
+    const registry = new WebBridgeRegistry();
+    let tabId = 0;
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockImplementation(async () => ({ success: true, tabId: ++tabId }));
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    for (let index = 0; index < 64; index++) {
+      await service.execute({
+        action: 'navigate',
+        args: { url: 'https://example.test', newTab: true },
+        session: `session-${index}`,
+      });
+    }
+    await expect(
+      service.execute({
+        action: 'navigate',
+        args: { url: 'https://example.test', newTab: true },
+        session: 'overflow',
+      }),
+    ).rejects.toThrow('session limit reached');
+    expect(call).toHaveBeenCalledTimes(64);
+  });
+
   it('expires queued commands without blocking later commands', async () => {
     vi.useFakeTimers({ now: 0 });
     try {
@@ -151,7 +170,8 @@ describe('WebBridgeService', () => {
       .spyOn(registry, 'call')
       .mockResolvedValueOnce({ success: true, tabId: 42 })
       .mockRejectedValueOnce(new Error('No tab with id: 42'))
-      .mockResolvedValueOnce({ success: true, tabId: 43 });
+      .mockResolvedValueOnce({ success: true, tabId: 43 })
+      .mockResolvedValueOnce({});
     const service = new WebBridgeService(registry, '1.2.3');
 
     await service.execute({
@@ -164,17 +184,23 @@ describe('WebBridgeService', () => {
       args: { url: 'https://example.test/next' },
       session: 'research',
     });
+    await service.execute({
+      action: 'snapshot',
+      args: {},
+      session: 'research',
+    });
 
-    expect(call).toHaveBeenLastCalledWith('navigate', {
+    expect(call).toHaveBeenNthCalledWith(3, 'navigate', {
       url: 'https://example.test/next',
       newTab: true,
       _session: 'research',
       _tabId: undefined,
       _tabIds: [],
     });
-    expect(service.sessionSnapshot('research')).toMatchObject({
-      currentTabId: 43,
-      ownedTabIds: [43],
+    expect(call).toHaveBeenLastCalledWith('snapshot', {
+      _session: 'research',
+      _tabId: 43,
+      _tabIds: [43],
     });
   });
 
@@ -183,7 +209,8 @@ describe('WebBridgeService', () => {
     const call = vi
       .spyOn(registry, 'call')
       .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true })
-      .mockResolvedValueOnce({ success: true, closed: 0 });
+      .mockResolvedValueOnce({ success: true, closed: 0 })
+      .mockResolvedValueOnce({});
     const service = new WebBridgeService(registry, '1.2.3');
 
     await service.execute({
@@ -202,7 +229,16 @@ describe('WebBridgeService', () => {
       _tabId: 99,
       _tabIds: [],
     });
-    expect(service.sessionSnapshot('research')).toBeNull();
+    await service.execute({
+      action: 'snapshot',
+      args: {},
+      session: 'research',
+    });
+    expect(call).toHaveBeenLastCalledWith('snapshot', {
+      _session: 'research',
+      _tabId: undefined,
+      _tabIds: [],
+    });
   });
 
   it('keeps a borrowed tab selected after navigating it', async () => {
@@ -235,18 +271,15 @@ describe('WebBridgeService', () => {
       _tabId: 99,
       _tabIds: [],
     });
-    expect(service.sessionSnapshot('research')).toMatchObject({
-      currentTabId: 99,
-      ownedTabIds: [],
-      borrowedTabId: 99,
-    });
   });
 
   it('forgets session tabs missing from list_tabs', async () => {
     const registry = new WebBridgeRegistry();
-    vi.spyOn(registry, 'call')
+    const call = vi
+      .spyOn(registry, 'call')
       .mockResolvedValueOnce({ success: true, tabId: 42 })
-      .mockResolvedValueOnce({ success: true, tabs: [] });
+      .mockResolvedValueOnce({ success: true, tabs: [] })
+      .mockResolvedValueOnce({});
     const service = new WebBridgeService(registry, '1.2.3');
 
     await service.execute({
@@ -259,8 +292,16 @@ describe('WebBridgeService', () => {
       args: {},
       session: 'research',
     });
-
-    expect(service.sessionSnapshot('research')).toBeNull();
+    await service.execute({
+      action: 'snapshot',
+      args: {},
+      session: 'research',
+    });
+    expect(call).toHaveBeenLastCalledWith('snapshot', {
+      _session: 'research',
+      _tabId: undefined,
+      _tabIds: [],
+    });
   });
 
   it('rejects unsupported actions before contacting the extension', async () => {
@@ -272,6 +313,57 @@ describe('WebBridgeService', () => {
       service.execute({ action: 'unknown', args: {}, session: 'test' }),
     ).rejects.toThrow('Unknown WebBridge action');
     expect(call).not.toHaveBeenCalled();
+  });
+
+  it('rejects oversized commands before queueing them', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi.spyOn(registry, 'call');
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await expect(
+      service.execute({
+        action: 'evaluate',
+        args: { code: 'x'.repeat(256 * 1024) },
+        session: 'test',
+      }),
+    ).rejects.toMatchObject({ statusCode: 413 });
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('forgets a session tab that was already closed', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 42 })
+      .mockResolvedValueOnce({
+        success: true,
+        closed: false,
+        reason: 'tab already closed',
+      })
+      .mockResolvedValueOnce({});
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'research',
+    });
+    await service.execute({
+      action: 'close_tab',
+      args: {},
+      session: 'research',
+    });
+    await service.execute({
+      action: 'snapshot',
+      args: {},
+      session: 'research',
+    });
+
+    expect(call).toHaveBeenLastCalledWith('snapshot', {
+      _session: 'research',
+      _tabId: undefined,
+      _tabIds: [],
+    });
   });
 
   it('does not accept caller-supplied internal tab state', async () => {
@@ -294,13 +386,21 @@ describe('WebBridgeService', () => {
 
   it('does not retain a new session when its action fails', async () => {
     const registry = new WebBridgeRegistry();
-    vi.spyOn(registry, 'call').mockRejectedValue(new Error('disconnected'));
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockRejectedValueOnce(new Error('disconnected'))
+      .mockResolvedValueOnce({});
     const service = new WebBridgeService(registry, '1.2.3');
 
     await expect(
       service.execute({ action: 'snapshot', args: {}, session: 'failed' }),
     ).rejects.toThrow('disconnected');
-    expect(service.sessionSnapshot('failed')).toBeNull();
+    await service.execute({ action: 'snapshot', args: {}, session: 'failed' });
+    expect(call).toHaveBeenLastCalledWith('snapshot', {
+      _session: 'failed',
+      _tabId: undefined,
+      _tabIds: [],
+    });
   });
 
   it.each([
@@ -309,10 +409,7 @@ describe('WebBridgeService', () => {
   ] as const)(
     'persists %s data returned by the extension',
     async (action, extension, mimeType) => {
-      const directory = await mkdtemp(
-        path.join(tmpdir(), 'qwen-webbridge-test-'),
-      );
-      const filePath = path.join(directory, `artifact.${extension}`);
+      let filePath = '';
       try {
         const registry = new WebBridgeRegistry();
         vi.spyOn(registry, 'call').mockResolvedValue({
@@ -323,18 +420,19 @@ describe('WebBridgeService', () => {
         });
         const service = new WebBridgeService(registry, '1.2.3');
 
-        await expect(
-          service.execute({
-            action,
-            args: { path: filePath },
-            session: 'artifact-test',
-          }),
-        ).resolves.toMatchObject({ path: filePath, mimeType, sizeBytes: 14 });
+        const result = await service.execute({
+          action,
+          args: { path: '/caller/cannot/choose-this' },
+          session: 'artifact-test',
+        });
+        expect(result).toMatchObject({ mimeType, sizeBytes: 14 });
+        filePath = String((result as Record<string, unknown>)['path']);
+        expect(filePath).toContain('qwen-webbridge');
         await expect(readFile(filePath, 'utf8')).resolves.toBe(
           'artifact bytes',
         );
       } finally {
-        await rm(directory, { recursive: true, force: true });
+        if (filePath) await rm(filePath, { force: true });
       }
     },
   );

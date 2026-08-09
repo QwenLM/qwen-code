@@ -75,6 +75,7 @@ type CdpEventListener = (
   params: Record<string, unknown>,
   tabId: number,
 ) => void;
+type CdpDetachListener = (tabId: number) => void;
 export type CdpCommand = (
   method: string,
   params?: Record<string, unknown>,
@@ -100,6 +101,7 @@ let attaching = false;
  */
 let releaseRequestedDuringAttach = false;
 const directEventListeners = new Set<CdpEventListener>();
+const directDetachListeners = new Set<CdpDetachListener>();
 const detachingTabIds = new Set<number>();
 let directOperationActive = false;
 
@@ -169,6 +171,7 @@ function onDebuggerDetach(
   console.log(LOG_PREFIX, 'debugger detached:', reason);
   attachedTabIds.delete(source.tabId);
   directTabIds.delete(source.tabId);
+  for (const listener of directDetachListeners) listener(source.tabId);
   if (activeSend && source.tabId === rawTabId) {
     activeSend({ type: 'cdp_detach', reason: reason || 'target_closed' });
     rawTabId = null;
@@ -294,6 +297,11 @@ export function subscribeCdpEvents(listener: CdpEventListener): () => void {
   return () => directEventListeners.delete(listener);
 }
 
+export function subscribeCdpDetaches(listener: CdpDetachListener): () => void {
+  directDetachListeners.add(listener);
+  return () => directDetachListeners.delete(listener);
+}
+
 export async function releaseCdpTab(tabId: number): Promise<void> {
   directTabIds.delete(tabId);
   if (rawTabId === tabId || !attachedTabIds.has(tabId)) return;
@@ -325,7 +333,7 @@ async function handleAttach(
     });
     return;
   }
-  if (directOperationActive) {
+  if (directOperationActive || directTabIds.size > 0) {
     send({
       type: 'cdp_attached',
       id: frame.id,
@@ -475,6 +483,9 @@ export function shutdownCdpBridge(): void {
     releaseRequestedDuringAttach = true;
   }
   const tabIds = [...attachedTabIds];
+  for (const tabId of tabIds) {
+    for (const listener of directDetachListeners) listener(tabId);
+  }
   teardownAttachments();
   activeSend = null;
   for (const tabId of tabIds) {

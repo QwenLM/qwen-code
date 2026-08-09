@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -394,6 +395,8 @@ function getRuntimeEffectiveEnv(
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /** Per-process credential accepted only by the WebBridge HTTP routes. */
+  webBridgeToken?: string;
   /**
    * Enables resident management of scheduled-task-owned sessions: a periodic
    * keepalive (so their schedulers aren't idle-reaped) and a boot-time
@@ -1643,7 +1646,13 @@ export function createServeApp(
     });
   }
 
-  app.use(bearerAuth(opts.token));
+  const daemonAuth = bearerAuth(opts.token);
+  const webBridgeAuth = bearerAuth(deps.webBridgeToken || randomUUID());
+  app.use((req, res, next) =>
+    /^\/(?:status|command)\/?$/i.test(req.path)
+      ? webBridgeAuth(req, res, next)
+      : daemonAuth(req, res, next),
+  );
 
   // Rate limiter: after auth (only count authenticated requests), except
   // webhook routes which use their own shared-secret auth before bearerAuth.
@@ -1714,7 +1723,6 @@ export function createServeApp(
 
   registerWebBridgeRoutes(app, {
     service: webBridgeService,
-    mutate,
   });
 
   registerDaemonStatusRoutes(app, {

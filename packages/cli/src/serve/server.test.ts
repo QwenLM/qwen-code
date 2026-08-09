@@ -20468,6 +20468,69 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
     });
 
+    it('accepts the route-scoped token only on WebBridge routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'daemon-secret' },
+        undefined,
+        { webBridgeToken: 'webbridge-secret' },
+      );
+
+      const webBridge = await request(app)
+        .get('/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(webBridge.status).toBe(200);
+
+      const daemon = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(daemon.status).toBe(401);
+    });
+
+    it('does not accept the daemon bearer on WebBridge routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'daemon-secret' },
+        undefined,
+        { webBridgeToken: 'webbridge-secret' },
+      );
+
+      const res = await request(app)
+        .get('/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer daemon-secret');
+      expect(res.status).toBe(401);
+    });
+
+    it('keeps trailing-slash WebBridge routes behind the route-scoped token', async () => {
+      const app = createServeApp({ ...baseOpts, token: undefined }, undefined, {
+        webBridgeToken: 'webbridge-secret',
+      });
+
+      const denied = await request(app)
+        .post('/COMMAND/')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ action: 'snapshot', args: {}, session: 'test' });
+      expect(denied.status).toBe(401);
+
+      const allowed = await request(app)
+        .get('/status/')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(allowed.status).toBe(200);
+    });
+
+    it('does not disable WebBridge auth for an empty route token', async () => {
+      const app = createServeApp({ ...baseOpts, token: undefined }, undefined, {
+        webBridgeToken: '',
+      });
+
+      const res = await request(app)
+        .get('/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(401);
+    });
+
     it('exempts /health from bearer auth so liveness probes work without credentials', async () => {
       // Per #3889 review A8dZT — the registration order in
       // `createServeApp` puts `/health` BEFORE `bearerAuth`, so a

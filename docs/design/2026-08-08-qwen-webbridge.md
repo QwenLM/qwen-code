@@ -42,14 +42,13 @@ The documented request envelope is:
 {
   "action": "navigate",
   "args": { "url": "https://example.com", "newTab": true },
-  "session": "task-name-unique-suffix"
+  "session": "task-name-uuid-suffix"
 }
 ```
 
 ## Goals
 
-- Expose `POST /command` and `GET /status` from `qwen serve`, plus namespaced
-  `/webbridge/command` and `/webbridge/status` aliases.
+- Expose `POST /command` and `GET /status` from `qwen serve`.
 - Keep the Agent path direct:
   `Agent/Skill -> HTTP -> daemon -> reverse WebSocket -> extension -> Chrome`.
 - Operate the user's real Chrome profile and login state.
@@ -67,8 +66,9 @@ The documented request envelope is:
 - Hiding Chrome's debugging banner or bypassing DevTools attachment conflicts.
 - Automating Chrome internal pages, operating-system dialogs, passkeys,
   captchas, or other surfaces that Chrome does not expose to extensions/CDP.
-- Supporting a remote Agent and remote browser in the first version. File paths
-  in `upload`, `screenshot`, and `save_as_pdf` refer to the daemon/browser host.
+- Supporting a remote Agent and remote browser in the first version. Upload
+  paths refer to the daemon/browser host; generated artifacts stay below the
+  daemon host's OS temporary directory.
 
 ## Architecture
 
@@ -95,22 +95,25 @@ silently switching its tab.
 
 `/command` is **process-global browser scoped**. It is not workspace scoped and
 must never fall back to a secondary workspace runtime. It is mounted after the
-existing host allowlist, browser-origin denial, bearer middleware, JSON parser,
-and rate limiter. With the default loopback/no-token daemon, local processes are
-trusted in the same way as existing session mutation routes. With a configured
-token, the existing bearer middleware protects the endpoint.
+existing host allowlist, browser-origin denial, JSON parser, and rate limiter.
+Every daemon instance generates a route-scoped WebBridge token; daemon-spawned
+Agent processes receive that token and the resolved daemon URL without receiving
+the daemon-wide bearer token. The WebBridge credential cannot access other
+daemon APIs.
 
 The extension connection is accepted only after ACP initialization with
-`clientInfo.name = qwen-cdp-bridge` and the `webbridge-v1` client capability.
+`clientInfo.name = qwen-cdp-bridge`, the `webbridge-v1` client capability, and a
+verified `chrome-extension://<id>` origin matching `clientInfo.extensionId`.
 This keeps older CDP-only extension builds and normal Web Shell or IDE clients
-from claiming the browser bridge. Reconnect is last-writer-wins; replacing or
-losing the active extension rejects every pending command.
+from claiming the browser bridge. Reconnect is last-writer-wins for new calls;
+in-flight calls remain bound to their original connection, and a disconnected
+replacement falls back to the previous live extension.
 
-`upload` passes local absolute paths to Chrome's `DOM.setFileInputFiles`.
-`screenshot` and `save_as_pdf` may write a caller-selected path. These are
-intentional local-machine capabilities and therefore inherit the daemon's
-authentication boundary. Default artifact paths are generated below the OS
-temporary directory. PDF decoding is capped at 100 MiB.
+`upload` passes local absolute paths to Chrome's `DOM.setFileInputFiles` and
+therefore inherits the route-scoped authentication boundary. Screenshot and PDF
+paths are always generated below the OS temporary directory; caller-selected
+artifact paths are ignored. Screenshot decoding is capped at 16 MiB, PDF
+decoding at 24 MiB, and accumulated chunk text at 32 MiB.
 
 ## Daemon protocol and state
 
@@ -205,9 +208,10 @@ Navigation or session cleanup invalidates it.
 
 A bundled `qwen-webbridge` Skill documents the command envelope, a unique
 session per task, tab ownership, non-destructive cleanup, artifacts, and
-recovery. It calls the daemon with `curl`; `QWEN_WEBBRIDGE_URL` can override the
-default `http://127.0.0.1:4170`, and `QWEN_SERVER_TOKEN` supplies bearer auth
-when set.
+recovery. Daemon-spawned Agent processes receive `QWEN_WEBBRIDGE_URL` and the
+route-scoped `QWEN_WEBBRIDGE_TOKEN`; the Skill sends that bearer on every
+request. A separately launched CLI does not inherit these values and does not
+automatically attach to an already-running daemon.
 
 ## Verification
 

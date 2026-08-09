@@ -6,6 +6,7 @@
 
 import {
   releaseCdpTab,
+  subscribeCdpDetaches,
   subscribeCdpEvents,
   withCdpTab,
   withDirectBrowserAction,
@@ -31,7 +32,6 @@ interface NetworkRequest {
 interface NetworkCapture {
   session: string;
   tabId: number;
-  active: boolean;
   requests: Map<string, NetworkRequest>;
 }
 
@@ -58,8 +58,16 @@ const refsByTab = new Map<number, Map<string, ElementRef>>();
 const groupBySession = new Map<string, number>();
 const tabsBySession = new Map<string, Set<number>>();
 const networkCaptures = new Map<string, NetworkCapture>();
+const MAX_NETWORK_CAPTURES = 32;
 const MAX_NETWORK_REQUESTS = 2_000;
 let removeNetworkListener: (() => void) | undefined;
+
+subscribeCdpDetaches((tabId) => {
+  for (const [key, capture] of networkCaptures) {
+    if (capture.tabId === tabId) networkCaptures.delete(key);
+  }
+  stopNetworkListenerIfIdle();
+});
 
 const ACTIONS: Record<string, (args: Args) => Promise<unknown>> = {
   navigate,
@@ -501,10 +509,15 @@ async function network(args: Args): Promise<unknown> {
   rememberTab(args, tab.id);
   const key = JSON.stringify([session, tab.id]);
   if (command === 'start') {
+    if (
+      !networkCaptures.has(key) &&
+      networkCaptures.size >= MAX_NETWORK_CAPTURES
+    ) {
+      throw new Error('network: capture limit reached');
+    }
     networkCaptures.set(key, {
       session,
       tabId: tab.id,
-      active: true,
       requests: new Map(),
     });
     installNetworkListener();
@@ -518,11 +531,10 @@ async function network(args: Args): Promise<unknown> {
     return { success: true, message: 'network capture started' };
   }
   if (command === 'stop') {
-    const capture = networkCaptures.get(key);
-    if (capture) capture.active = false;
+    networkCaptures.delete(key);
     if (
       ![...networkCaptures.values()].some(
-        (candidate) => candidate.tabId === tab.id && candidate.active,
+        (candidate) => candidate.tabId === tab.id,
       )
     ) {
       await withCdpTab(tab.id, async (send) => {
@@ -746,8 +758,14 @@ async function listTabs(args: Args): Promise<unknown> {
       });
     } catch {
       // Ignore tabs the user already closed.
+      refsByTab.delete(tabId);
+      forgetTab(tabId);
+      for (const [key, capture] of networkCaptures) {
+        if (capture.tabId === tabId) networkCaptures.delete(key);
+      }
     }
   }
+  stopNetworkListenerIfIdle();
   return { success: true, tabs };
 }
 
@@ -979,7 +997,7 @@ function installNetworkListener(): void {
     const requestId = string(params['requestId']);
     if (!requestId) return;
     for (const capture of networkCaptures.values()) {
-      if (!capture.active || capture.tabId !== tabId) continue;
+      if (capture.tabId !== tabId) continue;
       const requests = capture.requests;
       if (method === 'Network.requestWillBeSent') {
         const request = record(params['request']);
@@ -1008,7 +1026,7 @@ function installNetworkListener(): void {
 }
 
 function stopNetworkListenerIfIdle(): void {
-  if ([...networkCaptures.values()].some((capture) => capture.active)) return;
+  if (networkCaptures.size > 0) return;
   removeNetworkListener?.();
   removeNetworkListener = undefined;
 }
@@ -1023,7 +1041,7 @@ async function releaseIdleTabs(args: Args): Promise<void> {
   }
   for (const tabId of ids) {
     const capturing = [...networkCaptures.values()].some(
-      (capture) => capture.tabId === tabId && capture.active,
+      (capture) => capture.tabId === tabId,
     );
     if (!capturing) await releaseCdpTab(tabId);
   }
@@ -1152,13 +1170,7 @@ async function dispatchKey(
   sequence: KeySequence,
 ): Promise<void> {
   let activeBits = 0;
-  for (const modifier of sequence.modifiers) {
-    activeBits |= modifier.bit;
-    await send(
-      'Input.dispatchKeyEvent',
-      keyEvent('rawKeyDown', modifier, activeBits),
-    );
-  }
+  const pressed: KeySequence['modifiers'] = [];
   const shifted = (sequence.modifierBits & 8) !== 0;
   const key =
     shifted && /^[a-z]$/.test(sequence.key.key)
@@ -1179,26 +1191,60 @@ async function dispatchKey(
     )
       ? { commands: ['selectAll'] }
       : {};
-  await send('Input.dispatchKeyEvent', {
-    ...keyEvent(
-      Object.keys(printable).length === 0 ? 'rawKeyDown' : 'keyDown',
-      key,
-      sequence.modifierBits,
-    ),
-    ...printable,
-    ...commands,
-  });
-  await send(
-    'Input.dispatchKeyEvent',
-    keyEvent('keyUp', key, sequence.modifierBits),
-  );
-  for (const modifier of [...sequence.modifiers].reverse()) {
-    activeBits &= ~modifier.bit;
+  let keyPressed = false;
+  let failure: unknown;
+  try {
+    for (const modifier of sequence.modifiers) {
+      const nextBits = activeBits | modifier.bit;
+      await send(
+        'Input.dispatchKeyEvent',
+        keyEvent('rawKeyDown', modifier, nextBits),
+      );
+      activeBits = nextBits;
+      pressed.push(modifier);
+    }
+    await send('Input.dispatchKeyEvent', {
+      ...keyEvent(
+        Object.keys(printable).length === 0 ? 'rawKeyDown' : 'keyDown',
+        key,
+        sequence.modifierBits,
+      ),
+      ...printable,
+      ...commands,
+    });
+    keyPressed = true;
     await send(
       'Input.dispatchKeyEvent',
-      keyEvent('keyUp', modifier, activeBits),
+      keyEvent('keyUp', key, sequence.modifierBits),
     );
+    keyPressed = false;
+  } catch (error) {
+    failure = error;
   }
+  let cleanupError: unknown;
+  if (keyPressed) {
+    try {
+      await send(
+        'Input.dispatchKeyEvent',
+        keyEvent('keyUp', key, sequence.modifierBits),
+      );
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  for (const modifier of pressed.reverse()) {
+    activeBits &= ~modifier.bit;
+    try {
+      await send(
+        'Input.dispatchKeyEvent',
+        keyEvent('keyUp', modifier, activeBits),
+      );
+    } catch (error) {
+      cleanupError ??= error;
+    }
+  }
+  if (failure !== undefined) throw failure;
+  if (cleanupError !== undefined) throw cleanupError;
 }
 
 function keyEvent(type: string, spec: KeySpec, modifiers: number): JsonRecord {

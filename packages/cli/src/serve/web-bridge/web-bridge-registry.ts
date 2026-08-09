@@ -48,7 +48,7 @@ interface PendingCall {
   chunkLength: number;
 }
 
-const MAX_RESULT_CHARS = 140 * 1024 * 1024;
+const MAX_RESULT_CHARS = 32 * 1024 * 1024;
 
 export class WebBridgeUnavailableError extends Error {
   constructor(message = 'Qwen WebBridge extension is not connected') {
@@ -73,27 +73,23 @@ export function isWebBridgeInboundFrameType(type: unknown): boolean {
 
 export class WebBridgeRegistry {
   private active: WebBridgeEndpoint | undefined;
+  private readonly endpoints = new Map<string, WebBridgeEndpoint>();
   private readonly pending = new Map<string, PendingCall>();
 
   constructor(private readonly timeoutMs = 60_000) {}
 
   register(endpoint: WebBridgeEndpoint): () => void {
-    const previous = this.active;
-    if (previous && previous !== endpoint) {
-      this.rejectConnection(
-        previous.connectionId,
-        new WebBridgeUnavailableError(
-          'Qwen WebBridge extension connection was replaced',
-        ),
-      );
-    }
+    this.endpoints.delete(endpoint.connectionId);
+    this.endpoints.set(endpoint.connectionId, endpoint);
     this.active = endpoint;
     let unregistered = false;
     return () => {
       if (unregistered) return;
       unregistered = true;
-      if (this.active !== endpoint) return;
-      this.active = undefined;
+      this.endpoints.delete(endpoint.connectionId);
+      if (this.active === endpoint) {
+        this.active = [...this.endpoints.values()].at(-1);
+      }
       this.rejectConnection(
         endpoint.connectionId,
         new WebBridgeUnavailableError('Qwen WebBridge extension disconnected'),
@@ -196,10 +192,6 @@ export class WebBridgeRegistry {
       extensionId: this.active?.extensionId,
       version: this.active?.version,
     };
-  }
-
-  pendingCount(): number {
-    return this.pending.size;
   }
 
   private rejectConnection(connectionId: string, error: Error): void {

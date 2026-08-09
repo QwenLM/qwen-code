@@ -932,6 +932,12 @@ describe('formatChannelWorkerDaemonUrl', () => {
     );
     expect(isLoopbackBind('127.0.0.2')).toBe(true);
   });
+
+  it('preserves the requested scheme for local connection URLs', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170, 'https')).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
 });
 
 /**

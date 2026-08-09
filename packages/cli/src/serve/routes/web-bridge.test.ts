@@ -16,7 +16,6 @@ function setup() {
   app.use(express.json());
   registerWebBridgeRoutes(app, {
     service: new WebBridgeService(new WebBridgeRegistry(), '1.2.3'),
-    mutate: () => (_req, _res, next) => next(),
   });
   return app;
 }
@@ -51,7 +50,6 @@ describe('WebBridge routes', () => {
     app.use(express.json());
     registerWebBridgeRoutes(app, {
       service: new WebBridgeService(registry, '1.2.3'),
-      mutate: () => (_req, _res, next) => next(),
     });
 
     const response = await request(app).post('/command').send({

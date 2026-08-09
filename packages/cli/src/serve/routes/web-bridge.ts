@@ -18,7 +18,6 @@ export function registerWebBridgeRoutes(
   app: Application,
   deps: {
     service: WebBridgeService;
-    mutate: () => RequestHandler;
   },
 ): void {
   const status: RequestHandler = (_req, res) => {
@@ -43,7 +42,5 @@ export function registerWebBridgeRoutes(
   };
 
   app.get('/status', status);
-  app.get('/webbridge/status', status);
-  app.post('/command', deps.mutate(), command);
-  app.post('/webbridge/command', deps.mutate(), command);
+  app.post('/command', command);
 }
