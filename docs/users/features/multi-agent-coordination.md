@@ -1,6 +1,6 @@
 # Multi-Agent Coordination
 
-Qwen Code can coordinate several Qwen teammates with the experimental Agent Team runtime. Teammates receive separate tasks, share a task list, exchange messages, and appear in the existing Agent View tabs.
+Qwen Code can coordinate several same-model teammates with the experimental Agent Team runtime. Teammates receive separate tasks, share a task list, exchange messages, and appear in the existing Agent View tabs.
 
 ## Enable Agent Team
 

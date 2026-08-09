@@ -1,11 +1,11 @@
 ---
 name: coordinate
-description: Coordinate up to three Qwen teammates with the existing Agent Team runtime and Agent View tabs. Invoke explicitly with /coordinate.
+description: Coordinate up to three same-model Qwen Code teammates with the existing Agent Team runtime and Agent View tabs. Invoke explicitly with /coordinate.
 argument-hint: '<goal>'
 disable-model-invocation: true
 ---
 
-# Coordinate Qwen Teammates
+# Coordinate Qwen Code Teammates
 
 Act as the team leader. Decompose the goal, keep task ownership clear, reconcile disagreements, and deliver the final result.
 
@@ -15,7 +15,7 @@ When `team_create` is available:
 
 1. Create one team for the goal.
 2. Create one self-contained task per independent workstream.
-3. Spawn one to three named teammates with the Agent tool. Do not pass `model`; named teammates use the current Qwen configuration.
+3. Spawn one to three named teammates with the Agent tool. Do not pass `model`; named teammates use the current session model.
 4. Assign tasks and let teammates collaborate through `send_message` and the shared task list. Use follow-up messages when evidence conflicts or a task needs clarification.
 5. Synthesize the accepted results. The leader is the only agent that writes to the current workspace.
 6. Send each teammate a `shutdown_request`, then delete the team.
