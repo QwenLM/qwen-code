@@ -26,7 +26,6 @@ export default defineConfig({
         statements: 80,
       },
       // retaining vitest v1 defaults until reviewed for v3 changes
-      all: false,
       ignoreEmptyLines: false,
     },
     include: ['test/**/*.test.ts'],
