@@ -286,6 +286,15 @@ export class WorkflowRunner {
         : undefined,
     );
 
+    // The pause barrier above runs detached (it is entered from a dispatch's
+    // `.finally`), and it durably writes 'paused' + canResume. A run that
+    // completes or is cancelled while that write is in flight would publish
+    // its terminal manifest first and have the barrier overwrite it — a
+    // finished run advertised as resumable forever. Joining the barrier
+    // before each terminal write orders the two.
+    const joinPauseBarrier = (): Promise<void> =>
+      scheduler.whenPauseBarrierSettled();
+
     let terminalCheckpoint: JournalCheckpoint | undefined;
 
     const handle: WorkflowRunHandle = new WorkflowRunHandle(
@@ -331,6 +340,7 @@ export class WorkflowRunner {
                   : (entry.error ?? 'Workflow run failed.'),
             };
           }
+          await joinPauseBarrier();
           terminalCheckpoint = await journal?.flush();
           if (entry && isTerminalWorkflowStatus(entry.status)) {
             return {
@@ -378,6 +388,7 @@ export class WorkflowRunner {
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
           if (details?.logs) registry?.setRecentLogs(runId, details.logs);
           try {
+            await joinPauseBarrier();
             terminalCheckpoint = await journal?.flush();
           } catch (flushError) {
             debugLogger.warn(
@@ -429,6 +440,10 @@ export class WorkflowRunner {
                 settledEntry.startTime,
             });
             const snapshotWrite = writeWorkflowSnapshot(config, settledEntry);
+            // Reached without a terminal flush on the early-return paths
+            // (the entry settled mid-script), so this write needs the same
+            // ordering guarantee the try/catch paths already took.
+            await joinPauseBarrier();
             let checkpoint = terminalCheckpoint;
             if (!checkpoint && journal) {
               try {

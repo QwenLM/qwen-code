@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   MAX_WORKFLOW_ARGS_BYTES,
+  MAX_WORKFLOW_ARTIFACT_BYTES,
   WORKFLOW_MANIFEST_SCHEMA_VERSION,
   WORKFLOW_RUNTIME_VERSION,
   listWorkflowRunRecords,
@@ -666,6 +667,40 @@ describe('durable workflow manifests', () => {
       expect(serialized).not.toContain(`wf_${'x'.repeat(129)}`);
     },
   );
+
+  it('refuses to buffer artifacts above the read cap', async () => {
+    const config = fakeConfig(projectDir);
+    const dir = config.storage.getWorkflowRunsDir();
+    await fs.mkdir(dir, { recursive: true });
+    // Sparse files: the apparent size clears the cap without allocating it.
+    // A repo-shipped multi-gigabyte artifact must be refused from the stat
+    // that is already in hand, because an OOM abort is not catchable and
+    // would take the whole listing down instead of one record.
+    const oversize = async (filePath: string) => {
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      const handle = await fs.open(filePath, 'w');
+      try {
+        await handle.truncate(MAX_WORKFLOW_ARTIFACT_BYTES + 1);
+      } finally {
+        await handle.close();
+      }
+    };
+    await oversize(path.join(dir, 'wf_a1.json'));
+    await oversize(config.storage.getWorkflowRunManifestPath('wf_b2'));
+
+    const records = await listWorkflowRunRecords(config);
+    for (const runId of ['wf_a1', 'wf_b2']) {
+      expect(records.find((record) => record.runId === runId)).toMatchObject({
+        status: 'interrupted',
+        canResume: false,
+        resumeBlockedReason: expect.stringMatching(/too large/i),
+      });
+    }
+    await expect(readWorkflowManifest(config, 'wf_b2')).rejects.toThrow(
+      /too large/i,
+    );
+    await expect(listWorkflowSnapshots(config)).resolves.toEqual([]);
+  });
 
   it('rejects a terminal manifest that claims it can be resumed', async () => {
     const config = fakeConfig(projectDir);

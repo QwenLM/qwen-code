@@ -17,6 +17,7 @@ import {
   WorkflowJournal,
   JOURNAL_FORMAT_VERSION,
   JOURNAL_KEY_VERSION,
+  MAX_WORKFLOW_JOURNAL_BYTES,
   type JournalCheckpoint,
   type JournalEntry,
 } from './workflow-journal.js';
@@ -243,6 +244,36 @@ describe('WorkflowJournal', () => {
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it('refuses to buffer a journal above the read cap', async () => {
+    const runDir = path.join(dir, 'oversized', 'wf_dead');
+    await fs.mkdir(runDir, { recursive: true });
+    const journalPath = path.join(runDir, 'journal.jsonl');
+    // Sparse file: the apparent size clears the cap without allocating it.
+    // A repo-shipped journal can be arbitrarily large, and the resume path
+    // buffers it before any byteLength/hash check can reject it.
+    const handle = await fs.open(journalPath, 'w');
+    try {
+      await handle.truncate(MAX_WORKFLOW_JOURNAL_BYTES + 1);
+    } finally {
+      await handle.close();
+    }
+    const journal = new WorkflowJournal(journalPath);
+
+    // The manifest's `canResume` load — the reachable-by-listing path.
+    await expect(
+      journal.load({
+        version: JOURNAL_FORMAT_VERSION,
+        keyVersion: JOURNAL_KEY_VERSION,
+        byteLength: 0,
+        sha256: createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+        integrity: 'complete',
+      }),
+    ).rejects.toThrow(/too large/i);
+    const checkpoint = await journal.flush();
+    expect(checkpoint.integrity).toBe('failed');
+    expect(checkpoint.error).toMatch(/too large/i);
   });
 
   it('refuses a hardlinked journal without modifying its other name', async () => {

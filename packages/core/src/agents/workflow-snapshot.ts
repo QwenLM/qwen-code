@@ -51,6 +51,17 @@ export const WORKFLOW_MANIFEST_SCHEMA_VERSION = 2;
 export const WORKFLOW_RUNTIME_VERSION = 1;
 export const MAX_WORKFLOW_ARGS_BYTES = 64 * 1024;
 
+/**
+ * Upper bound on a single manifest/snapshot artifact read into memory.
+ * `<projectDir>/workflows` ships with the repository, so a clone can carry a
+ * multi-gigabyte `wf_<id>.json`; buffering that aborts the process (heap OOM
+ * is not a catchable exception, so the per-entry `catch` that degrades every
+ * other malformed artifact to an `invalidRecord` never runs). The bound is
+ * far above any real artifact — these are small JSON documents whose largest
+ * field is the workflow's own `result`.
+ */
+export const MAX_WORKFLOW_ARTIFACT_BYTES = 32 * 1024 * 1024;
+
 type JsonValue =
   | null
   | boolean
@@ -283,6 +294,14 @@ async function readRegularFileNoFollow(
       opened.ino !== current.ino
     ) {
       throw new Error(`Workflow artifact path changed: ${filePath}`);
+    }
+    // The size is already in hand from the identity stat; check it before
+    // buffering so an oversized artifact degrades to a skipped/invalid record
+    // instead of aborting the process on an uncatchable heap OOM.
+    if (opened.size > MAX_WORKFLOW_ARTIFACT_BYTES) {
+      throw new Error(
+        `Workflow artifact is too large: ${filePath} (${opened.size} bytes, limit ${MAX_WORKFLOW_ARTIFACT_BYTES})`,
+      );
     }
     return await handle.readFile('utf8');
   } finally {

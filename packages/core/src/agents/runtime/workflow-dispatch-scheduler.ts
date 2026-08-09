@@ -31,6 +31,7 @@ export class WorkflowDispatchScheduler {
   private state: WorkflowDispatchState = 'running';
   private inFlight = 0;
   private pauseBarrierPending = false;
+  private pauseBarrier: Promise<void> = Promise.resolve();
   private readonly queue: Job[] = [];
   private readonly gateWaiters: GateWaiter[] = [];
   private readonly stateListeners = new Set<
@@ -111,6 +112,19 @@ export class WorkflowDispatchScheduler {
     });
   }
 
+  /**
+   * Resolves once any in-flight pause barrier has settled. The barrier is
+   * entered from a dispatch's `.finally`, which cannot await it, so it runs
+   * detached from every caller: a run that completes or is cancelled during
+   * the barrier's fsync + manifest write has to join it here before writing
+   * its own terminal manifest, or the barrier's 'paused' + canResume write
+   * lands last and the settled run stays advertised as resumable. Never
+   * rejects — a failed barrier settles the run through its own error path.
+   */
+  whenPauseBarrierSettled(): Promise<void> {
+    return this.pauseBarrier;
+  }
+
   snapshot(): WorkflowDispatchSnapshot {
     return {
       state: this.state,
@@ -171,7 +185,7 @@ export class WorkflowDispatchScheduler {
       return;
     }
     this.pauseBarrierPending = true;
-    void Promise.resolve()
+    this.pauseBarrier = Promise.resolve()
       .then(this.beforePaused)
       .then(() => {
         this.pauseBarrierPending = false;

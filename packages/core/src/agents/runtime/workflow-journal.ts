@@ -53,6 +53,17 @@ export const JOURNAL_KEY_VERSION = 'v2';
 /** Durable checkpoint schema for committed journal prefixes. */
 export const JOURNAL_FORMAT_VERSION = 1;
 
+/**
+ * Upper bound on a `journal.jsonl` read into memory. The journal lives under
+ * `<projectDir>/workflows`, which ships with the repository, so a clone can
+ * carry a multi-gigabyte journal alongside a small, structurally valid
+ * `canResume` manifest — and the listing path journal-loads every such
+ * manifest. Buffering that aborts the process before any `byteLength`/hash
+ * check can reject it, so the size is checked first. The bound is far above
+ * any real run: a workflow is capped at 1000 dispatches, i.e. two lines each.
+ */
+export const MAX_WORKFLOW_JOURNAL_BYTES = 128 * 1024 * 1024;
+
 export interface JournalCheckpoint {
   version: typeof JOURNAL_FORMAT_VERSION;
   keyVersion: typeof JOURNAL_KEY_VERSION;
@@ -409,6 +420,11 @@ async function readJournalBytes(journalPath: string): Promise<Buffer> {
     assertSafeJournalFile(current, journalPath);
     assertSameJournalFile(before, current, journalPath);
     assertSameJournalFile(opened, current, journalPath);
+    if (opened.size > MAX_WORKFLOW_JOURNAL_BYTES) {
+      throw new Error(
+        `Workflow journal is too large: ${journalPath} (${opened.size} bytes, limit ${MAX_WORKFLOW_JOURNAL_BYTES})`,
+      );
+    }
     return await handle.readFile();
   } finally {
     await handle.close();

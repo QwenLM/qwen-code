@@ -124,6 +124,62 @@ describe('WorkflowRunner persistence', () => {
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
   });
 
+  // The pause barrier is entered from a dispatch's `.finally`, so nothing
+  // awaits it. A cancel landing while the barrier is mid-write used to
+  // publish the terminal manifest first and have the barrier's 'paused' +
+  // canResume write land on top — a cancelled run that resume() re-executes.
+  it('does not let a mid-barrier pause write outlive the terminal manifest', async () => {
+    const { config, registry, storage } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: null,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    const originalWrite = workflowSnapshot.writeWorkflowManifest;
+    const statuses: Array<string | undefined> = [];
+    let releasePaused: (() => void) | undefined;
+    const pausedGate = new Promise<void>((resolve) => {
+      releasePaused = resolve;
+    });
+    vi.spyOn(workflowSnapshot, 'writeWorkflowManifest').mockImplementation(
+      async (...args: Parameters<typeof originalWrite>) => {
+        const status = args[2].status;
+        statuses.push(status);
+        if (status === 'paused') await pausedGate;
+        return originalWrite(...args);
+      },
+    );
+
+    expect(handle.pause()).toBe(true);
+    finishDispatch?.('done');
+    await vi.waitFor(() => expect(statuses).toContain('paused'));
+    // The barrier has flushed and is inside its 'paused' + canResume write.
+    registry.cancel(handle.runId, Date.now());
+    releasePaused?.();
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: false });
+    expect(registry.get(handle.runId)?.status).toBe('cancelled');
+    // Read the file directly: a surviving 'paused' manifest also trips the
+    // terminal-snapshot conflict in readWorkflowManifest, which would mask
+    // which of the two writes actually landed last.
+    const durable = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunManifestPath(handle.runId),
+        'utf8',
+      ),
+    ) as { status: string; canResume: boolean };
+    expect(durable).toMatchObject({ status: 'cancelled', canResume: false });
+  });
+
   it('fails the run instead of publishing paused when the manifest cannot be replaced', async () => {
     const { config, registry, storage } = await harness();
     let finishDispatch: ((value: string) => void) | undefined;
