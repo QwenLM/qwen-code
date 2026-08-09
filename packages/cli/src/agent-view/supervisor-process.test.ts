@@ -74,14 +74,8 @@ describe('Agent View supervisor process helpers', () => {
       runtimeDir,
     });
     if (process.getuid === undefined) {
-      expect(path.dirname(socketPath)).toEqual(
-        expect.stringMatching(
-          new RegExp(
-            `^${escapeRegExp(runtimeDir)}${escapeRegExp(
-              path.sep,
-            )}qwen-agent-view-[a-f0-9]{16}$`,
-          ),
-        ),
+      expect(path.basename(path.dirname(socketPath))).toMatch(
+        /^qwen-agent-view-[a-f0-9]{16}$/,
       );
     } else {
       expect(path.dirname(socketPath)).toBe(
@@ -111,8 +105,8 @@ describe('Agent View supervisor process helpers', () => {
 
     const longPath = `/tmp/${'a'.repeat(120)}.sock`;
     const stalePath = getAgentViewSupervisorStaleSocketPath(longPath, 'pid:42');
-    expect(stalePath).toMatch(
-      /^\/tmp\/qwen-agent-view-stale-[a-f0-9]{16}\.sock$/,
+    expect(path.basename(stalePath)).toMatch(
+      /^qwen-agent-view-stale-[a-f0-9]{16}\.sock$/,
     );
     expect(Buffer.byteLength(stalePath)).toBeLessThan(100);
   });

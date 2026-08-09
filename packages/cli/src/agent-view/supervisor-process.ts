@@ -333,6 +333,7 @@ class AgentViewSupervisorProcessHandler
       throw new Error('Agent View dispatch launch record was not written.');
     }
 
+    let readyCompleted = false;
     try {
       const ready = this.workers.waitForWorkerReadyIfNeeded(
         result.sessionId,
@@ -357,6 +358,7 @@ class AgentViewSupervisorProcessHandler
         store,
       );
       await ready;
+      readyCompleted = true;
       await ensureSessionStillLaunchable(result.sessionId, store);
       if (shouldWaitForWorkerReady(this.options)) {
         await this.queuePromptForSession(result.sessionId, prompt);
@@ -376,10 +378,12 @@ class AgentViewSupervisorProcessHandler
       this.notifyChanged();
       return result;
     } catch (error) {
-      this.workers.rejectPendingWorkerReady(result.sessionId, error);
-      this.workers.terminateSession(result.sessionId, 'SIGTERM');
-      await markFailedSession(result.sessionId, error, store);
-      this.notifyChanged();
+      if (!readyCompleted) {
+        this.workers.rejectPendingWorkerReady(result.sessionId, error);
+        this.workers.terminateSession(result.sessionId, 'SIGTERM');
+        await markFailedSession(result.sessionId, error, store);
+        this.notifyChanged();
+      }
       throw error;
     }
   }
@@ -495,12 +499,20 @@ class AgentViewSupervisorProcessHandler
       const host = await this.workers.launchPtyHostForSupervisor(launch, store);
       await ensureSessionStillLaunchable(adoption.sessionId, store, host);
       this.workers.set(adoption.sessionId, host);
+      const latestState =
+        (await readAgentViewSessionState(adoption.sessionId, store)) ??
+        adoptingState;
       await writeAgentViewSessionState(
         {
-          ...adoptingState,
+          ...latestState,
           ownership: 'managed',
-          sessionState: 'starting',
-          processState: 'starting',
+          sessionState:
+            latestState.processState === 'alive'
+              ? latestState.sessionState
+              : 'starting',
+          processState:
+            latestState.processState === 'alive' ? 'alive' : 'starting',
+          attachState: 'detached',
           updatedAt: new Date().toISOString(),
         },
         store,
@@ -968,11 +980,43 @@ class AgentViewSupervisorProcessHandler
     const hibernated: string[] = [];
     for (const snapshot of snapshots) {
       const host = this.workers.get(snapshot.sessionId);
-      if (!host || !canHibernateSession(snapshot, nowMs, policy.idleMs)) {
+      if (
+        !host ||
+        this.hasLiveAttach(snapshot.sessionId) ||
+        this.hasPendingWorkerInputControl(snapshot.sessionId) ||
+        !canHibernateSession(snapshot, nowMs, policy.idleMs)
+      ) {
         continue;
       }
 
       await markSessionHibernating(snapshot.state, this.store);
+      const latestState = await readAgentViewSessionState(
+        snapshot.sessionId,
+        this.store,
+      );
+      const latestActivity = await readAgentViewActivity(
+        snapshot.sessionId,
+        this.store,
+      );
+      if (
+        !latestState ||
+        latestState.sessionState === 'stopped' ||
+        this.hasLiveAttach(snapshot.sessionId) ||
+        this.hasPendingWorkerInputControl(snapshot.sessionId) ||
+        hasPendingPrompt(latestActivity)
+      ) {
+        if (latestState?.processState === 'hibernating') {
+          await writeAgentViewSessionState(
+            {
+              ...latestState,
+              processState: 'alive',
+              updatedAt: new Date().toISOString(),
+            },
+            this.store,
+          );
+        }
+        continue;
+      }
       await this.workers.shutdownHost(snapshot.sessionId, host);
       await markSessionHibernated(snapshot.state, this.store);
       hibernated.push(snapshot.sessionId);
@@ -1006,18 +1050,6 @@ class AgentViewSupervisorProcessHandler
     socket: Socket,
     requestId: string,
   ): Promise<void> {
-    await requireKnownSession(sessionId, this.store);
-    const host = this.workers.get(sessionId);
-    if (!host) {
-      writeAttachError(
-        socket,
-        requestId,
-        'not_running',
-        `Agent View session ${sessionId} is not running.`,
-      );
-      return;
-    }
-
     const leaseResult = this.attachLeases.acquire(sessionId);
     if (!leaseResult.ok) {
       writeAttachError(
@@ -1025,6 +1057,24 @@ class AgentViewSupervisorProcessHandler
         requestId,
         'already_attached',
         `Agent View session ${sessionId} is already attached.`,
+      );
+      return;
+    }
+
+    try {
+      await requireKnownSession(sessionId, this.store);
+    } catch (error) {
+      this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
+      throw error;
+    }
+    const host = this.workers.get(sessionId);
+    if (!host) {
+      this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
+      writeAttachError(
+        socket,
+        requestId,
+        'not_running',
+        `Agent View session ${sessionId} is not running.`,
       );
       return;
     }
@@ -1152,6 +1202,19 @@ class AgentViewSupervisorProcessHandler
       await this.workers.respawnSession(sessionId);
     }
 
+    state = await readAgentViewSessionState(sessionId, this.store);
+    if (!state) {
+      throw new Error(`No Agent View session found for ${sessionId}.`);
+    }
+    if (state.attachState === 'attached') {
+      state = await this.detachIfAttachIsStale(state);
+    }
+    if (state.attachState === 'attached' || this.hasLiveAttach(sessionId)) {
+      throw new Error(
+        `Agent View session ${sessionId} is currently attached elsewhere.`,
+      );
+    }
+
     const now = new Date().toISOString();
     const events = this.pendingWorkerControls.get(sessionId) ?? [];
     events.push({
@@ -1232,6 +1295,18 @@ class AgentViewSupervisorProcessHandler
     if (!this.workers.has(sessionId)) {
       throw new Error(`Agent View session ${sessionId} is not running.`);
     }
+    state = await readAgentViewSessionState(sessionId, this.store);
+    if (!state) {
+      throw new Error(`No Agent View session found for ${sessionId}.`);
+    }
+    if (state.attachState === 'attached') {
+      state = await this.detachIfAttachIsStale(state);
+    }
+    if (state.attachState === 'attached' || this.hasLiveAttach(sessionId)) {
+      throw new Error(
+        `Agent View session ${sessionId} is currently attached elsewhere.`,
+      );
+    }
     if (
       (activity?.waitingFor === 'response' && hasPendingPrompt(activity)) ||
       this.hasPendingWorkerInputControl(sessionId)
@@ -1265,6 +1340,13 @@ class AgentViewSupervisorProcessHandler
   private hasPendingWorkerInputControl(sessionId: string): boolean {
     return (this.pendingWorkerControls.get(sessionId) ?? []).some(
       (event) => event.type === 'prompt' || event.type === 'answer',
+    );
+  }
+
+  private hasLiveAttach(sessionId: string): boolean {
+    return (
+      this.attachSockets.has(sessionId) ||
+      this.attachLeases.get(sessionId) !== undefined
     );
   }
 
@@ -1324,25 +1406,23 @@ class WorkerRegistry {
     this.trackHostExit(sessionId, host);
   }
 
-  delete(sessionId: string): void {
-    if (this.ptyHosts.delete(sessionId)) {
-      this.onHostReleased(sessionId);
-    }
-  }
-
   async stopSession(sessionId: string, queueStop: () => void): Promise<void> {
     const host = await this.getOrReconnectSessionHost(sessionId);
+    this.rejectPendingWorkerReady(
+      sessionId,
+      new Error(`Agent View worker ${sessionId} was stopped.`),
+    );
     if (host) {
       queueStop();
       await markStoppedSession(sessionId, this.store, 'alive');
       this.scheduleStopFallback(sessionId, host);
       return;
     }
-    await markStoppedSession(
-      sessionId,
-      this.store,
-      (await this.hasStoredLiveWorker(sessionId)) ? 'alive' : 'exited',
-    );
+    if (await this.hasStoredLiveWorker(sessionId)) {
+      queueStop();
+      this.scheduleStoredStopFallback(sessionId);
+    }
+    await markStoppedSession(sessionId, this.store, 'exited');
   }
 
   async killSession(
@@ -1351,6 +1431,10 @@ class WorkerRegistry {
   ): Promise<void> {
     const host = await this.getOrReconnectSessionHost(sessionId);
     host?.kill(signal);
+    this.rejectPendingWorkerReady(
+      sessionId,
+      new Error(`Agent View worker ${sessionId} was stopped.`),
+    );
     if (host && this.ptyHosts.get(sessionId) === host) {
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
@@ -1364,6 +1448,10 @@ class WorkerRegistry {
     const host = this.ptyHosts.get(sessionId);
     host?.kill(signal);
     if (host) {
+      this.rejectPendingWorkerReady(
+        sessionId,
+        new Error(`Agent View worker ${sessionId} was stopped.`),
+      );
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
     }
@@ -1494,33 +1582,36 @@ class WorkerRegistry {
       return false;
     }
 
-    let host: AgentViewPtyHostHandle | undefined;
     try {
-      host = await connectAgentViewPtyHostProcess(
+      const host = await connectAgentViewPtyHostProcess(
         launch,
         worker.hostEndpoint,
         worker.hostAuthToken,
       );
-      await writeAgentViewWorker(
-        sessionId,
-        {
-          schemaVersion: 1,
-          hostPid: host.pid,
-          workerPid: host.workerPid,
-          hostEndpoint: worker.hostEndpoint,
-          ...(worker.hostAuthToken
-            ? { hostAuthToken: worker.hostAuthToken }
-            : {}),
-          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
-          platform: process.platform,
-          recentOutputBytes: worker.recentOutputBytes,
-        },
-        this.store,
-      );
       this.set(sessionId, host);
+      try {
+        await writeAgentViewWorker(
+          sessionId,
+          {
+            schemaVersion: 1,
+            hostPid: host.pid,
+            workerPid: host.workerPid,
+            hostEndpoint: worker.hostEndpoint,
+            ...(worker.hostAuthToken
+              ? { hostAuthToken: worker.hostAuthToken }
+              : {}),
+            protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+            platform: process.platform,
+            recentOutputBytes: worker.recentOutputBytes,
+          },
+          this.store,
+        );
+      } catch {
+        // The reconnected worker is already alive; do not kill it just because
+        // pid bookkeeping could not be refreshed.
+      }
       return true;
     } catch {
-      host?.dispose();
       return false;
     }
   }
@@ -1582,13 +1673,20 @@ class WorkerRegistry {
       host = await this.launchPtyHostForSupervisor(resumeLaunch, this.store);
       await ensureSessionStillLaunchable(sessionId, this.store, host, {
         allowStopped: state.sessionState === 'stopped',
+        stoppedUpdatedAt: state.updatedAt,
       });
       this.set(sessionId, host);
+      const latestState =
+        (await readAgentViewSessionState(sessionId, this.store)) ?? state;
       await writeAgentViewSessionState(
         {
-          ...state,
-          sessionState: 'starting',
-          processState: 'starting',
+          ...latestState,
+          sessionState:
+            latestState.processState === 'alive'
+              ? latestState.sessionState
+              : 'starting',
+          processState:
+            latestState.processState === 'alive' ? 'alive' : 'starting',
           attachState: 'detached',
           updatedAt: new Date().toISOString(),
         },
@@ -1616,7 +1714,11 @@ class WorkerRegistry {
       if (this.ptyHosts.delete(sessionId)) {
         this.onHostReleased(sessionId);
       }
-      await markFailedSession(sessionId, error, this.store);
+      if (isStoppedError(error)) {
+        await markStoppedSession(sessionId, this.store, 'exited');
+      } else {
+        await markFailedSession(sessionId, error, this.store);
+      }
       throw error;
     }
     return { sessionId, respawned: true };
@@ -1679,10 +1781,16 @@ class WorkerRegistry {
         `Agent View session ${sessionId} is still ${state.processState}.`,
       );
     }
-    if (
-      state.attachState === 'attached' ||
-      isStaleStartingState(state, this.options)
-    ) {
+    const staleStarting = isStaleStartingState(state, this.options);
+    if (state.attachState === 'attached') {
+      state = {
+        ...state,
+        attachState: 'detached',
+        updatedAt: new Date().toISOString(),
+      };
+      await writeAgentViewSessionState(state, this.store);
+    }
+    if (staleStarting) {
       state = {
         ...state,
         sessionState: 'failed',
@@ -1710,12 +1818,6 @@ class WorkerRegistry {
       await this.respawnSession(sessionId);
       return true;
     }
-    await markFailedSession(
-      sessionId,
-      new Error(`stale PTY host while ${blockReason}`),
-      this.store,
-      'stale_host',
-    );
     return false;
   }
 
@@ -1730,12 +1832,28 @@ class WorkerRegistry {
       return false;
     }
 
-    this.ptyHosts.get(sessionId)?.kill('SIGTERM');
-    this.ptyHosts.delete(sessionId);
-    this.onHostReleased(sessionId);
+    const host = this.ptyHosts.get(sessionId);
+    const refreshedState = host
+      ? state
+      : await this.refreshMissingWorkerState(state);
+    if (!host) {
+      const blockReason = getRespawnBlockReason(
+        refreshedState,
+        await readAgentViewActivity(sessionId, this.store),
+      );
+      if (blockReason) {
+        throw new Error(
+          `Agent View session ${sessionId} cannot be respawned: ${blockReason}.`,
+        );
+      }
+    }
+    host?.kill('SIGTERM');
+    if (host && this.ptyHosts.delete(sessionId)) {
+      this.onHostReleased(sessionId);
+    }
     await writeAgentViewSessionState(
       {
-        ...state,
+        ...refreshedState,
         processState: 'exited',
         attachState: 'detached',
         updatedAt: new Date().toISOString(),
@@ -1790,6 +1908,18 @@ class WorkerRegistry {
     timeout.unref?.();
   }
 
+  private scheduleStoredStopFallback(sessionId: string): void {
+    const timeout = setTimeout(() => {
+      void this.killStoredWorkerPids(sessionId, 'SIGTERM')
+        .then(() => markStoppedSession(sessionId, this.store, 'exited'))
+        .catch(() => {})
+        .finally(() => {
+          this.onChanged();
+        });
+    }, DEFAULT_GRACEFUL_STOP_TIMEOUT_MS);
+    timeout.unref?.();
+  }
+
   async refreshMissingWorkerState(
     state: AgentViewSessionStateFile,
     reconnect: () => Promise<boolean> = () =>
@@ -1797,6 +1927,11 @@ class WorkerRegistry {
   ): Promise<AgentViewSessionStateFile> {
     if (state.processState === 'hibernating') {
       if (this.ptyHosts.has(state.sessionId)) {
+        return state;
+      }
+      const worker = await readAgentViewWorker(state.sessionId, this.store);
+      if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
+        await reconnect();
         return state;
       }
       const nextState = {
@@ -1902,13 +2037,19 @@ async function ensureSessionStillLaunchable(
   sessionId: string,
   store: AgentViewStoreOptions,
   host?: AgentViewPtyHostHandle,
-  options: { allowStopped?: boolean } = {},
+  options: { allowStopped?: boolean; stoppedUpdatedAt?: string } = {},
 ): Promise<void> {
   const state = await readAgentViewSessionState(sessionId, store);
+  const stoppedAfterLaunch =
+    state?.sessionState === 'stopped' &&
+    options.allowStopped &&
+    options.stoppedUpdatedAt !== undefined &&
+    state.updatedAt !== options.stoppedUpdatedAt;
   if (
     !state ||
     (state.ownership !== 'managed' && state.ownership !== 'adopting') ||
-    (state.sessionState === 'stopped' && !options.allowStopped)
+    (state.sessionState === 'stopped' && !options.allowStopped) ||
+    stoppedAfterLaunch
   ) {
     host?.kill('SIGTERM');
     throw new Error(`Agent View session ${sessionId} was stopped.`);
@@ -1937,7 +2078,8 @@ function canHibernateSession(
   }
   if (
     snapshot.state.processState === 'hibernated' ||
-    snapshot.state.processState === 'exited'
+    snapshot.state.processState === 'exited' ||
+    hasPendingPrompt(snapshot.activity)
   ) {
     return false;
   }
@@ -1957,6 +2099,7 @@ async function markSessionHibernating(
 ): Promise<void> {
   const latest = await readAgentViewSessionState(state.sessionId, options);
   if (!latest || latest.ownership !== 'managed') return;
+  if (latest.sessionState === 'stopped') return;
   await writeAgentViewSessionState(
     {
       ...latest,
@@ -2184,6 +2327,10 @@ function isStaleStartingState(
   return Date.now() - updatedAt > timeoutMs;
 }
 
+function isStoppedError(error: unknown): boolean {
+  return error instanceof Error && error.message.endsWith(' was stopped.');
+}
+
 async function markStoppedSession(
   sessionId: string,
   options: { globalDir?: string },
@@ -2249,6 +2396,12 @@ async function markFailedSession(
   const state = await readAgentViewSessionState(sessionId, options);
   if (!state) return;
   if (state.ownership !== 'managed') return;
+  if (state.sessionState === 'stopped') {
+    if (state.processState !== 'exited') {
+      await markStoppedSession(sessionId, options, 'exited');
+    }
+    return;
+  }
   const now = new Date().toISOString();
   await writeAgentViewSessionState(
     {
@@ -2277,7 +2430,10 @@ async function applyWorkerEvent(
   if (state.ownership !== 'managed' && state.ownership !== 'adopting') {
     throw new Error(`Agent View session ${event.sessionId} is not managed.`);
   }
-  if (event.type === 'ready' && state.sessionState === 'stopped') {
+  if (
+    state.sessionState === 'stopped' &&
+    (event.type === 'ready' || event.type === 'state')
+  ) {
     return;
   }
 
@@ -2326,7 +2482,7 @@ async function applyWorkerEvent(
           ...(event.type === 'state' && event.lastResult
             ? { lastResult: event.lastResult }
             : { lastResult: undefined }),
-          ...(shouldClearPendingPrompt(event)
+          ...(shouldClearPendingPrompt(event, state, existingActivity)
             ? getDequeuedPromptActivityPatch(existingActivity)
             : {}),
           capabilities:
@@ -2391,14 +2547,22 @@ async function applyWorkerHeartbeatEvent(
   );
 }
 
-function shouldClearPendingPrompt(event: AgentViewWorkerEvent): boolean {
+function shouldClearPendingPrompt(
+  event: AgentViewWorkerEvent,
+  previousState: AgentViewSessionStateFile,
+  activity: AgentViewActivityFile | undefined,
+): boolean {
+  if (!hasPendingPrompt(activity)) {
+    return false;
+  }
   return (
     event.type === 'ready' ||
     (event.type === 'state' &&
       (event.sessionState === 'idle' ||
         event.sessionState === 'completed' ||
         (event.sessionState === 'needs_input' &&
-          event.waitingFor === 'response')))
+          event.waitingFor === 'response' &&
+          previousState.sessionState !== 'needs_input')))
   );
 }
 
@@ -2449,7 +2613,7 @@ function shouldAdvanceActivityTime({
     return true;
   }
   return (
-    shouldClearPendingPrompt(event) &&
+    shouldClearPendingPrompt(event, previousState, existingActivity) &&
     getQueuedPromptCount(existingActivity) > 0
   );
 }
