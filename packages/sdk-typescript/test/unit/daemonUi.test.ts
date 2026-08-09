@@ -64,6 +64,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('drops usage_update frames instead of rendering them as debug text', () => {
+    // usage_update is emitted after every model round; falling through to the
+    // debug default would append a raw-JSON bullet to each assistant turn.
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 34298,
+          size: 1000000,
+        },
+      },
+    });
+    expect(events).toEqual([]);
+  });
+
   it('drops silent-shell heartbeat tool updates instead of rewriting the tool block', () => {
     const events = normalizeDaemonEvent({
       id: 1,
