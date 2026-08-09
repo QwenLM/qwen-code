@@ -396,6 +396,17 @@ export interface WorkflowAgentOpts {
   isolation?: 'worktree' | 'remote';
   agentType?: string;
   /**
+   * Absolute path the subagent runs in. Unlike `isolation: 'worktree'` — which
+   * *creates* a fresh worktree from the current tree and refuses when the
+   * parent has uncommitted changes — `cwd` points the subagent at a directory
+   * that already exists, so a script can review or build a tree it did not
+   * create. The two are mutually exclusive.
+   *
+   * The path must be absolute, must resolve to an existing directory, and must
+   * lie inside the run's workspace.
+   */
+  cwd?: string;
+  /**
    * P-stall: per-call stall-watchdog timeout in milliseconds. The dispatch
    * is aborted + retried (up to 3 attempts) after this many ms of no
    * subagent progress (with no tool in flight). Defaults to 60_000 (env
@@ -1348,7 +1359,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
       // typos like { scema: ... } that previously slipped through the
       // [key:string]: unknown index signature.
-      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs'];
+      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType', 'stallMs', 'cwd'];
       globalThis.agent = vmAsync(function (prompt, agentOpts) {
         agentOpts = agentOpts || {};
         const keys = Object.keys(agentOpts);
@@ -1377,6 +1388,28 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
             "Known modes are: 'worktree', 'remote'."
           );
+        }
+        // cwd points at a directory that already exists; isolation creates a
+        // new one. Passing both leaves the subagent's directory ambiguous,
+        // and the ambiguity is not theoretical: a /review run that set both a
+        // working directory and worktree isolation failed all 11 of its agents.
+        // The remaining validation (absolute, exists, inside the workspace) is
+        // host-side — the vm realm has no filesystem to check against.
+        // NOTE: no backticks anywhere below — this whole init script is a host
+        // template literal, so a backtick here terminates it at parse time.
+        if (agentOpts.cwd !== undefined) {
+          if (typeof agentOpts.cwd !== 'string' || agentOpts.cwd.length === 0) {
+            throw new Error(
+              'agent({cwd}): must be a non-empty string (an absolute path).'
+            );
+          }
+          if (agentOpts.isolation !== undefined) {
+            throw new Error(
+              "agent({cwd, isolation}): mutually exclusive. 'cwd' runs the " +
+              "subagent in an existing directory; 'isolation' creates a new " +
+              "one. Pass exactly one."
+            );
+          }
         }
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (__b.lastPhase() !== agentOpts.phase) {

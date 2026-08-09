@@ -7,7 +7,9 @@
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -2500,6 +2502,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
+    /** The Config actually handed to createAgentHeadless — the override, when one was built. */
+    runtimeContext: unknown;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
@@ -2557,6 +2561,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getTargetDir: () => '/fake/repo',
       getSessionId: () => 'sess_fake_test_id',
       getWorktreeSymlinkDirectories: () => [],
+      // agent({cwd}) validates containment through the workspace. Default to
+      // permissive so the tests that do not exercise `cwd` are unaffected;
+      // the containment test replaces this method on its own config.
+      getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
         createAgentHeadless: async (
@@ -2571,6 +2579,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
+            runtimeContext,
             options: { runConfigOverrides: options?.runConfigOverrides },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
@@ -3388,6 +3397,113 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // {success:false}, returns {success:true, branchPreserved:true}, or
   // throws synchronously. Each path produces a different preserved
   // suffix and was previously untested.
+
+  // --- agent({cwd}) -------------------------------------------------------
+  // `cwd` pins a subagent to a directory that already exists. It is the case
+  // isolation:'worktree' structurally cannot serve: that mode provisions a
+  // NEW worktree from the current tree and refuses when the parent has
+  // uncommitted changes — so a caller whose subject IS the uncommitted
+  // changes, or who wants a tree it prepared earlier, has no option today.
+  describe('agent({cwd})', () => {
+    let cwdDir: string;
+
+    beforeEach(() => {
+      cwdDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'wf-cwd-'));
+    });
+
+    afterEach(() => {
+      fsSync.rmSync(cwdDir, { recursive: true, force: true });
+    });
+
+    it('rebinds the subagent runtime context to the directory', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await dispatch('hi', { cwd: cwdDir });
+      expect(calls).toHaveLength(1);
+      // A distinct Config override reached createAgentHeadless, and every
+      // "where am I?" surface answers the requested directory.
+      expect(calls[0].runtimeContextSame).toBe(false);
+      const ctx = calls[0].runtimeContext as unknown as Config;
+      expect(ctx.getTargetDir()).toBe(cwdDir);
+      expect(ctx.getWorkingDir()).toBe(cwdDir);
+      expect(ctx.getProjectRoot()).toBe(cwdDir);
+    });
+
+    // The fast path builds no Config override at all, so a `cwd` that reached
+    // it would be dropped in silence and the subagent would read the parent's
+    // tree while the script believed otherwise — results that look plausible
+    // and describe the wrong directory.
+    it('forces the override path even with no other override opts', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await dispatch('hi', { cwd: cwdDir });
+      // Reaching the stubbed SubagentManager at all proves the fast path
+      // (which goes through AgentHeadless.create directly) was not taken.
+      expect(calls).toHaveLength(1);
+    });
+
+    it('rejects a relative path', async () => {
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(dispatch('hi', { cwd: 'relative/dir' })).rejects.toThrow(
+        /must be an absolute path/,
+      );
+    });
+
+    it('rejects a directory that does not exist', async () => {
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('hi', { cwd: path.join(cwdDir, 'nope') }),
+      ).rejects.toThrow(/no such directory/);
+    });
+
+    it('rejects a file', async () => {
+      const filePath = path.join(cwdDir, 'a-file.txt');
+      fsSync.writeFileSync(filePath, 'x');
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(dispatch('hi', { cwd: filePath })).rejects.toThrow(
+        /is not a directory/,
+      );
+    });
+
+    it('rejects a directory outside the workspace', async () => {
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      (
+        config as unknown as { getWorkspaceContext: () => unknown }
+      ).getWorkspaceContext = () => ({ isPathWithinWorkspace: () => false });
+      const dispatch = createProductionDispatch(config);
+      await expect(dispatch('hi', { cwd: cwdDir })).rejects.toThrow(
+        /outside the workspace/,
+      );
+    });
+
+    // The sandbox refuses this combination at authoring time; dispatch is
+    // also reachable directly from tests and SDK embedders, so the host
+    // re-checks rather than picking a precedence rule nobody would remember.
+    it('refuses cwd together with isolation at the dispatch boundary', async () => {
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('hi', { cwd: cwdDir, isolation: 'worktree' }),
+      ).rejects.toThrow(/mutually exclusive/);
+    });
+  });
 
   it("isolation:'worktree' cleanup: removeUserWorktree failure preserves path+branch", async () => {
     const { GitWorktreeService } = await import(

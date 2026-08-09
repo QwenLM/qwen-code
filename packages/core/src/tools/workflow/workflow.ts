@@ -79,7 +79,7 @@ const WORKFLOW_PARAM_SCHEMA = {
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, opts?)`, and read `args`. ' +
-        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation? }`. ' +
+        'agent() opts: `{ label?, phase?, schema?, model?, agentType?, isolation?, cwd? }`. ' +
         '`schema` (JSON Schema object): the subagent must deliver its result ' +
         'by calling `structured_output` with arguments matching the schema; ' +
         'agent() resolves to the validated object. Two failed attempts produce ' +
@@ -101,6 +101,12 @@ const WORKFLOW_PARAM_SCHEMA = {
         'in this build" (parity with upstream). isolation=worktree refuses to ' +
         'run when the parent working tree has uncommitted changes (the subagent ' +
         'would see a stale HEAD). ' +
+        '`cwd` (absolute path): runs the subagent in a directory that already ' +
+        'exists — use it when the tree to work in was prepared beforehand, or ' +
+        "when the subject IS the parent tree's uncommitted changes, both of " +
+        'which `isolation` cannot serve. The path must resolve to a directory ' +
+        'inside the workspace; anything else throws. `cwd` and `isolation` are ' +
+        'mutually exclusive — pass exactly one. ' +
         'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
         'in their disallowed-tool floor regardless of agentType. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +

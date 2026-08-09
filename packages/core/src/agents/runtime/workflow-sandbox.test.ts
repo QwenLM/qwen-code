@@ -1634,6 +1634,60 @@ describe('createWorkflowSandbox security', () => {
     ).rejects.toThrow(/unknown isolation mode/);
   });
 
+  // `cwd` pins a subagent to a directory that already exists — the case
+  // `isolation:'worktree'` cannot serve, since it provisions a NEW worktree
+  // and refuses outright when the parent tree is dirty. The sandbox owns the
+  // shape checks; path existence and workspace containment are host-side.
+  it('agent({cwd}) is passed through to dispatch', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'ok';
+      },
+    });
+    await sandbox.run(`return agent("hi", { cwd: "/repo/wt" });`);
+    expect(seen).toHaveLength(1);
+    expect((seen[0].opts as { cwd?: string }).cwd).toBe('/repo/wt');
+  });
+
+  it('agent({cwd}) rejects a non-string', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { cwd: 42 });`),
+    ).rejects.toThrow(/agent\(\{cwd\}\): must be a non-empty string/);
+  });
+
+  it('agent({cwd}) rejects an empty string', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { cwd: "" });`),
+    ).rejects.toThrow(/agent\(\{cwd\}\): must be a non-empty string/);
+  });
+
+  // Passing both leaves the subagent's directory ambiguous. A /review run that
+  // set a working directory alongside worktree isolation failed all 11 of its
+  // agents, so this is refused at authoring time rather than resolved by a
+  // precedence rule nobody would remember.
+  it('agent({cwd, isolation}) is refused as mutually exclusive', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(
+        `return agent("hi", { cwd: "/repo/wt", isolation: "worktree" });`,
+      ),
+    ).rejects.toThrow(/mutually exclusive/);
+  });
+
   it('agent({isolation:"worktree"}) is passed through to dispatch in P3', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({

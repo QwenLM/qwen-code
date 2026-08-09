@@ -5,7 +5,9 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import {
   createWorkflowSandbox,
@@ -439,11 +441,15 @@ async function runSingleDispatch(
   const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
+  // `cwd` joins this gate: the fast path builds no Config override, so a
+  // `cwd` that reached it would be silently dropped and the subagent would
+  // run in the parent's directory while the script believed otherwise.
   if (
     opts.agentType === undefined &&
     opts.model === undefined &&
     opts.isolation === undefined &&
-    opts.schema === undefined
+    opts.schema === undefined &&
+    opts.cwd === undefined
   ) {
     const subagent = await AgentHeadless.create(
       opts.label ?? 'workflow-agent',
@@ -696,14 +702,26 @@ async function runOverridePath(
 
   // Provision worktree BEFORE createAgentHeadless so the override Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
-  // resolve cwd-related getters via the prototype chain.
+  // resolve cwd-related getters via the prototype chain. `cwd` rebinds the
+  // same surfaces without provisioning anything — the caller owns that
+  // directory, so there is nothing to clean up afterwards. The two are
+  // mutually exclusive (rejected in the sandbox; re-checked here because
+  // dispatch is also reachable directly from tests and SDK embedders).
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
+  if (opts.isolation === 'worktree' && opts.cwd !== undefined) {
+    throw new Error(
+      'agent({cwd, isolation}): mutually exclusive. `cwd` runs the subagent ' +
+        'in an existing directory; `isolation` creates a new one. Pass exactly one.',
+    );
+  }
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
-    effectiveContext = createWorktreeConfigOverride(
+    effectiveContext = createDirConfigOverride(config, worktreeIsolation.path);
+  } else if (opts.cwd !== undefined) {
+    effectiveContext = createDirConfigOverride(
       config,
-      worktreeIsolation.path,
+      resolveAgentCwd(config, opts.cwd),
     );
   }
 
@@ -1068,12 +1086,58 @@ async function provisionWorkflowWorktree(
 }
 
 /**
- * Build a Config wrapper that rebinds every "where am I?" surface to the
- * isolated worktree path. `Object.create(base)` keeps prototype lookups
- * walking back to the parent for everything else (model config, session
- * id, MCP servers), while the own-property overrides shadow the cwd-
- * adjacent fields so the subagent's tools (Edit / Write / Read / Glob /
- * Grep / Ls / Shell) anchor inside the worktree.
+ * Resolve and validate `agent({cwd})` on the host side. The vm realm has
+ * already checked the shape (non-empty string, not combined with
+ * `isolation`); the filesystem and workspace checks can only happen here.
+ *
+ * Every branch fails closed. A `cwd` that does not name an existing directory
+ * inside the workspace is a script bug, and silently falling back to the
+ * parent's directory would hide it behind results that look plausible while
+ * describing the wrong tree — the exact failure `cwd` exists to prevent.
+ *
+ * `isPathWithinWorkspace` resolves symlinks and returns false on any error,
+ * so a symlink pointing out of the workspace is rejected rather than followed.
+ */
+function resolveAgentCwd(config: Config, rawCwd: string): string {
+  if (!path.isAbsolute(rawCwd)) {
+    throw new Error(
+      `agent({cwd}): must be an absolute path, received '${sanitizeForErrorMessage(rawCwd)}'.`,
+    );
+  }
+  const resolved = path.resolve(rawCwd);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error(
+      `agent({cwd}): no such directory '${sanitizeForErrorMessage(resolved)}'.`,
+    );
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `agent({cwd}): '${sanitizeForErrorMessage(resolved)}' is not a directory.`,
+    );
+  }
+  if (!config.getWorkspaceContext().isPathWithinWorkspace(resolved)) {
+    throw new Error(
+      `agent({cwd}): '${sanitizeForErrorMessage(resolved)}' is outside the workspace. ` +
+        `Add the directory to the workspace before pointing an agent at it.`,
+    );
+  }
+  return resolved;
+}
+
+/**
+ * Build a Config wrapper that rebinds every "where am I?" surface to `dir`.
+ * `Object.create(base)` keeps prototype lookups walking back to the parent
+ * for everything else (model config, session id, MCP servers), while the
+ * own-property overrides shadow the cwd-adjacent fields so the subagent's
+ * tools (Edit / Write / Read / Glob / Grep / Ls / Shell) anchor inside `dir`.
+ *
+ * Shared by both directory-changing paths: `isolation: 'worktree'` (where
+ * `dir` is a worktree this dispatch just provisioned) and `agent({cwd})`
+ * (where `dir` is a directory the caller already had). The rebinding is
+ * identical; only who owns the directory's lifecycle differs.
  *
  * Mirrors the inline rebind block at agent.ts:2008-2024. Sets BOTH the
  * field shape (e.g. `targetDir`) AND the method shape (`getTargetDir`)
@@ -1081,21 +1145,21 @@ async function provisionWorkflowWorktree(
  * call sites that read `this.targetDir` directly inside Config methods
  * would otherwise still resolve through the prototype to the parent.
  */
-function createWorktreeConfigOverride(base: Config, wtPath: string): Config {
+function createDirConfigOverride(base: Config, dir: string): Config {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ov: any = Object.create(base);
-  ov.targetDir = wtPath;
-  ov.cwd = wtPath;
-  ov.getTargetDir = () => wtPath;
-  ov.getCwd = () => wtPath;
-  ov.getWorkingDir = () => wtPath;
-  ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(wtPath);
-  ov.fileDiscoveryService = wtFileService;
-  ov.getFileService = () => wtFileService;
-  const wtWorkspace = new WorkspaceContext(wtPath);
-  ov.workspaceContext = wtWorkspace;
-  ov.getWorkspaceContext = () => wtWorkspace;
+  ov.targetDir = dir;
+  ov.cwd = dir;
+  ov.getTargetDir = () => dir;
+  ov.getCwd = () => dir;
+  ov.getWorkingDir = () => dir;
+  ov.getProjectRoot = () => dir;
+  const dirFileService = new FileDiscoveryService(dir);
+  ov.fileDiscoveryService = dirFileService;
+  ov.getFileService = () => dirFileService;
+  const dirWorkspace = new WorkspaceContext(dir);
+  ov.workspaceContext = dirWorkspace;
+  ov.getWorkspaceContext = () => dirWorkspace;
   return ov as Config;
 }
 

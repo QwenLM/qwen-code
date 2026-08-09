@@ -53,6 +53,23 @@ describe('canonicalizeAgentOpts', () => {
   it('empty opts → {}', () => {
     expect(canonicalizeAgentOpts({})).toBe('{}');
   });
+
+  // `cwd` decides which tree the subagent reads, so it must bust the resume
+  // cache. Were it projected out, a resumed run would serve one directory's
+  // cached result for an identical prompt aimed at a different directory —
+  // silently reviewing the wrong tree.
+  it('projects cwd, so two directories are two dispatches', () => {
+    const a = canonicalizeAgentOpts({ cwd: '/repo/wt-a' });
+    const b = canonicalizeAgentOpts({ cwd: '/repo/wt-b' });
+    expect(a).toBe(JSON.stringify({ cwd: '/repo/wt-a' }));
+    expect(a).not.toBe(b);
+  });
+
+  it('derives distinct agent keys for the same prompt in different cwds', () => {
+    const k1 = deriveAgentKey('', 'review the diff', { cwd: '/repo/wt-a' });
+    const k2 = deriveAgentKey('', 'review the diff', { cwd: '/repo/wt-b' });
+    expect(k1).not.toBe(k2);
+  });
 });
 
 describe('deriveAgentKey', () => {
