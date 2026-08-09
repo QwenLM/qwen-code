@@ -214,6 +214,20 @@ describe('TextSelectionController', () => {
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello');
   });
 
+  it('does not highlight a bare char-mode click', () => {
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+
+    // Assert on press: release clears the highlight either way, so only the
+    // press call pins the bare-click suppression.
+    expect(setSelection).toHaveBeenLastCalledWith(null);
+
+    handler(makeEvent('left-release', 1));
+
+    expect(setSelection).toHaveBeenLastCalledWith(null);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
   it('extends a double-click word selection word-wise on drag', () => {
     frame = makeFrame('foo bar baz');
     viewportRect = { x: 0, y: 0, width: 11, height: 1 };
@@ -390,6 +404,31 @@ describe('TextSelectionController', () => {
       ey: 1,
     });
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
+  });
+
+  it('keeps covered-row trailing spaces in a multi-row line drag', () => {
+    frame = makeTwoLineFrame('aaa ', 'bbb');
+    viewportRect = { x: 0, y: 0, width: 4, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1)); // double-click -> word "aaa"
+    handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
+    handler(makeEvent('move', 2, 2)); // drag onto line 1
+    handler(makeEvent('left-release', 2, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 2,
+      ey: 1,
+    });
+    // Covered rows keep written trailing spaces (getSelectedText contract);
+    // only the final row ends at the line span's trimmed last content column.
+    expect(copyToClipboard).toHaveBeenLastCalledWith('aaa \nbbb');
   });
 
   it('falls back to the cursor cell when a word drag lands on whitespace', () => {
