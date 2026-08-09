@@ -9183,9 +9183,9 @@ exit 1
       "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
       "run_check_no_ab 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
-      "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
-      "run_check 'lint failed on the agent-committed fix' npm run lint",
-      'run_check "tests failed in ${p}"',
+      "run_check_no_ab 'typecheck failed on the agent-committed fix' npm run typecheck",
+      "run_check_no_ab 'lint failed on the agent-committed fix' npm run lint",
+      'run_check_no_ab "tests failed in ${p}"',
     ]) {
       expect(gate).toContain(check);
     }
@@ -11144,29 +11144,40 @@ exit 1
 });
 
 describe('review verification gate: baseline A/B on deterministic rejection', () => {
-  // A deterministic rejection is only chargeable to the round if the same
-  // check passes without the round's commit. Run 31276008548 measured the
-  // alternative: PR #8614's branch predated #8693's tsconfig guard while
-  // node_modules came from the post-#8693 trusted base, so `npm run build`
-  // was just as red at origin/<branch> — 63 minutes of accepted work were
-  // discarded and an 18-minute repair burned on a failure the repair agent
-  // is forbidden to touch, thirteen rounds in a row. The gate now re-runs
-  // the failing check at the pre-round ref and, when it fails there too,
-  // reports pre-existing and skips the doomed repair (retryable stays
-  // unset). These tests execute the REAL script in a real git repo with a
-  // stubbed npm whose failures are keyed by commit SHA.
+  // The A/B re-runs a failed check at the pre-round ref and reports
+  // pre-existing ONLY when the baseline fails with a MATCHING failure
+  // signature (tsc diagnostics normalized to file + code): a bare nonzero
+  // baseline can be a different defect or an infrastructure hiccup, and
+  // gitignored dist survives the detach — which is why only the full
+  // `npm run build` (which rebuilds dist from checked-out sources) is
+  // A/B-eligible at all; typecheck, lint, and package tests consume
+  // round-built dist and are exempt. These tests execute the REAL script in
+  // a real git repo, config-isolated (a global core.hooksPath or
+  // pre-commit hook must not reach the fixture), with a stubbed npm whose
+  // failures and diagnostics are keyed by commit SHA.
+  const GIT_ISOLATION = {
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
   const runGate = ({
     failAt = [],
     agentCommit = true,
     schemaFail = false,
+    typecheckFail = false,
     addWorkspace = false,
     noisySuccess = false,
     touchCore = false,
+    baselineCode = '',
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
       const sh = (cmd, cwd) =>
-        execFileSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
+        execFileSync('bash', ['-c', cmd], {
+          cwd,
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        });
       const origin = join(dir, 'origin.git');
       const work = join(dir, 'work');
       sh(`git init -q --bare '${origin}'`, dir);
@@ -11199,13 +11210,14 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       }
       const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
       const failShas = failAt.map(shaOf).join(' ');
+      const baselineSha = shaOf('origin/feature');
 
-      // Stubs. npm mirrors two MEASURED behaviors: `run build` red when HEAD
-      // is in FAIL_BUILD_SHAS (printing a marker line), and `run test
-      // --workspace <p>` exiting 1 with "No workspaces found" when the
-      // workspace directory does not exist — --if-present forgives a missing
-      // script, not a missing workspace. NOISY_SUCCESS makes a PASSING build
-      // print >3 KB, the shape that used to flood the evidence window.
+      // Stub npm. A failing `run build` prints a marker AND a tsc-style
+      // diagnostic — the identity the A/B compares. BASELINE_CODE switches
+      // the diagnostic code on the baseline SHA so a different-cause
+      // baseline can be staged. `run test --workspace` mirrors measured npm:
+      // exit 1 "No workspaces found" for a missing workspace. NOISY_SUCCESS
+      // makes a PASSING build print >3 KB — the evidence-window flood shape.
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
@@ -11215,11 +11227,20 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           'if [[ "$1" == "run" && "$2" == "build" ]]; then',
           '  head="$(git rev-parse HEAD)"',
           '  for s in ${FAIL_BUILD_SHAS}; do',
-          '    if [[ "$s" == "$head" ]]; then echo "stub build FAILED at $head"; exit 1; fi',
+          '    if [[ "$s" == "$head" ]]; then',
+          '      code=9999',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && -n "${BASELINE_CODE:-}" ]]; then code="${BASELINE_CODE}"; fi',
+          '      echo "stub build FAILED at $head"',
+          '      echo "src/f.ts(1,1): error TS${code}: stub failure"',
+          '      exit 1',
+          '    fi',
           '  done',
           '  if [[ "${NOISY_SUCCESS:-}" == "1" ]]; then',
           '    for i in $(seq 1 200); do echo "baseline build banner line $i — all green, nothing to see"; done',
           '  fi',
+          'fi',
+          'if [[ "$1" == "run" && "$2" == "typecheck" && "${TYPECHECK_FAIL:-}" == "1" ]]; then',
+          '  echo "stub typecheck FAILED"; exit 1',
           'fi',
           'if [[ "$1" == "run" && "$2" == "test" && "$3" == "--workspace" ]]; then',
           '  if [[ ! -d "$4" ]]; then echo "npm error No workspaces found: --workspace=$4"; exit 1; fi',
@@ -11257,13 +11278,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           encoding: 'utf8',
           env: {
             ...process.env,
+            ...GIT_ISOLATION,
             PATH: `${bin}:${process.env.PATH}`,
             BRANCH: 'feature',
             WORKDIR: workdir,
             RUNNER_TEMP: rt,
             GITHUB_OUTPUT: outFile,
             FAIL_BUILD_SHAS: failShas,
+            BASELINE_SHA: baselineSha,
+            BASELINE_CODE: baselineCode,
             SCHEMA_FAIL: schemaFail ? '1' : '',
+            TYPECHECK_FAIL: typecheckFail ? '1' : '',
             NOISY_SUCCESS: noisySuccess ? '1' : '',
             WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
             RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
@@ -11278,6 +11303,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
+        baselineSha,
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -11297,7 +11323,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.headAfter).toBe('feature');
   });
 
-  it('reports pre-existing and skips the repair when the baseline fails too', () => {
+  it('reports pre-existing only on a matching failure signature, with the baseline transcript as evidence', () => {
     const r = runGate({ failAt: ['feature', 'origin/feature'] });
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('outcome=failed');
@@ -11305,8 +11331,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // retryable stays unset: the repair step keys on it and must not run.
     expect(r.outputs).not.toContain('retryable=true');
     expect(r.rejection).toContain('pre-existing');
-    expect(r.rejection).toContain('merge `main`');
+    expect(r.rejection).toContain('base update (merge main)');
+    // The baseline leg's own transcript is the ONLY proof behind the
+    // verdict — it must reach the rejection document.
+    expect(r.rejection).toContain(`stub build FAILED at ${r.baselineSha}`);
     expect(r.headAfter).toBe('feature');
+  });
+
+  it('charges the round when the baseline fails for a DIFFERENT reason', () => {
+    // A nonzero baseline is not identity: reason A there, reason B here —
+    // reducing both to rc=1 would skip the only repair allowed to fix B.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineCode: '8888',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
   });
 
   it('keeps the green path intact', () => {
@@ -11317,11 +11359,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
   });
 
   it('keeps the failure text in the evidence window past a chatty green baseline', () => {
-    // The baseline transcript goes to a side log: rendered evidence is
-    // `tail -c 3000` of GATE_LOG, and a passing baseline that prints >3 KB
-    // used to push the actual failure line out of gate-rejection.md — the
-    // sole carrier into the repair agent's feedback, the PR comment, and
-    // the next round's LAST_REJECTION block.
     const r = runGate({ failAt: ['feature'], noisySuccess: true });
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('retryable=true');
@@ -11329,10 +11366,6 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
   });
 
   it('never A/Bs a check with no round commit to remove', () => {
-    // The core-rebuild check runs BEFORE the commit gate, so it can fail on
-    // a round that committed nothing — the baseline IS the tree under test
-    // and a re-run would tautologically "confirm" pre-existing, skipping a
-    // repair today's semantics grant.
     const r = runGate({
       agentCommit: false,
       touchCore: true,
@@ -11344,24 +11377,19 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).not.toContain('Baseline A/B');
   });
 
-  it('never A/Bs the stdin-fed and dist-coupled checks', () => {
-    // The schema check's baseline verdict is confounded by the round-built
-    // core dist (gitignored, survives the detach), and the contracts
-    // check's stdin is drained by its first run — both are A/B-exempt and
-    // stay charged to the round, where the repair agent can act on them.
-    const r = runGate({ schemaFail: true });
-    expect(r.status).toBe(1);
-    expect(r.outputs).toContain('retryable=true');
-    expect(r.outputs).not.toContain('preexisting=true');
-    expect(r.stdout).not.toContain('Baseline A/B');
+  it('never A/Bs the dist-coupled and stdin-fed checks', () => {
+    // schema (round-built core dist), contracts (drained stdin), and now
+    // typecheck (sdk-typescript resolves core d.ts from dist) are exempt.
+    for (const opts of [{ schemaFail: true }, { typecheckFail: true }]) {
+      const r = runGate(opts);
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('retryable=true');
+      expect(r.outputs).not.toContain('preexisting=true');
+      expect(r.stdout).not.toContain('Baseline A/B');
+    }
   });
 
-  it('never marks a round-added workspace pre-existing', () => {
-    // npm exits 1 with "No workspaces found" for a workspace absent at the
-    // baseline (measured; --if-present forgives a missing script, not a
-    // missing workspace) — without the existence guard that misreads as
-    // pre-existing and skips the one repair that CAN fix the round's own
-    // package.
+  it('never A/Bs package tests (dist-resolving dependencies)', () => {
     const r = runGate({ addWorkspace: true });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('tests failed in packages/newpkg');
@@ -11372,36 +11400,41 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
 });
 
 describe('review verification gate: preexisting output is consumed', () => {
-  // The dead-switch rule: an output with no read site cannot be trusted to
-  // mean anything. preexisting=true flows verify → Finalize verification →
-  // the failure report's headline, which swaps the generic gate clause for
-  // the actionable one.
-  it('Finalize verification forwards the flag', () => {
+  it('Finalize verification selects the flag from the same attempt as the outcome', () => {
     expect(workflow).toContain(
       "FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'",
     );
+    expect(workflow).toContain(
+      "REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'",
+    );
     expect(workflow).toMatch(
-      /if \[\[ "\$\{FIRST_PREEXISTING\}" == 'true' \]\]; then\n\s*echo "preexisting=true" >> "\$\{GITHUB_OUTPUT\}"/,
+      /PREEXISTING="\$\{FIRST_PREEXISTING\}"\n\s*if \[\[ "\$\{REPAIR_ATTEMPTED\}" == 'true' \]\]; then\n\s*PREEXISTING="\$\{REPAIR_PREEXISTING\}"/,
     );
   });
 
-  it('the failure report reads it and renders the base-update clause', () => {
+  it('the failure report reads it and picks the clause by the compare', () => {
     expect(workflow).toContain(
       "PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'",
     );
-    expect(workflow).toContain(
-      'PRE-EXISTING failure (present without this round',
-    );
+    // behind/diverged → base update; otherwise the branch's own pre-round
+    // code — an up-to-date branch cannot be cured by merging main.
     expect(workflow).toContain('needs a base update (merge main)');
+    // The YAML embeds the apostrophe via shell quoting, so match around it.
+    expect(workflow).toContain('own pre-round code needs attention');
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then/,
+    );
   });
 
-  it('the evidence cap fits the pre-existing paragraph', () => {
-    // reject_fix renders tail -c 3000 + label + ~456 bytes of pre-existing
-    // wording + branch name + two fences; a 3500-byte cap measurably cut
-    // the closing fence for branch names past 44 characters.
+  it('the evidence window flexes so the document clears the render cap', () => {
+    // The report renders head -c 3900 of the finished document; the script
+    // sizes the tail against its preamble so the closing fence survives.
     expect(workflow).toContain('head -c 3900 "${WORKDIR}/gate-rejection.md"');
-    expect(workflow).not.toMatch(
-      /head -c 3500 "\$\{WORKDIR\}\/gate-rejection\.md"/,
+    expect(reviewVerificationRunner).toContain(
+      'tail_budget=$(( 3300 - ${#preamble} ))',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'tail -c "${tail_budget}" "${GATE_LOG}"',
     );
   });
 });

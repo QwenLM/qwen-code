@@ -59,21 +59,23 @@ reject_fix() {
   else
     echo "retryable=true" >> "${GITHUB_OUTPUT}"
   fi
+  # The evidence tail flexes so the WHOLE document stays under the report
+  # step's head -c 3900 render cap: truncating the finished document from
+  # the outside cuts the closing fence and malforms everything after it in
+  # the posted comment. Budget = 3300 minus the preamble, floored at 500.
+  local preamble tail_budget
+  preamble="**${label}**"
+  if [[ "${preexisting}" == 'true' ]]; then
+    preamble+="$(printf '\n\nMeasured fact: the same check also fails at \`origin/%s\` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass was skipped because it may only amend the round'"'"'s own fix. If the branch is behind \`main\`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
+  fi
+  tail_budget=$(( 3300 - ${#preamble} ))
+  (( tail_budget < 500 )) && tail_budget=500
   {
-    echo "**${label}**"
-    if [[ "${preexisting}" == 'true' ]]; then
-      echo
-      echo "This failure is NOT caused by this round's commit: the same" \
-        "check fails at \`origin/${BRANCH}\` (the branch as pushed, before" \
-        "this round) in the same environment. The repair pass was skipped" \
-        "because it may only amend the round's own fix. The usual cause is" \
-        "the branch being behind \`main\` while dependencies are installed" \
-        "from it — merge \`main\` into the branch and re-run."
-    fi
+    printf '%s\n' "${preamble}"
     echo
     # Captured output can contain triple-backtick fences.
     echo '````'
-    tail -c 3000 "${GATE_LOG}" 2> /dev/null
+    tail -c "${tail_budget}" "${GATE_LOG}" 2> /dev/null
     echo '````'
   } > "${WORKDIR}/gate-rejection.md" ||
     echo "::warning::could not write the gate rejection detail; the verdict stands."
@@ -116,21 +118,48 @@ baseline_also_fails() {
     # this point may trust it.
     reject_fix 'could not restore the verification tree after the baseline check'
   fi
-  if [[ "${rc}" -eq 1 ]]; then
-    # Only a FAILING baseline transcript is evidence — merge its tail into
-    # the window, where it backs the pre-existing label.
-    tail -c 1500 "${ab_log}" >> "${GATE_LOG}" 2> /dev/null || true
-    return 0
+  if [[ "${rc}" -ne 1 ]]; then
+    echo "🔁 baseline is green — the failure belongs to this round" \
+      | tee -a "${GATE_LOG}"
+    return 1
   fi
-  echo "🔁 baseline is green — the failure belongs to this round" \
-    | tee -a "${GATE_LOG}"
-  return 1
+  # A nonzero baseline is NOT enough: the branch can fail there for reason A
+  # while the round fails for reason B, and an infrastructure hiccup in the
+  # baseline leg is a nonzero exit too. Pre-existing requires the SAME
+  # failure identity on both legs — compiler diagnostics normalized to
+  # file + error code (line/column shift with the round's edits). No
+  # diagnostics on either side means identity cannot be established, and
+  # the rejection stays charged to the round (fail closed).
+  local sig_head sig_base
+  sig_head="$(fail_signature "${GATE_LOG}.check")"
+  sig_base="$(fail_signature "${ab_log}")"
+  if [[ -z "${sig_head}" || -z "${sig_base}" ]] ||
+    ! comm -12 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}") \
+      | grep -q .; then
+    echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
+  # Only a FAILING baseline transcript with a matching signature is
+  # evidence — merge its tail into the window, where it backs the label.
+  tail -c 1500 "${ab_log}" >> "${GATE_LOG}" 2> /dev/null || true
+  return 0
+}
+fail_signature() {
+  # Stable identity of a failed check: tsc-style diagnostics with the
+  # position stripped ("src/a.ts: error TS2504"). Sorted unique so two
+  # transcripts compare with comm(1).
+  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+" "${1}" 2> /dev/null \
+    | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
 }
 run_check() {
-  # pipefail makes the pipeline carry the command's status, not tee's.
+  # pipefail makes the pipeline carry the command's status, not tee's. The
+  # side copy holds THIS check's transcript alone — the identity comparison
+  # must not match diagnostics an earlier check left in the shared log.
   local label="${1}"
   shift
-  if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+  : > "${GATE_LOG}.check"
+  if ! "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
     if baseline_also_fails "$@"; then
       reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
     fi
@@ -226,8 +255,14 @@ fi
 
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
 run_check 'build failed on the agent-committed fix' npm run build
-run_check 'typecheck failed on the agent-committed fix' npm run typecheck
-run_check 'lint failed on the agent-committed fix' npm run lint
+# Typecheck consumes core's dist (sdk-typescript resolves
+# @qwen-code/qwen-code-core through the package exports to ./dist/*.d.ts),
+# and dist is gitignored — it survives the baseline detach carrying the
+# ROUND's build, so a baseline typecheck would run reverted sources against
+# round-built declarations. Probe-verified three-arm flip on this tree. Same
+# class as the schema check: A/B-exempt.
+run_check_no_ab 'typecheck failed on the agent-committed fix' npm run typecheck
+run_check_no_ab 'lint failed on the agent-committed fix' npm run lint
 
 # Test changed/related files for the packages this PR touches.
 # --changed follows the import graph so transitive breakage is caught.
@@ -258,18 +293,15 @@ else
       continue
     fi
     echo "🧪 Testing ${p} (changed files only)..."
-    # A workspace this round ADDS has no baseline to compare against: npm
-    # exits 1 there with "No workspaces found" (measured), which would
-    # misread as pre-existing and skip the one repair that CAN fix the
-    # round's own package. A/B only when the workspace exists at the
-    # pre-round ref.
-    if git cat-file -e "origin/${BRANCH}:${p}/package.json" 2> /dev/null; then
-      run_check "tests failed in ${p}" \
-        npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
-    else
-      run_check_no_ab "tests failed in ${p}" \
-        npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
-    fi
+    # A/B-exempt: package tests resolve sibling workspaces through their
+    # dist exports (channels/github -> @qwen-code/channel-base/dist), and
+    # dist survives the baseline detach carrying the ROUND's build — a
+    # baseline leg would test reverted sources against round-built
+    # dependencies. (A round-ADDED workspace also has no baseline at all:
+    # npm exits 1 there with "No workspaces found".) Their rejections stay
+    # charged to the round, where the repair agent can act.
+    run_check_no_ab "tests failed in ${p}" \
+      npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
   done
 fi
 assert_verification_tree

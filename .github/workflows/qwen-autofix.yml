@@ -4550,15 +4550,22 @@ jobs:
           REPAIR_COMMITTED: '${{ steps.verify_repair.outputs.committed }}'
           REPAIR_VERIFIED_HEAD: '${{ steps.verify_repair.outputs.verified_head }}'
           FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'
+          REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
-          # A pre-existing verdict never reaches the repair pass (it is what
-          # SKIPS the repair), so the first gate's flag is authoritative.
-          # Forwarded so the failure report can say "base update needed"
-          # instead of the generic gate-rejection clause.
-          if [[ "${FIRST_PREEXISTING}" == 'true' ]]; then
+          # The flag travels WITH the attempt whose outcome is selected: the
+          # first pass can fail a round-caused check, the repair fixes it, and
+          # the repair verification can then hit a pre-existing failure — that
+          # final classification is the one the report must render. Forwarded
+          # so the failure report can say "base update needed" instead of the
+          # generic gate-rejection clause.
+          PREEXISTING="${FIRST_PREEXISTING}"
+          if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
+            PREEXISTING="${REPAIR_PREEXISTING}"
+          fi
+          if [[ "${PREEXISTING}" == 'true' ]]; then
             echo "preexisting=true" >> "${GITHUB_OUTPUT}"
           fi
           if [[ "${REPAIR_ATTEMPTED}" == 'true' ]]; then
@@ -5290,9 +5297,19 @@ jobs:
                   GATE_CLAUSE=''
                   [[ -s "${WORKDIR}/gate-rejection.md" ]] && GATE_CLAUSE=' — the verification gate rejected the attempt'
                   # Pre-existing failures get the honest clause: the rejection
-                  # is not the agent's, the repair was deliberately skipped,
-                  # and the actionable remedy is a base update.
-                  [[ "${PREEXISTING}" == 'true' ]] && GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass was skipped and the branch needs a base update (merge main)'
+                  # is not the agent's and the repair was deliberately skipped.
+                  # The remedy depends on WHY it pre-exists, and this branch
+                  # only renders when the stale-base auto-update above did NOT
+                  # fire — which includes a branch current with main whose own
+                  # pre-round commits carry the failure, where "merge main"
+                  # changes nothing. The compare already ran; use it.
+                  if [[ "${PREEXISTING}" == 'true' ]]; then
+                    if [[ "${CMP_R:-}" == 'behind' || "${CMP_R:-}" == 'diverged' ]]; then
+                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass was skipped and the branch needs a base update (merge main)'
+                    else
+                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass was skipped and the branch'"'"'s own pre-round code needs attention'
+                    fi
+                  fi
                   HEADLINE="🤖 Could not produce a passing fix for this feedback (round ${MARK_ROUND}/${MAX_ROUNDS})${GATE_CLAUSE}. This item now needs a human; the loop stays engaged and still picks up new feedback and base conflicts, but will not retry this item on its own."
                 fi
               fi
