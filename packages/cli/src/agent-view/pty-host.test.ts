@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { AgentViewLaunchFile } from './protocol.js';
+import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import {
   AgentViewLaunchConfigError,
   AgentViewPtyUnavailableError,
@@ -195,19 +196,19 @@ describe('launchAgentViewPtyHost', () => {
 
   it('passes worker env while stripping host-only secrets', async () => {
     const pty = createFakePty();
-    const previousToken = process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'];
+    const previousToken = process.env[PTY_HOST_AUTH_TOKEN_ENV];
     const previousTerm = process.env['TERM'];
     const previousMarker = process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'];
-    process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'] = 'host-secret';
+    process.env[PTY_HOST_AUTH_TOKEN_ENV] = 'host-secret';
     process.env['TERM'] = 'ambient-term';
     process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'] = 'ambient-value';
     try {
       await launchAgentViewPtyHost(createLaunch(), { pty });
     } finally {
       if (previousToken === undefined) {
-        delete process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'];
+        delete process.env[PTY_HOST_AUTH_TOKEN_ENV];
       } else {
-        process.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'] = previousToken;
+        process.env[PTY_HOST_AUTH_TOKEN_ENV] = previousToken;
       }
       if (previousTerm === undefined) {
         delete process.env['TERM'];
@@ -229,7 +230,7 @@ describe('launchAgentViewPtyHost', () => {
       }),
     );
     expect(
-      pty.spawnCalls[0]?.options.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'],
+      pty.spawnCalls[0]?.options.env[PTY_HOST_AUTH_TOKEN_ENV],
     ).toBeUndefined();
   });
 
@@ -241,7 +242,7 @@ describe('launchAgentViewPtyHost', () => {
         ...createLaunch(),
         env: {
           QWEN_AGENT_VIEW_WORKER: '1',
-          QWEN_AGENT_VIEW_PTY_HOST_TOKEN: 'injected-token',
+          [PTY_HOST_AUTH_TOKEN_ENV]: 'injected-token',
         },
       },
       { pty },
@@ -251,7 +252,7 @@ describe('launchAgentViewPtyHost', () => {
       expect.objectContaining({ QWEN_AGENT_VIEW_WORKER: '1' }),
     );
     expect(
-      pty.spawnCalls[0]?.options.env['QWEN_AGENT_VIEW_PTY_HOST_TOKEN'],
+      pty.spawnCalls[0]?.options.env[PTY_HOST_AUTH_TOKEN_ENV],
     ).toBeUndefined();
   });
 

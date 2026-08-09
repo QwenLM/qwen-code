@@ -18,6 +18,7 @@ import {
   INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   launchAgentViewPtyHostProcess,
 } from './pty-host-process.js';
+import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import { BoundedOutputRing, type AgentViewPtyHostHandle } from './pty-host.js';
 import { getAgentViewSessionPaths } from './supervisor-store.js';
 
@@ -575,6 +576,35 @@ describe('Agent View PTY host process server', () => {
     expect(Buffer.byteLength(fallbackPath)).toBeLessThan(100);
   });
 
+  it('skips an unusable fallback socket directory', async () => {
+    const tmpRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-bad-tmp-'),
+    );
+    const tmpFile = path.join(tmpRoot, 'tmp-file');
+    const previousTmpDir = process.env['TMPDIR'];
+    await fs.writeFile(tmpFile, 'not a directory');
+    process.env['TMPDIR'] = tmpFile;
+    try {
+      const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
+        globalDir: path.join('/very-long-path'.repeat(20), '.qwen'),
+        platform: 'linux',
+      });
+      const uid =
+        typeof process.getuid === 'function' ? process.getuid() : 'user';
+
+      expect(path.dirname(fallbackPath)).toBe(
+        path.join('/tmp', `qwen-avp-${uid}`),
+      );
+    } finally {
+      if (previousTmpDir === undefined) {
+        delete process.env['TMPDIR'];
+      } else {
+        process.env['TMPDIR'] = previousTmpDir;
+      }
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rejects oversized PTY host responses', async () => {
     const socketPath = shortSocketPath();
     const server = net.createServer((socket) => {
@@ -704,7 +734,7 @@ describe('Agent View PTY host process server', () => {
           socketPath,
         ],
         expect.objectContaining({
-          QWEN_AGENT_VIEW_PTY_HOST_TOKEN: expect.stringMatching(
+          [PTY_HOST_AUTH_TOKEN_ENV]: expect.stringMatching(
             /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
           ),
         }),

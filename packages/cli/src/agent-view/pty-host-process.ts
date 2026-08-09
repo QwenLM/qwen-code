@@ -5,12 +5,19 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  statSync,
+} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { AgentViewLaunchFile } from './protocol.js';
+import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import {
   BoundedOutputRing,
   launchAgentViewPtyHost,
@@ -36,7 +43,6 @@ const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
 // JSON escaping inflates control bytes up to 6x, so a full 1 MiB
 // retained ring can serialize to ~6 MiB; keep the wire cap above that.
 const MAX_PTY_HOST_RESPONSE_LINE_BYTES = 8 * 1024 * 1024;
-const PTY_HOST_AUTH_TOKEN_ENV = 'QWEN_AGENT_VIEW_PTY_HOST_TOKEN';
 const ALLOWED_KILL_SIGNALS = new Set<NodeJS.Signals>([
   'SIGINT',
   'SIGKILL',
@@ -385,12 +391,17 @@ export function getAgentViewPtyHostSocketPath(
     path.join('/tmp', `qwen-avp-${uid}`, `${digest}.sock`),
   ];
   const fallback = fallbackCandidates.find(
+    (item) =>
+      Buffer.byteLength(item) < UNIX_SOCKET_PATH_LIMIT &&
+      canPrepareSocketDirectory(path.dirname(item)),
+  );
+  const lengthFallback = fallbackCandidates.find(
     (item) => Buffer.byteLength(item) < UNIX_SOCKET_PATH_LIMIT,
   );
-  if (!fallback) {
+  if (!lengthFallback) {
     throw new Error('Agent View PTY host socket path is too long.');
   }
-  return fallback;
+  return fallback ?? lengthFallback;
 }
 
 async function callAgentViewPtyHost(
@@ -929,6 +940,30 @@ async function ensurePrivateSocketDirectory(socketDir: string): Promise<void> {
   }
   if ((stat.mode & 0o077) !== 0) {
     await fs.chmod(socketDir, 0o700);
+  }
+}
+
+function canPrepareSocketDirectory(socketDir: string): boolean {
+  try {
+    const stat = lstatSync(socketDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+      return false;
+    }
+    accessSync(socketDir, fsConstants.W_OK | fsConstants.X_OK);
+    return true;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ENOENT') return false;
+  }
+
+  const parentDir = path.dirname(socketDir);
+  try {
+    const parentStat = statSync(parentDir);
+    if (!parentStat.isDirectory()) return false;
+    accessSync(parentDir, fsConstants.W_OK | fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 
