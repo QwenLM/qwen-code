@@ -5,6 +5,8 @@ import type {
 
 export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
+// Client-supplied routing hint only; never use it as an authorization boundary.
+export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 
 export interface AvailableCommand {
   name: string;

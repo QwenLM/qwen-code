@@ -7,7 +7,10 @@ import {
   AcpBridge,
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
-import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
+import {
+  CHANNEL_PROMPT_META_KEY,
+  type ChannelLoopToolHandler,
+} from './ChannelAgentBridge.js';
 
 const child = vi.hoisted(() => {
   class MockEmitter {
@@ -430,6 +433,11 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
     );
+    expect(bridge.connection.prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'question' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
   });
 
   it('forwards the user-facing prompt projection to the daemon', async () => {
@@ -448,7 +456,10 @@ describe('AcpBridge', () => {
     expect(prompt).toHaveBeenCalledWith({
       sessionId: 's-1',
       prompt: [{ type: 'text', text: 'hidden context\n\nhello' }],
-      _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        'qwen.daemon.promptDisplayText': 'hello',
+      },
     });
   });
 

@@ -18,6 +18,7 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {

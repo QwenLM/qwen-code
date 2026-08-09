@@ -3,16 +3,17 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  BridgeSessionInfo,
-  ChannelAgentBridge,
-  ChannelAgentBridgePromptOptions,
-  ChannelAgentBridgeSessionOptions,
-  ChannelLoopToolHandler,
-  ToolCallEvent,
+import {
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  type AvailableCommand,
+  type BridgeSessionInfo,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgePromptOptions,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
-import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
 import {
   ChannelLoopMcpServer,
@@ -422,13 +423,14 @@ export class DaemonChannelBridge
       const result = await session.prompt(
         {
           prompt,
-          ...(options?.displayText !== undefined
-            ? {
-                _meta: {
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            ...(options?.displayText !== undefined
+              ? {
                   [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
-                },
-              }
-            : {}),
+                }
+              : {}),
+          },
         },
         controller.signal,
       );
