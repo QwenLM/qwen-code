@@ -77,7 +77,7 @@ struct ApplicationState {
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
     last_error: Mutex<Option<String>>,
-    last_workspace: Mutex<Option<PathBuf>>,
+    last_workspace: Mutex<Option<(PathBuf, bool)>>,
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
@@ -302,7 +302,7 @@ fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String>
     require_bootstrap_origin(&webview)?;
     let last_workspace = lock(&app.state::<ApplicationState>().last_workspace).clone();
     let (workspace, create_if_missing) = match last_workspace {
-        Some(workspace) => (workspace, false),
+        Some(workspace) => workspace,
         None => initial_workspace(&app)?,
     };
     start_runtime_async(app, workspace, create_if_missing);
@@ -413,7 +413,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
     stop_runtime(&app);
     let generation = {
         let state = app.state::<ApplicationState>();
-        *lock(&state.last_workspace) = Some(workspace.clone());
+        *lock(&state.last_workspace) = Some((workspace.clone(), create_if_missing));
         let generation = state.start_generation.fetch_add(1, Ordering::SeqCst) + 1;
         state.starting.store(generation, Ordering::SeqCst);
         generation

@@ -528,13 +528,16 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
 mod tests {
     use super::{
         append_failure_output, parse_listening_url, resolve_workspace, runtime_arguments,
-        stop_runtime_handle, wait_for_listening, DesktopRuntime, RuntimeStopped,
-        FAILURE_OUTPUT_LIMIT,
+        DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
+    #[cfg(unix)]
+    use super::{stop_runtime_handle, wait_for_listening};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    #[cfg(unix)]
+    use std::sync::Arc;
+    use std::sync::Mutex;
     use url::Url;
 
     #[test]
