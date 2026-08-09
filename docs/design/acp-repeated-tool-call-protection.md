@@ -1,7 +1,8 @@
 # ACP Repeated Tool-Call Protection
 
 Date: 2026-07-31
-Status: Implemented, pending shadow rollout; revised for PR #8176 and PR #8180
+Status: Implemented on the PR branch; pre-merge manual ACP validation and post-merge shadow rollout pending
+Revision: Updated for PR #8176 and PR #8180
 Area: Interactive ACP foreground prompt loop
 
 ## Summary
@@ -551,12 +552,17 @@ Telemetry tests cover:
   preserving standard OpenTelemetry correlation fields, plus exclusion of
   sensitive tool fields from guard-specific telemetry.
 
-The behavioral change also has an E2E plan under `.qwen/e2e-tests/`. Its manual
-ACP fixture run remains required before promotion out of Draft. It covers one
-typed failing tool, permission cancellation, successful recovery after the
-reminder, a repeated failure that stops, concurrent siblings, unsupported
-hosts, channel exclusion, reconnect and restart behavior, history replay, a
-fresh prompt after stop, and both internal and public-cloud policy modes.
+The behavioral change will use a local E2E plan under `.qwen/e2e-tests/`.
+Preparing that plan and completing its manual ACP fixture run are still pending
+and are required before merge. Ready for review means maintainer review may
+proceed; it does not claim that the pre-merge manual ACP fixture validation is
+complete. The fixture must cover one typed failing tool, permission
+cancellation, successful recovery after the reminder, a repeated failure that
+stops, concurrent siblings, unsupported hosts, channel exclusion, reconnect and
+restart behavior, history replay, a fresh prompt after stop, and shadow-mode
+non-interference. Separate seven-day internal and public-cloud
+shadow baselines start after merge and deployment; they gate later promotion to
+warn or enforce rather than merge.
 
 Before delivery, run targeted Core and CLI Vitest files from their package
 directories, then `npm run build`, `npm run typecheck`, and `npm run lint`.
