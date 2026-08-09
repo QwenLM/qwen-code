@@ -1125,6 +1125,14 @@ describe('capture-tui without tmux (probe seam)', () => {
 // everywhere.
 describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   let dir: string;
+  // The probe seams are restored HERE, not per test: a test that fakes the
+  // version and forgets to put it back leaves every later capture believing
+  // it, and the plan then sends flags the real tmux may not have. That is
+  // exactly what happened — a leaked 'tmux 3.9' made 20 captures send -T on
+  // a runner whose tmux is 3.2a, and it was invisible on a dev machine
+  // whose tmux accepts -T. A hook cannot be forgotten.
+  const realTmuxProbe = probes.tmux;
+  const realFreezeProbe = probes.freeze;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'capture-tui-'));
     process.exitCode = undefined;
