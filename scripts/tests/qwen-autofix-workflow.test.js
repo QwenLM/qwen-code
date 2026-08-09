@@ -11484,3 +11484,120 @@ describe('review verification gate: preexisting output is consumed', () => {
     );
   });
 });
+
+describe('run-agent idle watchdog', () => {
+  // Four observed sandbox hangs (#8663 x2, #8761 r3, #8763 r4) printed their
+  // last byte at docker container entry and then sat SILENT for the whole
+  // 2-hour absolute budget — four different runners, two image versions, so
+  // the watchdog lives in the runner script, not the environment. A wedged
+  // sandbox produces nothing; a legitimate run is never silent for 20
+  // minutes (the fleet's longest tolerated quiet is the review pipeline's
+  // 10-minute stream-idle window). These tests execute the REAL script with
+  // a stub agent whose only difference is whether it keeps talking.
+  const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'qwen');
+      writeFileSync(bin, stub);
+      chmodSync(bin, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve('.qwen/skills/autofix/scripts/run-agent.mjs'),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          bin,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            QWEN_IDLE_TIMEOUT_MS: String(idleMs),
+            QWEN_TIMEOUT_MS: String(timeoutMs),
+          },
+        },
+      );
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('kills a silent agent at the idle window, naming the idle limit', () => {
+    // The hang shape: one line at startup, then nothing, ever.
+    const r = runAgent({
+      stub: '#!/bin/bash\necho "entering sandbox"\nsleep 600\n',
+      idleMs: 1200,
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // NOT the absolute-budget wording: the comment must say which limit
+    // fired, or the operator tunes the wrong knob.
+    expect(r.failure).not.toContain('timeout (60000ms)');
+  });
+
+  it('never fires while the agent keeps talking, however slowly', () => {
+    // Output every 400ms with a 1500ms idle window: an absolute-timer
+    // regression disguised as an idle watchdog would kill this run.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+        // The mode's output contract: a real run ends by writing its
+        // summary, and the script fails a run that produced neither output.
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+});
+
+describe('stale sandbox container cleanup', () => {
+  // A budget kill reaps the host-side docker client, not the container —
+  // every killed sandbox keeps running on the persistent runner (observed:
+  // a later leg's name counter found qwen-code-0.21.8-0 occupied). Both
+  // sandboxed jobs must reap before the sandbox picks a name.
+  const job = (id) => {
+    const start = workflow.indexOf(`\n  ${id}:`);
+    expect(start, id).toBeGreaterThan(-1);
+    const rest = workflow.slice(start + 1);
+    const next = rest.search(/\n {2}[a-zA-Z0-9_-]+:\n/);
+    return next === -1 ? rest : rest.slice(0, next);
+  };
+
+  it('both agent jobs remove stale qwen-code containers at start', () => {
+    const step = "- name: 'Remove stale sandbox containers'";
+    expect(workflow.split(step).length - 1).toBe(2);
+    for (const jobId of ['issue-autofix', 'review-address']) {
+      const j = job(jobId);
+      expect(j, jobId).toContain(step);
+      expect(j, jobId).toContain("docker ps -aq --filter 'name=qwen-code-'");
+      expect(j, jobId).toContain('xargs -r docker rm -f');
+      // Before the sandbox can pick a colliding name.
+      expect(j.indexOf(step)).toBeLessThan(
+        j.indexOf("- name: 'Reset autofix workspace'"),
+      );
+    }
+  });
+});

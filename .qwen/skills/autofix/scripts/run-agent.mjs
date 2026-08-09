@@ -19,6 +19,16 @@ const skillPath = resolve(
   'SKILL.md',
 );
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+// Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
+// (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
+// container entry and then sat silent for the whole absolute budget,
+// burning 2 hours per round for zero work. Legitimate runs are never that
+// quiet: the longest silence the fleet tolerates elsewhere is the review
+// pipeline's 10-minute stream-idle window for thinking phases on ~1M-token
+// contexts, so twice that is the default. Distinct from QWEN_TIMEOUT_MS so
+// the failure comment says which limit fired.
+const QWEN_IDLE_TIMEOUT_MS =
+  Number(process.env.QWEN_IDLE_TIMEOUT_MS) || 20 * 60 * 1000;
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -176,8 +186,11 @@ function runQwen(options, prompt) {
   let loopDetected = false;
   let settled = false;
   let timedOut = false;
+  let idleTimedOut = false;
+  let lastOutputAt = Date.now();
   let timer;
   let killTimer;
+  let idleTimer;
 
   return new Promise((resolve) => {
     const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
@@ -190,10 +203,12 @@ function runQwen(options, prompt) {
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
+      clearInterval(idleTimer);
       const apiErrorInfo = recoverableApiError(outputTail);
       const payload = {
         ...result,
         timedOut,
+        idleTimedOut,
         loopDetected: loopDetected || isLoopGuardOutput(outputTail),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
@@ -208,6 +223,7 @@ function runQwen(options, prompt) {
     };
 
     const record = (chunk, stream) => {
+      lastOutputAt = Date.now();
       const text = chunk.toString('utf8');
       outputTail = (outputTail + text).slice(-20_000);
       if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
@@ -229,6 +245,25 @@ function runQwen(options, prompt) {
         if (!settled) killQwen(child, 'SIGKILL');
       }, 10_000);
     }, QWEN_TIMEOUT_MS);
+    // Poll rather than reset-a-timeout-per-chunk: chunks arrive far more
+    // often than the watchdog needs to look, and a busy stream would then
+    // spend its time re-arming timers. The tick shrinks with the window so
+    // tiny test values still fire promptly.
+    const idleTick = Math.max(
+      250,
+      Math.min(30_000, Math.floor(QWEN_IDLE_TIMEOUT_MS / 4)),
+    );
+    idleTimer = setInterval(() => {
+      if (settled || idleTimedOut) return;
+      if (Date.now() - lastOutputAt >= QWEN_IDLE_TIMEOUT_MS) {
+        idleTimedOut = true;
+        timedOut = true;
+        killQwen(child, 'SIGTERM');
+        killTimer = setTimeout(() => {
+          if (!settled) killQwen(child, 'SIGKILL');
+        }, 10_000);
+      }
+    }, idleTick);
   });
 }
 
@@ -293,8 +328,10 @@ const result = await runQwen(options, prompt);
 if (result.error || result.signal || result.status !== 0) {
   const detail = result.error
     ? result.error.message
-    : result.timedOut
-      ? `timeout (${QWEN_TIMEOUT_MS}ms)`
+    : result.idleTimedOut
+      ? `idle-timeout (no output for ${QWEN_IDLE_TIMEOUT_MS}ms — the sandbox likely hung at startup)`
+      : result.timedOut
+        ? `timeout (${QWEN_TIMEOUT_MS}ms)`
       : result.signal
         ? `signal ${result.signal}`
         : `status ${String(result.status)}`;

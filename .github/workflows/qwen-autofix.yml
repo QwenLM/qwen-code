@@ -825,6 +825,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: 'Remove stale sandbox containers'
+        run: |-
+          # A budget kill (SIGTERM/SIGKILL from run-agent.mjs or the job
+          # timeout) reaps the HOST-side docker client, not the container:
+          # every killed sandbox keeps running on this persistent runner.
+          # Observed directly — a hung leg's container name counter found
+          # qwen-code-0.21.8-0 already occupied and picked -1. A runner
+          # executes one job at a time, so any qwen-code-* container alive
+          # at job start is stale by definition; reap it before the sandbox
+          # picks a name (and before the leftovers can wedge the daemon).
+          command -v docker > /dev/null || exit 0
+          STALE="$(docker ps -aq --filter 'name=qwen-code-')"
+          if [ -n "${STALE}" ]; then
+            echo "removing stale sandbox containers:"
+            docker ps -a --filter 'name=qwen-code-' --format '  {{.Names}} ({{.Status}})'
+            printf '%s\n' "${STALE}" | xargs -r docker rm -f > /dev/null
+          fi
+
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
@@ -3470,6 +3488,24 @@ jobs:
           ref: '${{ needs.build-cli.outputs.base_sha }}'
           fetch-depth: 0
           persist-credentials: false
+
+      - name: 'Remove stale sandbox containers'
+        run: |-
+          # A budget kill (SIGTERM/SIGKILL from run-agent.mjs or the job
+          # timeout) reaps the HOST-side docker client, not the container:
+          # every killed sandbox keeps running on this persistent runner.
+          # Observed directly — a hung leg's container name counter found
+          # qwen-code-0.21.8-0 already occupied and picked -1. A runner
+          # executes one job at a time, so any qwen-code-* container alive
+          # at job start is stale by definition; reap it before the sandbox
+          # picks a name (and before the leftovers can wedge the daemon).
+          command -v docker > /dev/null || exit 0
+          STALE="$(docker ps -aq --filter 'name=qwen-code-')"
+          if [ -n "${STALE}" ]; then
+            echo "removing stale sandbox containers:"
+            docker ps -a --filter 'name=qwen-code-' --format '  {{.Names}} ({{.Status}})'
+            printf '%s\n' "${STALE}" | xargs -r docker rm -f > /dev/null
+          fi
 
       - name: 'Reset autofix workspace'
         run: |-
