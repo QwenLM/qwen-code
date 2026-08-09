@@ -773,6 +773,136 @@ describe('runBuildTest', () => {
     expect(rep.ok).toBe(true);
   });
 
+  it('file-scopes a micro diff in a vitest workspace, disclosed in the caveat', () => {
+    // The measured incident: a 23-line one-file diff ran the whole cli suite,
+    // hit three unrelated environmental failures, and paid five minutes of
+    // merge-base dance to prove them pre-existing. `vitest related` answers
+    // the same question with exactly the suites that import the change.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/app', {
+      name: '@x/app',
+      scripts: { build: 'exit 0', test: 'vitest run' },
+    });
+    pkg('packages/other', {
+      name: '@x/other',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    mkdirSync(join(root, 'packages/app/src'), { recursive: true });
+    writeFileSync(join(root, 'packages/app/src/a.ts'), 'export const a = 1;');
+    writeFileSync(join(root, 'packages/app/src/b.ts'), 'export const b = 1;');
+    writePlan(['packages/app/src/a.ts', 'packages/app/src/b.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm exec --workspace="packages/app" -- ' +
+        'vitest related --run "src/a.ts" "src/b.ts"',
+    ]);
+    expect(rep.testScope?.caveat).toContain(
+      'packages/app ran only the suites vitest traces to its 2 changed file(s)',
+    );
+    expect(rep.ok).toBe(true);
+  });
+
+  it('file-scopes only the affected workspace — dependents keep their full suites', () => {
+    // A dependent's suite imports the package's BUILT output; vitest's module
+    // graph over there traces nothing back to the changed sources, so a
+    // narrowed dependent run would skip everything and call it coverage.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'vitest run' },
+    });
+    pkg('packages/leaf', {
+      name: '@x/leaf',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'vitest run' },
+    });
+    for (const island of ['island1', 'island2', 'island3']) {
+      pkg(`packages/${island}`, {
+        name: `@x/${island}`,
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+    }
+    mkdirSync(join(root, 'packages/core/src'), { recursive: true });
+    writeFileSync(join(root, 'packages/core/src/a.ts'), 'export const a = 1;');
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+    expect(rep.test.map((t) => t.command)).toEqual([
+      'npm exec --workspace="packages/core" -- vitest related --run "src/a.ts"',
+      'npm test --workspace="packages/leaf"',
+    ]);
+  });
+
+  it.each([
+    [
+      'more changed files than the cap',
+      ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'],
+      true,
+      'vitest run',
+    ],
+    [
+      'a deleted file the graph cannot trace',
+      ['src/gone.ts'],
+      false,
+      'vitest run',
+    ],
+    ['a test script that does not run vitest', ['src/a.ts'], true, 'jest'],
+  ])(
+    'falls back to the full suite for %s',
+    (_name, files, materialize, testScript) => {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+      );
+      pkg('packages/app', {
+        name: '@x/app',
+        scripts: { build: 'exit 0', test: testScript },
+      });
+      pkg('packages/other', {
+        name: '@x/other',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+      mkdirSync(join(root, 'packages/app/src'), { recursive: true });
+      if (materialize) {
+        for (const f of files) {
+          writeFileSync(join(root, 'packages/app', f), 'export const x = 1;');
+        }
+      }
+      writePlan(files.map((f) => `packages/app/${f}`));
+
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        install: false,
+        exec: okExec,
+      });
+      expect(rep.test.map((t) => t.command)).toEqual([
+        'npm test --workspace="packages/app"',
+      ]);
+      expect(rep.testScope?.caveat ?? '').not.toContain('vitest traces');
+    },
+  );
+
   it('tests the TRANSITIVE dependents of a changed workspace, not just direct ones', () => {
     // core <- mid <- top: a behaviour change in core can surface in top's suite
     // with mid unchanged in between. The closure must follow the chain.

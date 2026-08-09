@@ -88,6 +88,73 @@ function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
 
+/**
+ * At or below this many changed files in an affected workspace, its own
+ * suite is FILE-scoped: `vitest related --run <files>` — exactly the suites
+ * vitest's module graph traces to the change — instead of the whole suite.
+ *
+ * Measured on a 23-line, one-file `/demo`-page diff: the full `packages/cli`
+ * suite ran for minutes, failed on three suites unrelated to the change
+ * (environmental), and that failure then forced the merge-base
+ * build/test-delta dance — over five minutes of Agent 7's wall clock spent
+ * proving that pre-existing failures pre-existed, on a diff no test
+ * imports. The file-scoped run answers the same question in seconds, and a
+ * green scoped run never triggers the base measurement at all.
+ *
+ * The narrowing is deliberately confined to where it cannot under-test:
+ * only the AFFECTED workspace's own suite (a dependent's suite imports the
+ * package's BUILT output, not its source files, so `vitest related` over
+ * there would trace nothing — dependents keep their full suites), only when
+ * every changed file still exists (a deletion breaks tests no import graph
+ * can trace back to it), only when the workspace's test script runs vitest,
+ * and always disclosed through `testScope.caveat`.
+ */
+const FILE_SCOPE_MAX_CHANGED = 3;
+
+/** Does this workspace's `test` script run vitest? Any doubt reads as no. */
+function vitestTestScript(root: string, dir: string): boolean {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(root, dir, 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, unknown> };
+    const t = parsed?.scripts?.['test'];
+    return typeof t === 'string' && /\bvitest\b/.test(t);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The workspace-relative changed files a file-scoped run would hand vitest,
+ * or `null` when the narrowing does not apply and the full suite runs.
+ */
+function fileScopedChanges(
+  root: string,
+  dir: string,
+  changed: string[],
+): string[] | null {
+  if (dir === '.') return null;
+  const prefix = dir.endsWith('/') ? dir : `${dir}/`;
+  const mine = changed.filter((f) => f.startsWith(prefix));
+  if (mine.length === 0 || mine.length > FILE_SCOPE_MAX_CHANGED) return null;
+  if (!mine.every((f) => existsSync(join(root, f)))) return null;
+  if (!vitestTestScript(root, dir)) return null;
+  return mine.map((f) => f.slice(prefix.length));
+}
+
+/**
+ * The file-scoped test command. `npm exec --workspace` runs from the
+ * workspace's own directory with its local vitest and config — the same
+ * resolution `npm test --workspace` gets — and `test-delta` reruns this
+ * exact string on the merge base when it fails, same as any suite command.
+ */
+function relatedTestCommand(dir: string, files: string[]): string {
+  return (
+    `npm exec --workspace=${shellArg(dir)} -- ` +
+    `vitest related --run ${files.map(shellArg).join(' ')}`
+  );
+}
+
 /** A command this run actually executed, and what it did. */
 export interface CommandResult {
   command: string;
@@ -935,6 +1002,19 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       ? new Set(reverseDependencyClosure(notBuilt, scopeGraph))
       : new Set<string>();
   const notRun: string[] = [];
+  // File-scoping decisions, made up front so the command construction and
+  // the caveat below cannot disagree about what ran. Affected workspaces
+  // only — a dependent's suite imports BUILT output, which vitest's module
+  // graph cannot trace to the changed sources, so narrowing it would skip
+  // everything and call it coverage.
+  const fileScoped = new Map<string, string[]>();
+  if (testScope) {
+    for (const dir of runnableDirs) {
+      if (!affectedSet.has(dir)) continue;
+      const files = fileScopedChanges(root, dir, changed);
+      if (files) fileScoped.set(dir, files);
+    }
+  }
   for (let i = 0; i < runnableDirs.length; i++) {
     const dir = runnableDirs[i];
     if (untestable.has(dir)) {
@@ -948,10 +1028,35 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       notRun.push(...runnableDirs.slice(i).filter((d) => !untestable.has(d)));
       break;
     }
-    const r = exec(testCommand(dir), root, Math.min(perCommandMs, remaining));
+    const scoped = fileScoped.get(dir);
+    const r = exec(
+      scoped ? relatedTestCommand(dir, scoped) : testCommand(dir),
+      root,
+      Math.min(perCommandMs, remaining),
+    );
     results.test.push(r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
+  }
+
+  // The narrowed scope is a claim the report must not make silently: the
+  // caveat names each file-scoped suite so the review can state what was
+  // NOT run (the rest of that workspace's suite), exactly as every other
+  // incomplete scope is disclosed.
+  if (testScope && fileScoped.size > 0) {
+    const scopedNote = [...fileScoped.entries()]
+      .map(
+        ([d, files]) =>
+          `${d} ran only the suites vitest traces to its ` +
+          `${files.length} changed file(s), not its whole suite`,
+      )
+      .join('; ');
+    testScope = {
+      ...testScope,
+      caveat: testScope.caveat
+        ? `${testScope.caveat}; ${scopedNote}`
+        : scopedNote,
+    };
   }
 
   // A budget stop is STRUCTURAL, not just prose: `testScope.workspaces` is
