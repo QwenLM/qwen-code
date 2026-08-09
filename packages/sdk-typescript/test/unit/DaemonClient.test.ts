@@ -1894,6 +1894,110 @@ describe('DaemonClient', () => {
   });
 
   describe('createOrAttachSession', () => {
+    it('gates sessionId before mutation, serializes it, and verifies the response', async () => {
+      const requested = '550E8400-E29B-41D4-A716-446655440000';
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_id_override'],
+            })
+          : jsonResponse(200, {
+              sessionId: requested.toLowerCase(),
+              workspaceCwd: '/work/a',
+              attached: false,
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const session = await client.createOrAttachSession({
+        workspaceCwd: '/work/a',
+        sessionId: requested,
+      });
+
+      expect(session.sessionId).toBe(requested.toLowerCase());
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/session',
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toMatchObject({
+        sessionId: requested,
+      });
+    });
+
+    it('does not mutate when session_id_override is unavailable', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_create'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.createOrAttachSession({
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'session_id_override',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
+    });
+
+    it('treats a malformed capabilities envelope as missing capability', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.createOrAttachSession({
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'session_id_override',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
+    });
+
+    it('throws a protocol error when the daemon returns a different sessionId', async () => {
+      const { fetch } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['session_id_override'],
+            })
+          : jsonResponse(200, {
+              sessionId: '550e8400-e29b-41d4-a716-446655440999',
+              workspaceCwd: '/work/a',
+              attached: false,
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.createOrAttachSession({
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        }),
+      ).rejects.toMatchObject({
+        name: 'DaemonSessionIdProtocolError',
+        requestedSessionId: '550e8400-e29b-41d4-a716-446655440000',
+        actualSessionId: '550e8400-e29b-41d4-a716-446655440999',
+      });
+    });
+
     it('POSTs cwd in the body', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
