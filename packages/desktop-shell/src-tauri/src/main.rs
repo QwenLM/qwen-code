@@ -9,7 +9,7 @@ use local_control::{LocalControlInfo, LocalControlSession};
 use runtime::{resolve_workspace, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
@@ -26,6 +26,7 @@ use url::Url;
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +53,7 @@ struct ApplicationState {
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
     last_error: Mutex<Option<String>>,
+    last_workspace: Mutex<Option<PathBuf>>,
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
@@ -198,15 +200,18 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         log_path,
         origin,
         last_error: Mutex::new(None),
+        last_workspace: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
     });
 
-    if let Some(workspace) = initial_workspace(&handle) {
-        start_runtime_async(handle.clone(), workspace);
-    } else {
-        let _ = handle.emit("workspace-required", ());
+    match initial_workspace(&handle) {
+        Ok(workspace) => start_runtime_async(handle.clone(), workspace),
+        Err(error) => {
+            *lock(&handle.state::<ApplicationState>().last_error) = Some(error.clone());
+            let _ = handle.emit("runtime-failed", error);
+        }
     }
     check_updates_silently(handle.clone());
     spawn_window_state_flusher(handle);
@@ -268,11 +273,10 @@ async fn choose_workspace(
 #[tauri::command]
 fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
-    let workspace = app
-        .state::<ApplicationState>()
-        .settings
-        .workspace()
-        .ok_or_else(|| "Choose a workspace before starting Qwen Code.".to_string())?;
+    let workspace = lock(&app.state::<ApplicationState>().last_workspace)
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| initial_workspace(&app))?;
     start_runtime_async(app, workspace);
     Ok(())
 }
@@ -380,6 +384,7 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
 fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
     let generation = {
         let state = app.state::<ApplicationState>();
+        *lock(&state.last_workspace) = Some(workspace.clone());
         let generation = state.start_generation.fetch_add(1, Ordering::SeqCst) + 1;
         state.starting.store(generation, Ordering::SeqCst);
         generation
@@ -485,10 +490,33 @@ fn set_local_control_menu_state(app: &AppHandle, active: bool) {
     let _ = state.local_control_off_menu.set_enabled(active);
 }
 
-fn initial_workspace(app: &AppHandle) -> Option<PathBuf> {
-    std::env::var_os("QWEN_DESKTOP_WORKSPACE")
-        .map(PathBuf::from)
-        .or_else(|| app.state::<ApplicationState>().settings.workspace())
+fn initial_workspace(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(workspace) = std::env::var_os("QWEN_DESKTOP_WORKSPACE") {
+        return Ok(PathBuf::from(workspace));
+    }
+    if let Some(workspace) = app.state::<ApplicationState>().settings.workspace() {
+        return Ok(workspace);
+    }
+    default_workspace(app)
+}
+
+fn default_workspace(app: &AppHandle) -> Result<PathBuf, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Failed to resolve the home directory: {error}"))?;
+    create_default_workspace(&home)
+}
+
+fn create_default_workspace(home: &Path) -> Result<PathBuf, String> {
+    let workspace = home.join("Documents").join(DEFAULT_WORKSPACE_DIRECTORY);
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "Failed to create the default workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    Ok(workspace)
 }
 
 fn desktop_log_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -657,9 +685,10 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
-        BOOTSTRAP_URL,
+        create_default_workspace, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
+        is_same_origin, origin_of, BOOTSTRAP_URL,
     };
+    use std::fs;
     use std::sync::Mutex;
     use url::Url;
 
@@ -678,6 +707,23 @@ mod tests {
             &Url::parse("https://example.com/").expect("external"),
             &origin,
         ));
+    }
+
+    #[test]
+    fn creates_and_reuses_the_default_workspace() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+
+        let first = create_default_workspace(&home).expect("create workspace");
+        let second = create_default_workspace(&home).expect("reuse workspace");
+
+        assert_eq!(first, home.join("Documents/Qwen"));
+        assert_eq!(second, first);
+        assert!(first.is_dir());
+        fs::remove_dir_all(home).expect("cleanup");
     }
 
     #[test]
