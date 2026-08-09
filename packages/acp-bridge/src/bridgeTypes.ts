@@ -1642,12 +1642,15 @@ export interface AcpSessionBridge {
    * authorized against the session like `/prompt` and `/btw` — throws
    * `InvalidClientIdError` when the id is not bound to the session, and
    * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
+   * With `options.queueOnly` an idle session rejects instead of promoting —
+   * for callers that must drive the next turn themselves (live steering).
    */
   enqueueMidTurnMessage(
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
     messageId?: string,
+    options?: { queueOnly?: boolean },
   ): { accepted: boolean; messageId?: string };
 
   /** Remove a queued or promoted mid-turn message. */

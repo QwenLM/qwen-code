@@ -101,7 +101,7 @@ function createHarness() {
   const stableStore = {
     appendLocalUserMessage: vi.fn(),
     dispatch: vi.fn(),
-  } as never;
+  };
   const stableEditor = {
     getText: vi.fn(() => ''),
     setText: vi.fn(),
@@ -121,7 +121,7 @@ function createHarness() {
       canQueryMidTurn: opts.canQueryMidTurn ?? true,
       streamingState: opts.streamingState ?? 'responding',
       sessionActions: sdkMock.actions as never,
-      store: stableStore,
+      store: stableStore as never,
       editorRef: stableEditorRef,
       reportError: stableReportError,
       t: stableT,
@@ -157,6 +157,7 @@ function createHarness() {
       return latest;
     },
     editor: stableEditor,
+    store: stableStore,
     reportError: stableReportError,
   };
 }
@@ -1244,6 +1245,61 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         ]);
       });
       expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('renders a stable-id message the daemon promoted and started immediately', async () => {
+    // Settle-window case: the turn ends while the POST is in flight, so the
+    // daemon promotes the message and starts it without queued events. The
+    // started event is the only signal that tells this client to render the
+    // user message — its own stream echo is suppressed and the stable-id
+    // branch never created a local row.
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      let messageId: string | undefined;
+      sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+        (_message: string, opts?: { messageId?: string }) => {
+          messageId = opts?.messageId;
+          return Promise.resolve({
+            accepted: true,
+            messageId: opts?.messageId,
+          });
+        },
+      );
+
+      let enqueued = false;
+      await act(async () => {
+        enqueued = harness.result().enqueuePrompt('settled late');
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(enqueued).toBe(true);
+      expect(messageId).toEqual(expect.any(String));
+
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'pending_prompt_started',
+            promptId: messageId,
+            originatorClientId: CLIENT_ID,
+            data: {
+              sessionId: 'session-a',
+              promptId: messageId,
+              text: 'settled late',
+            },
+          },
+        ]);
+      });
+
+      expect(harness.store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'settled late',
+        undefined,
+        undefined,
+      );
     } finally {
       await harness.dispose();
     }

@@ -747,6 +747,9 @@ describe('LiveSessionCoordinator', () => {
       expect(harness.bridge.enqueueMidTurnMessage).toHaveBeenCalledWith(
         'live-new',
         '<realtime_delegation>\n  <input>只检查测试目录</input>\n  <transcript_delta>user: 只检查测试目录</transcript_delta>\n</realtime_delegation>',
+        undefined,
+        undefined,
+        { queueOnly: true },
       ),
     );
     expect(harness.bridge.sendPrompt).toHaveBeenCalledTimes(1);
@@ -760,7 +763,7 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
-  it('starts the steering request as the next turn when mid-turn admission is rejected', async () => {
+  it('starts the steering request as the next turn on the same session if the first turn just settled', async () => {
     const harness = makeHarness({ enqueueAccepted: false });
     await harness.coordinator.start({
       epoch: 1,
@@ -790,6 +793,16 @@ describe('LiveSessionCoordinator', () => {
       prompt: '第二步',
     });
     expect(harness.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    // Steering opts out of idle promotion: a promoted steering prompt would
+    // run without backend-context forwarding or a turn deadline, so the
+    // bridge hands the idle case back to the coordinator.
+    expect(harness.bridge.enqueueMidTurnMessage).toHaveBeenCalledWith(
+      'live-new',
+      expect.stringContaining('第二步'),
+      undefined,
+      undefined,
+      { queueOnly: true },
+    );
 
     await harness.finishTurn(1, [{ type: 'message', text: '第二步完成。' }]);
     await waitFor(() =>

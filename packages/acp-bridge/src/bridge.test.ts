@@ -21335,6 +21335,195 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     );
     await bridge.shutdown();
   });
+
+  it('rejects mid-turn admission while a conditional close is being confirmed', async () => {
+    // `closing` is false for the whole confirmation round trip; the gate must
+    // cover `activeWorkCloseInFlight` like `sendPrompt` does, or a message
+    // acked and promoted in that window is dropped by the teardown it raced.
+    const closeRequested = deferred<void>();
+    const closeResponse = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      initializeImpl: () => activeWorkInitializeResponse(),
+      extMethodImpl: async (method) => {
+        if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+        closeRequested.resolve();
+        return closeResponse.promise;
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      sessionReapIntervalMs: 0,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await sendActiveWorkSnapshot(handle, 1, [
+      { sessionId: session.sessionId, holds: [] },
+    ]);
+
+    const detached = bridge
+      .detachClient(session.sessionId, session.clientId)
+      .catch(() => undefined);
+    await closeRequested.promise;
+
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'race the teardown'),
+    ).toEqual({ accepted: false });
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+
+    closeResponse.resolve({ closed: true, holds: [] });
+    await detached;
+    await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+    await bridge.shutdown();
+  });
+
+  it('publishes pending_prompt_started for a promoted message that starts immediately', async () => {
+    // The settle-window case: the POST lands after the turn settled, so the
+    // message is promoted and starts without a queued phase. Only the started
+    // event tells the originator to render the user message (its own stream
+    // echo is suppressed and no client-side row exists).
+    const prompts: string[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(
+          (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
+        );
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const events: BridgeEvent[] = [];
+    const collecting = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      })) {
+        events.push(event);
+      }
+    })();
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'settled late',
+        { clientId: session.clientId },
+        'late-started',
+      ),
+    ).toEqual({ accepted: true, messageId: 'late-started' });
+
+    await vi.waitFor(() => expect(prompts).toEqual(['settled late']));
+    await vi.waitFor(() =>
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'pending_prompt_started' &&
+            event.promptId === 'late-started' &&
+            (event.data as { text?: string }).text === 'settled late' &&
+            event.originatorClientId === session.clientId,
+        ),
+      ).toBe(true),
+    );
+    // An immediate start never queues: the added event would be unpaired.
+    expect(
+      events.filter(
+        (event) =>
+          event.type === 'pending_prompt_added' &&
+          event.promptId === 'late-started',
+      ),
+    ).toEqual([]);
+
+    releases[0]!();
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    abort.abort();
+    await collecting;
+    await bridge.shutdown();
+  });
+
+  it('rejects a queueOnly enqueue on an idle session instead of promoting', async () => {
+    // Live steering passes `queueOnly`: an idle session must hand the next
+    // turn back to the caller instead of running a bare promoted prompt.
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        promptCalls++;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steering',
+        { clientId: session.clientId },
+        'steer-idle',
+        { queueOnly: true },
+      ),
+    ).toEqual({ accepted: false });
+    expect(promptCalls).toBe(0);
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    expect(
+      bridge.getMidTurnMessages(session.sessionId).promotedMessageIds,
+    ).toEqual([]);
+
+    // The default path still promotes on idle.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steering',
+        { clientId: session.clientId },
+        'steer-idle',
+      ),
+    ).toEqual({ accepted: true, messageId: 'steer-idle' });
+    await vi.waitFor(() => expect(promptCalls).toBe(1));
+    await bridge.shutdown();
+  });
+
+  it('still queues a queueOnly enqueue while the session is busy', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer busy',
+        { clientId: session.clientId },
+        'steer-busy',
+        { queueOnly: true },
+      ),
+    ).toEqual({ accepted: true, messageId: 'steer-busy' });
+    expect(bridge.getMidTurnMessages(session.sessionId).messages).toEqual([
+      { messageId: 'steer-busy', text: 'steer busy' },
+    ]);
+
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, 'steer-busy', {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+    release();
+    await prompt;
+    await bridge.shutdown();
+  });
 });
 
 describe('createAcpSessionBridge — child-resource refresh', () => {

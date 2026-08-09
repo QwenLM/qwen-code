@@ -5533,8 +5533,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     text: string,
     originatorClientId?: string,
   ) => {
-    // sendPrompt owns its FIFO slot synchronously before returning its promise.
-    rememberMidTurnId(entry.promotedMidTurnMessageIds, messageId);
     void bridgeApi
       .sendPrompt(
         entry.sessionId,
@@ -5546,6 +5544,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         {
           promptId: messageId,
           promotedMidTurn: { originatorClientId },
+          // Record the id only once sendPrompt owns its FIFO slot: an
+          // admission failure must not land the id in the reconciliation
+          // ring, or retries would be acked for a message that never runs.
+          onPromptAdmitted: () => {
+            rememberMidTurnId(entry.promotedMidTurnMessageIds, messageId);
+          },
         },
       )
       .catch((error: unknown) => {
@@ -6199,11 +6203,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw new DOMException('Prompt aborted', 'AbortError');
           }
           // If this prompt was queued behind another, promote it to
-          // 'running' and publish a started event now that it has
-          // reached the head of the FIFO.
-          if (pendingEntry.state === 'queued') {
-            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            pendingEntry.state = 'running';
+          // 'running' and publish a started event now that it has reached the
+          // head of the FIFO. A promoted mid-turn message that starts
+          // immediately (the turn settled while the POST was in flight) never
+          // has a queued phase but still needs the started event: the
+          // originator suppresses its own stream echo, and a daemon-owned
+          // mid-turn message has no client-side row to render.
+          if (pendingEntry.state === 'queued' || isPromotedMidTurn) {
+            if (pendingEntry.state === 'queued') {
+              delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+              pendingEntry.state = 'running';
+            }
             entry.events.publish({
               type: 'pending_prompt_started',
               promptId: pendingEntry.promptId,
@@ -8352,7 +8362,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { removed: true };
     },
 
-    enqueueMidTurnMessage(sessionId, message, context, requestedMessageId) {
+    enqueueMidTurnMessage(
+      sessionId,
+      message,
+      context,
+      requestedMessageId,
+      options,
+    ) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Authorize the caller against THIS session before doing anything —
@@ -8365,7 +8381,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
-      if (entry.closing) {
+      // `isClosingOrAuthorizingClose`, not bare `closing`: same admission
+      // invariant as `sendPrompt` — a conditional close still being confirmed
+      // must refuse new work too, or a message promoted in that window races
+      // the teardown and is dropped after an `accepted: true` ack.
+      if (isClosingOrAuthorizingClose(entry)) {
         writeStderrLine(
           `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected: session closing`,
         );
@@ -8414,6 +8434,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.
       if (entry.pendingPromptCount === 0) {
+        // `queueOnly` callers (live steering) drive the next turn themselves:
+        // a promoted message would run as a bare prompt with no collector
+        // forwarding its response to them or arming a deadline.
+        if (options?.queueOnly) {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(messageId)}: session idle`,
+          );
+          return { accepted: false };
+        }
         promoteMidTurnMessage(entry, messageId, trimmed, originatorClientId);
         return { accepted: true, messageId };
       }

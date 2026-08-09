@@ -1255,9 +1255,17 @@ export class LiveSessionCoordinator {
       event.request,
       event.activeTranscript,
     );
+    // `queueOnly`: if the turn already settled, promotion would run this
+    // steering as a bare prompt no coordinator collector subscribes to — the
+    // response would never reach the Realtime source, and no turn deadline
+    // would apply. Rejecting the idle case keeps the `runCoordinatorTurn`
+    // fallback in charge of the next turn.
     const routed = runtime.bridge.enqueueMidTurnMessage(
       locator.sessionId,
       modelPrompt,
+      undefined,
+      undefined,
+      { queueOnly: true },
     );
     if (routed.accepted) {
       onPromptAdmitted();
