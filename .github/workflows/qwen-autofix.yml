@@ -1733,12 +1733,13 @@ jobs:
               gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。\n\n</details>\n\n<!-- takeover-ack engaged -->')"
               echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
             else
-              # REST, not `gh pr edit`: its GraphQL lookup requests
-              # repository.pullRequest.projectCards, which errors on this
-              # repository (Projects classic) — the command exits 1 before
-              # mutating, so the /takeover COMMAND path never labeled anything
-              # while the UI label path worked. Same fix as
-              # pr-self-report-label.yml.
+              # REST for consistency and runner-version independence: `gh pr
+              # edit`'s GraphQL lookup requests
+              # repository.pullRequest.projectCards, which GitHub rejects on
+              # the gh builds that still send that query (demonstrated on the
+              # ECS pool — see pr-self-report-label.yml). This job runs on
+              # ubuntu-latest, where the command still worked; REST behaves
+              # the same on every runner image.
               gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${TAKEOVER_LABEL}" > /dev/null
               echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
               # Ack HERE, not via the pull_request:labeled round-trip: that
@@ -1767,7 +1768,10 @@ jobs:
             else
               # REST for the same reason as the add above; the label name is a
               # path segment and contains a slash, so it must be URI-encoded.
-              gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" > /dev/null
+              # `|| true`: a concurrent removal between the presence check
+              # and this DELETE already reached the end state — the 404 must
+              # not abort the step and drop the release ack below.
+              gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" > /dev/null || true
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
               # Release ack, direct from the command — the exact mirror of
               # the engage side above, for the same reason: the unlabeled

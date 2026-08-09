@@ -3305,8 +3305,8 @@ describe('qwen-autofix workflow', () => {
             '#!/bin/bash',
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
-            // Label mutations are REST gh api calls (gh pr edit cannot mutate
-            // on this repo — its projectCards lookup errors); record them.
+            // Label mutations are REST gh api calls (gh pr edit's
+            // projectCards lookup errors on older gh builds); record them.
             `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
@@ -4439,8 +4439,9 @@ exit 1
     expect(cmdBranch).toBeTruthy();
     expect(cmdBranch).not.toContain('DO_REVIEW=true');
     expect(cmdBranch).toContain('TAKEOVER_CMD="${CMD}"');
-    // The toggle job is presence-aware and PAT-verified. Label mutations are
-    // REST — `gh pr edit` exits 1 on this repo's projectCards lookup.
+    // The toggle job is presence-aware and PAT-verified. Label mutations
+    // are REST — on older gh builds `gh pr edit` exits 1 on its projectCards
+    // lookup.
     expect(workflow).toMatch(
       /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?-f "labels\[\]=\$\{TAKEOVER_LABEL\}"[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\//,
     );

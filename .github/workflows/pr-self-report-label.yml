@@ -74,11 +74,13 @@ jobs:
             --jq "[.labels[].name] | index(\"${LABEL}\") != null" 2> /dev/null || echo 'false')"
 
           # Label mutations go through REST, NOT `gh pr edit`: that command's
-          # GraphQL lookup requests repository.pullRequest.projectCards, and on
-          # this repository (Projects classic attached) GitHub returns the
-          # deprecation as an ERROR — `gh pr edit` exits 1 before mutating
-          # anything. Every add/remove path of this job failed that way from
-          # 2026-08-04 on (43 runs); the green runs were all the no-change arm.
+          # GraphQL lookup requests repository.pullRequest.projectCards, and
+          # GitHub answers the Projects (classic) deprecation as an ERROR on
+          # the gh builds that still send that query — this job's runner
+          # image does, so `gh pr edit` exits 1 before mutating anything.
+          # Every add/remove path of this job failed that way from
+          # 2026-08-04 on (43 runs); the green runs were all the no-change
+          # arm. REST never touches that query.
           if [[ "${SELF}" == 'true' && "${HAS_LABEL}" != 'true' ]]; then
             # Create the label on first use (idempotent), then apply it.
             gh label create "${LABEL}" --repo "${REPO}" --color 'BFD4F2' \
@@ -92,7 +94,10 @@ jobs:
             # succeeded: an API failure must not look like "no self-reported link".
             # The label name is a PATH SEGMENT here, and it contains a slash —
             # unencoded, the request hits …/labels/review/self-reported (404).
-            gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" > /dev/null
+            # `|| true`: the presence check above is not atomic with this
+            # DELETE — if the label was removed in the gap, the 404 only says
+            # the desired end state already holds and must not fail the step.
+            gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" > /dev/null || true
             echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
           else
             echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL}, api=${API_OK})"

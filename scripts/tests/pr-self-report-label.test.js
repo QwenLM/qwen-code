@@ -39,6 +39,24 @@ const GH_STUB = [
   'exit 0',
 ].join('\n');
 
+// The replayed DELETE URI-encodes the slashed label with a REAL jq — stub it
+// on PATH like gh so the suite never depends on the host having jq (a fresh
+// macOS has none, and the %2F assertion would fail opaquely). Supports only
+// the one form the workflow executes: jq -rn --arg NAME VALUE '$NAME|@uri'.
+const JQ_STUB = [
+  '#!/usr/bin/env bash',
+  'value=""',
+  'while [[ $# -gt 0 ]]; do',
+  '  if [[ "$1" == "--arg" ]]; then value="$3"; shift 3; else shift; fi',
+  'done',
+  'out=""',
+  'for ((i = 0; i < ${#value}; i++)); do',
+  '  c="${value:i:1}"',
+  '  if [[ "$c" =~ [A-Za-z0-9._~-] ]]; then out+="$c"; else printf -v hex \'%02X\' "\'$c"; out+="%$hex"; fi',
+  'done',
+  'printf \'%s\' "$out"',
+].join('\n');
+
 describe('pr-self-report-label', () => {
   const run = ({
     prAuthor = 'alice',
@@ -52,6 +70,8 @@ describe('pr-self-report-label', () => {
     const callsLog = join(dir, 'calls.log');
     writeFileSync(join(bin, 'gh'), GH_STUB);
     chmodSync(join(bin, 'gh'), 0o755);
+    writeFileSync(join(bin, 'jq'), JQ_STUB);
+    chmodSync(join(bin, 'jq'), 0o755);
     const out = execFileSync('bash', ['-c', runBlock], {
       env: {
         ...process.env,
@@ -71,11 +91,12 @@ describe('pr-self-report-label', () => {
     rmSync(dir, { recursive: true, force: true });
     return {
       // Label mutations are REST — `gh pr edit`'s GraphQL lookup requests
-      // repository.pullRequest.projectCards and errors on this repository's
-      // Projects (classic), so it exits 1 before mutating (43 straight CI
-      // failures of the add/remove arms, 2026-08-04..08). The full method +
-      // path is asserted, including the %2F: the label is a PATH SEGMENT in
-      // the DELETE and contains a slash, so an unencoded call 404s.
+      // repository.pullRequest.projectCards, which GitHub rejects on the gh
+      // builds that still send it (this job's runner image does), so it
+      // exits 1 before mutating (43 straight CI failures of the add/remove
+      // arms, 2026-08-04..08). The full method + path is asserted,
+      // including the %2F: the label is a PATH SEGMENT in the DELETE and
+      // contains a slash, so an unencoded call 404s.
       added:
         /api -X POST repos\/o\/r\/issues\/1\/labels -f labels\[\]=review\/self-reported/.test(
           calls,
@@ -144,22 +165,30 @@ describe('pr-self-report-label', () => {
   });
 });
 
-describe('gh pr edit label mutations are banned repo-wide', () => {
-  // `gh pr edit` cannot mutate anything on this repository: its GraphQL
-  // lookup requests repository.pullRequest.projectCards, and with Projects
-  // (classic) attached GitHub returns the deprecation as an error, so the
-  // command exits 1 before applying the change. Three workflows carried
-  // label mutations through it and every such arm failed silently-green
-  // (the runs only passed when there was nothing to do) or warned with a
-  // misdiagnosis. Labels go through the REST issues/labels endpoints, which
-  // never touch that query.
+describe('gh pr edit label mutations are banned in workflow files', () => {
+  // `gh pr edit` label mutations fail wherever the gh build still requests
+  // repository.pullRequest.projectCards: GitHub answers the Projects
+  // (classic) deprecation as an error and the command exits 1 before
+  // applying the change. Three workflows carried label mutations through it
+  // and every such arm failed silently-green (the runs only passed when
+  // there was nothing to do) or warned with a misdiagnosis. Labels go
+  // through the REST issues/labels endpoints, which never touch that query.
+  // Scope is workflow YAML: .github/scripts/classify-release-notes.mjs still
+  // toggles skip-changelog-auto through `gh pr edit` on the release path and
+  // needs its own conversion.
   it('no workflow mutates labels through gh pr edit', () => {
     const dir = '.github/workflows';
     const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
     expect(files.length).toBeGreaterThan(0);
     const offenders = [];
     for (const file of files) {
-      const text = readFileSync(join(dir, file), 'utf8');
+      // Join backslash continuations first: `.` does not span newlines, so a
+      // wrapped `gh pr edit … \` with the label flag on the next line would
+      // otherwise slip past the per-line scan.
+      const text = readFileSync(join(dir, file), 'utf8').replace(
+        /\\\n\s*/g,
+        ' ',
+      );
       for (const [i, line] of text.split('\n').entries()) {
         if (/gh pr edit .*(--add-label|--remove-label)/.test(line)) {
           offenders.push(`${file}:${i + 1}`);
