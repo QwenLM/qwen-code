@@ -5883,6 +5883,12 @@ describe('triage job budget', () => {
     const doc = parse(workflow);
     const budget = doc.jobs.authorize.steps.find((s) => s.id === 'budget');
     expect(budget).toBeTruthy();
+    // The replay injects RAW itself, so pin the seams it cannot see: which
+    // repository variable feeds RAW (a typo'd name expands to '' and hits
+    // the silent default), and that the step is unconditional (a scoped
+    // step skips on comment events and '' || 60 kills the knob there).
+    expect(budget.env.RAW).toBe('${{ vars.QWEN_TRIAGE_TIMEOUT_MINUTES }}');
+    expect(budget.if).toBeUndefined();
     const runBudget = (raw) => {
       const dir = mkdtempSync(join(tmpdir(), 'budget-'));
       try {
@@ -5911,6 +5917,21 @@ describe('triage job budget', () => {
       out: 'triage_timeout_minutes=90',
       warned: false,
     });
+    // a padded value must stay decimal — without 10#, bash parses 060 as
+    // octal (48)
+    expect(runBudget('060')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    // exactly at the boundaries: no clamp, no warning
+    expect(runBudget('10')).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: false,
+    });
+    expect(runBudget('600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: false,
+    });
     // 0 would be an instantly-cancelled job — clamped to the floor
     expect(runBudget('0')).toMatchObject({
       out: 'triage_timeout_minutes=10',
@@ -5918,6 +5939,13 @@ describe('triage job budget', () => {
     });
     // a runaway value would hold the runner for days — ceiling
     expect(runBudget('3600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // over 18 digits bash's 64-bit math wraps — 92233720368547758180
+    // lands on 100, silently in range — so the length guard must clamp
+    // to the ceiling with a warning instead
+    expect(runBudget('92233720368547758180')).toMatchObject({
       out: 'triage_timeout_minutes=600',
       warned: true,
     });

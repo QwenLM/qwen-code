@@ -136,13 +136,21 @@ jobs:
           MINUTES=60
           if [[ -n "${RAW}" ]]; then
             if [[ "${RAW}" =~ ^[0-9]+$ ]]; then
-              MINUTES=$((10#${RAW}))
-              if (( MINUTES < 10 )); then
-                echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} is below the 10-minute floor; clamping to 10."
-                MINUTES=10
-              elif (( MINUTES > 600 )); then
+              # Over 18 digits, bash's 64-bit arithmetic wraps, and the
+              # residue can land inside [10,600], silently skipping both
+              # clamps. Any such value is above the ceiling by construction.
+              if (( ${#RAW} > 18 )); then
                 echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} exceeds the 600-minute ceiling; clamping to 600."
                 MINUTES=600
+              else
+                MINUTES=$((10#${RAW}))
+                if (( MINUTES < 10 )); then
+                  echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} is below the 10-minute floor; clamping to 10."
+                  MINUTES=10
+                elif (( MINUTES > 600 )); then
+                  echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} exceeds the 600-minute ceiling; clamping to 600."
+                  MINUTES=600
+                fi
               fi
             else
               echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES='${RAW}' is not a bare positive integer of minutes; using the 60-minute default."
