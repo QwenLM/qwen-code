@@ -2550,6 +2550,23 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('classifies a session_update with no usable discriminator as malformed', () => {
+    // `getSessionUpdatePayload` accepts any record, so these reach the default
+    // branch with `kind === undefined`. They are broken frames, not kinds from
+    // a newer daemon — marking them unrecognized would let renderers hide the
+    // only diagnostic they produce.
+    for (const update of [{}, { sessionUpdate: 42 }, { sessionUpdate: '' }]) {
+      expect(
+        normalizeDaemonEvent(envelopeOf('session_update', { update })),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          debugReason: 'malformed_payload',
+        }),
+      ]);
+    }
+  });
+
   it('stamps debugReason on malformed payloads of known events', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', { scope: 'not-a-scope' }),
@@ -2559,6 +2576,27 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       expect.objectContaining({
         type: 'debug',
         debugReason: 'malformed_payload',
+      }),
+    ]);
+  });
+
+  it('carries debugReason through the reducer onto the transcript block', () => {
+    // The normalizer tests above inspect events directly and the Web Shell
+    // adapter tests construct blocks by hand, so neither would notice if the
+    // reducer dropped the field on the way across. Production blocks would
+    // then lose their classification and Web Shell would render raw JSON
+    // again with both suites still green.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        envelopeOf('some_future_event', { sessionId: 's1' }),
+      ),
+    );
+
+    expect(state.blocks).toEqual([
+      expect.objectContaining({
+        kind: 'debug',
+        debugReason: 'unrecognized_event',
       }),
     ]);
   });

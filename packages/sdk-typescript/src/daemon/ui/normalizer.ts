@@ -386,9 +386,9 @@ export function normalizeDaemonEvent(
       // unknown event types, the doubled block-consumption rate
       // accelerated `maxBlocks` trimming of real content. The `debug`
       // shape already carries the event-type as a prefix, so the
-      // status block was redundant. Adapters that want a user-visible
-      // banner can pattern-match on `event.type === 'debug'` and the
-      // text prefix.
+      // status block was redundant. Adapters deciding how to present a
+      // debug block must branch on `debugReason` — the text prefix is
+      // diagnostic wording and changes without notice.
       return normalizeUnrecognizedEvent(event, base);
   }
 }
@@ -848,7 +848,14 @@ function normalizeSessionUpdate(
         {
           ...base,
           type: 'debug',
-          debugReason: 'unrecognized_session_update',
+          // `getSessionUpdatePayload` accepts any record, so `kind` is
+          // `undefined` for a payload whose discriminator is missing, empty or
+          // not a string. That is a broken frame, not a kind from a newer
+          // daemon — classifying it as unrecognized would hide the only
+          // diagnostic a malformed `session_update` produces.
+          debugReason: kind
+            ? 'unrecognized_session_update'
+            : 'malformed_payload',
           text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
         },
       ];
