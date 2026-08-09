@@ -443,9 +443,32 @@ describe('reverseAuditBudgetMessage', () => {
 });
 
 describe('verifyBudgetExhausted — the compose floor the verifier answers to', () => {
-  it('stays silent when no deadline is set — every local run', () => {
+  it('fails OPEN on a missing or malformed deadline — every local run', () => {
     expect(verifyBudgetExhausted({}, NOW_MS)).toBeNull();
     expect(verifyBudgetExhausted({ [DEADLINE_ENV]: '' }, NOW_MS)).toBeNull();
+    // A malformed/non-positive deadline must leave the gate inert, not
+    // refuse every verify build — the sibling RA gate pins the same branch.
+    for (const bad of ['soon', 'NaN', '-5', '0']) {
+      expect(verifyBudgetExhausted({ [DEADLINE_ENV]: bad }, NOW_MS)).toBeNull();
+    }
+  });
+
+  it('reports a past deadline as negative remaining under the default floor', () => {
+    const spent = verifyBudgetExhausted(
+      { [DEADLINE_ENV]: String(NOW_S - 120) },
+      NOW_MS,
+    );
+    expect(spent).not.toBeNull();
+    expect(spent?.remainingSeconds).toBe(-120);
+  });
+
+  it('a negative floor override falls back to the default, never a silent zero', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS - 60),
+      [COMPOSE_FLOOR_ENV]: '-100',
+    };
+    const spent = verifyBudgetExhausted(env, NOW_MS);
+    expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
   });
 
   it('admits a verify build while the compose floor still fits', () => {
@@ -455,9 +478,22 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
     expect(verifyBudgetExhausted(env, NOW_MS)).toBeNull();
   });
 
-  it('admits at EXACT cover — remaining equal to the floor', () => {
+  it('REFUSES at exact cover — the floor is compose-only, with nothing to spare', () => {
+    // Unlike the reverse-audit reserve (which admits at exact cover, carrying
+    // its own margin), the compose floor is the bare time compose+submit
+    // need: at exactly the floor, admitting a verifier and letting it do any
+    // work crosses below it. Equality must refuse.
     const env = {
       [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS),
+    };
+    const spent = verifyBudgetExhausted(env, NOW_MS);
+    expect(spent).not.toBeNull();
+    expect(spent?.remainingSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+  });
+
+  it('admits one second above the floor', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS + 1),
     };
     expect(verifyBudgetExhausted(env, NOW_MS)).toBeNull();
   });
@@ -519,5 +555,12 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
     expect(msg).toContain('compose');
     expect(msg).toContain('[unverified]');
     expect(msg).toContain('5 minute(s) remain');
+    // Pin the FLOOR rendering, not just the remaining time: a field swap of
+    // composeFloorSeconds→remainingSeconds would misstate the protected
+    // floor to the orchestrator that decides whether to stop.
+    expect(msg).toContain('20-minute floor');
+    // The publication contract: tagged findings stay terminal-only, never
+    // posted as an accusation.
+    expect(msg).toContain('terminal-only');
   });
 });

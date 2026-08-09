@@ -4029,6 +4029,34 @@ describe('the verify gate — compose survives a budget stop', () => {
     expect(msg).toContain('VERIFY BUDGET:');
     expect(msg).toContain('compose');
     expect(msg).toContain('[unverified]');
+    // A refused verifier is NOT a reverse-audit stop: it must write no
+    // budget-stop marker (compose-review would otherwise post a false
+    // "reverse audit — stopped before round N" on a run whose audit
+    // converged and only the verifier hit the floor) and no admission stamp
+    // (a stray stamp would price later rounds from a refusal timestamp).
+    expect(readBudgetStop(plan)).toBeNull();
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('validation beats the gate: a malformed verify call under the floor throws, not exit 4', () => {
+    // The gate sits AFTER argument validation, like the RA gate. A budgeted
+    // run whose orchestrator issues a broken verify call must get the
+    // validation error naming the bug, not a VERIFY BUDGET termination rule
+    // it would mistake for a budget stop.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verifyval-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    // --findings omitted: a malformed verify call.
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+      }),
+    ).toThrow(/--findings/);
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
   });
 
   it('builds the verifier normally when the deadline is far', () => {

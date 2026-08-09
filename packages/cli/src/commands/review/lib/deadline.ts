@@ -269,25 +269,52 @@ export interface BudgetExhausted {
  * tail after it. Returns `null` when it does — or when no (well-formed)
  * deadline is present, which is every local run.
  */
+/**
+ * The deadline epoch both gates read, or null when unset/malformed — the
+ * fail-open contract in one place so the two gates cannot drift on it. A
+ * missing, empty, non-finite or non-positive `QWEN_REVIEW_DEADLINE_EPOCH`
+ * leaves the review ungated (the outer timeout still bounds it).
+ */
+function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
+  const raw = env[DEADLINE_ENV];
+  if (raw === undefined || raw.trim() === '') return null;
+  const deadline = Number(raw);
+  if (!Number.isFinite(deadline) || deadline <= 0) return null;
+  return deadline;
+}
+
+/**
+ * A non-negative seconds override from `env[key]`, or `fallback`. `>= 0`
+ * (not `> 0`) is deliberate: 0 is a documented escape hatch on both gates.
+ * A missing or malformed value falls back — never a silent zero.
+ */
+function readNonNegativeSeconds(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+): number {
+  const raw = env[key];
+  if (raw !== undefined && raw.trim() !== '') {
+    const v = Number(raw);
+    if (Number.isFinite(v) && v >= 0) return v;
+  }
+  return fallback;
+}
+
 export function reverseAuditBudgetExhausted(
   env: NodeJS.ProcessEnv,
   roundCostSeconds: number,
   nowMs: number = Date.now(),
 ): BudgetExhausted | null {
-  const raw = env[DEADLINE_ENV];
-  if (raw === undefined || raw.trim() === '') return null;
-  const deadline = Number(raw);
-  if (!Number.isFinite(deadline) || deadline <= 0) return null;
-
-  let reserve = DEFAULT_RESERVE_SECONDS;
-  const reserveRaw = env[RESERVE_ENV];
-  if (reserveRaw !== undefined && reserveRaw.trim() !== '') {
-    const r = Number(reserveRaw);
-    // `r >= 0` (not `> 0`) is deliberate: 0 is the escape hatch that shrinks
-    // the requirement to the round estimate alone, keeping only the refusal
-    // of a round that cannot finish before the deadline itself.
-    if (Number.isFinite(r) && r >= 0) reserve = r;
-  }
+  const deadline = readDeadlineSeconds(env);
+  if (deadline === null) return null;
+  // 0 is the escape hatch that shrinks the requirement to the round estimate
+  // alone, keeping only the refusal of a round that cannot finish at all.
+  const reserve = readNonNegativeSeconds(
+    env,
+    RESERVE_ENV,
+    DEFAULT_RESERVE_SECONDS,
+  );
 
   const remainingSeconds = Math.floor(deadline - nowMs / 1000);
   if (remainingSeconds >= reserve + roundCostSeconds) return null;
@@ -323,29 +350,27 @@ export function verifyBudgetExhausted(
   env: NodeJS.ProcessEnv,
   nowMs: number = Date.now(),
 ): ComposeFloorExhausted | null {
-  const raw = env[DEADLINE_ENV];
-  if (raw === undefined || raw.trim() === '') return null;
-  const deadline = Number(raw);
-  if (!Number.isFinite(deadline) || deadline <= 0) return null;
-
-  let floor = DEFAULT_COMPOSE_FLOOR_SECONDS;
-  const floorRaw = env[COMPOSE_FLOOR_ENV];
-  if (floorRaw !== undefined && floorRaw.trim() !== '') {
-    const f = Number(floorRaw);
-    // `>= 0` like the reserve: 0 is the escape hatch that disables the
-    // verify gate while leaving the reverse-audit gate untouched.
-    if (Number.isFinite(f) && f >= 0) floor = f;
-  }
+  const deadline = readDeadlineSeconds(env);
+  if (deadline === null) return null;
+  const floor = readNonNegativeSeconds(
+    env,
+    COMPOSE_FLOOR_ENV,
+    DEFAULT_COMPOSE_FLOOR_SECONDS,
+  );
 
   // A zero floor disables the gate ENTIRELY — the documented escape hatch.
-  // This must return before the comparison below: past the deadline
-  // `remainingSeconds` is negative, and `negative >= 0` is false, so a
-  // comparison-only check would fire the "disabled" gate exactly when it was
-  // asked to stand down.
+  // Return before the comparison below: past the deadline `remainingSeconds`
+  // is negative, and a comparison-only check would fire the "disabled" gate
+  // exactly when it was asked to stand down.
   if (floor <= 0) return null;
 
   const remainingSeconds = Math.floor(deadline - nowMs / 1000);
-  if (remainingSeconds >= floor) return null;
+  // STRICTLY greater: the floor is the bare time compose and submit need,
+  // with nothing to spare. At exactly the floor, admitting a verifier and
+  // letting it do any work crosses below it — so equality refuses, unlike
+  // the reverse-audit reserve (which carries its own margin and admits at
+  // exact cover).
+  if (remainingSeconds > floor) return null;
   return { remainingSeconds, composeFloorSeconds: floor };
 }
 
@@ -363,10 +388,13 @@ export function verifyBudgetMessage(spent: ComposeFloorExhausted): string {
     `submission need, so no verification shard will be built. This is a ` +
     `termination rule, not an error: do not rebuild the verifier. Proceed ` +
     `to Step 6 NOW and compose. Findings still carrying \`— [unverified]\` ` +
-    `keep that tag — compose-review caps the verdict on it and posts them ` +
-    `as needing human review — because a review that stops verifying here ` +
-    `still posts everything it found, while one that keeps verifying past ` +
-    `this floor is killed before it posts anything.`
+    `keep that tag: compose-review caps the verdict and discloses the ` +
+    `verification gap, and their details stay terminal-only (the ` +
+    `confirmed-only rule — an unverified finding is never posted as an ` +
+    `accusation). What DOES post is everything earlier rounds already ` +
+    `confirmed, plus that gap — because a review that stops verifying here ` +
+    `still reports what it proved, while one that keeps verifying past this ` +
+    `floor is killed before it posts anything.`
   );
 }
 
