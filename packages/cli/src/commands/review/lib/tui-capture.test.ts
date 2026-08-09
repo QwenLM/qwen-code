@@ -294,6 +294,24 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(i + 2).toBe(plan.start.length);
   });
 
+  it('PROPAGATES geometry — a hardcoded 80x24 must not pass', () => {
+    // Every other plan call in this file uses 80x24, so a plan that
+    // ignored opts.cols/opts.rows and hardcoded them passed the whole
+    // suite — and the fake-tmux seam tests too, since they drive the same
+    // default. Distinct values are the only way to see it.
+    const p = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 132,
+      rows: 43,
+      command: 'node cli.js',
+      cwd: '/work',
+      readyFile: '/ready',
+    });
+    expect(p.start[p.start.indexOf('-x') + 1]).toBe('132');
+    expect(p.start[p.start.indexOf('-y') + 1]).toBe('43');
+  });
+
   it('starts detached at the requested geometry and cwd', () => {
     // new-session and its `-s cap` are the join key every later call
     // targets via `-t cap` — dropping them would only fail the tmux-gated

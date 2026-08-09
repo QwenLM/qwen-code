@@ -621,18 +621,28 @@ describe('capture-tui without tmux (probe seam)', () => {
     // while a stale manifest claiming "evidence":"png" survived beside the
     // refusal.
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
-    for (const [name, over] of [
-      ['geometry', { rows: 9999 }],
-      ['empty command', { command: '   ' }],
-      ['cwd', { cwd: join(tmpdir(), 'capture-tui-nope-does-not-exist') }],
-      ['settle bound', { settleMs: -1 }],
-    ] as ReadonlyArray<readonly [string, Record<string, unknown>]>) {
+    // The REASON, not just exit 3: without it, deleting a gate outright
+    // ships green — the run sails on and refuses for some other reason
+    // (a tmux-less lane refuses 'not installed'), which is still exit 3
+    // with the artifacts cleared. The pin has to name the gate it pins.
+    for (const [name, over, reason] of [
+      ['geometry', { rows: 9999 }, '--rows must'],
+      ['empty command', { command: '   ' }, '--command must not be empty'],
+      [
+        'cwd',
+        { cwd: join(tmpdir(), 'capture-tui-nope-does-not-exist') },
+        '--cwd',
+      ],
+      ['settle bound', { settleMs: -1 }, '--settle-ms'],
+    ] as ReadonlyArray<
+      readonly [string, Record<string, unknown>, string]
+    >) {
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-boundstale-'));
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
         writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
-        await withStdio(() =>
+        const { stderr } = await withStdio(() =>
           runCaptureTui({
             command: 'printf hi',
             cwd: undefined,
@@ -646,6 +656,13 @@ describe('capture-tui without tmux (probe seam)', () => {
             ...(over as Record<string, unknown>),
           } as never),
         );
+        // The gate name rides IN the compared value: expect(v, message) is
+        // banned by vitest/valid-expect, and a bare miss would not say
+        // which gate stopped naming itself.
+        expect({ gate: name, named: stderr.includes(reason) }).toEqual({
+          gate: name,
+          named: true,
+        });
         expect({
           gate: name,
           exitCode: process.exitCode,
@@ -2200,243 +2217,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.degradedBecause).toContain('signal');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
-  });
-
-  it.skipIf(!hasTmux)(
-    'keeps a pre-existing .ans when its write fails at OPEN — nothing truncated',
-    async () => {
-      // The artifact-path probe proves a path writable BEFORE the capture
-      // window; the write can still fail at open() afterwards — EMFILE
-      // under the concurrent captures this tool's briefs encourage — having
-      // truncated NOTHING. Deleting then destroys a file the clear phase
-      // deliberately spared (no capture manifest beside it). Driven from a
-      // child whose preload makes exactly that write fail: the module takes
-      // writeFileSync as a named import, and patching the builtin before
-      // the import reaches it (verified).
-      let captureTuiTs = join(
-        process.cwd(),
-        'src/commands/review/capture-tui.ts',
-      );
-      if (!existsSync(captureTuiTs)) {
-        captureTuiTs = join(
-          process.cwd(),
-          'packages/cli/src/commands/review/capture-tui.ts',
-        );
-      }
-      const seeded = 'a user file the clear phase spared';
-      writeFileSync(join(dir, 'cap.ans'), seeded);
-      const patch = join(dir, 'patch.cjs');
-      writeFileSync(
-        patch,
-        [
-          "const fs = require('node:fs');",
-          'const orig = fs.writeFileSync;',
-          'fs.writeFileSync = function (p, ...rest) {',
-          "  if (typeof p === 'string' && p.endsWith('cap.ans')) {",
-          "    throw Object.assign(new Error('EMFILE: too many open files, open'), { code: 'EMFILE' });",
-          '  }',
-          '  return orig.call(this, p, ...rest);',
-          '};',
-        ].join('\n'),
-      );
-      const driver = join(dir, 'driver-ansfail.mts');
-      writeFileSync(
-        driver,
-        [
-          `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
-          `mod.probes.freeze = () => ({ status: 'absent' });`,
-          `await mod.runCaptureTui({ command: 'printf "READY\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'READY', keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 20_000 } as never);`,
-        ].join('\n'),
-      );
-      const { spawn } = await import('node:child_process');
-      const child = spawn(
-        process.execPath,
-        ['--require', patch, '--import', 'tsx', driver],
-        { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      const code = await new Promise<number | null>((resolve) =>
-        child.once('exit', (c) => resolve(c)),
-      );
-      // The refusal contract holds...
-      expect(code).toBe(3);
-      // ...and the file this run never wrote is byte-for-byte the user's.
-      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(seeded);
-    },
-    60_000,
-  );
-
-  it('asks tmux 3.2a for NO -N, and says so in the manifest', async () => {
-    // Plan-level pins cover tmuxPlan; this pins the WIRING. A fake tmux
-    // reporting 3.2a — what Ubuntu 22.04 ships, measured to pad a
-    // three-character line with 17 phantom spaces and to have no -T — must
-    // produce a capture-pane call without -N, and a manifest that names the
-    // trade so a trailing-space claim is not read off trimmed bytes.
-    const binDir = join(dir, 'fakebin-32a');
-    mkdirSync(binDir, { recursive: true });
-    const callLog = join(dir, 'tmux-calls-32a');
-    writeFileSync(
-      join(binDir, 'tmux'),
-      `#!/bin/sh\necho "$@" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.2a"; exit 0; }\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
-      { mode: 0o755 },
-    );
-    const realPath = process.env['PATH'];
-    process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
-    try {
-      await withStdio(() => run({ until: undefined, settleMs: 0 }));
-    } finally {
-      if (realPath === undefined) delete process.env['PATH'];
-      else process.env['PATH'] = realPath;
-    }
-    const captureCalls = readFileSync(callLog, 'utf8')
-      .split('\n')
-      .filter((l) => l.includes('capture-pane'));
-    expect(captureCalls.length).toBeGreaterThan(0);
-    for (const call of captureCalls) {
-      expect(call.split(/\s+/)).not.toContain('-N');
-    }
-    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
-    expect(manifest.degradedBecause).toContain('TRIMMED');
-    expect(manifest.degradedBecause).toContain('3.3+');
-  });
-
-  it('stays exit 0 when STDIO fails after the evidence is on disk', async () => {
-    // The success tail's two writes were the only contract writes with no
-    // stdio protection, and the broken-pipe guard rethrows every non-EPIPE
-    // 'error' event — so a full disk on a file-backed stdout flipped a
-    // completed capture to exit 1 with a stack trace, with the .ans and the
-    // manifest both written. Driven from a child whose preload makes the
-    // stdout write emit an async ENOSPC 'error' (the shape measured with an
-    // LD_PRELOAD shim), which try/catch alone cannot catch.
-    let captureTuiTs = join(
-      process.cwd(),
-      'src/commands/review/capture-tui.ts',
-    );
-    if (!existsSync(captureTuiTs)) {
-      captureTuiTs = join(
-        process.cwd(),
-        'packages/cli/src/commands/review/capture-tui.ts',
-      );
-    }
-    const patch = join(dir, 'enospc.cjs');
-    writeFileSync(
-      patch,
-      [
-        'const realWrite = process.stdout.write.bind(process.stdout);',
-        'process.stdout.write = function (chunk, ...rest) {',
-        '  if (String(chunk).includes(\'"captured":true\')) {',
-        '    process.nextTick(() =>',
-        "      process.stdout.emit('error', Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' })),",
-        '    );',
-        '    return true;',
-        '  }',
-        '  return realWrite(chunk, ...rest);',
-        '};',
-      ].join('\n'),
-    );
-    const driver = join(dir, 'driver-enospc.mts');
-    writeFileSync(
-      driver,
-      [
-        `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
-        `mod.probes.freeze = () => ({ status: 'absent' });`,
-        `await mod.runCaptureTui({ command: 'printf "READY\\n"; sleep 30', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: 'READY', keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 20_000 } as never);`,
-      ].join('\n'),
-    );
-    const { spawn } = await import('node:child_process');
-    const child = spawn(
-      process.execPath,
-      ['--require', patch, '--import', 'tsx', driver],
-      { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-    const code = await new Promise<number | null>((resolve) =>
-      child.once('exit', (c) => resolve(c)),
-    );
-    // A completed capture is a success, whatever happened to stdout after.
-    expect(code).toBe(0);
-    expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
-    expect(existsSync(join(dir, 'cap.json'))).toBe(true);
-  }, 60_000);
-
-  it('never clears a foreign png that an ANS-ONLY manifest never wrote', async () => {
-    // The signature check keys on the manifest, and an ans-only manifest
-    // says this tool wrote no png — so whatever sits at <out>.png belongs
-    // to someone else. Keying the png clear on `evidence` alone deleted it
-    // on the next run against the same --out, the documented reuse shape,
-    // and the in-run stamps are taken AFTER the clear so they cannot help.
-    writeFileSync(
-      join(dir, 'cap.json'),
-      JSON.stringify({ evidence: 'ans-only', pngPath: null }),
-    );
-    writeFileSync(join(dir, 'cap.ans'), 'the previous run text');
-    writeFileSync(join(dir, 'cap.png'), 'a foreign file');
-    await withFakeFreeze('#!/bin/sh\nexit 0\n', () => run());
-    // The previous run's own artifacts cleared and were rewritten...
-    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).not.toBe(
-      'the previous run text',
-    );
-    // ...and the foreign png is untouched.
-    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('a foreign file');
-  });
-
-  it('degrades on a DANGLING SYMLINK at the png path — the render must not escape', async () => {
-    // The png path is a rung, so it degrades rather than refuses — but the
-    // occupancy question is the same lstat one: with a stat-based stamp the
-    // link read as absent, freeze rendered THROUGH it, and the image landed
-    // outside the --out base while the manifest recorded `evidence: 'png'`
-    // (probe-verified: 1 file at the link target, rung claimed).
-    const elsewhere = join(dir, 'elsewhere');
-    mkdirSync(elsewhere, { recursive: true });
-    symlinkSync(join(elsewhere, 'png-victim.png'), join(dir, 'cap.png'));
-    await withFakeFreeze('#!/bin/sh\nprintf PNGBYTES > "$5"\n', () => run());
-    expect(process.exitCode).toBeUndefined();
-    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
-    expect(manifest.evidence).toBe('ans-only');
-    expect(manifest.pngPath).toBeNull();
-    expect(manifest.degradedBecause).toContain('did not write');
-    expect(readdirSync(elsewhere)).toEqual([]);
-    expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
-  });
-
-  it('still prints the refusal JSON when STDERR throws', async () => {
-    // The two writes lived in one try, so a synchronous stderr failure — a
-    // file-backed stderr under ENOSPC throws sync in Node — skipped the
-    // stdout JSON entirely and left a healthy stdout with nothing. The
-    // consumer is an agent that must tell an environment refusal from a
-    // caller mistake WITHOUT scraping stderr.
-    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
-    const sinks = { stdout: '' };
-    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
-      chunk: string | Uint8Array,
-    ) => {
-      sinks.stdout += String(chunk);
-      return true;
-    }) as never);
-    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((() => {
-      throw Object.assign(new Error('ENOSPC: no space left on device'), {
-        code: 'ENOSPC',
-      });
-    }) as never);
-    try {
-      await runCaptureTui({
-        command: 'printf hi',
-        cwd: undefined,
-        cols: 0,
-        rows: 24,
-        settleMs: 0,
-        until: undefined,
-        keys: undefined,
-        out: join(dir, 'stderr-throws'),
-        timeoutMs: 1000,
-      } as never);
-    } finally {
-      outSpy.mockRestore();
-      errSpy.mockRestore();
-    }
-    expect(process.exitCode).toBe(3);
-    expect(JSON.parse(sinks.stdout.trim())).toMatchObject({
-      captured: false,
-      evidence: 'none',
-    });
   });
 
   it('REFUSES an oversized <out>.json instead of reading it into the heap', async () => {

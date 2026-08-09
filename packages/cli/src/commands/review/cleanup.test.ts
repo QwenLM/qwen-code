@@ -230,6 +230,12 @@ describe('runCleanup', () => {
         expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${orphan}`, {
           force: true,
         });
+        // And the LIVE socket is never announced as reaped: every stdout
+        // negative in this suite named the orphan, so a mutant printing the
+        // success line for a skipped live server escaped all of them.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${live}`,
+        );
         expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
           `Reaped orphaned capture server: ${orphan}`,
         );
@@ -287,6 +293,11 @@ describe('runCleanup', () => {
         expect(mocks.rmSync).not.toHaveBeenCalledWith(
           `${dir}/${orphan}`,
           expect.anything(),
+        );
+        // ...and stdout must not claim it WAS reaped. Hoisting the success
+        // line above the failure branch escaped every other assertion here.
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
         );
         // The sweep REACHED the orphan listed after the wedged one — a
         // continue→break mutant left it alive for the holder's bounded window, unnoted.
