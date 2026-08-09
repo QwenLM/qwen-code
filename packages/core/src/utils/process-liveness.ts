@@ -22,9 +22,21 @@ import { isNodeError } from './errors.js';
 /**
  * True when the given PID belongs to a live process.
  *
- * `EPERM` means the process exists but is owned by another user — that is
- * still alive, and reporting it as dead would let one user's session sweep
- * another's record out of a shared registry directory.
+ * Only `ESRCH` — "no such process" — proves death. Everything else the
+ * probe can report is a permission failure against a process that exists:
+ * `EPERM` for another user's process on POSIX, and `EACCES` on Windows,
+ * where `uv_kill(pid, 0)` fails that way when Mandatory Integrity Control
+ * denies `OpenProcess` — an elevated session probed from a non-elevated
+ * one of the same user. Reporting either as dead would let one session
+ * sweep a live one's record out of a shared registry directory, and
+ * registration is startup-only, so the swept session stays invisible to
+ * discovery for the rest of its life.
+ *
+ * Deciding by the one errno that means death rather than by an allowlist
+ * of the ones that mean life keeps an unanticipated errno on the safe
+ * side of that trade, and matches the three sibling liveness probes in
+ * `session-writer-lease.ts`, `serve/live/discovery.ts` and
+ * `worktreeSessionService.ts`.
  */
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -32,7 +44,7 @@ export function isPidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    return isNodeError(err) && err.code === 'EPERM';
+    return isNodeError(err) && err.code !== 'ESRCH';
   }
 }
 

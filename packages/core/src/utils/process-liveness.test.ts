@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   isPidAlive,
   isSameProcess,
@@ -28,6 +28,41 @@ describe('isPidAlive', () => {
     expect(isPidAlive(-1)).toBe(false);
     expect(isPidAlive(1.5)).toBe(false);
     expect(isPidAlive(NaN)).toBe(false);
+  });
+
+  // Neither errno is reachable from a test that probes a real PID: EPERM
+  // needs a process owned by another user, EACCES needs an elevated
+  // Windows process and a non-elevated prober. Stub the probe instead —
+  // the branch decides whether a sweep deletes a live session's record,
+  // so leaving it to the platform means never testing it at all.
+  it.each([
+    ['EPERM', 'another user owns it (POSIX)'],
+    ['EACCES', 'Mandatory Integrity Control denied OpenProcess (Windows)'],
+    ['EINVAL', 'an errno this code has not anticipated'],
+  ])('treats %s as alive — %s', (code) => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const error: NodeJS.ErrnoException = new Error(`probe failed: ${code}`);
+      error.code = code;
+      throw error;
+    });
+    try {
+      expect(isPidAlive(DEAD_PID)).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it('treats ESRCH as dead, the one errno that proves it', () => {
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const error: NodeJS.ErrnoException = new Error('no such process');
+      error.code = 'ESRCH';
+      throw error;
+    });
+    try {
+      expect(isPidAlive(process.pid)).toBe(false);
+    } finally {
+      kill.mockRestore();
+    }
   });
 });
 
