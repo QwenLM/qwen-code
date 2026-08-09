@@ -150,11 +150,13 @@ const LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES = [
  * appear whenever the daemon ships a new event kind ahead of the UI, and
  * rendering them drops unreadable JSON into the middle of the conversation.
  *
- * Keyed on the normalizer's `debugReason` rather than the block text so new
- * event kinds are covered automatically. Two categories are deliberately kept
- * visible: `malformed_payload`, which means a frame this client *does* know
- * arrived broken and is worth surfacing, and client-dispatched debug blocks
- * (e.g. the model-switch summary), which carry no `debugReason` at all.
+ * Keyed on the normalizer's `debugReason` rather than the block text. The
+ * SDK names reasons by category: `unrecognized_*` is forward-compat noise,
+ * hidden here by prefix so a reason a newer SDK adds is covered without a
+ * Web Shell change. Everything else deliberately stays visible — `malformed_*`
+ * means a frame this client *does* know arrived broken and is worth
+ * surfacing, and client-dispatched debug blocks (e.g. the model-switch
+ * summary) carry no `debugReason` at all.
  *
  * `WebShellTranscript` is a public entry point that takes already-projected
  * blocks from its caller, so blocks projected — or persisted — by an SDK older
@@ -176,10 +178,7 @@ function isUnrecognizedDaemonDebug(
   block: DaemonStatusTranscriptBlock,
 ): boolean {
   if (block.debugReason !== undefined) {
-    return (
-      block.debugReason === 'unrecognized_event' ||
-      block.debugReason === 'unrecognized_session_update'
-    );
+    return block.debugReason.startsWith('unrecognized_');
   }
   // Only `debug` blocks ever carried an unrecognized projection; a `status`
   // block matching one of these shapes is real content.

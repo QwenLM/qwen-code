@@ -1337,6 +1337,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
+  it('keys the filter off the unrecognized_ category prefix, not the enum', () => {
+    // A newer SDK may stamp reasons this build's `DaemonUiDebugReason` does
+    // not list; the category prefix is the contract. `unrecognized_*` noise
+    // hides, `malformed_*` defect signals keep rendering.
+    const block = (id: string, debugReason: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        debugReason,
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      block(
+        'future-unrecognized',
+        'unrecognized_tool_frame',
+        'tool_frame: {"frameId":"f1"}',
+      ),
+      block(
+        'future-malformed',
+        'malformed_tool_frame',
+        'tool_frame: broken frame payload',
+      ),
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual(['future-malformed']);
+  });
+
   it('keeps malformed-payload debug blocks visible', () => {
     // A frame the client *does* know about arrived broken — that is a real
     // defect signal, not forward-compatibility noise.
