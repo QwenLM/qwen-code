@@ -359,7 +359,7 @@ export interface BridgeRestoredSession extends BridgeSession {
   replayError?: string;
   /** Compacted events for all completed turns (O(turns) size). */
   compactedReplay?: BridgeEvent[];
-  /** Raw events since last turn boundary (current incomplete turn). */
+  /** Bounded replay events for the current incomplete turn. */
   liveJournal?: BridgeEvent[];
   /** True when persisted records exist before the returned replay page. */
   historyHasMore?: boolean;

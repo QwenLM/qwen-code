@@ -125,15 +125,16 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
-   * to 10 000. Must be a positive safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal.
+   * Compatible text/thought chunks share bounded entries. Threaded into
+   * `BridgeOptions.maxJournalEvents`. Defaults to 10 000. Must be a positive
+   * safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. Threaded into
-   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
-   * safe integer.
+   * Per-session source-event byte cap on the in-flight live journal. Threaded
+   * into `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a
+   * positive safe integer.
    */
   maxJournalBytes?: number;
   /**

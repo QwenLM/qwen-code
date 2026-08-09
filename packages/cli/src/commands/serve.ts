@@ -310,16 +310,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         default: DEFAULT_MAX_JOURNAL_EVENTS,
         description:
-          'Per-session cap on raw events retained in the in-flight live ' +
-          'journal (current unfinished turn). When exceeded, the oldest ' +
-          'entries are dropped. Must be a positive safe integer.',
+          'Per-session cap on replay entries retained in the in-flight live ' +
+          'journal (current unfinished turn). Compatible text/thought chunks ' +
+          'share bounded entries. When exceeded, the oldest entries are ' +
+          'dropped. Must be a positive safe integer.',
       })
       .option('max-journal-bytes', {
         type: 'number',
         default: DEFAULT_MAX_JOURNAL_BYTES,
         description:
-          'Per-session byte cap on the in-flight live journal. When ' +
-          'exceeded, the oldest entries are dropped (at least one is ' +
+          'Per-session source-event byte cap on the in-flight live journal. ' +
+          'When exceeded, the oldest entries are dropped (at least one is ' +
           'always kept). Must be a positive safe integer.',
       })
       .option('http-bridge', {

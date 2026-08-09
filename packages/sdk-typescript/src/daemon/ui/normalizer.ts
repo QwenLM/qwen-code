@@ -466,7 +466,9 @@ function normalizeHistoryTruncated(
   }
   const fullTranscriptAvailable = event.data['fullTranscriptAvailable'];
   const limits = [
-    maxEvents === undefined ? undefined : `${maxEvents} events`,
+    maxEvents === undefined
+      ? undefined
+      : `${maxEvents} ${scope === 'live_journal' ? 'replay entries' : 'events'}`,
     `${maxBytes} bytes`,
   ]
     .filter((limit): limit is string => limit !== undefined)
@@ -778,12 +780,14 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const meta = extractUpdateMeta(update);
       return [
         {
           ...base,
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(meta ? { meta } : {}),
         },
       ];
     }

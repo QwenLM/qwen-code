@@ -590,15 +590,289 @@ describe('TurnBoundaryCompactionEngine', () => {
   });
 
   describe('liveJournal (incomplete turn)', () => {
-    it('accumulates raw events in liveJournal before turn completes', () => {
+    it('merges consecutive text chunks for live replay', () => {
       const engine = new TurnBoundaryCompactionEngine();
-      engine.ingest(makeTextChunk(1, 'H'));
-      engine.ingest(makeTextChunk(2, 'i'));
+      engine.ingest(makeThoughtChunk(1, 'Let me '));
+      engine.ingest(makeThoughtChunk(2, 'think'));
+      engine.ingest(makeTextChunk(3, 'The '));
+      engine.ingest(makeTextChunk(4, 'answer'));
 
       const snap = engine.snapshot();
       expect(snap.compactedTurns).toHaveLength(0);
       expect(snap.liveJournal).toHaveLength(2);
-      expect(snap.lastEventId).toBe(2);
+      expect(extractTexts(snap.liveJournal)).toEqual([
+        'Let me think',
+        'The answer',
+      ]);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([2, 4]);
+      expect(snap.lastEventId).toBe(4);
+    });
+
+    it('preserves tool boundaries in live replay', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'Before'));
+      engine.ingest(makeToolCall(2, 'tc1', 'running'));
+      engine.ingest(makeTextChunk(3, 'After'));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(3);
+      expect(extractTexts(snap.liveJournal)).toEqual(['Before', 'After']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2, 3]);
+    });
+
+    it.each([
+      {
+        name: 'parentToolCallId',
+        first: { parentToolCallId: 'tool-a' },
+        second: { parentToolCallId: 'tool-b' },
+      },
+      {
+        name: 'sourceRecordIds',
+        first: { sourceRecordIds: ['record-a'] },
+        second: { sourceRecordIds: ['record-b'] },
+      },
+      {
+        name: 'promptId',
+        first: { promptId: 'prompt-a' },
+        second: { promptId: 'prompt-b' },
+      },
+      {
+        name: 'originatorClientId',
+        first: { originatorClientId: 'client-a' },
+        second: { originatorClientId: 'client-b' },
+      },
+      {
+        name: 'sessionId',
+        first: { sessionId: 'session-a' },
+        second: { sessionId: 'session-b' },
+      },
+    ])('does not merge across $name boundaries', ({ first, second }) => {
+      const withIdentity = (
+        event: BridgeEvent,
+        identity: {
+          parentToolCallId?: string;
+          sourceRecordIds?: string[];
+          promptId?: string;
+          originatorClientId?: string;
+          sessionId?: string;
+        },
+      ): BridgeEvent => {
+        const update = (event.data as { update: Record<string, unknown> })
+          .update;
+        if (
+          identity.parentToolCallId !== undefined ||
+          identity.sourceRecordIds !== undefined
+        ) {
+          update['_meta'] = {
+            ...(identity.parentToolCallId === undefined
+              ? {}
+              : { parentToolCallId: identity.parentToolCallId }),
+            ...(identity.sourceRecordIds === undefined
+              ? {}
+              : {
+                  qwenTranscript: {
+                    sourceRecordIds: identity.sourceRecordIds,
+                  },
+                }),
+          };
+        }
+        event.promptId = identity.promptId;
+        event.originatorClientId = identity.originatorClientId;
+        if (identity.sessionId !== undefined) {
+          event.data = {
+            sessionId: identity.sessionId,
+            ...(event.data as Record<string, unknown>),
+          };
+        }
+        return event;
+      };
+
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), first));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), second));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(2);
+      expect(extractTexts(snap.liveJournal)).toEqual(['first', 'second']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2]);
+      expect(snap.liveJournal[0]).toMatchObject(
+        withIdentity(makeTextChunk(1, 'first'), first),
+      );
+      expect(snap.liveJournal[1]).toMatchObject(
+        withIdentity(makeTextChunk(2, 'second'), second),
+      );
+    });
+
+    it.each([
+      [
+        'ordinary then guard',
+        makeTextChunk(1, 'ordinary'),
+        makeDiscreteTextChunk(2, 'guard', 1),
+      ],
+      [
+        'guard then ordinary',
+        makeDiscreteTextChunk(1, 'guard', 1),
+        makeTextChunk(2, 'ordinary'),
+      ],
+    ])('keeps todo-stop-guard text discrete: %s', (_name, first, second) => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(first);
+      engine.ingest(second);
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(2);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2]);
+      expect(
+        snap.liveJournal.map(
+          (event) =>
+            (event.data as { update: { content: { text: string } } }).update
+              .content.text,
+        ),
+      ).toEqual(
+        [first, second].map(
+          (event) =>
+            (event.data as { update: { content: { text: string } } }).update
+              .content.text,
+        ),
+      );
+      const guard = snap.liveJournal.find(
+        (event) =>
+          (event.data as { update: { _meta?: { source?: string } } }).update
+            ._meta?.source === 'todo_stop_guard',
+      );
+      expect(
+        (guard?.data as { update: { _meta: Record<string, unknown> } }).update
+          ._meta,
+      ).toMatchObject({
+        source: 'todo_stop_guard',
+        qwenDiscreteMessage: true,
+        attempt: 1,
+        maxAttempts: 2,
+      });
+    });
+
+    it.each([
+      ['message', makeTextChunk],
+      ['thought', makeThoughtChunk],
+    ] as const)(
+      'keeps generic discrete %s chunks separate in live replay',
+      (_name, makeChunk) => {
+        const makeBackgroundMessage = (
+          id: number,
+          text: string,
+          taskId: string,
+        ): BridgeEvent => {
+          const event = makeChunk(id, text);
+          (event.data as { update: Record<string, unknown> }).update['_meta'] =
+            {
+              qwenDiscreteMessage: true,
+              backgroundTask: { taskId },
+            };
+          return event;
+        };
+        const first = makeBackgroundMessage(1, 'first', 'task-a');
+        const second = makeBackgroundMessage(2, 'second', 'task-b');
+        const engine = new TurnBoundaryCompactionEngine();
+        engine.ingest(first);
+        engine.ingest(second);
+
+        const live = engine.snapshot().liveJournal;
+        expect(live).toHaveLength(2);
+        expect(extractTexts(live)).toEqual(['first', 'second']);
+        expect(
+          live.map(
+            (event) =>
+              (
+                event.data as {
+                  update: { _meta: { backgroundTask: { taskId: string } } };
+                }
+              ).update._meta.backgroundTask.taskId,
+          ),
+        ).toEqual(['task-a', 'task-b']);
+      },
+    );
+
+    it('preserves semantic envelope metadata event boundaries', () => {
+      const withEnvelopeMeta = (
+        event: BridgeEvent,
+        meta: Record<string, unknown>,
+      ): BridgeEvent => ({ ...event, _meta: meta });
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(
+        withEnvelopeMeta(makeTextChunk(1, 'before'), { serverTimestamp: 1 }),
+      );
+      engine.ingest(
+        withEnvelopeMeta(makeTextChunk(2, 'middle'), {
+          serverTimestamp: 2,
+          semantic: { kind: 'middle' },
+        }),
+      );
+      engine.ingest(
+        withEnvelopeMeta(makeTextChunk(3, 'after'), { serverTimestamp: 3 }),
+      );
+
+      const live = engine.snapshot().liveJournal;
+      expect(live).toHaveLength(3);
+      expect(live.map((event) => event.id)).toEqual([1, 2, 3]);
+      expect(live[1]?._meta).toEqual({
+        serverTimestamp: 2,
+        semantic: { kind: 'middle' },
+      });
+    });
+
+    it('preserves semantic metadata event boundaries', () => {
+      const withMeta = (
+        event: BridgeEvent,
+        meta: Record<string, unknown>,
+      ): BridgeEvent => {
+        (event.data as { update: Record<string, unknown> }).update['_meta'] =
+          meta;
+        return event;
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'before'));
+      engine.ingest(
+        withMeta(makeTextChunk(2, ''), { usage: { totalTokens: 3 } }),
+      );
+      engine.ingest(
+        withMeta(makeTextChunk(3, 'command'), { source: 'slash_command' }),
+      );
+      engine.ingest(makeTextChunk(4, 'after'));
+
+      const live = engine.snapshot().liveJournal;
+      expect(live).toHaveLength(4);
+      expect(live.map((event) => event.id)).toEqual([1, 2, 3, 4]);
+      expect(
+        live.map(
+          (event) =>
+            (event.data as { update: { content: { text: string } } }).update
+              .content.text,
+        ),
+      ).toEqual(['before', '', 'command', 'after']);
+      expect(
+        (live[1]!.data as { update: { _meta: Record<string, unknown> } }).update
+          ._meta,
+      ).toEqual({ usage: { totalTokens: 3 } });
+      expect(
+        (live[2]!.data as { update: { _meta: Record<string, unknown> } }).update
+          ._meta,
+      ).toEqual({ source: 'slash_command' });
+    });
+
+    it('does not let snapshot frequency change journal eviction', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+      });
+      engine.ingest(makeTextChunk(1, 'first'));
+      expect(engine.snapshot().liveJournal).toHaveLength(1);
+      engine.ingest(makeTextChunk(2, ' second'));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(1);
+      expect(extractTexts(snap.liveJournal)).toEqual(['first second']);
+      expect(
+        snap.liveJournal.find((event) => event.type === 'history_truncated'),
+      ).toBeUndefined();
     });
 
     it('clears liveJournal on turn completion', () => {
@@ -618,16 +892,34 @@ describe('TurnBoundaryCompactionEngine', () => {
     const markerOf = (snap: { liveJournal: BridgeEvent[] }) =>
       snap.liveJournal.find((e) => e.type === 'history_truncated');
 
-    it('drops the oldest journal entries past maxJournalEvents and prepends a marker', () => {
+    it('keeps a long compatible text stream below the event cap', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 3,
       });
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= 512; i++) {
         engine.ingest(makeTextChunk(i, `chunk-${i}`));
       }
 
       const snap = engine.snapshot();
-      // marker + the 3 newest raw events; the 2 oldest were dropped.
+      expect(markerOf(snap)).toBeUndefined();
+      expect(snap.liveJournal).toHaveLength(2);
+      expect(extractTexts(snap.liveJournal).join('')).toBe(
+        Array.from({ length: 512 }, (_, index) => `chunk-${index + 1}`).join(
+          '',
+        ),
+      );
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([256, 512]);
+    });
+
+    it('drops the oldest non-mergeable entries past maxJournalEvents and prepends a marker', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 3,
+      });
+      for (let i = 1; i <= 5; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      const snap = engine.snapshot();
       expect(snap.liveJournal).toHaveLength(4);
       const marker = markerOf(snap);
       expect(marker?.data).toEqual({
@@ -643,12 +935,12 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal.slice(1).map((e) => e.id)).toEqual([3, 4, 5]);
     });
 
-    it('drops the oldest journal entries past maxJournalBytes but keeps at least one', () => {
+    it('drops the oldest non-mergeable entries past maxJournalBytes but keeps at least one', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalBytes: 300,
       });
-      engine.ingest(makeTextChunk(1, 'x'.repeat(200)));
-      engine.ingest(makeTextChunk(2, 'y'.repeat(200)));
+      engine.ingest(makeUserMessage(1, 'x'.repeat(200)));
+      engine.ingest(makeUserMessage(2, 'y'.repeat(200)));
 
       const snap = engine.snapshot();
       const marker = markerOf(snap);
@@ -656,11 +948,42 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(
         (marker?.data as { truncatedEvents: number }).truncatedEvents,
       ).toBe(1);
-      // The newest (still oversized alone) entry survives — first-item rule.
       expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
         1,
       );
       expect(snap.liveJournal.at(-1)?.id).toBe(2);
+    });
+
+    it('starts a new segment before a merged entry exceeds maxJournalBytes', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 600,
+      });
+      engine.ingest(makeTextChunk(1, 'x'.repeat(400)));
+      engine.ingest(makeTextChunk(2, 'y'.repeat(400)));
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)?.data).toMatchObject({
+        truncatedEvents: 1,
+        retainedEvents: 1,
+      });
+      expect(extractTexts(snap.liveJournal)).toEqual(['y'.repeat(400)]);
+      expect(snap.liveJournal.at(-1)?.id).toBe(2);
+    });
+
+    it('reports raw event counts when an aggregated segment is dropped', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      for (let i = 1; i <= 512; i++) {
+        engine.ingest(makeTextChunk(i, 'x'));
+      }
+      engine.ingest(makeUserMessage(513, 'later'));
+
+      const marker = markerOf(engine.snapshot());
+      expect(marker?.data).toMatchObject({
+        truncatedEvents: 256,
+        retainedEvents: 257,
+      });
     });
 
     it('does not let journal truncation corrupt the compacted turn', () => {
@@ -669,13 +992,11 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       engine.ingest(makeTextChunk(1, 'Hello'));
       engine.ingest(makeTextChunk(2, ' world'));
-      engine.ingest(makeTurnComplete(3));
+      engine.ingest(makeUserMessage(3, 'later'));
+      engine.ingest(makeTurnComplete(4));
 
       const snap = engine.snapshot();
-      // Compaction folds from the slots working set, not the journal:
-      // the merged text is complete even though the journal was capped.
       expect(extractTexts(snap.compactedTurns)).toContain('Hello world');
-      // Turn boundary reset the journal AND the truncation counter.
       expect(snap.liveJournal).toHaveLength(0);
       expect(markerOf(snap)).toBeUndefined();
     });
@@ -687,7 +1008,8 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       const snap = engine.snapshot();
       expect(markerOf(snap)).toBeUndefined();
-      expect(snap.liveJournal).toHaveLength(2);
+      expect(snap.liveJournal).toHaveLength(1);
+      expect(extractTexts(snap.liveJournal)).toEqual(['Hi']);
     });
 
     it('marker carries the last-seen recordId as a pagination anchor when the journal overflows', () => {
@@ -712,10 +1034,10 @@ describe('TurnBoundaryCompactionEngine', () => {
         },
       };
       engine.ingest(turnBounded);
-      engine.ingest(makeTextChunk(2, 'a'));
-      engine.ingest(makeTextChunk(3, 'b'));
-      engine.ingest(makeTextChunk(4, 'c'));
-      engine.ingest(makeTextChunk(5, 'd'));
+      engine.ingest(makeUserMessage(2, 'a'));
+      engine.ingest(makeUserMessage(3, 'b'));
+      engine.ingest(makeUserMessage(4, 'c'));
+      engine.ingest(makeUserMessage(5, 'd'));
 
       const snap = engine.snapshot();
       const marker = markerOf(snap);
@@ -751,8 +1073,8 @@ describe('TurnBoundaryCompactionEngine', () => {
         },
       };
       engine.ingest(bounded);
-      engine.ingest(makeTextChunk(3, 'x'));
-      engine.ingest(makeTextChunk(4, 'y'));
+      engine.ingest(makeUserMessage(3, 'x'));
+      engine.ingest(makeUserMessage(4, 'y'));
 
       const snap = engine.snapshot();
       const marker = markerOf(snap);
@@ -1586,7 +1908,7 @@ describe('EventBus + CompactionEngine integration', () => {
     expect(bus.snapshotReplay()).toBeUndefined();
   });
 
-  it('liveJournal contains raw events for incomplete turn', () => {
+  it('liveJournal contains bounded replay events for incomplete turn', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
@@ -1611,7 +1933,9 @@ describe('EventBus + CompactionEngine integration', () => {
 
     const snapshot = bus.snapshotReplay()!;
     expect(snapshot.compactedTurns).toHaveLength(0);
-    expect(snapshot.liveJournal).toHaveLength(2);
+    expect(snapshot.liveJournal).toHaveLength(1);
+    expect(extractTexts(snapshot.liveJournal)).toEqual(['streaming...']);
+    expect(snapshot.liveJournal[0]?.id).toBe(2);
     expect(snapshot.lastEventId).toBe(2);
   });
 
