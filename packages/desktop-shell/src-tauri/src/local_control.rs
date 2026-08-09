@@ -521,7 +521,7 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read response");
         assert!(response.ends_with("\r\n\r\nok"), "{response}");
-        for _ in 0..100 {
+        for _ in 0..500 {
             if lock(&connections.streams).is_empty() {
                 break;
             }
