@@ -429,6 +429,12 @@ describe('ChatEditor context usage ring', () => {
     });
 
     expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
+    // The arrow must be the Radix-positioned element: a pseudo-element pinned
+    // to the content center stops pointing at the trigger once collision
+    // avoidance shifts the content near the viewport edge.
+    expect(
+      document.querySelector('[data-slot="tooltip-arrow"]'),
+    ).not.toBeNull();
   });
 
   it('escalates the arc color at the /context panel thresholds', () => {
