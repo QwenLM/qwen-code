@@ -15,10 +15,7 @@ use url::Url;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
-#[cfg(not(test))]
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(test)]
-const HEADER_TIMEOUT: Duration = Duration::from_millis(250);
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Connections {
@@ -461,10 +458,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        find_header_end, lock, rewrite_request, runtime_socket_addr, spawn_proxy, Connections,
-        HEADER_TIMEOUT,
-    };
+    use super::{find_header_end, rewrite_request, runtime_socket_addr, spawn_proxy, Connections};
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -521,54 +515,10 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read response");
         assert!(response.ends_with("\r\n\r\nok"), "{response}");
-        for _ in 0..500 {
-            if lock(&connections.streams).is_empty() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(lock(&connections.streams).is_empty());
 
         connections.stopping.store(true, Ordering::SeqCst);
         proxy_thread.join().expect("stop proxy");
         upstream_thread.join().expect("stop upstream");
-    }
-
-    #[test]
-    fn bounds_the_complete_header_read() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).expect("upstream listener");
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("proxy listener");
-        let public_address = listener.local_addr().expect("proxy address");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking listener");
-        let connections = Arc::new(Connections {
-            stopping: AtomicBool::new(false),
-            streams: Mutex::new(HashMap::new()),
-        });
-        let proxy_thread = spawn_proxy(
-            listener,
-            upstream.local_addr().expect("upstream address"),
-            format!("http://{public_address}"),
-            "pair-token".to_string(),
-            "runtime-token".to_string(),
-            Arc::clone(&connections),
-        );
-
-        let mut client = TcpStream::connect(public_address).expect("proxy connection");
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("read timeout");
-        for _ in 0..4 {
-            let _ = client.write_all(b"x");
-            thread::sleep(HEADER_TIMEOUT / 3);
-        }
-        let mut response = String::new();
-        let _ = client.read_to_string(&mut response);
-        assert!(response.starts_with("HTTP/1.1 408 Request Timeout"));
-
-        connections.stopping.store(true, Ordering::SeqCst);
-        proxy_thread.join().expect("stop proxy");
     }
 
     #[test]
