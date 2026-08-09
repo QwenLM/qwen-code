@@ -468,6 +468,37 @@ describe('CDP bridge', () => {
     );
   });
 
+  it('does not retain the attach owner released while tab metadata is pending', async () => {
+    const chromeHarness = installChromeHarness({ deferTabGet: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+    chromeHarness.finishTabGet();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 1,
+        error: { message: 'released during attach' },
+        linkId: 'cdp-link-1',
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 }),
+    );
+  });
+
   it('clears an in-flight release after a failed attach', async () => {
     const chromeHarness = installChromeHarness({ deferAttach: true });
     const bridge = await loadBridge();

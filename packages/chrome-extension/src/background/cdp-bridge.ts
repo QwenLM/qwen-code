@@ -106,6 +106,7 @@ let attachedLinks = new Set<string>();
  * reentrancy hazard) and refcount the single resulting attachment.
  */
 let attachInFlight: Promise<{ url?: string; title?: string }> | null = null;
+let attachOwnerLinkId: string | null = null;
 /**
  * Links whose `cdp_release` (or socket close) arrived while their attach was
  * mid-flight. A teardown that fires before the attach lands can't detach a
@@ -280,6 +281,7 @@ function ensureAttachment(
       return info;
     });
   }
+  attachOwnerLinkId = linkId;
   const flow = runAttachFlow(linkId);
   attachInFlight = flow;
   return flow;
@@ -347,6 +349,7 @@ async function runAttachFlow(
 
     return await tabInfoOf(tabId);
   } finally {
+    attachOwnerLinkId = null;
     attachInFlight = null;
   }
 }
@@ -466,11 +469,13 @@ function handleRelease(frame: CdpReleaseFrame): void {
   const linkId = linkIdOf(frame);
   if (attachInFlight) {
     if (attachedLinks.has(linkId)) {
-      // Already landed: drop the ref now. Recording it in releasedDuringAttach
-      // would leave a phantom ref — the completing handleAttach only consumes
-      // its own linkId, so this link would stay in attachedLinks and keep
-      // chrome.debugger attached after the last real client disconnects.
+      // Already landed: drop the ref now. Only the current attach owner still
+      // needs a deferred release; recording any other landed link would leave
+      // a stale entry because its handleAttach has already completed.
       attachedLinks.delete(linkId);
+      if (attachOwnerLinkId === linkId) {
+        releasedDuringAttach.add(linkId);
+      }
       console.log(
         LOG_PREFIX,
         'cdp_release for landed link during attach',
