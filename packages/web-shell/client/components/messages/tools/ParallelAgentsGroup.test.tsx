@@ -110,12 +110,16 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.querySelector('[class*="ruler"]')).toBeNull();
   });
 
-  it('keeps the task and current tool in separate stable fields', () => {
+  it('keeps task, current activity, and metrics in compact stable fields', () => {
     const container = renderExpandedGroup([
       agent({
         callId: 'active',
         status: 'in_progress',
-        args: { description: 'Inspect the message list' },
+        startTime: Date.now() - 8_000,
+        args: {
+          description: 'Inspect the message list',
+          subagent_type: 'reviewer',
+        },
         subTools: [
           {
             callId: 'read',
@@ -130,9 +134,65 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
       'Inspect the message list',
     );
+    expect(container.querySelector('[class*="rowType"]')?.textContent).toBe(
+      'reviewer:',
+    );
     expect(
-      container.querySelector('[class*="rowTool"]')?.textContent,
+      container.querySelector('[class*="rowActivity"]')?.textContent,
     ).toContain('MessageList.tsx');
+    expect(container.querySelector('[class*="rowDuration"]')?.textContent).toBe(
+      '8s',
+    );
+    expect(container.querySelector('[class*="rowAction"]')).not.toBeNull();
+  });
+
+  it('keeps completed duration and tokens separate from the task text', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'completed',
+        status: 'completed',
+        args: { description: 'Audit the session route' },
+        rawOutput: {
+          type: 'task_execution',
+          tokenCount: 214,
+          executionSummary: { totalDurationMs: 8_000 },
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowDuration"]')?.textContent).toBe(
+      '8s',
+    );
+    expect(container.querySelector('[class*="rowTokens"]')?.textContent).toBe(
+      '214 tokens',
+    );
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Audit the session route',
+    );
+  });
+
+  it('keeps a cancellation reason in the activity field', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'cancelled',
+        status: 'completed',
+        args: { description: 'Audit the session route' },
+        rawOutput: {
+          type: 'task_execution',
+          status: 'cancelled',
+          reason: 'Cancelled by user',
+          tokenCount: 214,
+          executionSummary: { totalDurationMs: 8_000 },
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowActivity"]')?.textContent).toBe(
+      '(Cancelled by user)',
+    );
+    expect(container.querySelector('[class*="rowTokens"]')?.textContent).toBe(
+      '214 tokens',
+    );
   });
 
   it('auto-expands active agents and collapses 1.5s after completion', () => {
@@ -1258,6 +1318,8 @@ describe('ParallelAgentsGroup activity rendering', () => {
     const row = container.querySelector('[class*="row"]') as HTMLButtonElement;
 
     expect(container.textContent).not.toContain('nested agent output');
+    expect(row.getAttribute('data-detail-mode')).toBe('inline');
+    expect(row.title).toBe('Toggle agent stream details');
     expect(row.getAttribute('aria-expanded')).toBe('false');
     act(() => row.click());
     expect(container.textContent).toContain('nested agent output');
@@ -1284,6 +1346,8 @@ describe('ParallelAgentsGroup activity rendering', () => {
       (container.querySelector('[aria-expanded]') as HTMLElement).click(),
     );
     const row = container.querySelector('[class*="row"]') as HTMLElement;
+    expect(row.getAttribute('data-detail-mode')).toBe('panel');
+    expect(row.getAttribute('title')).toBe('Open subagent details');
     expect(row.hasAttribute('aria-expanded')).toBe(false);
     act(() => row.click());
 
