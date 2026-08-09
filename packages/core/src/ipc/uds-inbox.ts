@@ -225,6 +225,15 @@ export async function startPeerInbox(
     async close() {
       if (closed) return;
       closed = true;
+      // Stop accepting first. `server.close()` shuts the listener
+      // immediately but fires its callback only once every connection has
+      // ended, so taking it *after* the drain leaves the accept window open
+      // for the whole drain: a connection arriving in it is missed by the
+      // snapshot below, forgotten by `connections.clear()`, and then pins
+      // that callback forever while `PeerMessaging.close()` awaits it.
+      const listenerClosed = new Promise<void>((resolve) =>
+        server.close(() => resolve()),
+      );
       // Drain instead of destroying: a frame the peer has already written
       // can still be unread here, and destroy() discards it while the
       // sender's transport close resolves as a successful send. Ending our
@@ -251,8 +260,14 @@ export async function startPeerInbox(
             }),
         ),
       );
+      // Whatever the drain did not settle still holds the listener open.
+      // Destroying is safe here in a way it was not before the drain: these
+      // sockets have had their full CLOSE_DRAIN_MS to deliver.
+      for (const socket of [...connections]) {
+        if (!socket.destroyed) socket.destroy();
+      }
       connections.clear();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await listenerClosed;
       try {
         await fs.unlink(socketPath);
       } catch {

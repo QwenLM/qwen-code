@@ -10,7 +10,7 @@
  * bits, cleanup on close — only exist at the socket boundary.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -156,6 +156,87 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     const started = await listen();
     await started.close();
     await expect(started.close()).resolves.toBeUndefined();
+    inbox = null;
+  });
+
+  // Draining before the listener is shut leaves an accept window open for
+  // the whole CLOSE_DRAIN_MS. A connection landing in it is missed by the
+  // drain snapshot but still counts against server.close()'s callback, so
+  // close() never resolves and the caller awaits it with no timeout.
+  it('does not hang when a peer connects while close() is draining', async () => {
+    const started = await listen();
+    // A live connection at close() time is what holds the window open, and
+    // allowHalfOpen is what makes it hold: without it the client answers
+    // the drain's FIN immediately and the window shuts in a millisecond.
+    const holder = net.connect({
+      path: started.socketPath,
+      allowHalfOpen: true,
+    });
+    holder.on('error', () => {});
+    await new Promise<void>((resolve, reject) => {
+      holder.once('connect', () => resolve());
+      holder.once('error', reject);
+    });
+    await settle();
+
+    const closing = started.close();
+
+    // Land inside the drain window without sending FIN, exactly like a
+    // peer that connects as this session quits.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const latecomer = net.connect({ path: started.socketPath });
+    latecomer.on('error', () => {});
+
+    let timer: NodeJS.Timeout | undefined;
+    const hung = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('close() did not resolve')),
+        5_000,
+      );
+    });
+    try {
+      await Promise.race([closing, hung]);
+    } finally {
+      clearTimeout(timer);
+      holder.destroy();
+      latecomer.destroy();
+    }
+    inbox = null;
+  });
+
+  it('leaves the drain timer unreffed so shutdown cannot pin the event loop', async () => {
+    const started = await listen();
+    const holder = net.connect({
+      path: started.socketPath,
+      allowHalfOpen: true,
+    });
+    holder.on('error', () => {});
+    await new Promise<void>((resolve, reject) => {
+      holder.once('connect', () => resolve());
+      holder.once('error', reject);
+    });
+    await settle();
+
+    const created: NodeJS.Timeout[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      ...args: Parameters<typeof globalThis.setTimeout>
+    ) => {
+      const handle = realSetTimeout(...args);
+      created.push(handle);
+      return handle;
+    }) as typeof globalThis.setTimeout);
+
+    try {
+      // The drain timers are armed synchronously, before close() suspends.
+      const closing = started.close();
+      expect(created.length).toBeGreaterThan(0);
+      expect(created.filter((handle) => handle.hasRef())).toEqual([]);
+      await closing;
+    } finally {
+      spy.mockRestore();
+      holder.destroy();
+    }
     inbox = null;
   });
 });

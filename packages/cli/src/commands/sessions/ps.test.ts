@@ -123,6 +123,21 @@ describe('qwen sessions ps', () => {
     expect(row).not.toContain('\n');
   });
 
+  it('reports a registry read failure on stderr and exits 1', async () => {
+    const exit = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    listLiveSessions.mockRejectedValue(new Error('EACCES'));
+
+    await run({ json: false, all: false });
+
+    expect(stderr.join('\n')).toContain(
+      'failed to read the session registry: EACCES',
+    );
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(stdout).toEqual([]);
+  });
+
   it('truncates an over-long name instead of breaking the columns', async () => {
     listLiveSessions.mockResolvedValue([record({ name: 'x'.repeat(80) })]);
     await run({ json: false, all: false });

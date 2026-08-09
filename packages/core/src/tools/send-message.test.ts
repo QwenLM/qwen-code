@@ -661,6 +661,20 @@ describe('SendMessageTool — peer mode', () => {
     expect(result.llmContent).toContain('qwen-code-f7');
   });
 
+  // The common miss: no live session is even close. Returning a peer error
+  // here would render an empty 'Did you mean: ?' instead of the generic
+  // error the caller falls through to.
+  it('falls through to the team error when no name comes close', async () => {
+    sendToPeer.mockResolvedValue({ kind: 'not-found', suggestions: [] });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'nobody', message: 'hi' })
+      .execute(new AbortController().signal);
+
+    expect(result.llmContent).toContain('No active team');
+    expect(result.llmContent).not.toContain('Did you mean');
+  });
+
   it('reports a delivery failure against the address it tried', async () => {
     sendToPeer.mockResolvedValue({
       kind: 'failed',
