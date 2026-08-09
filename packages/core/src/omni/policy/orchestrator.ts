@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from '../../config/config.js';
@@ -33,6 +33,7 @@ import {
   OmniDegradationCache,
 } from './degradation-cache.js';
 import { DEFAULT_OMNI_PROCESSING_LIMITS } from './config.js';
+import { resolvePolicyToolSettings } from './tools/media-policy-tool.js';
 import type {
   FixedPolicyOrigin,
   NormalizedFixedPolicy,
@@ -646,25 +647,6 @@ interface ValidatedFileArtifact {
 type ValidatedArtifact = ValidatedMediaArtifact | ValidatedFileArtifact;
 
 /**
- * Tool-level tunable defaults from
- * `omni.processing.policyTools.<tool>.settings`. The map is raw settings
- * input (values may be null tombstones or malformed — see
- * `OmniPolicyToolsSettings` in types.ts), so anything non-conforming
- * reads as "no defaults" rather than throwing mid-run.
- */
-function resolveToolSettingsDefaults(
-  config: Config,
-  toolName: string,
-): Record<string, unknown> {
-  const entry = config.getOmniPolicyToolsSettings?.()?.[toolName];
-  const settings = entry?.settings;
-  if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
-    return settings;
-  }
-  return {};
-}
-
-/**
  * Execute one policy against one work item: degradation-cache lookup,
  * otherwise a real tool invocation in a fresh staging directory followed
  * by artifact validation and promotion (staging lifecycle §5, order D12:
@@ -695,7 +677,7 @@ async function executePolicy(
   // arguments. Merged HERE — the single point feeding both the tool call
   // and the cache fingerprint — so a settings change also invalidates
   // cached derivatives produced under the old values.
-  const settingsDefaults = resolveToolSettingsDefaults(config, policy.toolName);
+  const settingsDefaults = resolvePolicyToolSettings(config, policy.toolName);
   const effectiveArguments = { ...settingsDefaults, ...policy.arguments };
   const fingerprint = computePolicyFingerprint(
     policy.toolName,
@@ -728,6 +710,7 @@ async function executePolicy(
                 sha256: hit.degradedSha256,
                 disclosure: hit.disclosure,
                 degraded: true,
+                role: hit.role,
               },
             ],
             derivedFiles: [],
@@ -795,12 +778,13 @@ async function executePolicy(
       );
     }
 
-    const validated: ValidatedArtifact[] = [];
-    for (const artifact of batch.artifacts) {
-      validated.push(
-        await validateArtifact(artifact, descriptor, stagingDir, signal),
-      );
-    }
+    // Artifacts are independent files in the same staging dir — validate
+    // them concurrently; map keeps the batch order.
+    const validated = await Promise.all(
+      batch.artifacts.map((artifact) =>
+        validateArtifact(artifact, descriptor, stagingDir, signal),
+      ),
+    );
     assertRequiredOutputsPresent(descriptor, validated, policy.toolName);
 
     // Fixed-point: identical output means this iteration changed nothing —
@@ -812,22 +796,29 @@ async function executePolicy(
 
     // Promotion first (D12): once an artifact is in objects/ it is
     // content-addressed and immutable; only then substitute + cache.
+    // Independent files promote concurrently (the store is
+    // content-addressed: tmp + atomic rename); map keeps the batch order.
+    const promoted = await Promise.all(
+      validated.map(async (artifact) => {
+        const mimeType =
+          artifact.kind === 'media'
+            ? artifact.recognized.detectedMimeType
+            : artifact.mimeType;
+        const put = await store.putFile(
+          artifact.absolutePath,
+          artifact.sha256,
+          extensionForMime(mimeType),
+          signal,
+        );
+        return { artifact, objectPath: put.objectPath };
+      }),
+    );
     const derived: PolicyExecution['derived'] = [];
     const derivedFiles: PolicyExecution['derivedFiles'] = [];
-    for (const artifact of validated) {
-      const mimeType =
-        artifact.kind === 'media'
-          ? artifact.recognized.detectedMimeType
-          : artifact.mimeType;
-      const put = await store.putFile(
-        artifact.absolutePath,
-        artifact.sha256,
-        extensionForMime(mimeType),
-        signal,
-      );
+    for (const { artifact, objectPath } of promoted) {
       if (artifact.kind === 'media') {
         derived.push({
-          filePath: put.objectPath,
+          filePath: objectPath,
           recognized: artifact.recognized,
           sha256: artifact.sha256,
           disclosure: artifact.disclosure,
@@ -836,7 +827,7 @@ async function executePolicy(
         });
       } else {
         derivedFiles.push({
-          filePath: put.objectPath,
+          filePath: objectPath,
           role: artifact.role,
           mimeType: artifact.mimeType,
           text: artifact.text,
@@ -859,6 +850,9 @@ async function executePolicy(
         extension: extensionForMime(validated[0].recognized.detectedMimeType),
         disclosure: validated[0].disclosure,
         mimeType: validated[0].recognized.detectedMimeType,
+        // Persist the artifact's role so a cache hit reconstructs the SAME
+        // derived shape as the fresh derivation above.
+        ...(validated[0].role !== undefined ? { role: validated[0].role } : {}),
       });
     }
     return { outcome: 'succeeded', derived, derivedFiles };
@@ -972,7 +966,9 @@ async function validateArtifact(
       mimeType: artifact.mimeType as string,
       text,
       sizeBytes: bytes.byteLength,
-      sha256: await hashFileSha256(absolutePath, signal),
+      // The bytes are already in memory for the UTF-8 check — hash them
+      // directly instead of streaming the file a second time.
+      sha256: createHash('sha256').update(bytes).digest('hex'),
       disclosure,
       lossy: spec.lossy === true,
       role,
