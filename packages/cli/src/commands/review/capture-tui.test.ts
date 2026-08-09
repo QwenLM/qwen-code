@@ -2439,6 +2439,37 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     });
   });
 
+  it('REFUSES an oversized <out>.json instead of reading it into the heap', async () => {
+    // A capture manifest is a few hundred bytes. The clear phase used to
+    // readFileSync + JSON.parse whatever regular file sat there, so a huge
+    // one killed the process with a heap OOM before any refusal could
+    // print (measured at ~479MB). lstat already holds the size, so the cap
+    // costs nothing — and past it the file is simply not ours, which the
+    // collision gate then refuses by name.
+    // VALID JSON, and shaped like a manifest, so the cap is what decides:
+    // without it the file parses, `shaped` is true, and the clear phase
+    // deletes the sibling artifacts. With it the file is simply too big to
+    // be ours, nothing is cleared, and the collision gate refuses by name.
+    // (A garbage payload would not discriminate — JSON.parse rejects it
+    // either way.)
+    const huge = JSON.stringify({
+      evidence: 'png',
+      pngPath: join(dir, 'cap.png'),
+      pad: 'x'.repeat(2 * 1024 * 1024),
+    });
+    writeFileSync(join(dir, 'cap.json'), huge);
+    writeFileSync(join(dir, 'cap.ans'), 'previous run text');
+    const { stderr } = await withStdio(() => run({ settleMs: 0 }));
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('collides with a file this capture did not');
+    // Neither the oversized file nor its siblings were touched: a manifest
+    // this run could not verify is not authority to delete anything.
+    expect(statSync(join(dir, 'cap.json')).size).toBe(huge.length);
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
+      'previous run text',
+    );
+  });
+
   it('refuses a DANGLING SYMLINK at a mandatory path — writes must not escape', async () => {
     // existsSync and statSync follow links, so a dangling one read as
     // "nothing here": the collision gate never fired and writeFileSync's

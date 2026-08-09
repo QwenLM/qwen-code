@@ -177,6 +177,10 @@ export const probes = {
  * group (measured: exit 129 with server, socket and holder all surviving),
  * and the capture window legally runs up to an hour. Exported so the signal
  * tests iterate the REAL list. */
+/** A capture manifest is a few hundred bytes; anything past this is not
+ * one, and reading it would cost more than refusing does. */
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+
 export const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
 
 /** The tmux control-call deadline, exported as a seam like its freezeRender
@@ -349,6 +353,8 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
   };
   const changed = (path: string, stamp: Stamp): boolean => {
+    // Never taken: nothing here is ours to credit or remove.
+    if (stamp.size === UNSTAMPED && stamp.ino === UNSTAMPED) return false;
     if (!stamp.existed) return occupied(path);
     try {
       const st = lstatSync(path);
@@ -362,9 +368,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return false;
     }
   };
-  // Default to "already there, untouched" so anything taken before the
-  // stamps exist can neither claim an evidence rung nor authorize a delete.
-  const untouched: Stamp = { existed: true, size: -1, mtimeMs: -1, ino: -1 };
+  // Fail-safe by CONSTRUCTION, not by comment: `changed()` compares
+  // identity when `existed` is true, and an impossible ino made every real
+  // file look changed — the exact opposite of the promise, and it would
+  // have authorized deletes and credited an evidence rung. A sentinel that
+  // is byte-equal to nothing must instead answer "unchanged" for anything,
+  // which is what a NaN-free impossible SIZE plus a matching guard does:
+  // `changed()` returns false whenever the stamp is this sentinel.
+  const UNSTAMPED = -1;
+  const untouched: Stamp = {
+    existed: true,
+    size: UNSTAMPED,
+    mtimeMs: UNSTAMPED,
+    ino: UNSTAMPED,
+  };
   // Occupancy is a LINK-level question everywhere it is asked: existsSync
   // follows symlinks, so a dangling one answered false at every gate below.
   const occupied = (path: string): boolean => {
@@ -415,18 +432,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let manifestHadPng = false;
     try {
       // A FIFO here would block readFileSync FOREVER — a hang, not a throw,
-      // so no refusal is ever printed and the process sits until something
-      // outside kills it, before the reap handlers are even installed. Only
-      // a regular file can be a capture manifest anyway; anything else is
-      // unverifiable, which the catch below already treats as "not ours".
-      // A FIFO here would block readFileSync FOREVER — a hang, not a throw,
       // so no refusal is printed, no reap handler is installed yet, and NO
       // timeout inside the process can interrupt it: the read is
       // synchronous on the main thread (measured — a vitest run wedged past
       // its own 10s test timeout until the runner killed it). Only a
       // regular file can be a capture manifest anyway; anything else is
       // unverifiable, which the catch below already treats as "not ours".
-      if (!lstatSync(manifestPath).isFile()) throw new Error('not a file');
+      const st = lstatSync(manifestPath);
+      if (!st.isFile()) throw new Error('not a file');
+      // A capture manifest is a few hundred bytes. Reading an arbitrarily
+      // large regular file here killed the process before any refusal could
+      // print — measured, a 479MB dense JSON at <out>.json hit
+      // `FATAL ERROR: Reached heap limit` — and lstat already has the size,
+      // so the cap costs nothing. Too big to be ours: treat as unverified.
+      if (st.size > MAX_MANIFEST_BYTES) throw new Error('too large');
       const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         evidence?: unknown;
         pngPath?: unknown;
@@ -1238,13 +1257,23 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // file whole. A PARTIAL manifest is worse than none — it parses or
       // half-parses as an evidence description — and it, having changed,
       // is removed.
-      if (changed(ansPath, ansStamp)) rmSync(ansPath, { force: true });
-      if (changed(pngPath, pngStamp)) rmSync(pngPath, { force: true });
-      if (changed(manifestPath, manifestStamp)) {
-        rmSync(manifestPath, { force: true });
+      // PER PATH, like the clear phase's own clearArtifact: one try around
+      // all three let a throw on the .ans or .png removal skip the manifest
+      // one — leaving exactly the partial manifest this block calls worse
+      // than none (probe-reproduced with a directory at the .png path).
+      for (const [path, stamp] of [
+        [ansPath, ansStamp],
+        [pngPath, pngStamp],
+        [manifestPath, manifestStamp],
+      ] as const) {
+        try {
+          if (changed(path, stamp)) rmSync(path, { force: true });
+        } catch {
+          // The refusal reason below is the primary signal either way.
+        }
       }
     } catch {
-      // The refusal reason below is the primary signal either way.
+      // Unreachable in practice; the per-path catches above own the risk.
     }
     await drainSignalsThenRelease();
     refuse(
