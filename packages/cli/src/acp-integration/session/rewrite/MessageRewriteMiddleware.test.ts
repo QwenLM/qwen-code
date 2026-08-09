@@ -209,6 +209,32 @@ describe('MessageRewriteMiddleware', () => {
         expect.any(AbortSignal),
       );
     });
+
+    it('drops an in-flight automatic-turn rewrite before the next prompt', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      let resolveRewrite!: (value: string) => void;
+      rewriter.rewrite.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveRewrite = resolve;
+          }),
+      );
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'automatic turn answer' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      middleware.discardTurn();
+      resolveRewrite('late automatic rewrite');
+      await middleware.waitForPendingRewrites();
+
+      expect(mockSendUpdate).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('flushTurn — tool_call boundary', () => {

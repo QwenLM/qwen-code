@@ -3529,7 +3529,7 @@ export class Session implements SessionContext {
                 // Hook blocked the prompt - send notification to UI and return
                 const blockReason =
                   hookOutput?.getEffectiveReason() || 'No reason provided';
-                await this.messageEmitter.emitAgentMessage(
+                await this.#emitAgentDiagnosticMessage(
                   `✗ **UserPromptSubmit blocked**: ${blockReason}`,
                 );
                 return { stopReason: 'end_turn' };
@@ -4176,7 +4176,7 @@ export class Session implements SessionContext {
         const stopOutput = hookOutput as StopHookOutput | undefined;
 
         if (stopOutput?.systemMessage) {
-          await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+          await this.#emitAgentDiagnosticMessage(stopOutput.systemMessage);
         }
 
         if (
@@ -4222,7 +4222,7 @@ export class Session implements SessionContext {
           warning,
         );
         this.todoStopGuard.suspend();
-        await this.messageEmitter.emitAgentMessage(warning);
+        await this.#emitAgentDiagnosticMessage(warning);
         debugLogger.warn(warning);
         return { stopReason: 'end_turn' };
       }
@@ -4977,9 +4977,6 @@ export class Session implements SessionContext {
     rewriteContext?: MessageRewriteEmissionContext,
     captureResultText = true,
   ): Promise<void> {
-    if (captureResultText) {
-      this.#accumulateTurnResultText(update, rewriteContext);
-    }
     const params: SessionNotification = {
       sessionId: this.sessionId,
       update: projectAcpToolResultUpdate(update),
@@ -4992,6 +4989,9 @@ export class Session implements SessionContext {
       this.activeTodoPlanRevision = undefined;
     }
     await this.client.sessionUpdate(params);
+    if (captureResultText) {
+      this.#accumulateTurnResultText(update, rewriteContext);
+    }
     if (update.sessionUpdate === 'plan') {
       this.#captureTodoPlanRevision(update);
     }
@@ -5091,7 +5091,7 @@ export class Session implements SessionContext {
       return;
     }
     if (
-      rewriteContext?.ownerPromptId !== undefined &&
+      rewriteContext !== undefined &&
       rewriteContext.ownerPromptId !== recording.promptId
     ) {
       return;
@@ -9316,7 +9316,7 @@ export class Session implements SessionContext {
               const blockReason =
                 preHookResult.blockReason || 'Blocked by PreToolUse hook';
               try {
-                await this.messageEmitter.emitAgentMessage(
+                await this.#emitAgentDiagnosticMessage(
                   `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
                 );
               } catch (emitError) {
@@ -9744,7 +9744,7 @@ export class Session implements SessionContext {
               : undefined;
           if (visionBridgeNotice) {
             try {
-              await this.messageEmitter.emitAgentMessage(visionBridgeNotice);
+              await this.#emitAgentDiagnosticMessage(visionBridgeNotice);
             } catch (emitError) {
               debugLogger.debug(
                 '[Session.runTool] Failed to emit vision bridge notice',
@@ -10465,7 +10465,7 @@ export class Session implements SessionContext {
       );
       if (selected) {
         try {
-          await this.messageEmitter.emitAgentMessage(
+          await this.#emitAgentDiagnosticMessage(
             formatFullTurnVisionNotice(fullTurnModel),
           );
         } catch (error) {
@@ -10499,7 +10499,7 @@ export class Session implements SessionContext {
 
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
-        await this.messageEmitter.emitAgentMessage(
+        await this.#emitAgentDiagnosticMessage(
           formatVisionBridgeNotice(bridgeResult),
         );
       } catch (error) {
@@ -10619,7 +10619,7 @@ export class Session implements SessionContext {
 
     if (transcribedCount > 0 || egressCount > 0) {
       try {
-        await this.messageEmitter.emitAgentMessage(
+        await this.#emitAgentDiagnosticMessage(
           transcribedCount > 0
             ? this.#formatVoiceBridgeNotice(voiceModel, transcribedCount)
             : this.#formatVoiceBridgeEgressNotice(voiceModel, egressCount),
