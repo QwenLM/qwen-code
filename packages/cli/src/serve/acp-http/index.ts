@@ -14,6 +14,7 @@ import {
   RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
   Storage,
 } from '@qwen-code/qwen-code-core';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -41,6 +42,7 @@ import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import type { RequestedSessionIdAdmission } from '../session-id-admission.js';
 import {
   RPC,
   error as rpcError,
@@ -109,7 +111,8 @@ function isActiveDrainCorrelation(
       ? (message.params as { sessionId?: unknown })
       : undefined;
   return (
-    typeof params?.sessionId === 'string' && conn.ownsSession(params.sessionId)
+    typeof params?.sessionId === 'string' &&
+    conn.ownsSession(normalizeSessionIdForLookup(params.sessionId))
   );
 }
 
@@ -397,6 +400,12 @@ export interface MountAcpHttpOptions {
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   archiveCoordinator?: SessionArchiveCoordinator;
+  /**
+   * The daemon-wide session-id admission shared with every other transport.
+   * Required: a mount-local fallback could not see draining generations, so
+   * the host must inject the shared instance (as `createServeApp` does).
+   */
+  requestedSessionIdAdmission: RequestedSessionIdAdmission;
   /** Shared lane for sessionless workspace remember tasks. */
   workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -611,6 +620,12 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const daemonEnv = opts.daemonEnv ?? process.env;
+  const primarySessionRuntimeBaseDir =
+    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
+    Storage.getRuntimeBaseDir();
+  const archiveCoordinator =
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator();
+  const requestedSessionIdAdmission = opts.requestedSessionIdAdmission;
   const getPrimaryEnv = () =>
     opts.workspaceRegistry
       ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
@@ -800,11 +815,12 @@ export function mountAcpHttp(
     getPrimaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
+    requestedSessionIdAdmission,
     opts.fsFactory,
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
     registry,
-    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+    archiveCoordinator,
     opts.isPrimaryWorkspaceTrusted ??
       (() => {
         const entry = opts.workspaceRegistry?.primaryEntry;
@@ -817,8 +833,20 @@ export function mountAcpHttp(
       return guard ? () => guard.assertOpen() : undefined;
     },
     undefined,
-    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
-      Storage.getRuntimeBaseDir(),
+    primarySessionRuntimeBaseDir,
+    () => {
+      const runtime = opts.workspaceRegistry?.primary;
+      return runtime
+        ? {
+            bridge: runtime.bridge,
+            sessionRuntimeBaseDir: runtime.sessionRuntimeBaseDir,
+            workspaceId: runtime.workspaceId,
+          }
+        : {
+            bridge,
+            sessionRuntimeBaseDir: primarySessionRuntimeBaseDir,
+          };
+    },
   );
   dispatcherRef.current = dispatcher;
 
@@ -1068,7 +1096,10 @@ export function mountAcpHttp(
       res.status(404).json({ error: 'Unknown Acp-Connection-Id' });
       return;
     }
-    const sessionId = headerOf(req, ACP_SESSION_HEADER);
+    const rawSessionId = headerOf(req, ACP_SESSION_HEADER);
+    const sessionId = rawSessionId
+      ? normalizeSessionIdForLookup(rawSessionId)
+      : undefined;
 
     if (!sessionId) {
       // Connection-scoped stream. onClose logs the disconnect so a
@@ -1277,12 +1308,20 @@ export function mountAcpHttp(
       rt.bridge,
       rt.workspaceCwd,
     );
+    const registeredGeneration = opts.workspaceRegistry?.getEntryByWorkspaceId(
+      rt.workspaceId,
+    )?.current;
+    const generationGuard =
+      registeredGeneration?.runtime === rt
+        ? registeredGeneration.guard
+        : rt.generationGuard;
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
       () => runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
+      requestedSessionIdAdmission,
       rt.routeFileSystemFactory,
       // Phase 4: secondary mounts share the daemon-global device-flow registry
       // (single instance per daemon; OAuth credentials are global state). The
@@ -1292,16 +1331,18 @@ export function mountAcpHttp(
       opts.deviceFlowRegistry,
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
-      opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+      archiveCoordinator,
       () => rt.trusted,
-      () => {
-        const guard = rt.generationGuard;
-        return guard ? () => guard.assertOpen() : undefined;
-      },
+      () => (generationGuard ? () => generationGuard.assertOpen() : undefined),
       rt.provenance === 'live-conversation'
         ? opts.liveSessionIsolation
         : undefined,
       rt.sessionRuntimeBaseDir,
+      () => ({
+        bridge: rt.bridge,
+        sessionRuntimeBaseDir: rt.sessionRuntimeBaseDir,
+        workspaceId: rt.workspaceId,
+      }),
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -2277,9 +2318,13 @@ export function mountAcpHttp(
             message.params &&
             typeof message.params === 'object'
           ) {
-            const sid = (message.params as Record<string, unknown>)[
+            const rawSid = (message.params as Record<string, unknown>)[
               'sessionId'
             ];
+            const sid =
+              typeof rawSid === 'string'
+                ? normalizeSessionIdForLookup(rawSid)
+                : rawSid;
             if (typeof sid === 'string' && conn.ownsSession(sid)) {
               const binding = conn.sessions.get(sid);
               if (
