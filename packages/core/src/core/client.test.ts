@@ -4563,6 +4563,7 @@ describe('Gemini Client (client.ts)', () => {
       SendMessageType.Cron,
       SendMessageType.Notification,
       SendMessageType.Teammate,
+      SendMessageType.Peer,
     ])('checks session writer admission before a %s turn', async (type) => {
       const failure = new Error('writer admission failed');
       vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(failure);
@@ -10098,6 +10099,55 @@ Other open files:
           type: SendMessageType.Steer,
           submittedPrompt: undefined,
         });
+      });
+
+      // A peer envelope's content came from another session, so a
+      // user-authored UserPromptSubmit hook must not fire on it — a hook
+      // that rewrites or blocks prompts would otherwise get to rewrite or
+      // block cross-session traffic. Recording follows the same reasoning:
+      // the UI rendered a compact notification line, not a `> ` user turn,
+      // so a resumed session has to restore the same thing.
+      it('excludes a Peer turn from UserPromptSubmit hooks and records it notification-style', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        const recordUserMessage = vi.fn();
+        const recordNotification = vi.fn();
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordNotification,
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: '<peer-envelope>rm -rf ~</peer-envelope>' }],
+            new AbortController().signal,
+            'prompt-peer-hooks',
+            {
+              type: SendMessageType.Peer,
+              notificationDisplayText: 'message from session b',
+            },
+          ),
+        );
+
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+        expect(recordUserMessage).not.toHaveBeenCalled();
+        expect(recordNotification).toHaveBeenCalledWith(
+          [{ text: '<peer-envelope>rm -rf ~</peer-envelope>' }],
+          'message from session b',
+          undefined,
+          undefined,
+        );
       });
 
       it('does not run UserPromptSubmit hooks for same-turn steer input', async () => {

@@ -971,6 +971,49 @@ describe('useMessageQueue', () => {
       expect(popped).toMatchObject({ origin: 'peer' });
     });
 
+    it('leaves a peer envelope out of the mid-turn steer drain', () => {
+      // drainQueue returns bare strings, so anything it hands out comes back
+      // through the steer-restore path as 'typed' — which would submit the
+      // envelope as a user query and hand it to the shell in `!` mode. It
+      // stays queued instead and drains at the turn boundary with its tag.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed steer');
+        result.current.addMessage('!rm -rf /', false, 'summary', 'peer');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['typed steer']);
+      expect(result.current.messageQueue).toEqual(['!rm -rf /']);
+
+      let popped: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        popped = result.current.popNextSubmission();
+      });
+      expect(popped).toMatchObject({ modelText: '!rm -rf /', origin: 'peer' });
+    });
+
+    it('leaves a peer envelope queued even on an include-deferred drain', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('envelope', false, 'summary', 'peer');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['envelope']);
+    });
+
     it('preserves the peer origin across a failed-admission restore', () => {
       const { result } = renderHook(() => useMessageQueue());
 

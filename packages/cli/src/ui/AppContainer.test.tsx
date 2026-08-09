@@ -2242,6 +2242,144 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    // Cancelling a turn, or Ctrl+C-ing the queue into the input box, takes a
+    // peer envelope out of the queue where it was tagged 'peer' and hands it
+    // back through handleFinalSubmit. Re-queued as typed input it drains as
+    // SendMessageType.UserQuery, which is the one route that reaches
+    // handleShellCommand — so in `!` shell mode the sender's text is executed
+    // with no approval prompt.
+    describe('peer content round-tripping through the composer', () => {
+      const envelope = '<peer-envelope>rm -rf ~</peer-envelope>';
+
+      const renderWithPoppedPeer = (modelText: string = envelope) => {
+        const mockQueueMessage = vi.fn();
+        const handleSlashCommand = vi.fn();
+        let onBufferChange: ((text: string) => void) | undefined;
+        mockedUseTextBuffer.mockImplementation((options) => {
+          onBufferChange = options.onChange;
+          return { text: '', setText: vi.fn() };
+        });
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          handleSlashCommand,
+          slashCommands: [],
+          pendingHistoryItems: [],
+          commandContext: {},
+          shellConfirmationRequest: null,
+          confirmationRequest: null,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          messageQueue: [modelText],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          popAllMessages: vi.fn().mockReturnValue({
+            kind: 'user',
+            modelText,
+            submittedPrompt: 'message from session b',
+            origin: 'peer',
+            turnKey: 'message-queue:peer-1',
+          }),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+        return {
+          mockQueueMessage,
+          handleSlashCommand,
+          changeBuffer: (text: string) => {
+            act(() => {
+              onBufferChange?.(text);
+            });
+          },
+        };
+      };
+
+      it('re-queues an unedited peer envelope as peer, not typed', () => {
+        const { mockQueueMessage } = renderWithPoppedPeer();
+
+        capturedUIActions.handleFinalSubmit(envelope, {
+          submittedPrompt: envelope,
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          envelope,
+          false,
+          'message from session b',
+          'peer',
+        );
+      });
+
+      // The peer tag has to survive edits. restoredSubmissionRef is dropped
+      // the moment the text changes — correct for prompt provenance, wrong
+      // here: typing around an envelope does not make it the user's own.
+      // A mixed buffer resolves to 'peer' for the same reason
+      // aggregateUserMessages does — a typed `!cmd` reaching the model is
+      // recoverable, peer content reaching the shell is not.
+      it('keeps the peer tag after the user edits or adds to the buffer', () => {
+        const { mockQueueMessage, changeBuffer } = renderWithPoppedPeer();
+        changeBuffer(`${envelope}\n!ls`);
+
+        capturedUIActions.handleFinalSubmit(`${envelope}\n!ls`, {
+          submittedPrompt: `${envelope}\n!ls`,
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          `${envelope}\n!ls`,
+          false,
+          undefined,
+          'peer',
+        );
+      });
+
+      // The re-queue happens before the exit-word check, so an envelope
+      // whose whole content is `/quit` cannot close the user's session.
+      it('does not let a peer envelope reading /quit end the session', () => {
+        const { mockQueueMessage, handleSlashCommand } =
+          renderWithPoppedPeer('/quit');
+
+        capturedUIActions.handleFinalSubmit('/quit', {
+          submittedPrompt: '/quit',
+        });
+
+        expect(handleSlashCommand).not.toHaveBeenCalled();
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          '/quit',
+          false,
+          'message from session b',
+          'peer',
+        );
+      });
+
+      // An empty composer holds nothing: the next thing typed into it is the
+      // user's own and must not inherit the tag.
+      it('drops the peer tag once the composer empties', () => {
+        const { mockQueueMessage, changeBuffer } = renderWithPoppedPeer();
+        changeBuffer('');
+        changeBuffer('my own prompt');
+
+        capturedUIActions.handleFinalSubmit('my own prompt', {
+          submittedPrompt: 'my own prompt',
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          'my own prompt',
+          false,
+          'my own prompt',
+        );
+      });
+    });
+
     it('treats a restored prompt stash as provenance unavailable', () => {
       const stashedText =
         '<system-reminder>\ngenerated context\n</system-reminder>\n\nuser text';

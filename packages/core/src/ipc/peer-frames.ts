@@ -48,9 +48,13 @@ export interface PeerUserFrame {
   /** Sender's display name, for the envelope shown to the model. */
   fromName?: string;
   /**
-   * The sender's approval-mode class at send time, used for mode parity on
-   * the receiving side. Absent means "asserts nothing", which the gate
-   * treats as the cautious case rather than as a match.
+   * The sender's approval-mode class at send time.
+   *
+   * Advisory only. Nothing authenticates it — any process that can write to
+   * the socket can put any value here — so the receiving gate never lets it
+   * decide delivery, and only uses it to word the explanation on a parked
+   * message. Do not add a code path that treats `'bypass'` here as evidence
+   * of anything.
    */
   fromMode?: 'bypass' | 'prompting';
   priority: PeerMessagePriority;

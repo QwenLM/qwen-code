@@ -75,6 +75,11 @@ export interface UseMessageQueueReturn {
     submittedPrompt?: string,
     origin?: SubmissionOrigin,
   ) => void;
+  /**
+   * Take the steerable messages out of the queue as bare text.
+   *
+   * Peer envelopes are deliberately left behind — see the implementation.
+   */
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
 
@@ -320,6 +325,19 @@ export function useMessageQueue(): UseMessageQueueReturn {
       const current = queueRef.current;
       if (current.length === 0) return [];
       const shouldDrain = (message: QueuedMessage) =>
+        // Peer envelopes never steer. This drain returns bare text, and
+        // every restore path behind it (steer aborted, preprocessing threw,
+        // the client declined the steer) puts that text back with origin
+        // defaulting to 'typed' — which would submit the envelope as a user
+        // query and hand it to the shell/slash/@ preprocessing the origin
+        // tag exists to skip. Widening the drain and all four restore sites
+        // to carry origin would keep the tag alive, but steering is the
+        // wrong destination for peer content anyway: it would splice
+        // another session's text into the middle of the user's in-flight
+        // turn. Leaving it queued costs it the current turn and no more —
+        // the idle drain picks it up at the turn boundary through the
+        // origin-aware popNextSubmission path.
+        message.origin !== 'peer' &&
         (goalTurnActive
           ? GOAL_COMMAND_RE.test(message.text)
           : !isSlashCommand(message.text)) &&

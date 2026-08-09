@@ -1213,6 +1213,27 @@ export const AppContainer = (props: AppContainerProps) => {
     QueuedUserSubmission,
     'modelText' | 'submittedPrompt'
   > | null>(null);
+  /**
+   * Whether the composer currently holds text that came from a peer.
+   *
+   * Cancelling a turn (Esc) and `popQueueIntoInput` both drain the queue
+   * into the input box, so a peer envelope can leave the queue — where it
+   * is tagged `'peer'` — and come back through `handleFinalSubmit`, which
+   * would re-enqueue it as ordinary typed input. It would then drain as a
+   * user query and reach exactly the shell/slash/@ preprocessing the tag
+   * exists to skip.
+   *
+   * This is deliberately a separate ref from `restoredSubmissionRef`,
+   * which any edit invalidates: editing peer text, or typing around it,
+   * does not make it the user's own. So the flag survives edits and is
+   * cleared only when the composer empties or its contents are submitted.
+   * A buffer mixing typed input with a peer envelope therefore submits as
+   * `'peer'` — the same fail-safe direction `aggregateUserMessages` takes
+   * for a mixed batch, and for the same reason: a typed `!command`
+   * reaching the model is recoverable, peer content reaching the shell is
+   * not.
+   */
+  const composerHoldsPeerContentRef = useRef(false);
   const submittedPromptProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
@@ -1230,6 +1251,8 @@ export const AppContainer = (props: AppContainerProps) => {
         setBufferTextRef.current?.('', { clearUndoHistory: true });
       }
       restoredSubmissionRef.current = null;
+      // An empty composer holds nothing, peer or otherwise.
+      composerHoldsPeerContentRef.current = false;
       submittedPromptProvenanceUnavailableRef.current = false;
       return;
     }
@@ -2264,6 +2287,9 @@ export const AppContainer = (props: AppContainerProps) => {
     const submission = popAllMessages();
     if (submission === null) return null;
     restoredSubmissionRef.current = submission;
+    if (submission.origin === 'peer') {
+      composerHoldsPeerContentRef.current = true;
+    }
     submittedPromptProvenanceUnavailableRef.current = false;
     return submission.modelText;
   }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
@@ -2466,8 +2492,11 @@ export const AppContainer = (props: AppContainerProps) => {
       const submittedPromptProvenanceUnavailable =
         consumesComposerState &&
         submittedPromptProvenanceUnavailableRef.current;
+      const submitsPeerContent =
+        consumesComposerState && composerHoldsPeerContentRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
+        composerHoldsPeerContentRef.current = false;
         submittedPromptProvenanceUnavailableRef.current = false;
       }
       const submittedPromptCandidate = options?.submittedPrompt;
@@ -2494,6 +2523,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
+      // Peer content that round-tripped through the composer goes back onto
+      // the queue tagged `'peer'`, and nothing below runs for it. The drain
+      // then submits it as `SendMessageType.Peer`, which is the one path
+      // that skips slash/shell/@ preprocessing — the same route it would
+      // have taken had the user never pressed Esc. Returning here (rather
+      // than only tagging the `addMessage` at the bottom) also keeps the
+      // envelope out of the exit-word check just below, where a peer
+      // message reading `/quit` would otherwise close the session.
+      if (submitsPeerContent) {
+        addMessage(
+          submittedValue,
+          options?.deferUntilIdle ?? false,
+          submittedPrompt,
+          'peer',
+        );
+        return;
+      }
+
       // The user's raw text, captured before any `<system-reminder>` prefix is
       // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
@@ -2793,6 +2840,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const popped = popAllMessages();
       if (popped) {
         restoredSubmissionRef.current = popped;
+        if (popped.origin === 'peer') {
+          composerHoldsPeerContentRef.current = true;
+        }
         submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
         buffer.setText(

@@ -111,9 +111,25 @@ describe('mode parity (no explicit setting)', () => {
     expect(h.delivered).toHaveLength(3);
   });
 
-  it('accepts a bypassing sender when the receiver also bypasses', () => {
+  // `fromMode` is self-asserted and authenticated by nothing, so a sender
+  // claiming parity gets no more trust than one claiming nothing: any
+  // same-uid process can write that claim straight onto the socket, and it
+  // would be the only thing standing between it and a YOLO session's input.
+  it('holds a sender that claims to bypass, because the claim is unverifiable', () => {
     h.setMode(ApprovalMode.YOLO);
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.gate.getHeld()[0].cause).toBe('sender-mode-unverified');
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  // The claim cannot buy delivery later either: nothing re-derives it, so a
+  // reevaluate has nothing new to act on.
+  it('does not release a claimed-bypass hold on reevaluate', () => {
+    h.setMode(ApprovalMode.YOLO);
+    h.gate.admit(frame({ fromMode: 'bypass' }));
+    expect(h.gate.reevaluate('mode-changed')).toBe(0);
+    expect(h.gate.getHeld()).toHaveLength(1);
+    expect(h.delivered).toHaveLength(0);
   });
 
   it('holds a prompting sender when the receiver bypasses', () => {
@@ -393,6 +409,9 @@ describe('describeHoldCause', () => {
     );
     expect(describeHoldCause('mode-mismatch')).toContain('bypasses');
     expect(describeHoldCause('no-mode-asserted')).toContain('did not say');
+    expect(describeHoldCause('sender-mode-unverified')).toContain(
+      'only claims',
+    );
     expect(describeHoldCause('mode-unknown')).toContain('could not be');
   });
 });

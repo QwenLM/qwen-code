@@ -16,10 +16,8 @@
  * encodes one idea: a message may auto-deliver only when acting on it
  * cannot do more than the sender could already have done itself.
  *
- *   receiver YOLO      + sender YOLO       → accept
- *   receiver YOLO      + sender prompting  → hold
- *   receiver YOLO      + sender unasserted → hold
  *   receiver prompting + anything          → accept
+ *   receiver YOLO      + any sender        → hold
  *   receiver mode unknown                  → hold  (fail closed)
  *
  * A prompting receiver can accept freely because every consequential
@@ -27,6 +25,13 @@
  * execution. A YOLO receiver has no such backstop, so anything it is told
  * to do simply happens — which is why an unverified sender has to be
  * reviewed first.
+ *
+ * And every sender is unverified. The wire's `fromMode` is asserted by
+ * whoever wrote the frame and authenticated by nothing, so a YOLO
+ * receiver holds no matter what the sender claims; the claim only picks
+ * which explanation the user sees. Auto-delivery into a YOLO session is
+ * reachable only through an explicit `crossSessionInbound: 'accept'` —
+ * the receiving user's own decision, not the sender's.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -47,6 +52,7 @@ export type HoldCause =
   | 'explicit-setting'
   | 'mode-mismatch'
   | 'no-mode-asserted'
+  | 'sender-mode-unverified'
   | 'mode-unknown';
 
 /**
@@ -146,14 +152,23 @@ export class InboundGate {
       return { policy: 'accept', cause: 'explicit-setting' };
     }
 
-    // Receiver is bypassing prompts from here down.
+    // Receiver is bypassing prompts from here down, so nothing downstream
+    // asks before acting on whatever the message says. Parity would let an
+    // equally-bypassing sender through — but the wire cannot establish that
+    // the sender is one. `fromMode` is self-asserted and authenticated by
+    // nothing: any same-uid process can write a frame claiming `'bypass'`
+    // (peer-frames.ts documents hand-delivery over the socket), and doing so
+    // would walk it straight past the only gate between it and a YOLO
+    // session's input queue. So the claim never decides — it only selects
+    // the explanation the user reads next to the parked message.
     const sender = frame?.fromMode;
     if (sender === undefined) {
       return { policy: 'hold', cause: 'no-mode-asserted' };
     }
-    return sender === 'bypass'
-      ? { policy: 'accept', cause: 'explicit-setting' }
-      : { policy: 'hold', cause: 'mode-mismatch' };
+    return {
+      policy: 'hold',
+      cause: sender === 'bypass' ? 'sender-mode-unverified' : 'mode-mismatch',
+    };
   }
 
   /** Run a freshly-arrived message through the gate. */
@@ -325,6 +340,8 @@ export function describeHoldCause(cause: HoldCause): string {
       return 'this session bypasses permission prompts and the sender does not';
     case 'no-mode-asserted':
       return 'this session bypasses permission prompts and the sender did not say whether it does';
+    case 'sender-mode-unverified':
+      return 'this session bypasses permission prompts and the sender only claims to do the same — nothing on the wire can confirm it';
     case 'mode-unknown':
       return "this session's approval mode could not be determined";
     default: {
