@@ -307,7 +307,19 @@ fn rewrite_request(
     pair_token: &str,
     runtime_token: &str,
 ) -> Result<Vec<u8>, u16> {
-    let header = std::str::from_utf8(&request[..header_end]).map_err(|_| 400_u16)?;
+    let header_bytes = &request[..header_end];
+    if header_bytes
+        .iter()
+        .enumerate()
+        .any(|(index, &byte)| match byte {
+            b'\r' => header_bytes.get(index + 1) != Some(&b'\n'),
+            b'\n' => index == 0 || header_bytes[index - 1] != b'\r',
+            _ => false,
+        })
+    {
+        return Err(400);
+    }
+    let header = std::str::from_utf8(header_bytes).map_err(|_| 400_u16)?;
     let public_authority = public_origin.strip_prefix("http://").ok_or(500_u16)?;
     let pair_protocol = format!("qwen-bearer.{}", URL_SAFE_NO_PAD.encode(pair_token));
     let runtime_protocol = format!("qwen-bearer.{}", URL_SAFE_NO_PAD.encode(runtime_token));
@@ -686,6 +698,20 @@ mod tests {
                 "runtime-token",
             ),
             Err(403),
+        );
+
+        let request = b"GET / HTTP/1.1\nHost: 127.0.0.1:4170\n\n\r\n\r\n";
+        assert_eq!(
+            rewrite_request(
+                request,
+                find_header_end(request).expect("header"),
+                "http://192.168.1.10:49152",
+                "http://127.0.0.1:4170",
+                "127.0.0.1:4170",
+                "pair-token",
+                "runtime-token",
+            ),
+            Err(400),
         );
 
         let pair = URL_SAFE_NO_PAD.encode("pair-token");
