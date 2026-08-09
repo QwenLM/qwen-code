@@ -309,7 +309,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain(
         '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
-      expect(modelText).toContain(`<output-file>${outputPath}</output-file>`);
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
       expect(meta).toEqual({
         shellId: 'a',
         status: 'completed',
@@ -498,6 +498,9 @@ describe('BackgroundShellRegistry', () => {
       expect(callback).toHaveBeenCalledTimes(1);
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('<output-tail');
+      // register/complete also mirrored a `<dir>.status` sidecar next to
+      // the temp dir, and afterEach only tracks the dir itself.
+      rmSync(statusFilePathFor(dir), { force: true });
     });
 
     it('skips output-tail when the output file is empty (stat.size === 0)', () => {
