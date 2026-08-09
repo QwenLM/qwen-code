@@ -138,6 +138,23 @@ function outsideQuotes(stmt) {
 // on which function you ask is not a model.
 const SEPARATORS = /(\|\||&&|;|\||(?<!>)&(?!>))/;
 
+// Does this statement reach its command through sudo? The wrappers stack
+// (`timeout 280 sudo -n apt-get …`), so walk the same prefix unwrapCommand
+// walks and look for sudo anywhere along it — requiring it FIRST would red
+// a legitimately bounded install.
+function runsThroughSudo(stmt) {
+  let out = stmt.trim().replace(/^(\w+=\S+\s+)+/, '');
+  for (;;) {
+    if (/^sudo\b/.test(out)) return true;
+    const next = out
+      .replace(WRAPPERS, '')
+      .replace(/^(-{1,2}[\w-]+(=\S+)?\s+)+/, '')
+      .replace(/^(\d+[smhd]?\s+)/, '');
+    if (next === out) return false;
+    out = next;
+  }
+}
+
 // Is this statement a real apt-get invocation, or a mention of one? A
 // `command -v apt-get` probe names it without running it; anything else
 // that reaches apt-get — behind any wrapper, in any group — runs it.
@@ -457,13 +474,13 @@ describe('ci.yml capture tooling', () => {
     expect(installStatements.length).toBe(1);
     for (const stmt of installStatements) {
       expect(unwrapCommand(stmt).split(/\s+/), stmt).toContain('-y');
-      // Through sudo, in any of its spellings: `sudo -n apt-get` is the
-      // sibling workflow's convention, and requiring literal adjacency
-      // would red the very form this suite's siblings pin.
-      expect(
-        /^sudo\b/.test(stmt.trim()),
-        `${stmt} does not run through sudo`,
-      ).toBe(true);
+      // Through sudo, in any of its spellings and behind any other wrapper:
+      // `sudo -n apt-get` is the sibling workflow's convention and
+      // `timeout 280 sudo -n apt-get` is what a bounded install looks like.
+      // Requiring sudo FIRST would red both.
+      expect(runsThroughSudo(stmt), `${stmt} does not run through sudo`).toBe(
+        true,
+      );
       expect(NO_OP_INSTALL_OPTION.test(stmt), `${stmt} simulates`).toBe(false);
       expect(NO_OP_INSTALL_LONG.test(stmt), `${stmt} installs nothing`).toBe(
         false,
@@ -495,7 +512,7 @@ describe('ci.yml capture tooling', () => {
         .some(
           (stmt) =>
             /^apt-get\s+update\b/.test(unwrapCommand(stmt)) &&
-            /^sudo\b/.test(stmt.trim()),
+            runsThroughSudo(stmt),
         ),
       'the apt-get update does not run through sudo',
     ).toBe(true);
@@ -586,17 +603,31 @@ describe('ci.yml capture tooling', () => {
     // always fails) kills the branch while satisfying a containment pin and
     // the forcing-term blacklist alike.
     expect(elifLine.replace(/\s+/g, ' ')).toBe(
-      'elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then',
+      'elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then',
     );
     // The already-installed branch is not empty either: it must verify the
     // tool it claims is present, advisorily. An emptied body (`:`) leaves a
     // broken-but-installed tmux undetected on the lane that takes it.
     const thenIdx = lines.findIndex((l) => l.startsWith('if '));
     const elifIdx = lines.findIndex((l) => l.startsWith('elif '));
-    expect(
-      lines.slice(thenIdx + 1, elifIdx).some((l) => /\btmux -V\b/.test(l)),
-      'the already-installed branch verifies nothing',
-    ).toBe(true);
+    // ALL THREE tools, not just tmux: the branch is taken when each is
+    // present, and a broken-but-present zip fails the packaging suite with
+    // no warning to explain it. Each check carries its own advisory guard,
+    // because a broken tool must not red the required check either.
+    const thenBody = lines.slice(thenIdx + 1, elifIdx);
+    // Word-anchored, because `unzip -v` CONTAINS `zip -v`: a substring
+    // search reported the zip probe present after it had been deleted —
+    // this pin's own first version passed that mutant for exactly that
+    // reason.
+    for (const probe of ['tmux -V', 'zip -v', 'unzip -v']) {
+      const at = new RegExp(`(^|\\s)${probe.replace(' ', '\\s+')}\\b`);
+      const line = thenBody.find((l) => at.test(l));
+      expect(
+        line,
+        `the already-installed branch never runs ${probe}`,
+      ).toBeDefined();
+      expect(line, `${probe} is unguarded`).toMatch(/\|\|\s*echo\b/);
+    }
     // And the ELSE fallback exists: on a lane with neither tmux nor
     // sudo+apt-get — a root-container self-hosted runner, the family this
     // PR's own evidence is produced on — it is the only signal that the
