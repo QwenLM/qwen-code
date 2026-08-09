@@ -26,6 +26,10 @@ const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
   'utf8',
 );
+const workflowsDir = '.github/workflows';
+const workflowFiles = readdirSync(workflowsDir).filter((f) =>
+  /\.ya?ml$/.test(f),
+);
 
 function runReviewStep() {
   const doc = parse(workflow);
@@ -2175,14 +2179,12 @@ describe('workflow expression length', () => {
   // length 21000` (e.g. run 31239579253). CI stayed green the whole time — no
   // test covered this, which is why it is covered here.
   const LIMIT = 21000;
-  const dir = '.github/workflows';
-  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 
   it('keeps every templated run block under the limit', () => {
-    expect(files.length).toBeGreaterThan(0);
+    expect(workflowFiles.length).toBeGreaterThan(0);
     const over = [];
-    for (const file of files) {
-      const doc = parse(readFileSync(join(dir, file), 'utf8'));
+    for (const file of workflowFiles) {
+      const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
       for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
         for (const step of job?.steps ?? []) {
           const body = step?.run;
@@ -2320,14 +2322,12 @@ describe('bot comment markers', () => {
   // `.github/workflows` — the `.github/scripts/*.mjs` comment builders
   // (template literals and pushed marker lines) are not scanned. All are
   // latent — nothing glues a marker today.
-  const dir = '.github/workflows';
-  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 
   it('never glues prose onto a comment marker, in any workflow', () => {
-    expect(files.length).toBeGreaterThan(0);
+    expect(workflowFiles.length).toBeGreaterThan(0);
     const offenders = [];
-    for (const file of files) {
-      const text = readFileSync(join(dir, file), 'utf8');
+    for (const file of workflowFiles) {
+      const text = readFileSync(join(workflowsDir, file), 'utf8');
       // The class excludes `\n` so a `<!--` inside a nearby comment cannot
       // let one match span lines, swallow the real marker, and get discarded
       // by the comment skip below — the guard would then pass with the very
@@ -2389,15 +2389,16 @@ describe('bot comment markers', () => {
   it('pins the workflow-run URL into the ack printf', () => {
     // bash printf with a leftover argument and no conversion spec exits 0
     // under `set -euo pipefail` and emits `[workflow run]()`, so nothing
-    // else catches a dropped `%s` or `"$RUN_URL"` on the ack line.
-    const text = readFileSync(join(dir, 'qwen-code-pr-review.yml'), 'utf8');
-    const ackLine = text
+    // else catches a dropped `%s` or `"$RUN_URL"` on the ack line. Assert
+    // the link shape, not bare co-existence: a `%s` displaced out of the
+    // parens keeps both pieces on the line and re-ships the dead link.
+    const ackLine = workflow
       .split('\n')
       .find(
         (l) => l.includes('printf') && l.includes('<!-- qwen-review-ack -->'),
       );
     expect(ackLine).toBeDefined();
-    expect(ackLine).toContain('%s');
+    expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
   });
 });
