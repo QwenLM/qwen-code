@@ -248,7 +248,10 @@ describe('handleSlashCommand', () => {
       mockSettings,
     );
 
-    expect(mockBtwCommand.action).toHaveBeenCalled();
+    expect(mockBtwCommand.action).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: undefined }),
+      'question',
+    );
     expect(result.type).toBe('message');
     if (result.type === 'message') {
       expect(result.content).toBe('btw> question\nanswer');

@@ -247,7 +247,6 @@ import {
 import {
   getSlashCommandFirstToken,
   isSlashCommand,
-  SLASH_COMMANDS_SKIP_RECORDING,
 } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import {
@@ -3269,8 +3268,7 @@ export class Session implements SessionContext {
             const isSlashInput = !isContinue && isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
             const shouldRecordSlashCommand =
-              !isSlashInput ||
-              !SLASH_COMMANDS_SKIP_RECORDING.has(slashCommandName);
+              !isSlashInput || slashCommandName !== 'advisor';
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
