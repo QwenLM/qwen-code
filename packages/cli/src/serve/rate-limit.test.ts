@@ -296,18 +296,6 @@ describe('rateLimit', () => {
       expect(next).toHaveBeenCalledTimes(5);
     });
 
-    it('exempts GET /demo', () => {
-      const next = vi.fn();
-      for (let i = 0; i < 5; i++) {
-        limiter.middleware(
-          mockReq({ method: 'GET', path: '/demo' }),
-          mockRes(),
-          next,
-        );
-      }
-      expect(next).toHaveBeenCalledTimes(5);
-    });
-
     it('exempts POST .../heartbeat', () => {
       const next = vi.fn();
       for (let i = 0; i < 5; i++) {

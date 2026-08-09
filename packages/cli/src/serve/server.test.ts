@@ -25120,85 +25120,6 @@ describe('GET /session/:id/events (SSE)', () => {
   });
 });
 
-describe('GET /demo', () => {
-  it('returns 200 with text/html content type on loopback', async () => {
-    const app = createServeApp(baseOpts, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/text\/html/);
-    expect(res.text).toContain('Qwen Serve');
-    expect(res.text).toContain('<!DOCTYPE html>');
-  });
-
-  it('is accessible without bearer token on loopback even when --token is set', async () => {
-    // Loopback: /demo is registered BEFORE bearerAuth so browsers can
-    // reach the page via address-bar navigation (no Authorization header).
-    const app = createServeApp({ ...baseOpts, token: 'secret' }, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/text\/html/);
-  });
-
-  it('requires bearer token on non-loopback (401 without token)', async () => {
-    // Non-loopback: /demo is registered AFTER bearerAuth to prevent
-    // unauthenticated access on public interfaces.
-    const app = createServeApp(
-      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
-      () => 4170,
-      { bridge: fakeBridge() },
-    );
-    const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
-    expect(res.status).toBe(401);
-  });
-
-  it('is accessible on non-loopback with valid bearer token', async () => {
-    const app = createServeApp(
-      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
-      () => 4170,
-      { bridge: fakeBridge() },
-    );
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', '0.0.0.0:4170')
-      .set('Authorization', 'Bearer secret');
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/text\/html/);
-  });
-
-  it('is guarded by CORS (rejects cross-origin requests)', async () => {
-    const app = createServeApp(baseOpts, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`)
-      .set('Origin', 'https://evil.example.com');
-    expect(res.status).toBe(403);
-  });
-
-  it('sets anti-clickjacking headers (X-Frame-Options + CSP)', async () => {
-    const app = createServeApp(baseOpts, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['x-frame-options']).toBe('DENY');
-    expect(res.headers['content-security-policy']).toContain(
-      "frame-ancestors 'none'",
-    );
-  });
-});
-
 describe('same-origin Origin-stripping middleware', () => {
   it('strips loopback Origin header matching daemon port', async () => {
     const app = createServeApp(baseOpts, () => 4170, {
@@ -25398,7 +25319,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     );
   });
 
-  it('demo self-origin shim still works when `--allow-origin` is set (loopback strip runs first)', async () => {
+  it('loopback self-origin shim still works when `--allow-origin` is set (loopback strip runs first)', async () => {
     // Regression anchor: the loopback-self-origin shim that strips the
     // Origin header for matching addresses must continue working even
     // when the new allowlist middleware is installed. Without this,
