@@ -51,6 +51,7 @@ const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
 const SUPERVISOR_MAINTENANCE_INTERVAL_MS = 5000;
 const LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS = 30_000;
+const COORDINATION_OPERATION_TIMEOUT_MS = 90_000;
 
 export interface AgentViewSupervisorClientHandle {
   socketPath: string;
@@ -270,7 +271,7 @@ function createSupervisorHandle(
         { ...request, environment: currentCoordinationEnvironment() },
         {
           ...authOptions,
-          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+          timeoutMs: COORDINATION_OPERATION_TIMEOUT_MS,
         },
       ),
     collectCoordination: (coordinationId) =>
@@ -280,7 +281,7 @@ function createSupervisorHandle(
         { coordinationId },
         {
           ...authOptions,
-          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+          timeoutMs: COORDINATION_OPERATION_TIMEOUT_MS,
         },
       ),
     reassignCoordination: (request) =>
@@ -290,7 +291,7 @@ function createSupervisorHandle(
         { ...request, environment: currentCoordinationEnvironment() },
         {
           ...authOptions,
-          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+          timeoutMs: COORDINATION_OPERATION_TIMEOUT_MS,
         },
       ),
     adopt: (params) =>
