@@ -11171,6 +11171,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     touchCore = false,
     baselineCode = '',
     baselineMsg = '',
+    headMsg = '',
+    extraRoundDiag = false,
     restoreClash = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
@@ -11245,8 +11247,14 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '        if [[ -n "${BASELINE_MSG:-}" ]]; then msg="${BASELINE_MSG}"; fi',
           '        if [[ "${RESTORE_CLASH:-}" == "1" ]]; then echo untracked > clash.txt; fi',
           '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" ]]; then',
+          '        if [[ -n "${HEAD_MSG:-}" ]]; then msg="${HEAD_MSG}"; fi',
+          '      fi',
           '      echo "stub build FAILED at $head"',
           '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" && "${EXTRA_ROUND_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(2,2): error TS7777: round-introduced defect"',
+          '      fi',
           '      exit 1',
           '    fi',
           '  done',
@@ -11303,6 +11311,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             BASELINE_SHA: baselineSha,
             BASELINE_CODE: baselineCode,
             BASELINE_MSG: baselineMsg,
+            HEAD_MSG: headMsg,
+            EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
@@ -11369,19 +11379,53 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('DIFFERENT reason');
   });
 
-  it('rejects retryably when the baseline leg breaks the restore', () => {
+  it('rejects WITHOUT retry when the baseline leg breaks the restore', () => {
     // The baseline run recreates (untracked) a file the branch tracks, so
-    // `git checkout` back refuses — the tree can no longer be trusted, and
-    // the guard must reject WITHOUT the pre-existing label: a transient
-    // git failure is not a verdict about the failure's origin.
+    // `git checkout` back refuses — the tree can no longer be trusted. No
+    // pre-existing label (a transient git failure is not a verdict about
+    // the failure's origin) and no retry either: the repair agent works in
+    // this very checkout and performs no git recovery, so on the detached
+    // tree its commit would land on the baseline and be orphaned. The next
+    // round starts clean from the trusted checkout instead.
     const r = runGate({
       failAt: ['feature', 'origin/feature'],
       restoreClash: true,
     });
     expect(r.status).toBe(1);
-    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('could not restore the verification tree');
+  });
+
+  it('keeps the full message past the first n (the bracket class ate it)', () => {
+    // In an ERE bracket expression `\` is literal, so the earlier
+    // `[^\n]*` meant "neither backslash nor the letter n" and truncated
+    // every message at its first 'n' — collapsing "Cannot find module
+    // './foo'" and "'./bar'" into one signature and skipping the only
+    // repair that could fix the round-caused one. `.*` keeps the message.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      headMsg: "Cannot find module './foo'",
+      baselineMsg: "Cannot find module './bar'",
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('charges the round when it ADDS a diagnostic to a failing baseline', () => {
+    // Pre-existing means the round's failing set is a SUBSET of the
+    // baseline's: sharing one signature with the baseline while adding
+    // another is a round-caused failure the repair can still fix — an
+    // intersection test labeled it pre-existing and skipped the repair.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraRoundDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
   });
 
   it('charges the round when the baseline fails for a DIFFERENT reason', () => {
@@ -11577,7 +11621,10 @@ describe('stale sandbox container cleanup', () => {
   // A budget kill reaps the host-side docker client, not the container —
   // every killed sandbox keeps running on the persistent runner (observed:
   // a later leg's name counter found qwen-code-0.21.8-0 occupied). Both
-  // sandboxed jobs must reap before the sandbox picks a name.
+  // sandboxed jobs must reap before the sandbox picks a name — but the
+  // docker daemon is per HOST and this pool runs several registrations on
+  // one OS, so a RUNNING container can belong to a concurrent job on
+  // another registration: the reap is restricted to provably-dead states.
   const job = (id) => {
     const start = workflow.indexOf(`\n  ${id}:`);
     expect(start, id).toBeGreaterThan(-1);
@@ -11592,7 +11639,9 @@ describe('stale sandbox container cleanup', () => {
     for (const jobId of ['issue-autofix', 'review-address']) {
       const j = job(jobId);
       expect(j, jobId).toContain(step);
-      expect(j, jobId).toContain("docker ps -aq --filter 'name=qwen-code-'");
+      expect(j, jobId).toContain(
+        "docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead'",
+      );
       expect(j, jobId).toContain('xargs -r docker rm -f');
       // Before the sandbox can pick a colliding name.
       expect(j.indexOf(step)).toBeLessThan(
