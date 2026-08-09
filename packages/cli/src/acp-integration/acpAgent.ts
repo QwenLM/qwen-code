@@ -116,6 +116,7 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  findGitRoot,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -563,6 +564,14 @@ function parseAcpLocalReadRootsEnv(
 
 function defaultAcpOnlyLocalReadRoots(): string[] {
   return process.platform === 'win32' ? [] : [POSIX_TMP_LOCAL_READ_ROOT];
+}
+
+/** Returns true when `target` lives under `<repoRoot>/.qwen/worktrees/`. */
+function isWorktreePath(target: string): boolean {
+  const repoRoot = findGitRoot(target);
+  if (!repoRoot) return false;
+  const worktreesDir = path.join(repoRoot, '.qwen', 'worktrees');
+  return path.normalize(target).startsWith(worktreesDir + path.sep);
 }
 
 function buildAcpLocalReadRoots(config: Config): string[] {
@@ -3602,17 +3611,6 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
-  /**
-   * Agent-level fallback cwd for `qwen/settings/*` handlers when the client
-   * supplies neither an explicit `cwd` nor a `sessionId`. Set to the worktree
-   * path on session creation or `session/cd`; cleared when the owning session
-   * closes.
-   *
-   * Prefer per-session resolution: pass `sessionId` in the extMethod params
-   * and `resolveSettingsCwd` will read `Session.worktreeCwd` directly,
-   * avoiding the last-wins ambiguity when multiple worktree sessions coexist.
-   */
-  private defaultSettingsCwd: string | null = null;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -4173,12 +4171,6 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
-    if (
-      session.worktreeCwd &&
-      session.worktreeCwd === this.defaultSettingsCwd
-    ) {
-      this.defaultSettingsCwd = null;
-    }
     // A Session missing from the next snapshot is how the daemon learns the
     // child released it — including when it never saw our close response.
     this.activeWorkReporter?.notifyChanged();
@@ -7663,8 +7655,14 @@ class QwenAgent implements Agent {
   /**
    * Resolve the cwd for `qwen/settings/*` handlers with per-session
    * worktree awareness. Priority: session.worktreeCwd > session
-   * config's activeWorktree > agent-level defaultSettingsCwd >
-   * explicit `cwd` param > process.cwd().
+   * config's activeWorktree > explicit `cwd` param > process.cwd().
+   *
+   * TODO(#8138): The desktop Settings panel sends qwen/settings/* through a
+   * session-less shared ACP process (buildSharedAcpProcessKey never matches
+   * the session-hosting process). In that process this.sessions is empty, so
+   * resolution falls through to process.cwd(). A future fix should populate
+   * worktreeRootPath per the desktop wiring or route the settings panel
+   * through the session-hosting process.
    */
   private resolveSettingsCwd(params: Record<string, unknown>): string {
     const sessionId = params['sessionId'];
@@ -7690,9 +7688,6 @@ class QwenAgent implements Agent {
     for (const session of this.sessions.values()) {
       const wt = session.getConfig().getActiveWorktree?.();
       if (wt && existsSync(wt)) return wt;
-    }
-    if (this.defaultSettingsCwd && existsSync(this.defaultSettingsCwd)) {
-      return this.defaultSettingsCwd;
     }
     return process.cwd();
   }
@@ -9797,12 +9792,13 @@ class QwenAgent implements Agent {
             );
           }
 
-          if (canonicalPath !== process.cwd()) {
+          if (
+            canonicalPath !== process.cwd() &&
+            isWorktreePath(canonicalPath)
+          ) {
             session.worktreeCwd = canonicalPath;
-            this.defaultSettingsCwd = canonicalPath;
           } else {
             session.worktreeCwd = null;
-            this.defaultSettingsCwd = null;
           }
 
           try {
@@ -11273,11 +11269,8 @@ class QwenAgent implements Agent {
         >;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
-        this.settings = loadSettings(settingsCwd);
         const oldMerged = structuredClone(this.settings.merged);
-
-        this.settings.reloadScopeFromDisk(SettingScope.User);
-        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        this.settings = loadSettings(settingsCwd);
         const newMerged = this.settings.merged;
 
         const envResult = reloadEnvironment(newMerged, settingsCwd);
@@ -11977,11 +11970,8 @@ class QwenAgent implements Agent {
     this.sessions.set(sessionId, session);
 
     const targetDir = config.getTargetDir();
-    if (targetDir !== process.cwd()) {
+    if (targetDir !== process.cwd() && isWorktreePath(targetDir)) {
       session.worktreeCwd = targetDir;
-      this.defaultSettingsCwd = targetDir;
-    } else {
-      this.defaultSettingsCwd = null;
     }
 
     // The Session set itself is part of the snapshot: publish so the daemon

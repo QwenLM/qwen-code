@@ -3691,10 +3691,11 @@ async function runQwenServeImpl(
       toolName: string,
       enabled: boolean,
       assertGenerationOpen?: () => void,
-    ): Promise<void> =>
-      withSettingsLock(workspace, async () => {
+    ): Promise<void> => {
+      const effective = findEffectiveWorkspace(bridge, workspace);
+      return withSettingsLock(effective, async () => {
         assertGenerationOpen?.();
-        const fresh = loadSettingsForPersistence(workspace);
+        const fresh = loadSettingsForPersistence(effective);
         const wsScope = fresh.forScope(WORKSPACE_SETTING_SCOPE).settings;
         const wsDisabled = wsScope.tools?.disabled;
         const current = Array.isArray(wsDisabled)
@@ -3711,20 +3712,22 @@ async function runQwenServeImpl(
           assertGenerationOpen,
         );
       });
+    };
     const persistDisabledSkillsFn = (
       workspace: string,
       skillName: string,
       enabled: boolean,
       assertGenerationOpen?: () => void,
-    ) =>
-      withSettingsLock(workspace, async () => {
+    ) => {
+      const effective = findEffectiveWorkspace(bridge, workspace);
+      return withSettingsLock(effective, async () => {
         assertGenerationOpen?.();
         const {
           resolveSkillSettings,
           skillSettingStrings,
           updateWorkspaceSkillSettingLists,
         } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
+        const fresh = loadSettingsForPersistence(effective);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
         const disablement = resolved.disablements.get(normalizedName);
@@ -3790,6 +3793,7 @@ async function runQwenServeImpl(
           settingsChanges,
         };
       });
+    };
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -3937,15 +3941,16 @@ async function runQwenServeImpl(
         statusProvider,
         delegateReadTextFileToClient: false,
         fileSystem: createBridgeFileSystemAdapter(fsFactory),
-        persistApprovalMode: (workspace, mode) =>
-          withSettingsLock(workspace, async () => {
+        persistApprovalMode: (workspace, mode) => {
+          const effective = findEffectiveWorkspace(bridge, workspace);
+          return withSettingsLock(effective, async () => {
             primaryGenerationGuard.assertOpen();
             if (!trustedWorkspace) {
               throw new Error(
                 'Cannot persist approval mode for an untrusted workspace.',
               );
             }
-            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+            const fresh = settingsRuntime.settings.loadSettings(effective, {
               skipLoadEnvironment: true,
               workspaceTrusted: trustedWorkspace,
             });
@@ -3956,7 +3961,8 @@ async function runQwenServeImpl(
               mode,
               () => primaryGenerationGuard.assertOpen(),
             );
-          }),
+          });
+        },
       });
     if (!deps.bridge) {
       bridgeRef = bridge;
@@ -4345,15 +4351,16 @@ async function runQwenServeImpl(
         statusProvider: secondaryStatusProvider,
         delegateReadTextFileToClient: false,
         fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
-        persistApprovalMode: (workspace, mode) =>
-          withSettingsLock(workspace, async () => {
+        persistApprovalMode: (workspace, mode) => {
+          const effective = findEffectiveWorkspace(secondaryBridge, workspace);
+          return withSettingsLock(effective, async () => {
             secondaryGenerationGuard.assertOpen();
             if (!secondaryTrusted) {
               throw new Error(
                 'Cannot persist approval mode for an untrusted workspace.',
               );
             }
-            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+            const fresh = settingsRuntime.settings.loadSettings(effective, {
               skipLoadEnvironment: true,
               workspaceTrusted: secondaryTrusted,
             });
@@ -4364,7 +4371,8 @@ async function runQwenServeImpl(
               mode,
               () => secondaryGenerationGuard.assertOpen(),
             );
-          }),
+          });
+        },
       });
       secondaryBridgeRef = secondaryBridge;
       runtimeBridges.push(secondaryBridge);
@@ -4896,15 +4904,16 @@ async function runQwenServeImpl(
           }),
           delegateReadTextFileToClient: false,
           fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
-          persistApprovalMode: (workspace, mode) =>
-            withSettingsLock(workspace, async () => {
+          persistApprovalMode: (workspace, mode) => {
+            const effective = findEffectiveWorkspace(wsBridge, workspace);
+            return withSettingsLock(effective, async () => {
               generationGuard.assertOpen();
               if (!trusted) {
                 throw new Error(
                   'Cannot persist approval mode for an untrusted workspace.',
                 );
               }
-              const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              const fresh = settingsRuntime.settings.loadSettings(effective, {
                 skipLoadEnvironment: true,
                 workspaceTrusted: trusted,
               });
@@ -4915,7 +4924,8 @@ async function runQwenServeImpl(
                 mode,
                 () => generationGuard.assertOpen(),
               );
-            }),
+            });
+          },
         });
       } catch (err) {
         wsSubSessionLauncher.stop();

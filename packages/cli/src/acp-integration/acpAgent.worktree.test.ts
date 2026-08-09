@@ -183,6 +183,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     snapshot: vi.fn(() => ({})),
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  findGitRoot: vi.fn().mockReturnValue(null),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',
@@ -518,6 +519,32 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     ).resolves.not.toThrow();
 
     expect(lastSessionMock?.pendingWorktreeNotice).toBeNull();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('VP4: getTargetDir returns a worktree path — session.worktreeCwd is set', async () => {
+    const worktreePath = '/repo/.qwen/worktrees/my-feature';
+    const innerConfig = makeInnerConfig();
+    (innerConfig.getTargetDir as ReturnType<typeof vi.fn>).mockReturnValue(
+      worktreePath,
+    );
+
+    const { findGitRoot } = await import('@qwen-code/qwen-code-core');
+    vi.mocked(findGitRoot).mockReturnValue('/repo');
+
+    const { agent, agentPromise } = await bootAgentWithLoadSession(innerConfig);
+
+    await agent.loadSession({
+      sessionId: SESSION_ID,
+      cwd: '/fake/project',
+      mcpServers: [],
+    });
+
+    expect((lastSessionMock as Record<string, unknown>)?.['worktreeCwd']).toBe(
+      worktreePath,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

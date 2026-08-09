@@ -28,6 +28,7 @@ import {
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
+import { findEffectiveWorkspace } from '../worktree-workspace.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 const TUI_ONLY_SETTINGS = new Set([
@@ -540,7 +541,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     // the Phase 3 core-route trust gate.
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
-      const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
+      const effective = findEffectiveWorkspace(
+        runtime.bridge,
+        runtime.workspaceCwd,
+      );
+      const response = buildSettingsResponse(effective, allowedKeys);
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(
@@ -653,9 +658,13 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       }
       let publicValue: unknown = value;
       try {
+        const effective = findEffectiveWorkspace(
+          runtime.bridge,
+          runtime.workspaceCwd,
+        );
         const persist = async () => {
           const prepared = prepareSettingWrite(
-            runtime.workspaceCwd,
+            effective,
             settingScope,
             key,
             value,
@@ -664,7 +673,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
           );
           publicValue = prepared.publicValue;
           await deps.persistSetting(
-            runtime.workspaceCwd,
+            effective,
             settingScope,
             key,
             prepared.persistedValue,
