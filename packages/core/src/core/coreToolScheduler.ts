@@ -4376,6 +4376,7 @@ export class CoreToolScheduler {
       prompt:
         reason ||
         `A PreToolUse hook requested confirmation before running ${toolName}.`,
+      renderPromptAsPlainText: true,
       hideAlwaysAllow: true,
       onConfirm: (outcome, payload) =>
         this.handleConfirmationResponse(

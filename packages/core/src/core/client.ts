@@ -51,7 +51,6 @@ import {
 } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
@@ -79,6 +78,7 @@ import {
 // Services
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -151,6 +151,7 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 
 // Hook types and utilities
 import {
@@ -2564,12 +2565,12 @@ export class GeminiClient {
       // content's own pairing.
     }
 
-    // Set when the UserPromptSubmit hook injects additional context: the
-    // pre-injection prompt projection. Telemetry, memory recall, and chat
-    // recording must see the user's own text, not the augmented request.
-    let preInjectionPromptText: string | undefined;
-
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
+    const preHookUserPromptText =
+      messageType === SendMessageType.UserQuery
+        ? partToString(request)
+        : undefined;
+    let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
     try {
@@ -2590,7 +2591,7 @@ export class GeminiClient {
         messageBus &&
         this.config.hasHooksForEvent('UserPromptSubmit')
       ) {
-        const promptText = partToString(request);
+        const promptText = preHookUserPromptText ?? partToString(request);
         const submittedPrompt =
           messageType === SendMessageType.UserQuery &&
           typeof options?.submittedPrompt === 'string' &&
@@ -2664,7 +2665,12 @@ export class GeminiClient {
             ...requestArray,
             { text: wrapUserPromptSubmitContext(additionalContext) },
           ];
-          preInjectionPromptText = promptText;
+          if (messageType === SendMessageType.UserQuery) {
+            userPromptRecordPayload = {
+              displayText: submittedPrompt ?? promptText,
+              hookContext: additionalContext,
+            };
+          }
         }
       }
     } catch (error) {
@@ -2811,7 +2817,7 @@ export class GeminiClient {
         addUserPromptAttributes(
           this.config,
           interactionSpan,
-          preInjectionPromptText ?? partToString(request),
+          preHookUserPromptText ?? partToString(request),
         );
       }
     }
@@ -2868,7 +2874,7 @@ export class GeminiClient {
             .getMemoryManager()
             .recall(
               this.config.getProjectRoot(),
-              preInjectionPromptText ?? partToString(request),
+              preHookUserPromptText ?? partToString(request),
               {
                 config: this.config,
                 excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
@@ -2940,16 +2946,15 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
-          // Only pass the payload when a hook actually injected; omitting
-          // the third argument keeps existing two-arg spies/call sites
-          // exact (passing `undefined` would still count as a third arg).
-          const recordingService = this.config.getChatRecordingService();
-          if (recordingService && preInjectionPromptText !== undefined) {
-            recordingService.recordUserMessage(request, goalPermit, {
-              displayText: preInjectionPromptText,
-            });
-          } else if (recordingService) {
-            recordingService.recordUserMessage(request, goalPermit);
+          const recorder = this.config.getChatRecordingService();
+          if (userPromptRecordPayload) {
+            recorder?.recordUserMessage(
+              request,
+              goalPermit,
+              userPromptRecordPayload,
+            );
+          } else {
+            recorder?.recordUserMessage(request, goalPermit);
           }
         }
       }

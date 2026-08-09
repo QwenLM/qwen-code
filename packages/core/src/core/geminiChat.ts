@@ -835,6 +835,27 @@ function getRecoveryContinuationSuffix(
   return continuationText;
 }
 
+/**
+ * Join already-delivered text to the continuation that resumes it, dropping
+ * any tail the model replayed.
+ *
+ * The single definition of "merged turn text" for the transport-continuation
+ * path. Both the durable JSONL record and in-memory history are built from one
+ * call to this (see `processStreamResponse`), so the two storage layers cannot
+ * drift apart if the dedup rule ever changes — the same reason the
+ * `willPersistToHistory` gate is a shared binding rather than two copies of
+ * one expression.
+ */
+function mergeDeliveredPrefix(
+  deliveredText: string,
+  continuationText: string,
+): string {
+  return (
+    deliveredText +
+    getRecoveryContinuationSuffix(deliveredText, continuationText)
+  );
+}
+
 function isPlainTextPart(part: Part | undefined): part is Part & {
   text: string;
 } {
@@ -2761,6 +2782,12 @@ export class GeminiChat {
               prompt_id,
               requestOverrides,
               turnGoalContext,
+              // Captured by value, so the attempt records exactly the prefix
+              // `buildAttemptContents()` just asked the model to resume from,
+              // even if a later branch resets the continuation.
+              transportContinuationPrefix.length > 0
+                ? transportContinuationPrefix
+                : undefined,
             );
 
             lastFinishReason = undefined;
@@ -2789,10 +2816,13 @@ export class GeminiChat {
             }
 
             lastError = null;
-            if (transportContinuationPrefix.length > 0) {
-              self.prependTextToLastModelTurn(transportContinuationPrefix);
-              transportContinuationPrefix = '';
-            }
+            // The merge itself now happens inside `processStreamResponse`,
+            // which folds the prefix into the parts before it writes either
+            // the JSONL record or the history turn (issue #8094). Merging
+            // again here would risk double-applying it: the dedup helper only
+            // strips a replayed prefix that clears its significance floor, so
+            // a short prefix would survive the second pass and be doubled.
+            transportContinuationPrefix = '';
             break;
           } catch (error) {
             lastError = error;
@@ -3856,6 +3886,7 @@ export class GeminiChat {
       retryErrorCodes?: readonly number[];
     },
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3932,7 +3963,12 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse, goalContext);
+    return this.processStreamResponse(
+      model,
+      streamResponse,
+      goalContext,
+      transportContinuationPrefix,
+    );
   }
 
   private async *makeFallbackStream(
@@ -4392,10 +4428,19 @@ export class GeminiChat {
     }
   }
 
+  /**
+   * @param transportContinuationPrefix - Text a previous attempt already
+   *   delivered before a socket cut, which this attempt was asked to resume
+   *   from (issue #7832). On success it is folded into the response parts
+   *   before either durable write, so the JSONL transcript and in-memory
+   *   history carry the same merged turn (issue #8094). Undefined on every
+   *   non-continuation send.
+   */
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4846,6 +4891,62 @@ export class GeminiChat {
       streamError === null ||
       (hasToolCall &&
         (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    // Transport-continuation merge (issue #8094). `allModelParts` is
+    // per-attempt, so a continuation's parts carry the resumed remainder only.
+    // Fold the already-delivered prefix back in HERE — into the parts
+    // themselves, before either durable write — so the JSONL record below and
+    // the `this.history.push` further down are derived from the same data and
+    // cannot disagree. Otherwise `--resume` rehydrates a turn that starts
+    // mid-sentence while the live session shows a coherent answer.
+    //
+    // Merging in one place is load-bearing, not tidiness:
+    //   - Computing the record's text and history's text from separate
+    //     expressions lets them drift. They already would: `contentText` is
+    //     trimmed (see its definition above) while the pushed parts are raw,
+    //     so deduping the record against the trimmed text fuses words when the
+    //     remainder opens with whitespace ("The result is" + " 42." →
+    //     "The result is42.").
+    //   - Writing them at different times opens a window. The record is
+    //     appended below, the history push happens after it, and a
+    //     `deferredFinishReason` chunk is yielded after that — a suspension
+    //     point. A consumer abandoning iteration there (an abort inside
+    //     `Turn.run`) would strand a merged record against a remainder-only
+    //     history, and the JSONL is append-only so nothing reconciles it.
+    //
+    // Placed after the stream-validation throws above so an empty continuation
+    // still fails validation on its own merits rather than being masked by the
+    // prefix.
+    //
+    // Success only. On `streamError !== null` the parts must keep matching the
+    // remainder-only partial that survives in history (the
+    // `pendingPartialAssistantRecord` path below) — the prefix belongs to an
+    // attempt that did not survive, and a fresh-restart retry discards it via
+    // `resetTransportContinuation`.
+    if (streamError === null && transportContinuationPrefix) {
+      const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
+      if (textIndex < 0) {
+        // Continuation returned no text of its own (e.g. only a functionCall).
+        // `thoughtContentPart` is prepended separately at the push below, so
+        // index 0 here is already "after any leading thought part".
+        consolidatedHistoryParts.unshift({ text: transportContinuationPrefix });
+      } else {
+        const remainderPart = consolidatedHistoryParts[textIndex] as Part & {
+          text: string;
+        };
+        consolidatedHistoryParts[textIndex] = {
+          ...remainderPart,
+          text: mergeDeliveredPrefix(
+            transportContinuationPrefix,
+            remainderPart.text,
+          ),
+        };
+      }
+      contentText = consolidatedHistoryParts
+        .filter((part) => part.text)
+        .map((part) => part.text)
+        .join('')
+        .trim();
+    }
     if (
       willPersistToHistory &&
       (thoughtContentPart || contentText || hasToolCall || usageMetadata)
@@ -4966,53 +5067,6 @@ export class GeminiChat {
         usageMetadata,
       } as GenerateContentResponse;
     }
-  }
-
-  /**
-   * Prepend already-delivered text to the trailing model turn.
-   *
-   * Used by the transport-continuation path (issue #7832): after a socket cut
-   * mid-response, the caller has seen text that `processStreamResponse`
-   * deliberately did not persist, and the continuation attempt's own turn
-   * carries only the resumed remainder. Without this, durable history would
-   * hold an answer that starts mid-sentence — visibly wrong on `/compress`,
-   * `--resume`, and every later turn's context.
-   *
-   * The delivered text is merged into the turn's first plain-text part (kept
-   * after any leading thought part, matching the
-   * `[thoughtPart?, ...text]` shape `processStreamResponse` produces), or
-   * inserted as a new part when the continuation returned no text of its own.
-   * Overlap is deduped by the same helper the output-recovery merge uses, so a
-   * model that replays part of its previous tail does not double it.
-   */
-  private prependTextToLastModelTurn(deliveredText: string): void {
-    if (deliveredText.length === 0) return;
-    const lastEntry = this.history.at(-1);
-    if (lastEntry?.role !== 'model') {
-      debugLogger.warn(
-        '[TRANSPORT_CONTINUATION] Trailing entry is not a model turn; ' +
-          'dropping the delivered-text merge.',
-        { role: lastEntry?.role ?? 'undefined' },
-      );
-      return;
-    }
-    const parts = [...(lastEntry.parts ?? [])];
-    const textIndex = parts.findIndex(isPlainTextPart);
-    if (textIndex < 0) {
-      const insertAt = parts.findIndex((part) => !part.thought);
-      parts.splice(insertAt < 0 ? parts.length : insertAt, 0, {
-        text: deliveredText,
-      });
-    } else {
-      const continuationPart = parts[textIndex] as Part & { text: string };
-      parts[textIndex] = {
-        ...continuationPart,
-        text:
-          deliveredText +
-          getRecoveryContinuationSuffix(deliveredText, continuationPart.text),
-      };
-    }
-    lastEntry.parts = parts;
   }
 
   /**

@@ -13008,6 +13008,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(
       (waiting.confirmationDetails as { prompt: string }).prompt,
     ).toContain('confirm deploy 38111');
+    expect(
+      (
+        waiting.confirmationDetails as {
+          renderPromptAsPlainText?: boolean;
+        }
+      ).renderPromptAsPlainText,
+    ).toBe(true);
     // One open blocked_on_user span; the tool span stays open across the
     // bounce (it is NOT finalized until the confirmation resolves).
     const blocked = getBlockedSpans();
