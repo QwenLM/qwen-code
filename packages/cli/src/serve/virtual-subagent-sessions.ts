@@ -229,7 +229,7 @@ export function createVirtualSubagentSessionId(
   }
   const sessionId = `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
   if (sessionId.length > MAX_VIRTUAL_SESSION_ID_LENGTH) {
-    throw new Error('Virtual subagent session ids require valid id parts');
+    throw new Error('Virtual subagent session id exceeds 2000 characters');
   }
   return sessionId;
 }
@@ -245,13 +245,17 @@ export function parseVirtualSubagentSessionId(
   }
   const parts = sessionId.slice(PREFIX.length).split('.');
   if (parts.length !== 2) return undefined;
-  const parentSessionId = decodePart(parts[0]!);
-  const agentId = decodePart(parts[1]!);
+  const parentPart = parts[0]!;
+  const agentPart = parts[1]!;
+  const parentSessionId = decodePart(parentPart);
+  const agentId = decodePart(agentPart);
   if (
     !parentSessionId ||
     !agentId ||
     !isValidVirtualParentSessionId(parentSessionId) ||
-    !isValidVirtualAgentId(agentId)
+    !isValidVirtualAgentId(agentId) ||
+    encodePart(parentSessionId) !== parentPart ||
+    encodePart(agentId) !== agentPart
   ) {
     return undefined;
   }
