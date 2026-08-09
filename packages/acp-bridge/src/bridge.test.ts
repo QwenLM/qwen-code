@@ -6005,6 +6005,224 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('reserves a caller-supplied id against concurrent restores until spawn settles', async () => {
+    const requestedSpawn = deferred<NewSessionResponse>();
+    const handle = makeChannel({
+      newSessionImpl: (params) => {
+        const requestedSessionId =
+          typeof params._meta === 'object' && params._meta !== null
+            ? (params._meta as Record<string, unknown>)[
+                REQUESTED_SESSION_ID_META_KEY
+              ]
+            : undefined;
+        return requestedSessionId === 'registration-race'
+          ? requestedSpawn.promise
+          : {
+              sessionId: `sess:${params.cwd}#${handle.agent.newSessionCalls.length}`,
+            };
+      },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const spawning = bridge
+        .spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sessionId: 'registration-race',
+        })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => {
+        expect(handle.agent.newSessionCalls).toHaveLength(2);
+      });
+
+      const racedRestore = await bridge
+        .loadSession({
+          sessionId: 'registration-race',
+          workspaceCwd: WS_A,
+        })
+        .catch((error: unknown) => error);
+      expect(racedRestore).toBeInstanceOf(RestoreInProgressError);
+      expect(racedRestore).toMatchObject({
+        reason: 'restore_in_progress',
+        activeAction: 'spawn',
+        requestedAction: 'load',
+      });
+      const racedSpawn = await bridge
+        .spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sessionId: 'registration-race',
+        })
+        .catch((error: unknown) => error);
+      expect(racedSpawn).toMatchObject({
+        reason: 'restore_in_progress',
+        activeAction: 'spawn',
+        requestedAction: 'spawn',
+      });
+      expect(handle.agent.newSessionCalls).toHaveLength(2);
+
+      requestedSpawn.reject(new Error('spawn failed'));
+      await expect(spawning).resolves.toMatchObject({ code: -32603 });
+
+      const retried = await bridge.loadSession({
+        sessionId: 'registration-race',
+        workspaceCwd: WS_A,
+      });
+      expect(retried.sessionId).toBe('registration-race');
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('hands a settled abandoned id to a caller-supplied spawn before newSession events', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      newSessionImpl: async (params) => {
+        const requestedSessionId =
+          typeof params._meta === 'object' && params._meta !== null
+            ? (params._meta as Record<string, unknown>)[
+                REQUESTED_SESSION_ID_META_KEY
+              ]
+            : undefined;
+        if (requestedSessionId === 'settled-retry') {
+          await handle.agentConnection.extNotification(
+            'qwen/notify/session/mcp-budget-event',
+            {
+              v: 1,
+              sessionId: requestedSessionId,
+              kind: 'budget_warning',
+              liveCount: 4,
+              reservedCount: 4,
+              budget: 4,
+              thresholdRatio: 0.75,
+              mode: 'warn',
+            },
+          );
+          return { sessionId: requestedSessionId };
+        }
+        return {
+          sessionId: `sess:${params.cwd}#${handle.agent.newSessionCalls.length}`,
+        };
+      },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'settled-retry', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const retried = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        sessionId: 'settled-retry',
+      });
+      expect(retried.sessionId).toBe('settled-retry');
+
+      const events = bridge
+        .subscribeEvents(retried.sessionId, { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      await expect(events.next()).resolves.toMatchObject({
+        value: { type: 'mcp_budget_warning' },
+      });
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('purges requested-id startup events when the child registers another id', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      newSessionImpl: async (params) => {
+        const requestedSessionId =
+          typeof params._meta === 'object' && params._meta !== null
+            ? (params._meta as Record<string, unknown>)[
+                REQUESTED_SESSION_ID_META_KEY
+              ]
+            : undefined;
+        if (requestedSessionId === 'not-reclaimed') {
+          await handle.agentConnection.extNotification(
+            'qwen/notify/session/mcp-budget-event',
+            {
+              v: 1,
+              sessionId: requestedSessionId,
+              kind: 'budget_warning',
+              liveCount: 4,
+              reservedCount: 4,
+              budget: 4,
+              thresholdRatio: 0.75,
+              mode: 'warn',
+            },
+          );
+          return { sessionId: 'different-child-id' };
+        }
+        return {
+          sessionId: `sess:${params.cwd}#${handle.agent.newSessionCalls.length}`,
+        };
+      },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({ sessionId: 'not-reclaimed', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const different = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        sessionId: 'not-reclaimed',
+      });
+      expect(different.sessionId).toBe('different-child-id');
+
+      const loaded = await bridge.loadSession({
+        sessionId: 'not-reclaimed',
+        workspaceCwd: WS_A,
+      });
+      const events = bridge
+        .subscribeEvents(loaded.sessionId, { lastEventId: 0 })
+        [Symbol.asyncIterator]();
+      await expect(events.next()).resolves.toMatchObject({
+        value: { type: 'replay_complete' },
+      });
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('never closes or fences an id a live session has reclaimed', async () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();
@@ -17327,23 +17545,29 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('fails fresh spawns closed when freshSessionAdmission rejects', async () => {
+    it('fails fresh spawns closed and releases the requested id when admission rejects', async () => {
+      let rejectAdmission = true;
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
         sessionScope: 'thread',
         freshSessionAdmission: () => {
-          throw new TotalSessionLimitExceededError(1);
+          if (rejectAdmission) throw new TotalSessionLimitExceededError(1);
+          return { release() {} };
         },
       });
 
-      await expect(
-        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
-      ).rejects.toMatchObject({
+      const request = {
+        workspaceCwd: WS_A,
+        sessionId: 'admission-retry',
+      };
+      await expect(bridge.spawnOrAttach(request)).rejects.toMatchObject({
         name: 'TotalSessionLimitExceededError',
         limit: 1,
         scope: 'total',
       });
       expect(bridge.sessionCount).toBe(0);
+      rejectAdmission = false;
+      await expect(bridge.spawnOrAttach(request)).resolves.toBeDefined();
       await bridge.shutdown();
     });
 

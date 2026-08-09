@@ -134,23 +134,22 @@ export type RestoreInProgressReason =
 export const RESTORE_IN_PROGRESS_RETRY_AFTER_SECONDS = 5;
 
 /**
- * The operation the caller actually issued. `spawn` is a fresh `POST /session`
- * carrying a caller-supplied id that a restore already owns — it must not be
- * reported as a `load` or `resume` the caller never asked for, or logs name
- * the wrong operation and the retry instruction points at the wrong endpoint.
+ * A session-id registration operation. `requestedAction` is the caller's
+ * operation; `activeAction` is the operation that already owns the id.
+ * `spawn` means a fresh `POST /session` carrying a caller-supplied id.
  */
 export type RestoreBlockedAction = 'load' | 'resume' | 'spawn';
 
 export class RestoreInProgressError extends Error {
   readonly sessionId: string;
-  readonly activeAction: 'load' | 'resume';
+  readonly activeAction: RestoreBlockedAction;
   readonly requestedAction: RestoreBlockedAction;
   readonly reason: RestoreInProgressReason;
   readonly retryAfterSeconds: number;
 
   constructor(
     sessionId: string,
-    activeAction: 'load' | 'resume',
+    activeAction: RestoreBlockedAction,
     requestedAction: RestoreBlockedAction,
     opts?: {
       reason?: RestoreInProgressReason;
@@ -160,10 +159,16 @@ export class RestoreInProgressError extends Error {
     const reason = opts?.reason ?? 'restore_in_progress';
     const retryTarget =
       requestedAction === 'spawn' ? 'the spawn' : `session/${requestedAction}`;
+    const activeTarget =
+      activeAction === 'spawn'
+        ? 'a caller-supplied-id spawn'
+        : `session/${activeAction}`;
     super(
       reason === 'awaiting_abandoned_cleanup'
-        ? `Session "${sessionId}" timed out during session/${activeAction} and its abandoned restore has not settled yet; retry ${retryTarget} once cleanup completes`
-        : `Session "${sessionId}" is already being restored via session/${activeAction}; retry ${retryTarget} after it completes`,
+        ? `Session "${sessionId}" timed out during ${activeTarget} and its abandoned restore has not settled yet; retry ${retryTarget} once cleanup completes`
+        : activeAction === 'spawn'
+          ? `Session "${sessionId}" is already being registered by ${activeTarget}; retry ${retryTarget} after it completes`
+          : `Session "${sessionId}" is already being restored via ${activeTarget}; retry ${retryTarget} after it completes`,
     );
     this.name = 'RestoreInProgressError';
     this.sessionId = sessionId;

@@ -2574,6 +2574,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // simultaneous calls don't collide while still being awaitable from
   // `shutdown()`.
   const inFlightSpawns = new Map<string, Promise<BridgeSession>>();
+  // Reserves caller-supplied ids before `doSpawn` reaches its first await.
+  // Restore admission checks the same set, closing the opposite race from
+  // `inFlightRestores`: whichever operation reserves the id first owns its
+  // registration window.
+  const inFlightRequestedSessionSpawns = new Map<string, symbol>();
 
   interface InFlightRestore {
     action: 'load' | 'resume';
@@ -3212,6 +3217,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ensureChannel,
     );
     ci.sessionSpawnsInFlight++;
+    if (requestedSessionId !== undefined) {
+      // A caller-supplied id can legitimately reuse an id after an abandoned
+      // restore settles. Transfer ownership before `newSession`, not at
+      // registration, so the child's startup notifications are buffered even
+      // while the ordinary post-close tombstone is still live.
+      ci.client.markSessionRegistrationInFlight(requestedSessionId);
+    }
     let sessionRegistered = false;
     let sessionRemovedDuringInitialization = false;
     let initializedSessionId: string | undefined;
@@ -3500,6 +3512,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(entry.branch ? { branch: entry.branch } : {}),
       };
     } finally {
+      if (requestedSessionId !== undefined) {
+        ci.client.clearSessionRegistrationInFlight(requestedSessionId);
+        if (
+          initializedSessionId !== requestedSessionId &&
+          !byId.has(requestedSessionId)
+        ) {
+          // The child rejected the attempt or returned another id. Purge any
+          // startup frames buffered for the requested id and restore the
+          // ordinary post-close tombstone.
+          ci.client.markSessionClosed(requestedSessionId);
+        }
+      }
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
       if (!sessionRegistered) {
         await reapPendingEmptyChannel(ci);
@@ -4535,9 +4559,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // A legitimate owner supersedes any abandoned-restore fence on this id.
     // The fence has no TTL by design, and it silently drops session updates,
     // guardrail events, and notifications — so leaving it standing would hand
-    // this session a working id that never emits anything. `markRestoreInFlight`
-    // covers the re-restore path; this covers registration from any other
-    // route (fresh spawn with a caller-supplied id, branch, fork).
+    // this session a working id that never emits anything. Restore and
+    // caller-supplied spawn paths transfer ownership before their ACP call;
+    // this remains a defense for routes that only learn the id from the child.
     ci.client.clearAbandonedRestoreFence(entry.sessionId);
     touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
@@ -5087,6 +5111,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { historyAnchorRecordId }
           : {}),
       };
+    }
+
+    if (inFlightRequestedSessionSpawns.has(req.sessionId)) {
+      throw new RestoreInProgressError(req.sessionId, 'spawn', action);
     }
 
     const inFlight = inFlightRestores.get(req.sessionId);
@@ -6311,9 +6339,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : undefined,
           );
         }
+        if (inFlightRequestedSessionSpawns.has(req.sessionId)) {
+          throw new RestoreInProgressError(req.sessionId, 'spawn', 'spawn');
+        }
       }
       // Cap check: count both registered sessions and in-flight spawns
-      // (a fresh-spawn races that's about to register hasn't hit
+      // (a fresh-spawn race that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches
       // returned above bypass this — only NEW children are gated.
       assertFreshSessionsAvailable();
@@ -6324,10 +6355,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new SessionLimitExceededError(maxSessions);
       }
 
-      const admission = reserveFreshSession({
-        operation: 'spawn',
-        workspaceCwd: workspaceKey,
-      });
+      const requestedSessionRegistrationOwner =
+        req.sessionId !== undefined ? Symbol(req.sessionId) : undefined;
+      if (
+        req.sessionId !== undefined &&
+        requestedSessionRegistrationOwner !== undefined
+      ) {
+        inFlightRequestedSessionSpawns.set(
+          req.sessionId,
+          requestedSessionRegistrationOwner,
+        );
+      }
+      const releaseRequestedSessionRegistration = () => {
+        if (
+          req.sessionId !== undefined &&
+          requestedSessionRegistrationOwner !== undefined &&
+          inFlightRequestedSessionSpawns.get(req.sessionId) ===
+            requestedSessionRegistrationOwner
+        ) {
+          inFlightRequestedSessionSpawns.delete(req.sessionId);
+        }
+      };
+      let admission: BridgeFreshSessionReservation | undefined;
+      try {
+        admission = reserveFreshSession({
+          operation: 'spawn',
+          workspaceCwd: workspaceKey,
+        });
+      } catch (error) {
+        releaseRequestedSessionRegistration();
+        throw error;
+      }
       let admissionReleased = false;
       const releaseAdmissionOnce = () => {
         if (admissionReleased) return;
@@ -6373,6 +6431,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // poison every future coalescing-path call for this
         // workspace (single-scope) or grow unbounded (thread-scope).
         inFlightSpawns.delete(tracker);
+        releaseRequestedSessionRegistration();
       }
     },
 

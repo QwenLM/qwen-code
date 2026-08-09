@@ -1143,22 +1143,15 @@ export class BridgeClient implements Client {
    */
   private readonly tombstonedSessionIds = new Map<string, number>();
 
-  /**
-   * Allow-list of sessionIds currently being restored via
-   * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time events for a
-   * previously-closed id flow through to the future
-   * `createSessionEntry -> drainEarlyEvents` call.
-   *
-   * Without this, the tombstone set before a future `load` can clear
-   * it via `drainEarlyEvents` would silently drop legitimate
-   * restore-time events (e.g. MCP discovery budget events firing
-   * during the ACP call window).
-   *
-   * Bridge factory enters the set before awaiting the ACP restore
-   * call and exits on settle (success or failure).
-   */
+  /** Restore ownership for `sessionUpdate` and artifact demultiplexing. */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Registrations allowed to buffer early extended notifications through an
+   * ordinary close tombstone. This includes restores and caller-supplied-id
+   * spawns, and lasts only until their ACP registration attempt settles.
+   */
+  private readonly inFlightSessionRegistrationIds = new Set<string>();
 
   /**
    * Restore ids whose caller timed out while the non-cancellable ACP request
@@ -2415,16 +2408,15 @@ export class BridgeClient implements Client {
     // Drop frames for ids the bridge has already marked closed/killed.
     // Sweep + check before any other work so a malicious / buggy child
     // can't keep appending post-mortem frames against an old id. Live
-    // ids that re-register (load/resume) clear their tombstone in
-    // `drainEarlyEvents`.
+    // ids that re-register (load/resume or a caller-supplied-id spawn) clear
+    // their tombstone in `drainEarlyEvents`.
     //
-    // Skip the tombstone check for ids currently being restored so a
-    // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time early events.
+    // Skip the tombstone check for ids currently being registered so a
+    // legitimate owner can receive its ACP-call-time extended notifications.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
-      !this.inFlightRestoreIds.has(sessionId)
+      !this.inFlightSessionRegistrationIds.has(sessionId)
     ) {
       writeStderrLine(
         `qwen serve: dropping early extNotification ` +
@@ -2506,11 +2498,19 @@ export class BridgeClient implements Client {
    * failed restore doesn't leave a dangling allow-list entry.
    */
   markRestoreInFlight(sessionId: string): void {
-    // A new explicit restore supersedes an older abandoned attempt for the
-    // same persisted id. Until this point, keep the abandoned fence for the
-    // lifetime of the channel rather than falling back to the short tombstone.
-    this.clearAbandonedRestoreFence(sessionId);
+    this.markSessionRegistrationInFlight(sessionId);
     this.inFlightRestoreIds.add(sessionId);
+  }
+
+  /**
+   * Transfer an id from closed/abandoned ownership to a new registration
+   * attempt before its ACP call starts. The in-flight allow-list is what lets
+   * legitimate early notifications bypass the ordinary close tombstone until
+   * `createSessionEntry` can drain them.
+   */
+  markSessionRegistrationInFlight(sessionId: string): void {
+    this.clearAbandonedRestoreFence(sessionId);
+    this.inFlightSessionRegistrationIds.add(sessionId);
   }
 
   /**
@@ -2534,10 +2534,16 @@ export class BridgeClient implements Client {
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+    this.clearSessionRegistrationInFlight(sessionId);
+  }
+
+  clearSessionRegistrationInFlight(sessionId: string): void {
+    this.inFlightSessionRegistrationIds.delete(sessionId);
   }
 
   markRestoreAbandoned(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+    this.inFlightSessionRegistrationIds.delete(sessionId);
     this.abandonedRestoreIds.add(sessionId);
     this.earlyEvents.delete(sessionId);
   }

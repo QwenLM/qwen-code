@@ -100,7 +100,7 @@ When `--max-total-sessions` rejects a fresh session, the same response shape is 
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
-`RestoreInProgressError` — emitted by `POST /session/:id/load` and `POST /session/:id/resume`, and by `POST /session` when a caller-supplied `sessionId` collides with a restore that already owns it — returns `409` and:
+`RestoreInProgressError` — emitted by `POST /session/:id/load`, `POST /session/:id/resume`, or a caller-supplied-id `POST /session` when another registration already owns that id — returns `409` and:
 
 ```json
 {
@@ -114,16 +114,16 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 }
 ```
 
-Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry. Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring while the restore is active.
+Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa), or when a caller-supplied-id spawn races either restore direction. Wait at least `Retry-After` seconds and retry. Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring while the restore is active.
 
 `reason` distinguishes two fences that share this code, and the `Retry-After` header tracks it:
 
-| `reason`                     | Meaning                                                                                                          | `Retry-After`                                            |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `restore_in_progress`        | An ordinary restore is running.                                                                                  | `5` (matching `session_limit_exceeded`)                  |
-| `awaiting_abandoned_cleanup` | The public caller already got a `504` and the non-cancellable ACP request plus its cleanup have not settled yet. | the effective restore budget in seconds, capped at `120` |
+| `reason`                     | Meaning                                                                                                          | `Retry-After`                                                 |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `restore_in_progress`        | An ordinary restore is running.                                                                                  | `5` (matching `session_limit_exceeded`)                       |
+| `awaiting_abandoned_cleanup` | The public caller already got a `504` and the non-cancellable ACP request plus its cleanup have not settled yet. | the effective restore budget in seconds, clamped to `5`–`120` |
 
-The public restore request is governed by `limits.sessionRestoreTimeoutMs` (default 60s). After a `504` the id stays fenced until the late ACP request and cleanup settle, so a client that keeps retrying at the ordinary 5-second cadence would spin against a 409 it cannot clear — honor the longer hint that comes with `awaiting_abandoned_cleanup`.
+The public restore request is governed by `limits.sessionRestoreTimeoutMs` (default 60s). After a `504` the id stays fenced until the late ACP request and cleanup settle, so a client that keeps retrying at the ordinary 5-second cadence would spin against a 409 it cannot clear — honor the budget-derived hint that comes with `awaiting_abandoned_cleanup`.
 
 `SessionWorkspaceConflictError` — emitted by `POST /session/:id/load` and `POST /session/:id/resume` when the requested `cwd` targets one registered workspace but the same session id is already live or being restored by another runtime — returns `409` with:
 
@@ -2055,7 +2055,7 @@ Response:
 
 **History replay over SSE.** While `loadSession` is in flight on the agent side, the agent may emit `session_update` notifications for persisted turns, or return bulk replay updates in the response metadata. The daemon seeds those events into the session's bounded replay snapshot window before the route response returns. For live sessions, `POST /session/:id/load` only promises that bounded window (`compactedReplay`, `liveJournal`, `lastEventId`), not the full transcript. The window is byte-capped by `--compacted-replay-max-bytes` (default 4 MiB, maximum 256 MiB); if older replay entries were dropped, `compactedReplay[0]` is an id-less `history_truncated` marker. The in-flight `liveJournal` is separately capped by `--max-journal-events` (default 10 000) and `--max-journal-bytes` (default 8 MiB); when exceeded, the oldest journal entries are dropped and a `history_truncated` marker with `scope: 'live_journal'` is prepended. Clients should render that marker as status and continue applying retained events. Full persisted transcript access is exposed separately through `GET /session/:id/transcript`.
 
-The replay-window byte caps apply after the child has reconstructed the persisted transcript; they do not cap the on-disk JSONL read. A restore that exceeds the daemon budget returns `504` with a `Retry-After` derived from the restore budget (clamped to 5-120s) and `{code: "session_restore_timeout", errorKind: "restore_timeout", retryable: true, sessionId, action, timeoutMs}`. The daemon fences the still-running ACP request and cleans up any late session instead of registering it. A retry for the same id returns `409 restore_in_progress` with `reason: "awaiting_abandoned_cleanup"` and a `Retry-After` of the restore budget (capped at 120s) until that cleanup settles. If late cleanup is uncertain, or the abandoned restore has still not settled a full restore budget after its deadline, new sessions on that workspace return `503 acp_channel_unavailable` with `reason: "restore_cleanup_failed"` or `"restore_settlement_overdue"`; already-live sessions remain usable while the channel drains.
+The replay-window byte caps apply after the child has reconstructed the persisted transcript; they do not cap the on-disk JSONL read. A restore that exceeds the daemon budget returns `504` with a `Retry-After` derived from the restore budget (clamped to 5-120s) and `{code: "session_restore_timeout", errorKind: "restore_timeout", retryable: true, sessionId, action, timeoutMs}`. The daemon fences the still-running ACP request and cleans up any late session instead of registering it. A retry for the same id returns `409 restore_in_progress` with `reason: "awaiting_abandoned_cleanup"` and a `Retry-After` of the restore budget (clamped to 5-120s) until that cleanup settles. If late cleanup is uncertain, or the abandoned restore has still not settled a full restore budget after its deadline, new sessions on that workspace return `503 acp_channel_unavailable` with `reason: "restore_cleanup_failed"` or `"restore_settlement_overdue"`; already-live sessions remain usable while the channel drains.
 
 **Errors:**
 

@@ -38,6 +38,7 @@ describe('toRpcError', () => {
         errorKind: 'restore_timeout',
         httpStatus: 504,
         retryable: true,
+        retryAfterSeconds: 60,
         sessionId: 'persisted-1',
         action: 'resume',
         timeoutMs: 60_000,

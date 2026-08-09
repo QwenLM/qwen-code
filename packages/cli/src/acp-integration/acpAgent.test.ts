@@ -14198,6 +14198,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExtractDaemonTraceContext.mockReturnValue(undefined);
     vi.mocked(Storage.getRuntimeBaseDir).mockReturnValue(
       '/tmp/qwen-runtime-test',
     );
@@ -14511,6 +14512,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         } else {
           await agent.unstable_resumeSession(request);
         }
+        expect(mockWithDaemonSpan).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_restore',
+          expect.objectContaining({
+            'qwen-code.daemon.session_restore.action': action,
+          }),
+          expect.any(Function),
+          {},
+        );
         mockSessionStartSpan.setAttribute.mockClear();
 
         if (action === 'load') {

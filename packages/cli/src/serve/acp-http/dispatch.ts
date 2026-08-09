@@ -48,6 +48,7 @@ import {
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
@@ -714,6 +715,7 @@ export function toRpcError(err: unknown): {
           errorKind: 'restore_timeout',
           httpStatus: 504,
           retryable: true,
+          retryAfterSeconds: restoreRetryAfterSeconds(restoreError.timeoutMs),
           sessionId: restoreError.sessionId,
           action: restoreError.action,
           timeoutMs: restoreError.timeoutMs,
