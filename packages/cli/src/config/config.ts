@@ -73,7 +73,6 @@ import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
 import { isValidSessionId } from './session-id.js';
-import { agentViewCommand } from '../commands/agent-view.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -228,7 +227,6 @@ export interface CliArgs {
   jsonFile?: string | undefined;
   jsonSchema?: string | undefined;
   inputFile?: string | undefined;
-  background?: boolean | undefined;
 }
 
 /**
@@ -686,11 +684,6 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Execute the provided prompt and continue in interactive mode',
         })
-        .option('background', {
-          alias: 'bg',
-          type: 'boolean',
-          description: 'Start a new Agent View background session',
-        })
         .option('system-prompt', {
           type: 'string',
           description:
@@ -987,28 +980,6 @@ export async function parseArguments(): Promise<CliArgs> {
             ? query.length > 0
             : !!query;
 
-          if (argv['background'] && !hasPositionalQuery) {
-            return 'Cannot use --bg/--background without a positional prompt';
-          }
-          if (argv['background'] && argv['prompt']) {
-            return 'Cannot use --bg/--background with --prompt (-p)';
-          }
-          if (argv['background'] && argv['promptInteractive']) {
-            return 'Cannot use --bg/--background with --prompt-interactive (-i)';
-          }
-          if (argv['background'] && (argv['acp'] || argv['experimentalAcp'])) {
-            return 'Cannot use --bg/--background with ACP mode';
-          }
-          if (argv['background'] && argv['inputFormat'] === 'stream-json') {
-            return 'Cannot use --bg/--background with --input-format stream-json';
-          }
-          if (
-            argv['background'] &&
-            (argv['outputFormat'] === OutputFormat.JSON ||
-              argv['outputFormat'] === OutputFormat.STREAM_JSON)
-          ) {
-            return 'Cannot use --bg/--background with JSON output';
-          }
           if (argv['prompt'] && hasPositionalQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
           }
@@ -1120,8 +1091,6 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
-    // Register Agent View command surface
-    .command(agentViewCommand)
     // Register update command
     .command(updateCommand);
 
@@ -1149,7 +1118,6 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
-      result._[0] === 'agent-view' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1169,7 +1137,7 @@ export async function parseArguments(): Promise<CliArgs> {
     : queryArg;
 
   // Route positional args: explicit -i flag -> interactive; else -> one-shot (even for @commands)
-  if (q && !result['prompt'] && !result['background']) {
+  if (q && !result['prompt']) {
     const hasExplicitInteractive =
       result['promptInteractive'] === '' || !!result['promptInteractive'];
     if (hasExplicitInteractive) {
@@ -1585,14 +1553,10 @@ export async function loadCliConfig(
   /**
    * Runtime-only host policy. This is deliberately not sourced from argv,
    * settings, or the environment: only an embedding host that owns the Config
-   * construction may install these executor-boundary restrictions.
+   * construction may install the executor-boundary callback.
    */
   hostPolicy?: {
-    exactToolInventory?: readonly string[];
     toolInvocationGuard?: ToolInvocationGuard;
-    requireRipgrep?: boolean;
-    requireBuiltinRipgrep?: boolean;
-    strictRipgrepIgnorePolicy?: boolean;
   },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
@@ -2181,11 +2145,7 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
-    exactToolInventory: hostPolicy?.exactToolInventory,
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
-    requireRipgrep: hostPolicy?.requireRipgrep,
-    requireBuiltinRipgrep: hostPolicy?.requireBuiltinRipgrep,
-    strictRipgrepIgnorePolicy: hostPolicy?.strictRipgrepIgnorePolicy,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);

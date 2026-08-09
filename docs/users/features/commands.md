@@ -141,13 +141,13 @@ These commands invoke bundled skills that provide specialized workflows.
 
 | Command       | Description                                                 | Usage Examples                                                            |
 | ------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `/coordinate` | Coordinate read-only investigators under one Qwen Leader    | `/coordinate compare the retry paths and implement the safest fix`        |
 | `/review`     | Multi-agent code review (12 parallel agents at high effort) | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
+| `/coordinate` | Coordinate up to three Qwen teammates with Agent Team       | `/coordinate investigate and fix the authentication regression`           |
 | `/loop`       | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                                                |
 | `/simplify`   | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`                             |
 | `/qc-helper`  | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`                                      |
 
-See [Multi-Agent Coordination](./multi-agent-coordination.md) and [Code Review](./code-review.md) for full workflow documentation.
+See [Code Review](./code-review.md) for full `/review` documentation.
 
 ### 1.6 Side Question (`/btw`)
 

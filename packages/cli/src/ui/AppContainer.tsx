@@ -63,8 +63,6 @@ import {
   ConditionalRulesRegistry,
   MCPDiscoveryState,
   ToolConfirmationOutcome,
-  type ToolConfirmationPayload,
-  type ToolCallConfirmationDetails,
   type WaitingToolCall,
   ToolNames,
   SendMessageType,
@@ -138,7 +136,6 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
-import type { AgentViewIdleGateState } from './commands/types.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
@@ -155,7 +152,6 @@ import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
@@ -243,19 +239,6 @@ import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
-import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
-import {
-  acknowledgeAgentViewWorkerControlEvents,
-  isAgentViewWorkerEnv,
-  readAgentViewWorkerControlEvents,
-  reportAgentViewWorkerState,
-  sendAgentViewWorkerEvent,
-} from '../agent-view/worker-sideband.js';
-import type {
-  AgentViewSessionState,
-  AgentViewWorkerControlEvent,
-  AgentViewWorkerAnswerOutcome,
-} from '../agent-view/protocol.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
@@ -314,287 +297,6 @@ function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
     (item) =>
       item.type === MessageType.COMPRESSION && item.compression.isPending,
   );
-}
-
-interface AgentViewStatusToolCall {
-  status: string;
-  request?: {
-    callId?: string;
-    name?: string;
-  };
-  liveOutput?: unknown;
-  confirmationDetails?: ToolCallConfirmationDetails;
-}
-
-export interface AgentViewWorkerUiStateReport {
-  sessionState: AgentViewSessionState;
-  summary?: string;
-  waitingFor?: string;
-  inputKind?: 'blocking' | 'soft';
-  callId?: string;
-  inputType?: 'tool_confirmation' | 'ask_user_question';
-  inputSummary?: string;
-  lastResult?: string;
-}
-
-export function getAgentViewWorkerStateForUi({
-  initError,
-  streamingState,
-  pendingToolCalls,
-  lastResult,
-}: {
-  initError: unknown;
-  streamingState: StreamingState;
-  pendingToolCalls?: AgentViewStatusToolCall[];
-  lastResult?: string;
-}): AgentViewWorkerUiStateReport {
-  if (initError) {
-    const summary =
-      initError instanceof Error ? initError.message : String(initError);
-    return { sessionState: 'failed', summary };
-  }
-
-  const toolCalls = pendingToolCalls ?? [];
-  const answerableToolCalls = getAgentViewAnswerableToolCalls(toolCalls);
-  const waitingTool = answerableToolCalls[0];
-  if (
-    streamingState === StreamingState.WaitingForConfirmation &&
-    waitingTool?.request.callId &&
-    answerableToolCalls.filter(
-      (toolCall) => toolCall.request.callId === waitingTool.request.callId,
-    ).length === 1
-  ) {
-    const details = waitingTool.confirmationDetails;
-    return {
-      sessionState: 'needs_input',
-      waitingFor: waitingTool.request.name,
-      inputKind: 'blocking',
-      callId: waitingTool.request.callId,
-      inputType:
-        details.type === 'ask_user_question'
-          ? 'ask_user_question'
-          : 'tool_confirmation',
-      inputSummary:
-        details.type === 'ask_user_question'
-          ? details.questions.map((question) => question.question).join(' ') ||
-            waitingTool.request.name ||
-            'User input required'
-          : details.title ||
-            waitingTool.request.name ||
-            'Tool confirmation required',
-      ...(lastResult ? { lastResult } : {}),
-    };
-  }
-
-  if (
-    streamingState === StreamingState.Responding ||
-    streamingState === StreamingState.WaitingForConfirmation
-  ) {
-    return {
-      sessionState: 'working',
-      ...(lastResult ? { lastResult } : {}),
-    };
-  }
-
-  if (lastResult && looksLikeUserQuestion(lastResult)) {
-    return {
-      sessionState: 'idle',
-      waitingFor: 'response',
-      inputKind: 'soft',
-      lastResult,
-    };
-  }
-
-  return {
-    sessionState: 'idle',
-    ...(lastResult ? { lastResult } : {}),
-  };
-}
-
-function looksLikeUserQuestion(text: string): boolean {
-  return /[?？]\s*$/.test(text.trim());
-}
-
-export function getLastAgentViewModelOutputLine(
-  items: readonly HistoryItemWithoutId[],
-): string | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (!item || (item.type !== 'gemini' && item.type !== 'gemini_content')) {
-      continue;
-    }
-    const lastLine = item.text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .at(-1);
-    if (lastLine) return lastLine;
-  }
-  return undefined;
-}
-
-export async function answerAgentViewPendingToolCall(
-  event: Extract<AgentViewWorkerControlEvent, { type: 'answer' }>,
-  pendingToolCalls: WaitingToolCall[],
-): Promise<boolean> {
-  const matchingToolCalls = pendingToolCalls.filter(
-    (call) =>
-      call.status === 'awaiting_approval' &&
-      call.request.callId === event.callId,
-  );
-  const toolCall = matchingToolCalls.length === 1 ? matchingToolCalls[0] : null;
-  if (!toolCall?.confirmationDetails?.onConfirm) {
-    return false;
-  }
-
-  const outcome = toToolConfirmationOutcome(event.outcome, event.text);
-  if (toolCall.confirmationDetails.type === 'ask_user_question') {
-    await toolCall.confirmationDetails.onConfirm(
-      outcome,
-      getAgentViewAnswerPayload(event),
-    );
-    return true;
-  }
-
-  await toolCall.confirmationDetails.onConfirm(outcome);
-  return true;
-}
-
-export function getAgentViewAnswerableToolCalls(
-  pendingToolCalls: readonly unknown[],
-): WaitingToolCall[] {
-  const answerable: WaitingToolCall[] = [];
-  for (const toolCall of pendingToolCalls) {
-    if (!isRecord(toolCall)) continue;
-    if (
-      toolCall['status'] === 'awaiting_approval' &&
-      isRecord(toolCall['confirmationDetails'])
-    ) {
-      answerable.push(toolCall as unknown as WaitingToolCall);
-      continue;
-    }
-
-    const pendingConfirmation = getNestedAgentViewPendingConfirmation(
-      toolCall['liveOutput'],
-    );
-    if (pendingConfirmation) {
-      answerable.push({
-        status: 'awaiting_approval',
-        request: isRecord(toolCall['request'])
-          ? {
-              callId:
-                typeof toolCall['request']['callId'] === 'string'
-                  ? toolCall['request']['callId']
-                  : '',
-              name:
-                typeof toolCall['request']['name'] === 'string'
-                  ? toolCall['request']['name']
-                  : 'Agent',
-            }
-          : { callId: '', name: 'Agent' },
-        confirmationDetails: pendingConfirmation,
-      } as unknown as WaitingToolCall);
-    }
-  }
-  return answerable;
-}
-
-export async function applyAgentViewWorkerControlEventForUi(
-  event: AgentViewWorkerControlEvent,
-  pendingToolCalls: readonly unknown[],
-  enqueuePrompt: (text: string, promptId?: string) => void,
-  stopCurrentTurn?: () => void,
-  activePromptId?: string,
-): Promise<void> {
-  if (event.type === 'prompt') {
-    enqueuePrompt(event.text, event.promptId);
-    return;
-  }
-
-  if (event.type === 'stop') {
-    stopCurrentTurn?.();
-    return;
-  }
-
-  if (event.type !== 'answer') {
-    return;
-  }
-
-  if (!activePromptId || event.promptId !== activePromptId) {
-    return;
-  }
-
-  await answerAgentViewPendingToolCall(
-    event,
-    getAgentViewAnswerableToolCalls(pendingToolCalls),
-  );
-}
-
-function getNestedAgentViewPendingConfirmation(
-  liveOutput: unknown,
-): ToolCallConfirmationDetails | undefined {
-  if (
-    !isRecord(liveOutput) ||
-    liveOutput['type'] !== 'task_execution' ||
-    !isRecord(liveOutput['pendingConfirmation'])
-  ) {
-    return undefined;
-  }
-  return liveOutput[
-    'pendingConfirmation'
-  ] as unknown as ToolCallConfirmationDetails;
-}
-
-function toToolConfirmationOutcome(
-  outcome: AgentViewWorkerAnswerOutcome | undefined,
-  text: string | undefined,
-): ToolConfirmationOutcome {
-  switch (outcome) {
-    case 'proceed_always':
-      return ToolConfirmationOutcome.ProceedAlways;
-    case 'proceed_always_project':
-      return ToolConfirmationOutcome.ProceedAlwaysProject;
-    case 'proceed_always_user':
-      return ToolConfirmationOutcome.ProceedAlwaysUser;
-    case 'modify_with_editor':
-      return ToolConfirmationOutcome.ModifyWithEditor;
-    case 'restore_previous':
-      return ToolConfirmationOutcome.RestorePrevious;
-    case 'cancel':
-      return ToolConfirmationOutcome.Cancel;
-    case 'proceed_once':
-      return ToolConfirmationOutcome.ProceedOnce;
-    default:
-      break;
-  }
-
-  const normalized = text?.trim().toLowerCase();
-  if (
-    normalized === 'n' ||
-    normalized === 'no' ||
-    normalized === 'deny' ||
-    normalized === 'cancel'
-  ) {
-    return ToolConfirmationOutcome.Cancel;
-  }
-  return ToolConfirmationOutcome.ProceedOnce;
-}
-
-function getAgentViewAnswerPayload(
-  event: Extract<AgentViewWorkerControlEvent, { type: 'answer' }>,
-): ToolConfirmationPayload | undefined {
-  if (isRecord(event.payload)) {
-    return event.payload as unknown as ToolConfirmationPayload;
-  }
-  const text = event.text?.trim();
-  if (!text) {
-    return undefined;
-  }
-  return { answers: { 0: text } };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function isInputActiveForState({
@@ -1462,8 +1164,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
-  const activeAgentViewPromptIdRef = useRef<string | undefined>(undefined);
-  const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -1773,13 +1473,6 @@ export const AppContainer = (props: AppContainerProps) => {
         existingCallback?.(customTitle, source, sessionId);
         if (sessionId === config.getSessionId()) {
           setSessionName(customTitle);
-          if (isAgentViewWorkerEnv()) {
-            void reportAgentViewWorkerState({
-              promptId: activeAgentViewPromptIdRef.current,
-              sessionState: isIdleRef.current ? 'idle' : 'working',
-              summary: customTitle,
-            });
-          }
         }
       },
     );
@@ -1958,22 +1651,6 @@ export const AppContainer = (props: AppContainerProps) => {
     [config, skillReviewPending],
   );
 
-  const detachAgentViewSession = useCallback(async () => {
-    if (isAgentViewWorkerEnv()) {
-      await sendAgentViewWorkerEvent({ type: 'detach' });
-      return;
-    }
-    await detachCurrentSessionToAgentView(config, {
-      terminal: {
-        columns: terminalWidth,
-        rows: terminalHeight,
-      },
-    });
-    config.getGeminiClient()?.requestShutdown();
-    await runExitCleanup();
-    process.exit(runAgentViewRosterCommand(config.getProjectRoot()));
-  }, [config, terminalHeight, terminalWidth]);
-
   // Subscribe to skill-review task changes and keep skillReviewPending in sync.
   useEffect(() => {
     const mgr = config.getMemoryManager();
@@ -2067,7 +1744,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       clearPendingState: () => clearPendingStateRef.current(),
-      detachAgentViewSession,
     }),
     [
       openAuthDialog,
@@ -2098,7 +1774,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       openDiffDialog,
-      detachAgentViewSession,
       config,
     ],
   );
@@ -2135,7 +1810,6 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
-    agentViewIdleGateStateRef,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -2387,7 +2061,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
-    pendingToolCalls = [],
+    pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
   } = useGeminiStream(
@@ -2419,10 +2093,6 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
-  const streamingStateRef = useRef(streamingState);
-  streamingStateRef.current = streamingState;
-  const isProcessingRef = useRef(isProcessing);
-  isProcessingRef.current = isProcessing;
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -2436,28 +2106,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
-
-  useEffect(() => {
-    if (!isAgentViewWorkerEnv()) return;
-    void reportAgentViewWorkerState({
-      ...getAgentViewWorkerStateForUi({
-        initError,
-        streamingState,
-        pendingToolCalls,
-        lastResult: getLastAgentViewModelOutputLine([
-          ...historyManager.history,
-          ...pendingGeminiHistoryItems,
-        ]),
-      }),
-      promptId: activeAgentViewPromptIdRef.current,
-    });
-  }, [
-    historyManager.history,
-    initError,
-    pendingGeminiHistoryItems,
-    pendingToolCalls,
-    streamingState,
-  ]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
   // Gated on the live auto-skill flag: after the dialog's turn-off option
@@ -2516,6 +2164,7 @@ export const AppContainer = (props: AppContainerProps) => {
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
+
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
   const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
@@ -3037,79 +2686,6 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
     ],
   );
-
-  const pendingAgentViewControlPromptsRef = useRef<
-    Array<{ text: string; promptId?: string }>
-  >([]);
-  useEffect(() => {
-    if (!isAgentViewWorkerEnv()) return undefined;
-
-    let disposed = false;
-    let timer: NodeJS.Timeout | undefined;
-    const flushPrompt = () => {
-      if (
-        streamingStateRef.current !== StreamingState.Idle ||
-        isProcessingRef.current
-      ) {
-        return;
-      }
-      const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
-      if (nextPrompt) {
-        activeAgentViewPromptIdRef.current = nextPrompt.promptId;
-        handleFinalSubmit(nextPrompt.text);
-      }
-    };
-    const poll = async () => {
-      try {
-        const events = await readAgentViewWorkerControlEvents();
-        for (const event of events) {
-          if (!disposed && event.type === 'redraw') {
-            refreshStatic();
-          }
-          await applyAgentViewWorkerControlEventForUi(
-            event,
-            pendingToolCallsRef.current,
-            (text, promptId) => {
-              pendingAgentViewControlPromptsRef.current.push({
-                text,
-                promptId,
-              });
-            },
-            () => {
-              if (streamingStateRef.current === StreamingState.Responding) {
-                cancelOngoingRequestRef.current();
-              }
-              void reportAgentViewWorkerState({
-                promptId: activeAgentViewPromptIdRef.current,
-                sessionState: 'stopped',
-                lastResult: 'Stopped by user',
-              });
-            },
-            activeAgentViewPromptIdRef.current,
-          );
-          acknowledgeAgentViewWorkerControlEvents(event.sequence);
-        }
-        if (!disposed) {
-          flushPrompt();
-        }
-      } catch {
-        // Supervisor sideband is best-effort; normal TUI rendering continues.
-      } finally {
-        if (!disposed) {
-          timer = setTimeout(poll, 1_000);
-        }
-      }
-    };
-
-    flushPrompt();
-    void poll();
-    return () => {
-      disposed = true;
-      if (timer) {
-        clearTimeout(timer);
-      }
-    };
-  }, [handleFinalSubmit, refreshStatic]);
 
   const handleArenaModelsSelected = useCallback(
     (models: string[]) => {
@@ -3708,23 +3284,6 @@ export const AppContainer = (props: AppContainerProps) => {
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
 
-  const answerableAgentViewToolCalls =
-    getAgentViewAnswerableToolCalls(pendingToolCalls);
-  agentViewIdleGateStateRef.current = {
-    hasPendingUserQuestion: answerableAgentViewToolCalls.some(
-      (toolCall) => toolCall.confirmationDetails.type === 'ask_user_question',
-    ),
-    hasPendingToolConfirmation: answerableAgentViewToolCalls.some(
-      (toolCall) => toolCall.confirmationDetails.type !== 'ask_user_question',
-    ),
-    hasPendingCommandConfirmation:
-      !!shellConfirmationRequest ||
-      !!confirmationRequest ||
-      !!loopDetectionConfirmationRequest,
-    hasForegroundShell: Boolean(activePtyId || embeddedShellFocused),
-    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
-    hasQueuedPrompt: messageQueue.length > 0,
-  };
   const shouldShowStickyTodos =
     stickyTodos !== null &&
     !dialogsVisible &&
@@ -4354,13 +3913,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // 4. Cancel ongoing requests
       if (streamingState === StreamingState.Responding) {
-        if (isAgentViewWorkerEnv()) {
-          void reportAgentViewWorkerState({
-            promptId: activeAgentViewPromptIdRef.current,
-            sessionState: 'stopped',
-            lastResult: 'Stopped by user',
-          });
-        }
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
       }
@@ -4404,29 +3956,6 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
-      if (
-        key.ctrl &&
-        key.name === 'z' &&
-        isAgentViewWorkerEnv() &&
-        !dialogsVisibleRef.current
-      ) {
-        void detachAgentViewSession();
-        return;
-      }
-
-      if (
-        key.name === 'left' &&
-        !key.ctrl &&
-        !key.meta &&
-        !key.shift &&
-        buffer.text.length === 0 &&
-        !dialogsVisibleRef.current
-      ) {
-        if (isAgentViewWorkerEnv()) {
-          void detachAgentViewSession();
-        }
-        return;
-      }
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -4502,13 +4031,6 @@ export const AppContainer = (props: AppContainerProps) => {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
-          }
-          if (isAgentViewWorkerEnv()) {
-            void reportAgentViewWorkerState({
-              promptId: activeAgentViewPromptIdRef.current,
-              sessionState: 'stopped',
-              lastResult: 'Stopped by user',
-            });
           }
           cancelOngoingRequest?.();
           setEscapePressedOnce(false);
@@ -4687,7 +4209,6 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
       vimMode,
       setThoughtExpanded,
-      detachAgentViewSession,
     ],
   );
 
@@ -5272,30 +4793,3 @@ export const AppContainer = (props: AppContainerProps) => {
     </VirtualViewportContext.Provider>
   );
 };
-
-type SpawnSyncFn = typeof spawnSync;
-
-export function runAgentViewRosterCommand(
-  cwd: string,
-  spawn: SpawnSyncFn = spawnSync,
-): number {
-  const entrypoint = process.argv[1];
-  if (!entrypoint) {
-    return 1;
-  }
-  const result = spawn(
-    process.execPath,
-    [entrypoint, 'agent-view', 'list', '--cwd', cwd],
-    {
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        QWEN_CODE_NO_RELAUNCH: '1',
-      },
-    },
-  );
-  if (result.signal) {
-    return 1;
-  }
-  return result.status ?? 0;
-}

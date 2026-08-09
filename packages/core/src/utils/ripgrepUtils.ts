@@ -292,17 +292,10 @@ export async function ensureMacBinarySigned(
  */
 async function resolveHealthyRipgrep(
   useBuiltin: boolean,
-  requireBuiltin = false,
 ): Promise<RipgrepSelection | null> {
-  if (requireBuiltin && !useBuiltin) {
-    throw new Error('Bundled ripgrep is required by this runtime.');
-  }
   const selection = await resolveRipgrep(useBuiltin);
   if (!selection) {
     return null;
-  }
-  if (requireBuiltin && selection.mode !== 'builtin') {
-    throw new Error('Bundled ripgrep is required but unavailable.');
   }
 
   try {
@@ -312,7 +305,6 @@ async function resolveHealthyRipgrep(
     if (selection.mode !== 'builtin') {
       throw error;
     }
-    if (requireBuiltin) throw error;
     debugLogger.warn(
       `Bundled ripgrep at ${selection.command} is unusable (${error}); trying system rg.`,
     );
@@ -347,9 +339,8 @@ async function resolveHealthyRipgrep(
  */
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
-  requireBuiltin: boolean = false,
 ): Promise<boolean> {
-  const selection = await resolveHealthyRipgrep(useBuiltin, requireBuiltin);
+  const selection = await resolveHealthyRipgrep(useBuiltin);
   return selection !== null;
 }
 
@@ -601,9 +592,8 @@ export async function runRipgrep(
   args: string[],
   signal?: AbortSignal,
   useBuiltin: boolean = true,
-  requireBuiltin: boolean = false,
 ): Promise<RipgrepRunResult> {
-  const selection = await resolveHealthyRipgrep(useBuiltin, requireBuiltin);
+  const selection = await resolveHealthyRipgrep(useBuiltin);
   if (!selection) {
     throw new Error('ripgrep not found.');
   }

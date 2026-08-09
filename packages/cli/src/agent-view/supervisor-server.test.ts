@@ -127,8 +127,6 @@ describe('Agent View supervisor server', () => {
         callAgentViewSupervisor(socketPath, 'workerEvent', {
           type: 'heartbeat',
           sessionId: 'session-1',
-          generation: 1,
-          sequence: 1,
         }),
       ).rejects.toMatchObject({ code: 'unauthorized' });
       expect(handler.workerEvent).not.toHaveBeenCalled();
@@ -159,8 +157,6 @@ describe('Agent View supervisor server', () => {
           type: 'heartbeat',
           sessionId: 'session-1',
           token: 'wrong-token',
-          generation: 1,
-          sequence: 1,
         }),
       ).rejects.toMatchObject({ code: 'unauthorized' });
       expect(handler.workerEvent).not.toHaveBeenCalled();
@@ -170,16 +166,12 @@ describe('Agent View supervisor server', () => {
           type: 'heartbeat',
           sessionId: 'session-1',
           token: 'session-token',
-          generation: 1,
-          sequence: 1,
         }),
       ).resolves.toEqual({ received: true });
       expect(handler.workerEvent).toHaveBeenCalledWith({
         type: 'heartbeat',
         sessionId: 'session-1',
         token: 'session-token',
-        generation: 1,
-        sequence: 1,
       });
     } finally {
       await server.close();
@@ -475,17 +467,11 @@ describe('Agent View supervisor server', () => {
       await expect(
         callAgentViewSupervisor(socketPath, 'answer', {
           sessionId: 'session-1',
-          generation: 1,
-          promptId: 'prompt-1',
-          callId: 'call-1',
           text: 'yes',
         }),
       ).resolves.toEqual({ answered: true });
       expect(handler.answer).toHaveBeenCalledWith({
         sessionId: 'session-1',
-        generation: 1,
-        promptId: 'prompt-1',
-        callId: 'call-1',
         text: 'yes',
       });
     } finally {

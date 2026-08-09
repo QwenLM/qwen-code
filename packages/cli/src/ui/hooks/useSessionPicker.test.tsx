@@ -226,7 +226,7 @@ describe('useSessionPicker multi-select state', () => {
 
     pressKey({ name: 'return', sequence: '\r' });
 
-    expect(onSelect).toHaveBeenCalledWith('s1', sessions[0]);
+    expect(onSelect).toHaveBeenCalledWith('s1');
     expect(onConfirmMulti).not.toHaveBeenCalled();
   });
 
@@ -274,29 +274,5 @@ describe('useSessionPicker multi-select state', () => {
 
     expect(onConfirmMulti).toHaveBeenCalledWith(['s2']);
     expect(onSelect).not.toHaveBeenCalled();
-  });
-});
-
-describe('useSessionPicker filtering', () => {
-  it('excludes sessions by id before search and selection', () => {
-    const { result } = renderHook(
-      () =>
-        useSessionPicker({
-          sessionService: null,
-          onSelect: vi.fn(),
-          onCancel: vi.fn(),
-          maxVisibleItems: 5,
-          initialSessions: sessions,
-          excludeSessionIds: ['s1'],
-        }),
-      { wrapper },
-    );
-
-    expect(
-      result.current.filteredSessions.map((session) => session.sessionId),
-    ).toEqual(['s2']);
-    expect(
-      result.current.visibleSessions.map((session) => session.sessionId),
-    ).toEqual(['s2']);
   });
 });

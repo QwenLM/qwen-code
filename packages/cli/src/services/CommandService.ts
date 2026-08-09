@@ -6,10 +6,7 @@
 
 import type { SlashCommand, ExecutionMode } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
-import {
-  createDebugLogger,
-  isReservedBundledSkill,
-} from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { filterCommandsForMode } from './commandUtils.js';
 
 const debugLogger = createDebugLogger('CLI_COMMANDS');
@@ -75,12 +72,6 @@ export class CommandService {
 
     const commandMap = new Map<string, SlashCommand>();
     for (const cmd of allCommands) {
-      if (
-        cmd.source !== 'bundled-skill' &&
-        [cmd.name, ...(cmd.altNames ?? [])].some(isReservedBundledSkill)
-      ) {
-        continue;
-      }
       let finalName = cmd.name;
 
       // Extension commands get renamed if they conflict with existing commands

@@ -18,8 +18,6 @@
  * - User-level: `~/.qwen/skills/`
  * - Extension-level: provided by installed extensions
  * - Bundled: built-in skills shipped with qwen-code
- *
- * Security-sensitive bundled workflows may reserve their names.
  */
 
 // Core types and interfaces
@@ -34,7 +32,7 @@ export type {
 export { SkillError } from './types.js';
 
 // Main management class
-export { SkillManager, isReservedBundledSkill } from './skill-manager.js';
+export { SkillManager } from './skill-manager.js';
 
 // Priority normalization, shared with the `/skills` display sort
 export { normalizeSkillPriority } from './skill-load.js';

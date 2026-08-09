@@ -98,9 +98,6 @@ import type {
 } from '../../agents/runtime/agent-events.js';
 import {
   BuiltinAgentRegistry,
-  COORDINATOR_EXPLORE_MAX_INVESTIGATORS,
-  COORDINATOR_EXPLORE_MAX_RESULT_CHARS,
-  COORDINATOR_EXPLORE_SUBAGENT_TYPE,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
 } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -148,15 +145,6 @@ function getCachedGitBranch(cwd: string): string | undefined {
   const branch = getGitBranch(cwd);
   gitBranchCache.set(cwd, branch);
   return branch;
-}
-
-function capCoordinatorExploreResult(result: string): string {
-  if (result.length <= COORDINATOR_EXPLORE_MAX_RESULT_CHARS) return result;
-
-  const marker = '\n\n[Coordinator investigator result truncated]\n\n';
-  const retained = COORDINATOR_EXPLORE_MAX_RESULT_CHARS - marker.length;
-  const headLength = Math.ceil(retained / 2);
-  return `${result.slice(0, headLength)}${marker}${result.slice(-Math.floor(retained / 2))}`;
 }
 
 function persistBackgroundCancellation(
@@ -806,20 +794,6 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   private availableSubagents: SubagentConfig[] =
     BuiltinAgentRegistry.getBuiltinAgents();
   private readonly removeChangeListener: () => void;
-  private readonly coordinatorLaunchCounts = new Map<string, number>();
-
-  private tryReserveCoordinatorLaunch(promptId?: string): boolean {
-    const key = promptId ?? '<unscoped>';
-    const count = this.coordinatorLaunchCounts.get(key) ?? 0;
-    if (count >= COORDINATOR_EXPLORE_MAX_INVESTIGATORS) return false;
-
-    if (count === 0 && this.coordinatorLaunchCounts.size >= 64) {
-      const oldest = this.coordinatorLaunchCounts.keys().next().value;
-      if (oldest !== undefined) this.coordinatorLaunchCounts.delete(oldest);
-    }
-    this.coordinatorLaunchCounts.set(key, count + 1);
-    return true;
-  }
 
   constructor(private readonly config: Config) {
     // Initialize with a basic schema first
@@ -952,16 +926,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * Updates the tool's description and schema based on available subagents.
    */
   private updateDescriptionAndSchema(): void {
-    const advertisedSubagents = this.availableSubagents.filter(
-      (subagent) =>
-        subagent.name.toLowerCase() !== COORDINATOR_EXPLORE_SUBAGENT_TYPE,
-    );
     let subagentDescriptions = '';
-    if (advertisedSubagents.length === 0) {
+    if (this.availableSubagents.length === 0) {
       subagentDescriptions =
         'No subagents are currently configured. You can create subagents using the /agents command.';
     } else {
-      subagentDescriptions = advertisedSubagents
+      subagentDescriptions = this.availableSubagents
         .map((subagent) => `- **${subagent.name}**: ${subagent.description}`)
         .join('\n');
     }
@@ -970,7 +940,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team. The explicit \`/coordinate\` workflow is the bounded exception: follow its instructions and do not create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -1152,29 +1122,6 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           // cache and schema catch up for subsequent calls.
           void this.refreshSubagents();
         }
-      }
-    }
-
-    if (
-      params.subagent_type?.toLowerCase() === COORDINATOR_EXPLORE_SUBAGENT_TYPE
-    ) {
-      if (!isTopLevelSession()) {
-        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" can only be launched by the top-level Leader.`;
-      }
-      if (params.run_in_background !== false) {
-        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" requires run_in_background: false.`;
-      }
-      if (params.model !== undefined) {
-        return `Parameter "model" cannot be used with subagent_type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}".`;
-      }
-      if (
-        params.name !== undefined ||
-        params.plan_mode_required !== undefined
-      ) {
-        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" cannot be used as a named or plan-required teammate.`;
-      }
-      if (params.isolation !== undefined || params.working_dir !== undefined) {
-        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" must use the Leader's current workspace.`;
       }
     }
 
@@ -1366,7 +1313,6 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       this.subagentManager,
       invocationParams,
       forkProfile,
-      (promptId) => this.tryReserveCoordinatorLaunch(promptId),
     );
   }
 
@@ -1394,12 +1340,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   getAvailableSubagentNames(): string[] {
-    return this.availableSubagents
-      .filter(
-        (subagent) =>
-          subagent.name.toLowerCase() !== COORDINATOR_EXPLORE_SUBAGENT_TYPE,
-      )
-      .map((subagent) => subagent.name);
+    return this.availableSubagents.map((subagent) => subagent.name);
   }
 }
 
@@ -1481,14 +1422,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
   private callId?: string;
-  private promptId?: string;
 
   constructor(
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
     private readonly forkProfile?: ForkProfile,
-    private readonly reserveCoordinatorLaunch?: (promptId?: string) => boolean,
   ) {
     super(params);
   }
@@ -1496,10 +1435,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   // Background agents carry the tool-use id through to completion notifications.
   setCallId(callId: string): void {
     this.callId = callId;
-  }
-
-  setPromptId(promptId: string): void {
-    this.promptId = promptId;
   }
 
   /**
@@ -2341,17 +2276,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
-    if (
-      this.params.subagent_type?.toLowerCase() ===
-        COORDINATOR_EXPLORE_SUBAGENT_TYPE &&
-      this.reserveCoordinatorLaunch?.(this.promptId) === false
-    ) {
-      return this.buildSpawnBlockedResult(
-        `Error: /coordinate allows at most ${COORDINATOR_EXPLORE_MAX_INVESTIGATORS} investigators per user request. Synthesize the results already returned instead of launching another investigator.`,
-        'Coordinator investigator limit reached',
-      );
-    }
-
     if (this.params.plan_mode_required === true) {
       if (
         !this.params.name ||
@@ -4186,15 +4110,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const stopHookWarning = await runFramed();
         const terminateMode = subagent.getTerminateMode();
-        const uncappedFinalText = appendStopHookBlockingCapWarning(
+        const finalText = appendStopHookBlockingCapWarning(
           toModelVisibleSubagentResult(subagent.getFinalText(), terminateMode),
           stopHookWarning,
         );
-        const finalText =
-          this.params.subagent_type?.toLowerCase() ===
-          COORDINATOR_EXPLORE_SUBAGENT_TYPE
-            ? capCoordinatorExploreResult(uncappedFinalText)
-            : uncappedFinalText;
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {

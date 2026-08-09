@@ -19,8 +19,6 @@ import {
   createDebugLogger,
   persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
-  ISOLATED_COORDINATION_WRITER_TOOLS,
-  READ_ONLY_REPOSITORY_TOOLS,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -101,8 +99,6 @@ import {
   UPDATE_COMPLETE_EXIT_CODE,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
-import type { ManagedCoordinationWorker } from './agent-view/coordination-worker.js';
-import type { CLIResultMessage } from './nonInteractive/types.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -376,57 +372,12 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
-  if (process.argv.includes('--internal-agent-view-supervisor')) {
-    const { runAgentViewSupervisor } = await import(
-      './agent-view/supervisor-runner.js'
-    );
-    await runAgentViewSupervisor();
-    process.exit(0);
-  }
-
-  const ptyHostArgIndex = process.argv.indexOf(
-    '--internal-agent-view-pty-host',
-  );
-  if (ptyHostArgIndex !== -1) {
-    const launchPath = process.argv[ptyHostArgIndex + 1];
-    const socketPath = process.argv[ptyHostArgIndex + 2];
-    const globalDir = process.argv[ptyHostArgIndex + 3];
-    if (!launchPath || !socketPath || !globalDir) {
-      throw new Error(
-        'Agent View PTY host requires launch, socket, and global paths.',
-      );
-    }
-    const { runAgentViewPtyHostProcess } = await import(
-      './agent-view/pty-host-process.js'
-    );
-    await runAgentViewPtyHostProcess({ launchPath, socketPath, globalDir });
-    process.exit(0);
-  }
-
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
 
   markAcpStartup('argsParseStart');
   let argv = await parseArguments();
-  let managedCoordinationWorker: ManagedCoordinationWorker | undefined;
-  if (
-    [
-      'QWEN_AGENT_VIEW_COORDINATION_MODE',
-      'QWEN_AGENT_VIEW_TASK_PATH',
-      'QWEN_AGENT_VIEW_PROMPT_ID',
-      'QWEN_AGENT_VIEW_ATTEMPT_ID',
-    ].some((key) => process.env[key] !== undefined)
-  ) {
-    const { prepareManagedCoordinationWorker } = await import(
-      './agent-view/coordination-worker.js'
-    );
-    managedCoordinationWorker = await prepareManagedCoordinationWorker(argv);
-    if (!managedCoordinationWorker) {
-      throw new Error('Managed coordination environment was not accepted.');
-    }
-    argv = managedCoordinationWorker.argv;
-  }
   // The full yargs `serve` handler captures and deletes this credential while
   // parsing the subcommand. Other CLI/ACP paths do not use it, so scrub any
   // ambient value immediately after argument parsing and before Config,
@@ -457,18 +408,6 @@ export async function main() {
     }
   }
 
-  if (argv.background) {
-    const prompt = argv.query;
-    if (!prompt) {
-      throw new Error('Cannot use --bg/--background without a prompt.');
-    }
-    const { handleAgentViewBackgroundPrompt } = await import(
-      './commands/agents.js'
-    );
-    await handleAgentViewBackgroundPrompt(prompt);
-    process.exit(0);
-  }
-
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
@@ -477,13 +416,7 @@ export async function main() {
   markAcpStartup('settingsLoadStart');
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
-    : managedCoordinationWorker
-      ? loadSettings(managedCoordinationWorker.coordination.projectCwd, {
-          consumeCorruptionEnvVars: false,
-          readOnly: true,
-          skipLoadEnvironment: true,
-        })
-      : loadSettings();
+    : loadSettings();
   markAcpStartup('settingsLoadEnd');
 
   // Propagate corruption state to child process via env vars so
@@ -492,9 +425,7 @@ export async function main() {
     process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
     process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
   }
-  if (!managedCoordinationWorker) {
-    await cleanupCheckpoints();
-  }
+  await cleanupCheckpoints();
   // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
@@ -543,10 +474,6 @@ export async function main() {
   const { themeManager, AUTO_THEME_NAME } = await import(
     './ui/themes/theme-manager.js'
   );
-  const { isAgentViewWorkerEnv } = await import(
-    './agent-view/worker-sideband.js'
-  );
-  const isAgentViewWorker = isAgentViewWorkerEnv();
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
@@ -568,7 +495,7 @@ export async function main() {
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
-  if (!managedCoordinationWorker && !process.env['SANDBOX']) {
+  if (!process.env['SANDBOX']) {
     const memoryArgs = settings.merged.advanced?.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
@@ -826,7 +753,7 @@ export async function main() {
     );
     process.exit(1);
   }
-  if (!managedCoordinationWorker) {
+  {
     const startupRes = await setupStartupWorktree(argv.worktree, {
       symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
     });
@@ -893,150 +820,47 @@ export async function main() {
     // else: argv.resume is already a valid UUID, pass through to loadCliConfig
   }
 
-  if (argv.resume !== undefined) {
-    const { routeManagedAgentViewResume } = await import(
-      './startup/agent-view-resume.js'
-    );
-    if (await routeManagedAgentViewResume(argv.resume)) {
-      process.exit(process.exitCode ?? 0);
-    }
-  }
-
   // We are now past the logic handling potentially launching a child process
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
   profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  if (!managedCoordinationWorker && !isBareMode(argv.bare)) {
+  if (!isBareMode(argv.bare)) {
     initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
   }
 
   {
     // Start settings file watcher (skip in bare mode)
-    const settingsWatcher =
-      managedCoordinationWorker || isBareMode(argv.bare)
-        ? undefined
-        : new SettingsWatcher(settings);
+    const settingsWatcher = isBareMode(argv.bare)
+      ? undefined
+      : new SettingsWatcher(settings);
     settingsWatcher?.startWatching();
 
     markAcpStartup('configConstructionStart');
-    const managedHostPolicy = managedCoordinationWorker
-      ? {
-          exactToolInventory:
-            managedCoordinationWorker.coordination.writeMode === 'read-only'
-              ? READ_ONLY_REPOSITORY_TOOLS
-              : ISOLATED_COORDINATION_WRITER_TOOLS,
-          requireRipgrep: true,
-          requireBuiltinRipgrep: true,
-          strictRipgrepIgnorePolicy: true,
-          toolInvocationGuard: await (
-            await import('./agent-view/coordination-worker.js')
-          ).createManagedCoordinationPathGuard(
-            managedCoordinationWorker.coordination.sideband.activeCwd,
-            settings.merged.context?.fileFiltering?.customIgnoreFiles,
-            managedCoordinationWorker.coordination.writeMode,
-            managedCoordinationWorker.coordination.projectCwd,
-            managedCoordinationWorker.coordination.inputSnapshot,
-          ),
-        }
-      : undefined;
-    const effectiveSettings = managedCoordinationWorker
-      ? {
-          ...settings.merged,
-          context: {
-            ...settings.merged.context,
-            fileFiltering: {
-              ...settings.merged.context?.fileFiltering,
-              respectGitIgnore: true,
-              respectQwenIgnore: true,
-            },
-          },
-          tools: {
-            ...settings.merged.tools,
-            useRipgrep: true,
-            useBuiltinRipgrep: true,
-          },
-        }
-      : settings.merged;
-    let config: Config;
-    try {
-      config = await loadCliConfig(
-        effectiveSettings,
-        argv.acp || argv.experimentalAcp
-          ? { ...argv, chatRecording: false }
-          : argv,
-        process.cwd(),
-        argv.extensions,
-        // Pass separated hooks for proper source attribution
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-        undefined,
-        settingsWatcher,
-        false,
-        managedHostPolicy,
-      );
-    } catch (error) {
-      if (managedCoordinationWorker) {
-        await exitManagedCoordinationFailure(managedCoordinationWorker, error);
-      }
-      throw error;
-    }
+    const config = await loadCliConfig(
+      settings.merged,
+      argv.acp || argv.experimentalAcp
+        ? { ...argv, chatRecording: false }
+        : argv,
+      process.cwd(),
+      argv.extensions,
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
+      buildDisabledSkillNamesProvider(settings),
+      undefined,
+      settingsWatcher,
+    );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
-
-    {
-      const {
-        createAgentViewWorkerSidebandEnv,
-        readAgentViewWorkerSidebandEnv,
-        reportAgentViewWorkerState,
-        sendAgentViewWorkerEvent,
-        startAgentViewWorkerHeartbeat,
-      } = await import('./agent-view/worker-sideband.js');
-      const sideband =
-        managedCoordinationWorker?.coordination.sideband ??
-        readAgentViewWorkerSidebandEnv();
-      if (sideband) {
-        const sidebandEnv = managedCoordinationWorker
-          ? createAgentViewWorkerSidebandEnv(
-              managedCoordinationWorker.coordination.sideband,
-            )
-          : process.env;
-        await sendAgentViewWorkerEvent(
-          {
-            type: 'ready',
-            cwd: process.cwd(),
-            capabilities: ['ready', 'heartbeat', 'state'],
-            summary: config.getQuestion(),
-          },
-          sidebandEnv,
-        ).catch((error) => {
-          debugLogger.debug(
-            `Agent View worker ready sideband failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        });
-        await reportAgentViewWorkerState(
-          {
-            promptId: managedCoordinationWorker?.coordination.promptId,
-            sessionState: managedCoordinationWorker ? 'working' : 'idle',
-            cwd: process.cwd(),
-            summary: config.getQuestion(),
-          },
-          sidebandEnv,
-        );
-        startAgentViewWorkerHeartbeat(sidebandEnv);
-      }
-    }
 
     // Subscribe the running Config to settings changes so MCP servers
     // reconnect / disconnect / restart without a session restart (#3696,
     // sub-task 3). Skipped in bare mode (no watcher).
-    if (settingsWatcher && !managedCoordinationWorker) {
+    if (settingsWatcher) {
       const disposeMcpHotReload = registerMcpHotReload(
         settingsWatcher,
         settings,
@@ -1046,13 +870,11 @@ export async function main() {
       registerCleanup(disposeMcpHotReload);
     }
 
-    if (!managedCoordinationWorker) {
-      registerLspHotReload(config, registerCleanup);
-    }
+    registerLspHotReload(config, registerCleanup);
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
-      managedCoordinationWorker || isBareMode(argv.bare) || config.isSafeMode()
+      isBareMode(argv.bare) || config.isSafeMode()
         ? undefined
         : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
     extensionFileWatcher?.startWatching();
@@ -1149,9 +971,7 @@ export async function main() {
     // output is visible and sufficient.
     setupUncaughtExceptionHandler(config);
 
-    if (!managedCoordinationWorker) {
-      startEarlyStartupPrefetches(config);
-    }
+    startEarlyStartupPrefetches(config);
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -1188,10 +1008,7 @@ export async function main() {
       // the filter in startEarlyInputCapture absorbs the OSC 11 response
       // bytes so they cannot leak into the TUI input, even though our
       // probe attaches its own listener to parse the RGB value.
-      if (
-        !isAgentViewWorker &&
-        (!configuredTheme || configuredTheme === AUTO_THEME_NAME)
-      ) {
+      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
         themeAutoDetectionComplete = themeManager
           .resolveAutoThemeAsync()
           .catch((err) => {
@@ -1220,24 +1037,15 @@ export async function main() {
     const { initializeApp } = await import('./core/initializer.js');
     let input = config.getQuestion();
     const hasRemoteInput = Boolean(config.getInputFile?.());
-    const deferIdeConnection = managedCoordinationWorker
-      ? true
-      : config.isInteractive() &&
-        !config.getExperimentalZedIntegration() &&
-        !input &&
-        !hasRemoteInput;
+    const deferIdeConnection =
+      config.isInteractive() &&
+      !config.getExperimentalZedIntegration() &&
+      !input &&
+      !hasRemoteInput;
     markAcpStartup('appInitializationStart');
-    let initializationResult;
-    try {
-      initializationResult = await initializeApp(config, settings, {
-        deferIdeConnection,
-      });
-    } catch (error) {
-      if (managedCoordinationWorker) {
-        await exitManagedCoordinationFailure(managedCoordinationWorker, error);
-      }
-      throw error;
-    }
+    const initializationResult = await initializeApp(config, settings, {
+      deferIdeConnection,
+    });
     markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
 
@@ -1378,7 +1186,7 @@ export async function main() {
     // have at least an observable signal. Interactive runs are excluded
     // because the user is at the keyboard and the TUI shows approval
     // state directly. See issue #4103.
-    if (!config.isInteractive() && !managedCoordinationWorker) {
+    if (!config.isInteractive()) {
       const yoloWarning = getHeadlessYoloSafetyWarning(config);
       if (yoloWarning) writeStderrLine(yoloWarning);
     }
@@ -1389,27 +1197,7 @@ export async function main() {
     // that must be in place before discovery runs (see session.ts).
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
-      try {
-        await config.initialize(
-          managedCoordinationWorker
-            ? {
-                skipMcpDiscovery: true,
-                skipHooks: true,
-                skipSkillManager: true,
-                skipFileCheckpointing: true,
-                skipWorktreeCleanup: true,
-              }
-            : undefined,
-        );
-      } catch (error) {
-        if (managedCoordinationWorker) {
-          await exitManagedCoordinationFailure(
-            managedCoordinationWorker,
-            error,
-          );
-        }
-        throw error;
-      }
+      await config.initialize();
       for (const warning of config.getWarnings()) {
         if (emittedStartupWarnings.has(warning)) continue;
         emittedStartupWarnings.add(warning);
@@ -1424,9 +1212,7 @@ export async function main() {
       // tools — a silent regression versus the legacy synchronous
       // behavior. Interactive paths skip this (AppContainer's batch-flush
       // subscriber updates the tool list as MCP servers come online).
-      if (!managedCoordinationWorker) {
-        await config.waitForMcpReady();
-      }
+      await config.waitForMcpReady();
       // Surface MCP server failures on stderr so non-interactive runs
       // (--prompt / piped stdin / scripts) don't silently regress to
       // built-in-tools-only when a server cannot connect. The legacy
@@ -1439,9 +1225,8 @@ export async function main() {
       // Defensive against tests that pass a stubbed Config without
       // `getFailedMcpServerNames` — the warning is best-effort visibility
       // and never gates startup.
-      const failedMcpServers = managedCoordinationWorker
-        ? []
-        : typeof config.getFailedMcpServerNames === 'function'
+      const failedMcpServers =
+        typeof config.getFailedMcpServerNames === 'function'
           ? config.getFailedMcpServerNames()
           : [];
       if (failedMcpServers.length > 0) {
@@ -1468,11 +1253,7 @@ export async function main() {
     // Only read stdin if NOT in stream-json mode
     // In stream-json mode, stdin is used for protocol messages (control requests, etc.)
     // and should be consumed by StreamJsonInputReader instead
-    if (
-      !managedCoordinationWorker &&
-      inputFormat !== InputFormat.STREAM_JSON &&
-      !process.stdin.isTTY
-    ) {
+    if (inputFormat !== InputFormat.STREAM_JSON && !process.stdin.isTTY) {
       const stdinData = await readStdin();
       if (stdinData) {
         input = `${stdinData}\n\n${input}`;
@@ -1482,20 +1263,11 @@ export async function main() {
     const { validateNonInteractiveAuth } = await import(
       './validateNonInterActiveAuth.js'
     );
-    let nonInteractiveConfig: Config;
-    try {
-      nonInteractiveConfig = await validateNonInteractiveAuth(
-        settings.merged.security?.auth?.useExternal,
-        config,
-        settings,
-        { throwOnError: Boolean(managedCoordinationWorker) },
-      );
-    } catch (error) {
-      if (managedCoordinationWorker) {
-        await exitManagedCoordinationFailure(managedCoordinationWorker, error);
-      }
-      throw error;
-    }
+    const nonInteractiveConfig = await validateNonInteractiveAuth(
+      settings.merged.security?.auth?.useExternal,
+      config,
+      settings,
+    );
 
     const prompt_id = createNonInteractivePromptId(config.getSessionId());
 
@@ -1542,63 +1314,6 @@ export async function main() {
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
     const { runNonInteractive } = await import('./nonInteractiveCli.js');
-    if (managedCoordinationWorker) {
-      const { JsonOutputAdapter } = await import(
-        './nonInteractive/io/JsonOutputAdapter.js'
-      );
-      const { parseManagedCoordinationResult } = await import(
-        './agent-view/coordination-worker.js'
-      );
-      const { createAgentViewWorkerSidebandEnv, reportAgentViewWorkerResult } =
-        await import('./agent-view/worker-sideband.js');
-      let capturedResult: CLIResultMessage | undefined;
-      let exitCode = 1;
-      let executionError: unknown;
-      try {
-        exitCode = await runNonInteractive(
-          nonInteractiveConfig,
-          settings,
-          input,
-          prompt_id,
-          {
-            adapter: new JsonOutputAdapter(nonInteractiveConfig, (result) => {
-              capturedResult = result;
-            }),
-            processAtCommands: false,
-          },
-        );
-      } catch (error) {
-        executionError = error;
-      }
-      const result = executionError
-        ? {
-            outcome: 'failed' as const,
-            summary:
-              executionError instanceof Error
-                ? executionError.message
-                : String(executionError),
-            artifacts: [],
-          }
-        : parseManagedCoordinationResult(capturedResult);
-      try {
-        await reportAgentViewWorkerResult(
-          {
-            promptId: managedCoordinationWorker.coordination.promptId,
-            attemptId: managedCoordinationWorker.coordination.attemptId,
-            ...result,
-          },
-          createAgentViewWorkerSidebandEnv(
-            managedCoordinationWorker.coordination.sideband,
-          ),
-        );
-      } catch (error) {
-        debugLogger.warn('Managed coordination result sideband failed', error);
-        exitCode = 1;
-      } finally {
-        await runExitCleanup();
-      }
-      process.exit(executionError ? 1 : exitCode);
-    }
     const exitCode = await runNonInteractive(
       nonInteractiveConfig,
       settings,
@@ -1613,36 +1328,6 @@ export async function main() {
     await runExitCleanup();
     process.exit(exitCode);
   }
-}
-
-async function exitManagedCoordinationFailure(
-  worker: ManagedCoordinationWorker,
-  error: unknown,
-): Promise<never> {
-  const summary = (
-    error instanceof Error ? error.message : String(error)
-  ).slice(0, 32_000);
-  try {
-    const { createAgentViewWorkerSidebandEnv, reportAgentViewWorkerResult } =
-      await import('./agent-view/worker-sideband.js');
-    await reportAgentViewWorkerResult(
-      {
-        promptId: worker.coordination.promptId,
-        attemptId: worker.coordination.attemptId,
-        outcome: 'failed',
-        summary,
-        artifacts: [],
-      },
-      createAgentViewWorkerSidebandEnv(worker.coordination.sideband),
-    );
-  } catch (sidebandError) {
-    debugLogger.warn(
-      'Managed coordination failure sideband failed',
-      sidebandError,
-    );
-  }
-  await runExitCleanup();
-  process.exit(1);
 }
 
 export function createNonInteractivePromptId(sessionId: string): string {

@@ -241,28 +241,6 @@ export class ToolRegistry {
     return a.displayName.localeCompare(b.displayName);
   }
 
-  private getExactToolInventory(): ReadonlySet<string> | undefined {
-    return this.config.getExactToolInventory?.();
-  }
-
-  private isToolAllowedByExactInventory(name: string): boolean {
-    const inventory = this.getExactToolInventory();
-    return inventory === undefined || inventory.has(name);
-  }
-
-  private matchesExactInventoryToolShape(
-    registrationName: string,
-    tool: AnyDeclarativeTool,
-  ): boolean {
-    const inventory = this.getExactToolInventory();
-    if (inventory === undefined) return true;
-    return (
-      inventory.has(registrationName) &&
-      tool.name === registrationName &&
-      (tool.schema.name ?? tool.name) === registrationName
-    );
-  }
-
   /**
    * Returns true when `name` is in the Config's `disabledTools` set, in
    * which case `registerTool` / `registerFactory` will skip it. This is
@@ -297,21 +275,6 @@ export class ToolRegistry {
    */
   registerTool(tool: AnyDeclarativeTool): void {
     if (
-      this.getExactToolInventory() !== undefined &&
-      (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool)
-    ) {
-      debugLogger.debug(
-        `Tool "${tool.name}" skipped: discovered tools are outside exact runtime inventory.`,
-      );
-      return;
-    }
-    if (!this.matchesExactInventoryToolShape(tool.name, tool)) {
-      debugLogger.debug(
-        `Tool "${tool.name}" skipped: outside exact runtime inventory.`,
-      );
-      return;
-    }
-    if (
       this.isToolDisabled(
         tool.name,
         tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
@@ -337,12 +300,6 @@ export class ToolRegistry {
     const collidesWithEager = this.tools.has(tool.name);
     const collidesWithFactory = this.factories.has(tool.name);
     if (collidesWithEager || collidesWithFactory) {
-      if (this.getExactToolInventory() !== undefined) {
-        debugLogger.debug(
-          `Tool "${tool.name}" skipped: exact runtime inventory entries cannot be replaced.`,
-        );
-        return;
-      }
       if (tool instanceof DiscoveredMCPTool) {
         tool = tool.asFullyQualifiedTool();
       } else {
@@ -350,12 +307,6 @@ export class ToolRegistry {
           `Tool with name "${tool.name}" is already registered. Overwriting.`,
         );
       }
-    }
-    if (!this.matchesExactInventoryToolShape(tool.name, tool)) {
-      debugLogger.debug(
-        `Tool "${tool.name}" skipped (post-rename): outside exact runtime inventory.`,
-      );
-      return;
     }
     // Re-check the disabled set against
     // the FINAL registration name. Without this, an MCP tool that
@@ -384,21 +335,6 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
-    if (!this.isToolAllowedByExactInventory(name)) {
-      debugLogger.debug(
-        `Tool factory "${name}" skipped: outside exact runtime inventory.`,
-      );
-      return;
-    }
-    if (
-      this.getExactToolInventory() !== undefined &&
-      (this.tools.has(name) || this.factories.has(name))
-    ) {
-      debugLogger.debug(
-        `Tool factory "${name}" skipped: exact runtime inventory entries cannot be replaced.`,
-      );
-      return;
-    }
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -415,8 +351,6 @@ export class ToolRegistry {
    * factory is never executed more than once.
    */
   async ensureTool(name: string): Promise<AnyDeclarativeTool | undefined> {
-    if (!this.isToolAllowedByExactInventory(name)) return undefined;
-
     const cached = this.tools.get(name);
     if (cached) {
       // Clean up any stale factory for this name so warmAll() and bulk
@@ -433,11 +367,6 @@ export class ToolRegistry {
 
     const load = factory()
       .then((tool) => {
-        if (!this.matchesExactInventoryToolShape(name, tool)) {
-          throw new Error(
-            `Tool factory "${name}" resolved outside exact runtime inventory.`,
-          );
-        }
         this.tools.set(name, tool);
         this.factories.delete(name);
         this.inflight.delete(name);
@@ -487,7 +416,7 @@ export class ToolRegistry {
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
         !this.tools.has(tool.name)
       ) {
-        this.registerTool(tool);
+        this.tools.set(tool.name, tool);
       }
     }
   }
@@ -990,36 +919,6 @@ export class ToolRegistry {
     return Array.from(names);
   }
 
-  /** Fail closed unless the fully loaded registry is exactly the runtime set. */
-  assertExactToolInventory(): void {
-    const expected = this.getExactToolInventory();
-    if (expected === undefined) {
-      throw new Error('No exact runtime tool inventory is configured.');
-    }
-    if (this.factories.size > 0 || this.inflight.size > 0) {
-      throw new Error(
-        'Exact runtime tool inventory must be asserted after tool warmup.',
-      );
-    }
-
-    const actual = new Set(this.tools.keys());
-    const missing = [...expected].filter((name) => !actual.has(name)).sort();
-    const unexpected = [...actual].filter((name) => !expected.has(name)).sort();
-    const malformed = [...this.tools.entries()]
-      .filter(
-        ([name, tool]) =>
-          tool.name !== name || (tool.schema.name ?? tool.name) !== name,
-      )
-      .map(([name]) => name)
-      .sort();
-
-    if (missing.length > 0 || unexpected.length > 0 || malformed.length > 0) {
-      throw new Error(
-        `Exact runtime tool inventory mismatch: missing=[${missing.join(', ')}], unexpected=[${unexpected.join(', ')}], malformed=[${malformed.join(', ')}].`,
-      );
-    }
-  }
-
   /**
    * Returns an array of all registered and discovered tool instances.
    * @remarks Requires all tool factories to be resolved first. Call
@@ -1055,7 +954,6 @@ export class ToolRegistry {
    * Get the definition of a specific tool.
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
-    if (!this.isToolAllowedByExactInventory(name)) return undefined;
     return this.tools.get(name);
   }
 

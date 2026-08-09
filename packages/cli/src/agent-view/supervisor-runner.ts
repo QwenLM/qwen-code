@@ -8,7 +8,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import { sanitizeChildEnv } from '@qwen-code/qwen-code-core';
 import {
   attachAgentViewSupervisorTerminal,
   callAgentViewSupervisor,
@@ -17,20 +16,12 @@ import {
 } from './supervisor-client.js';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
-  AgentViewAnswerRequest,
-  AgentViewCoordinationDispatchAck,
-  AgentViewCoordinationDispatchRequest,
-  AgentViewCoordinationReassignRequest,
-  AgentViewCoordinationSnapshot,
-} from './protocol.js';
-import type {
   AgentViewSupervisorAdoptParams,
   AgentViewSupervisorEvent,
   AgentViewSupervisorResponse,
   AgentViewSupervisorSubscription,
 } from './supervisor-client.js';
 import {
-  authorizeAgentViewWorkerSideband,
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
@@ -42,7 +33,6 @@ import {
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
-import { isLoaderEnvKey } from '../config/shared-env-keys.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
@@ -51,7 +41,6 @@ const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
 const SUPERVISOR_MAINTENANCE_INTERVAL_MS = 5000;
 const LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS = 30_000;
-const COORDINATION_OPERATION_TIMEOUT_MS = 90_000;
 
 export interface AgentViewSupervisorClientHandle {
   socketPath: string;
@@ -63,20 +52,11 @@ export interface AgentViewSupervisorClientHandle {
     onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
   dispatch(prompt: string, cwd: string): Promise<unknown>;
-  dispatchCoordination(
-    request: Omit<AgentViewCoordinationDispatchRequest, 'environment'>,
-  ): Promise<AgentViewCoordinationDispatchAck[]>;
-  collectCoordination(
-    coordinationId: string,
-  ): Promise<AgentViewCoordinationSnapshot>;
-  reassignCoordination(
-    request: Omit<AgentViewCoordinationReassignRequest, 'environment'>,
-  ): Promise<AgentViewCoordinationDispatchAck>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
   attach(sessionId: string): Promise<unknown>;
   peek(sessionId: string): Promise<unknown>;
   send(sessionId: string, text: string): Promise<unknown>;
-  answer(request: AgentViewAnswerRequest): Promise<unknown>;
+  answer(sessionId: string, text: string): Promise<unknown>;
   logs(sessionId: string): Promise<unknown>;
   stop(sessionId: string): Promise<unknown>;
   kill(sessionId: string): Promise<unknown>;
@@ -173,8 +153,6 @@ export async function runAgentViewSupervisor(
   const server = createAgentViewSupervisorServer(handler, {
     socketPath,
     authToken,
-    authorizeSideband: (_op, params) =>
-      authorizeAgentViewWorkerSideband(params, options),
   });
 
   await server.listen();
@@ -264,36 +242,6 @@ function createSupervisorHandle(
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
         },
       ),
-    dispatchCoordination: (request) =>
-      callAgentViewSupervisor(
-        socketPath,
-        'dispatchCoordination',
-        { ...request, environment: currentCoordinationEnvironment() },
-        {
-          ...authOptions,
-          timeoutMs: COORDINATION_OPERATION_TIMEOUT_MS,
-        },
-      ),
-    collectCoordination: (coordinationId) =>
-      callAgentViewSupervisor(
-        socketPath,
-        'collect',
-        { coordinationId },
-        {
-          ...authOptions,
-          timeoutMs: COORDINATION_OPERATION_TIMEOUT_MS,
-        },
-      ),
-    reassignCoordination: (request) =>
-      callAgentViewSupervisor(
-        socketPath,
-        'reassignCoordination',
-        { ...request, environment: currentCoordinationEnvironment() },
-        {
-          ...authOptions,
-          timeoutMs: COORDINATION_OPERATION_TIMEOUT_MS,
-        },
-      ),
     adopt: (params) =>
       callAgentViewSupervisor(socketPath, 'adopt', params, {
         ...authOptions,
@@ -310,8 +258,13 @@ function createSupervisorHandle(
         { sessionId, text },
         authOptions,
       ),
-    answer: (request: AgentViewAnswerRequest) =>
-      callAgentViewSupervisor(socketPath, 'answer', request, authOptions),
+    answer: (sessionId: string, text: string) =>
+      callAgentViewSupervisor(
+        socketPath,
+        'answer',
+        { sessionId, text },
+        authOptions,
+      ),
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),
     stop: (sessionId: string) =>
@@ -525,17 +478,6 @@ function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
       QWEN_CODE_NO_RELAUNCH: '1',
     },
   });
-}
-
-function currentCoordinationEnvironment(): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(sanitizeChildEnv(process.env)).filter(
-      (entry): entry is [string, string] =>
-        typeof entry[1] === 'string' &&
-        !entry[0].startsWith('QWEN_AGENT_VIEW_') &&
-        !isLoaderEnvKey(entry[0]),
-    ),
-  );
 }
 
 async function delay(ms: number): Promise<void> {

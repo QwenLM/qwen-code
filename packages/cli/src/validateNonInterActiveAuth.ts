@@ -17,7 +17,6 @@ export async function validateNonInteractiveAuth(
   useExternalAuth: boolean | undefined,
   nonInteractiveConfig: Config,
   settings: LoadedSettings,
-  options: { throwOnError?: boolean } = {},
 ): Promise<Config> {
   try {
     // Get the actual authType from config which has already resolved CLI args, env vars, and settings
@@ -47,9 +46,6 @@ export async function validateNonInteractiveAuth(
     await nonInteractiveConfig.refreshAuth(resolvedAuthType);
     return nonInteractiveConfig;
   } catch (error) {
-    if (options.throwOnError) {
-      throw error;
-    }
     const outputFormat = nonInteractiveConfig.getOutputFormat();
 
     // In JSON and STREAM_JSON modes, emit error result and exit

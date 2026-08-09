@@ -17,31 +17,11 @@ vi.mock('../../config/config.js', () => ({
   ),
 }));
 
-const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() => vi.fn());
-const mockIsAgentViewWorkerResumeCommandBlocked = vi.hoisted(() => vi.fn());
-const mockGetAgentViewProjectSessionService = vi.hoisted(() => vi.fn());
-
-vi.mock('../../startup/agent-view-resume-guard.js', () => ({
-  isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
-  isAgentViewWorkerResumeCommandBlocked:
-    mockIsAgentViewWorkerResumeCommandBlocked,
-  MANAGED_AGENT_VIEW_RESUME_MESSAGE: 'managed session message',
-  AGENT_VIEW_WORKER_RESUME_MESSAGE:
-    'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
-}));
-
-vi.mock('../../startup/agent-view-resume-sessions.js', () => ({
-  getAgentViewProjectSessionService: mockGetAgentViewProjectSessionService,
-}));
-
 describe('resumeCommand', () => {
   let mockContext: CommandContext;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
-    mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(false);
-    mockGetAgentViewProjectSessionService.mockResolvedValue(undefined);
     mockContext = createMockCommandContext();
   });
 
@@ -60,19 +40,6 @@ describe('resumeCommand', () => {
     expect(result).toEqual({
       type: 'dialog',
       dialog: 'resume',
-    });
-  });
-
-  it('blocks resume inside an attached background agent', async () => {
-    mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(true);
-
-    const result = await resumeCommand.action!(mockContext, '');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content:
-        'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
     });
   });
 
@@ -108,29 +75,6 @@ describe('resumeCommand', () => {
       dialog: 'resume',
       sessionId,
     });
-  });
-
-  it('should block direct resume for Agent View managed sessions', async () => {
-    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
-    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(true);
-
-    const mockConfig = {
-      getSessionService: vi.fn(),
-      getTargetDir: vi.fn().mockReturnValue('/test'),
-    };
-
-    mockContext = createMockCommandContext({
-      services: { config: mockConfig as never },
-    });
-
-    const result = await resumeCommand.action!(mockContext, sessionId);
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'managed session message',
-    });
-    expect(mockConfig.getSessionService).not.toHaveBeenCalled();
   });
 
   it('should return error when valid UUID is provided but session does not exist', async () => {

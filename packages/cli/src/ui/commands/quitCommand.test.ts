@@ -9,19 +9,13 @@ import { quitCommand } from './quitCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { formatDuration } from '../utils/formatters.js';
 
-const mockIsAgentViewWorkerEnv = vi.hoisted(() => vi.fn(() => false));
-
 vi.mock('../utils/formatters.js');
-vi.mock('../../agent-view/worker-sideband.js', () => ({
-  isAgentViewWorkerEnv: mockIsAgentViewWorkerEnv,
-}));
 
 describe('quitCommand', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T01:00:00Z'));
     vi.mocked(formatDuration).mockReturnValue('1h 0m 0s');
-    mockIsAgentViewWorkerEnv.mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -57,16 +51,5 @@ describe('quitCommand', () => {
         },
       ],
     });
-  });
-
-  it('detaches managed Agent View workers instead of quitting', () => {
-    mockIsAgentViewWorkerEnv.mockReturnValue(true);
-    const mockContext = createMockCommandContext();
-
-    if (!quitCommand.action) throw new Error('Action is not defined');
-    const result = quitCommand.action(mockContext, 'exit');
-
-    expect(result).toEqual({ type: 'agent_view_detach' });
-    expect(formatDuration).not.toHaveBeenCalled();
   });
 });

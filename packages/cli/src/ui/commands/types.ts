@@ -88,8 +88,6 @@ export interface CommandContext {
     btwAbortControllerRef: MutableRefObject<AbortController | null>;
     /** Ref to whether the agent stream is currently idle (no model turn in flight). */
     isIdleRef: MutableRefObject<boolean>;
-    /** Ref to Agent View detach blockers that are owned by the outer UI. */
-    agentViewIdleGateStateRef?: MutableRefObject<AgentViewIdleGateState>;
     /**
      * Loads a new set of history items, replacing the current history.
      *
@@ -118,15 +116,6 @@ export interface CommandContext {
   overwriteConfirmed?: boolean;
   /** Abort signal for cancelling long-running slash command operations via ESC. */
   abortSignal?: AbortSignal;
-}
-
-export interface AgentViewIdleGateState {
-  hasPendingUserQuestion?: boolean;
-  hasPendingToolConfirmation?: boolean;
-  hasPendingCommandConfirmation?: boolean;
-  hasForegroundShell?: boolean;
-  hasBackgroundFocusDialog?: boolean;
-  hasQueuedPrompt?: boolean;
 }
 
 /**
@@ -293,10 +282,6 @@ export interface ConfirmActionReturn {
   };
 }
 
-export interface AgentViewDetachActionReturn {
-  type: 'agent_view_detach';
-}
-
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
@@ -307,8 +292,7 @@ export type SlashCommandActionReturn =
   | SubmitPromptActionReturn
   | GoalControlActionReturn
   | ConfirmShellCommandsActionReturn
-  | ConfirmActionReturn
-  | AgentViewDetachActionReturn;
+  | ConfirmActionReturn;
 
 export enum CommandKind {
   BUILT_IN = 'built-in',

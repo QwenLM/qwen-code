@@ -5,7 +5,6 @@
  */
 
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes, randomInt } from 'node:crypto';
 import { execFile, execSync } from 'node:child_process';
@@ -224,16 +223,10 @@ export class GitWorktreeService {
   private sourceRepoPath: string;
   private gitPromise: Promise<SimpleGit> | undefined;
   private readonly customBaseDir?: string;
-  private readonly customUserWorktreesDir?: string;
 
-  constructor(
-    sourceRepoPath: string,
-    customBaseDir?: string,
-    customUserWorktreesDir?: string,
-  ) {
+  constructor(sourceRepoPath: string, customBaseDir?: string) {
     this.sourceRepoPath = path.resolve(sourceRepoPath);
     this.customBaseDir = customBaseDir;
-    this.customUserWorktreesDir = customUserWorktreesDir;
   }
 
   private getGit(): Promise<SimpleGit> {
@@ -724,7 +717,6 @@ export class GitWorktreeService {
    */
   async removeWorktree(
     worktreePath: string,
-    options: { preserveChanges?: boolean } = {},
   ): Promise<{ success: boolean; error?: string }> {
     let git: SimpleGit;
     try {
@@ -738,20 +730,9 @@ export class GitWorktreeService {
 
     try {
       // Remove the worktree from git
-      await git.raw([
-        'worktree',
-        'remove',
-        worktreePath,
-        ...(options.preserveChanges ? [] : ['--force']),
-      ]);
+      await git.raw(['worktree', 'remove', worktreePath, '--force']);
       return { success: true };
     } catch (error) {
-      if (options.preserveChanges) {
-        return {
-          success: false,
-          error: `Failed to remove worktree: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        };
-      }
       // Try to remove the directory manually if git worktree remove fails
       try {
         await fs.rm(worktreePath, { recursive: true, force: true });
@@ -1053,9 +1034,7 @@ export class GitWorktreeService {
    * repo: `<projectRoot>/.qwen/worktrees`.
    */
   getUserWorktreesDir(): string {
-    return this.customUserWorktreesDir
-      ? path.resolve(this.customUserWorktreesDir)
-      : path.join(this.sourceRepoPath, '.qwen', WORKTREES_DIR);
+    return path.join(this.sourceRepoPath, '.qwen', WORKTREES_DIR);
   }
 
   /**
@@ -1555,10 +1534,7 @@ export class GitWorktreeService {
   async createUserWorktree(
     slug: string,
     baseBranch?: string,
-    options?: {
-      symlinkDirectories?: readonly string[];
-      suppressCheckoutHooks?: boolean;
-    },
+    options?: { symlinkDirectories?: readonly string[] },
   ): Promise<CreateWorktreeResult> {
     const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
     if (validationError) {
@@ -1602,45 +1578,20 @@ export class GitWorktreeService {
         return { success: false, error };
       }
 
-      if (options?.suppressCheckoutHooks) {
-        const emptyHooksDir = await fs.mkdtemp(
-          path.join(os.tmpdir(), 'qwen-empty-git-hooks-'),
-        );
-        try {
-          await execFileAsync(
-            'git',
-            ['worktree', 'add', '-b', branchName, worktreePath, base],
-            {
-              cwd: this.sourceRepoPath,
-              env: {
-                ...process.env,
-                GIT_CONFIG_COUNT: '1',
-                GIT_CONFIG_KEY_0: 'core.hooksPath',
-                GIT_CONFIG_VALUE_0: emptyHooksDir,
-              },
-            },
-          );
-        } finally {
-          await fs.rm(emptyHooksDir, { recursive: true, force: true });
-        }
-      } else {
-        await (
-          await this.getGit()
-        ).raw(['worktree', 'add', '-b', branchName, worktreePath, base]);
-      }
+      await (
+        await this.getGit()
+      ).raw(['worktree', 'add', '-b', branchName, worktreePath, base]);
 
       // Configure core.hooksPath so commits inside the worktree run the
       // main repo's hooks (the new worktree's .git directory has no hooks
       // of its own). Priority: .husky/ first (common for JS projects),
       // .git/hooks fallback. Mirrors claude-code's performPostCreationSetup.
       // Best-effort: hook failures must not abort worktree creation.
-      if (!options?.suppressCheckoutHooks) {
-        await this.configureHooksPath(worktreePath).catch((error) => {
-          debugLogger.warn(
-            `createUserWorktree: failed to configure core.hooksPath for ${slug}: ${error}`,
-          );
-        });
-      }
+      await this.configureHooksPath(worktreePath).catch((error) => {
+        debugLogger.warn(
+          `createUserWorktree: failed to configure core.hooksPath for ${slug}: ${error}`,
+        );
+      });
 
       // Phase D-2: symlink user-configured directories from the main
       // repo into the new worktree (e.g. node_modules) so the model can
@@ -2075,7 +2026,6 @@ export class GitWorktreeService {
    * we never disturb intentional configuration.
    */
   private async ensureWorktreesGitignored(): Promise<void> {
-    if (this.customUserWorktreesDir) return;
     try {
       const qwenDir = path.join(this.sourceRepoPath, '.qwen');
       await fs.mkdir(qwenDir, { recursive: true });
@@ -2105,86 +2055,6 @@ export class GitWorktreeService {
     }
   }
 
-  async isUserWorktreeRemoved(slug: string): Promise<boolean> {
-    try {
-      await fs.lstat(this.getUserWorktreePath(slug));
-      return false;
-    } catch (error) {
-      if (
-        !isNodeError(error) ||
-        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
-      ) {
-        debugLogger.warn(
-          `isUserWorktreeRemoved failed for slug ${slug}: ${error}`,
-        );
-        return false;
-      }
-    }
-    const branchName = worktreeBranchForSlug(slug);
-    try {
-      const out = await (
-        await this.getGit()
-      ).raw([
-        'for-each-ref',
-        '--count=1',
-        '--format=%(refname)',
-        `refs/heads/${branchName}`,
-      ]);
-      return out.trim().length === 0;
-    } catch (error) {
-      debugLogger.warn(
-        `isUserWorktreeRemoved failed for slug ${slug}: ${error}`,
-      );
-      return false;
-    }
-  }
-
-  async removeUnchangedUserWorktreeBranch(
-    slug: string,
-    expectedCommit: string,
-  ): Promise<boolean> {
-    if (GitWorktreeService.validateUserWorktreeSlug(slug)) return false;
-    try {
-      await fs.lstat(this.getUserWorktreePath(slug));
-      return false;
-    } catch (error) {
-      if (
-        !isNodeError(error) ||
-        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
-      ) {
-        debugLogger.warn(
-          `removeUnchangedUserWorktreeBranch failed for slug ${slug}: ${error}`,
-        );
-        return false;
-      }
-    }
-    const branchName = worktreeBranchForSlug(slug);
-    try {
-      const git = await this.getGit();
-      const out = await git.raw([
-        'for-each-ref',
-        '--count=1',
-        '--format=%(objectname)',
-        `refs/heads/${branchName}`,
-      ]);
-      const head = out.trim();
-      if (!head) return true;
-      if (head !== expectedCommit) return false;
-      await git.raw([
-        'update-ref',
-        '-d',
-        `refs/heads/${branchName}`,
-        expectedCommit,
-      ]);
-      return true;
-    } catch (error) {
-      debugLogger.warn(
-        `removeUnchangedUserWorktreeBranch failed for slug ${slug}: ${error}`,
-      );
-      return false;
-    }
-  }
-
   /**
    * Removes a user worktree, optionally deleting its branch.
    *
@@ -2197,11 +2067,7 @@ export class GitWorktreeService {
    */
   async removeUserWorktree(
     slug: string,
-    options: {
-      deleteBranch?: boolean;
-      forceDeleteBranch?: boolean;
-      preserveChanges?: boolean;
-    } = {},
+    options: { deleteBranch?: boolean; forceDeleteBranch?: boolean } = {},
   ): Promise<{
     success: boolean;
     error?: string;
@@ -2210,9 +2076,7 @@ export class GitWorktreeService {
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
 
-    const removed = await this.removeWorktree(worktreePath, {
-      preserveChanges: options.preserveChanges === true,
-    });
+    const removed = await this.removeWorktree(worktreePath);
     if (!removed.success) {
       return removed;
     }

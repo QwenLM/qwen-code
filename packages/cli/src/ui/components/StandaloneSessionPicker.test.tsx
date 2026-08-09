@@ -422,10 +422,7 @@ describe('SessionPicker', () => {
       stdin.write('\r');
       await flush();
 
-      expect(onSelect).toHaveBeenCalledWith(
-        'selected-session',
-        expect.objectContaining({ sessionId: 'selected-session' }),
-      );
+      expect(onSelect).toHaveBeenCalledWith('selected-session');
     });
 
     it('should cancel on Escape', async () => {
@@ -937,10 +934,7 @@ describe('SessionPicker', () => {
       // unchanged), not be eaten by a phantom preview.
       stdin.write('\r');
       await flush();
-      expect(onSelect).toHaveBeenCalledWith(
-        's1',
-        expect.objectContaining({ sessionId: 's1' }),
-      );
+      expect(onSelect).toHaveBeenCalledWith('s1');
       expect(service.loadSession).not.toHaveBeenCalled();
     });
   });

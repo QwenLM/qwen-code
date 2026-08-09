@@ -944,13 +944,6 @@ export interface ConfigParameters {
   allowedTools?: string[];
   excludeTools?: string[];
   /**
-   * Runtime-only exact built-in tool inventory. When present, only these
-   * canonical tool names may be registered or invoked; dynamically discovered
-   * and MCP tools are excluded, and an empty list disables every tool. This is
-   * deliberately not sourced from user or project settings.
-   */
-  exactToolInventory?: readonly string[];
-  /**
    * Pre-merged list of slash command names that should be hidden from the
    * CLI surface. Matched case-insensitively on the final (post-rename)
    * command name. Sourced from settings (`slashCommands.disabled`, UNION
@@ -1188,9 +1181,6 @@ export interface ConfigParameters {
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
-  requireRipgrep?: boolean;
-  requireBuiltinRipgrep?: boolean;
-  strictRipgrepIgnorePolicy?: boolean;
   shouldUseNodePtyShell?: boolean;
   /** Prevent the system from sleeping while model or tool work is in flight. */
   preventSystemSleep?: boolean;
@@ -1588,12 +1578,6 @@ export interface ConfigInitializeOptions {
    */
   skipFileCheckpointing?: boolean;
   /**
-   * Skip the asynchronous stale-worktree sweep. Managed coordination workers
-   * operate inside supervisor-owned worktrees and must not mutate unrelated
-   * workspace state during bootstrap.
-   */
-  skipWorktreeCleanup?: boolean;
-  /**
    * Warm the tool registry in best-effort (non-strict) mode. Read-only replay
    * Configs set this so a tool whose constructor requires a subsystem this
    * Config deliberately skipped (e.g. `SkillTool` needs the `SkillManager` that
@@ -1825,7 +1809,6 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
-  private readonly exactToolInventory: ReadonlySet<string> | undefined;
   private readonly disabledSlashCommands: readonly string[];
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
@@ -2009,9 +1992,6 @@ export class Config {
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
-  private readonly requireRipgrep: boolean;
-  private readonly requireBuiltinRipgrep: boolean;
-  private readonly strictRipgrepIgnorePolicy: boolean;
   private readonly shouldUseNodePtyShell: boolean;
   private readonly preventSystemSleep: boolean;
   private readonly skipNextSpeakerCheck: boolean;
@@ -2148,10 +2128,6 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
-    this.exactToolInventory =
-      params.exactToolInventory === undefined
-        ? undefined
-        : new Set(params.exactToolInventory);
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
@@ -2172,21 +2148,7 @@ export class Config {
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
-    const hostToolInvocationGuard = params.toolInvocationGuard;
-    const exactToolInventory = this.exactToolInventory;
-    this.toolInvocationGuard = exactToolInventory
-      ? async (context) => {
-          if (!exactToolInventory.has(context.toolName)) {
-            return {
-              allowed: false,
-              reason: 'Tool invocation denied by exact runtime inventory.',
-            };
-          }
-          return hostToolInvocationGuard
-            ? hostToolInvocationGuard(context)
-            : { allowed: true };
-        }
-      : hostToolInvocationGuard;
+    this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -2345,10 +2307,6 @@ export class Config {
     // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
-    this.requireRipgrep = params.requireRipgrep ?? false;
-    this.requireBuiltinRipgrep = params.requireBuiltinRipgrep ?? false;
-    this.strictRipgrepIgnorePolicy =
-      params.strictRipgrepIgnorePolicy ?? false;
     this.shouldUseNodePtyShell =
       params.shouldUseNodePtyShell ?? shouldDefaultToNodePty();
     this.preventSystemSleep = params.preventSystemSleep ?? true;
@@ -3046,9 +3004,6 @@ export class Config {
     await this.toolRegistry.warmAll({
       strict: options?.lenientToolWarmup !== true,
     });
-    if (this.exactToolInventory !== undefined) {
-      this.toolRegistry.assertExactToolInventory();
-    }
     recordStartupEvent('config_initialize_tool_warmup_end');
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
@@ -3101,7 +3056,7 @@ export class Config {
     // directly would cause launches from a monorepo subdirectory to
     // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
     // sweep would silently be a no-op forever.
-    if (!this.getBareMode() && !options?.skipWorktreeCleanup) {
+    if (!this.getBareMode()) {
       void (async () => {
         try {
           // Resolve the repo top-level FIRST. The previous code bailed
@@ -5205,22 +5160,6 @@ export class Config {
     return this.customSkillDirs;
   }
 
-  /** Runtime-only registration and execution boundary for managed sessions. */
-  getExactToolInventory(): ReadonlySet<string> | undefined {
-    return this.exactToolInventory;
-  }
-
-  /**
-   * Re-check the initialized registry against the configured exact inventory.
-   * Useful after an explicit registry refresh in a managed session.
-   */
-  assertExactToolInventory(): void {
-    if (!this.toolRegistry) {
-      throw new Error('Tool registry is not initialized.');
-    }
-    this.toolRegistry.assertExactToolInventory();
-  }
-
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
@@ -7262,14 +7201,6 @@ export class Config {
     return this.useBuiltinRipgrep;
   }
 
-  getStrictRipgrepIgnorePolicy(): boolean {
-    return this.strictRipgrepIgnorePolicy;
-  }
-
-  getRequireBuiltinRipgrep(): boolean {
-    return this.requireBuiltinRipgrep;
-  }
-
   getShouldUseNodePtyShell(): boolean {
     return this.shouldUseNodePtyShell;
   }
@@ -8084,18 +8015,11 @@ export class Config {
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = this.requireBuiltinRipgrep
-          ? await canUseRipgrep(true, true)
-          : await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }
       recordStartupEvent('config_initialize_ripgrep_probe_end');
-      if (!useRipgrep && this.requireRipgrep) {
-        throw new Error(
-          `Managed runtime requires ripgrep: ${errorString ?? 'ripgrep is not available'}`,
-        );
-      }
       if (useRipgrep) {
         await registerLazy(ToolNames.GREP, async () => {
           const { RipGrepTool } = await import('../tools/ripGrep.js');

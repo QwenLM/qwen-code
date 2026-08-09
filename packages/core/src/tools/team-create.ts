@@ -196,8 +196,6 @@ Use this tool proactively whenever:
 - The user mentions wanting agents to work together, coordinate, or collaborate
 - A task is complex enough that it would benefit from parallel work by multiple agents (e.g., building a full-stack feature with frontend and backend work, refactoring a codebase while keeping tests passing, implementing a multi-step project with research, planning, and coding phases)
 
-Do not use this tool for the explicit \`/coordinate\` workflow; that workflow uses bounded foreground investigators without a persistent team.
-
 When in doubt about whether a task warrants a team, prefer spawning a team.
 
 ## Choosing Agent Types for Teammates
