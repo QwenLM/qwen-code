@@ -1286,9 +1286,11 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   return {
     type: 'diff',
     path:
-      typeof resultDisplay['fileName'] === 'string'
-        ? resultDisplay['fileName']
-        : '',
+      typeof resultDisplay['filePath'] === 'string'
+        ? resultDisplay['filePath']
+        : typeof resultDisplay['fileName'] === 'string'
+          ? resultDisplay['fileName']
+          : '',
     oldText:
       typeof resultDisplay['originalContent'] === 'string'
         ? resultDisplay['originalContent']

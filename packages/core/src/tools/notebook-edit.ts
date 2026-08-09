@@ -696,6 +696,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       const displayResult = {
         fileDiff,
         fileName,
+        filePath: this.params.notebook_path,
         originalContent: prepared.originalContent,
         newContent: prepared.updatedContent,
         diffStat,

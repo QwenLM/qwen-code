@@ -464,6 +464,7 @@ describe('WriteFileTool', () => {
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_new_file.txt');
+      expect(display.filePath).toBe(filePath);
       expect(display.fileDiff).toMatch(/--- execute_new_file.txt\tOriginal/);
       expect(display.fileDiff).toMatch(/\+\+\+ execute_new_file.txt\tWritten/);
       expect(display.fileDiff).toMatch(
@@ -824,6 +825,7 @@ describe('WriteFileTool', () => {
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_existing_file.txt');
+      expect(display.filePath).toBe(filePath);
       expect(display.fileDiff).toMatch(
         initialContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
