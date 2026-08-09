@@ -472,13 +472,20 @@ jobs:
             tmux -V || echo '::warning::tmux present but not answering; real-tmux capture tests will be skipped.'
             zip -v > /dev/null 2>&1 || echo '::warning::zip present but not answering; the zip-packaging suite will throw on CI.'
             unzip -v > /dev/null 2>&1 || echo '::warning::unzip present but not answering; the zip-packaging suite will throw on CI.'
+          elif [ "$(id -u)" = '0' ] && command -v apt-get > /dev/null 2>&1; then
+            # Root-container lanes have no sudo (and need none): apt-get
+            # runs as-is. Advisory, not a gate: an apt hiccup must not red
+            # this step before a single test has run — the suites carry
+            # their own signal (the real-tmux suite skips; the zip suite
+            # throws on CI). ::warning:: (not a plain echo) so a lane
+            # where the install PERMANENTLY fails shows the loss in the
+            # check UI instead of hiding it in a multi-thousand-line log.
+            timeout 280 apt-get update -qq && timeout 280 apt-get install -y -qq --no-install-recommends tmux zip unzip \
+              || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
           elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then
-            # Advisory, not a gate: an apt hiccup must not red this step
-            # before a single test has run — the suites carry their own
-            # signal (the real-tmux suite skips; the zip suite throws on
-            # CI). ::warning:: (not a plain echo) so a lane where the
-            # install PERMANENTLY fails shows the loss in the check UI
-            # instead of hiding it in a multi-thousand-line log.
+            # Same advisory contract as the root branch; sudo -n here so a
+            # runner without passwordless sudo fails fast instead of
+            # hanging on a password prompt toward the step's bound.
             timeout 280 sudo -n apt-get update -qq && timeout 280 sudo -n apt-get install -y -qq --no-install-recommends tmux zip unzip \
               || echo '::warning::tmux/zip install failed; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
           else

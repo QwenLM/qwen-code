@@ -457,65 +457,86 @@ describe('ci.yml capture tooling', () => {
     // The flags that make it work UNATTENDED: without -y apt-get prompts
     // and fails on a runner with no tty, and without root it cannot write
     // /var/lib/dpkg — both keep every structural pin green while installing
-    // nothing.
-    // EVERY install statement, not just the first: splitting the install in
-    // two exempted the second from both requirements.
-    const branchStatements = installLines.flatMap((l) => rawStatementsOf(l));
-    const installStatements = branchStatements.filter((stmt) =>
-      /^apt-get\s+install\b/.test(unwrapCommand(stmt)),
+    // nothing. Checked PER install statement, not just the first: splitting
+    // the install in two exempted the second from both requirements.
+    // The step carries one install chain PER lane: a root branch (root
+    // containers have no sudo and need none) and a sudo branch. Each branch
+    // must install on ITS OWN — a chain that only lives in one branch
+    // leaves the other lane with no tooling and every whole-step pin green.
+    const elifIdxs = installLines
+      .map((l, i) => (l.startsWith('elif ') ? i : -1))
+      .filter((i) => i > -1);
+    const elseLineIdx = installLines.findIndex((l) => l === 'else');
+    expect(elifIdxs.length, 'expected the root and sudo install branches').toBe(
+      2,
     );
-    expect(
-      installStatements.length,
-      'no apt-get install statement',
-    ).toBeGreaterThan(0);
-    // …and EXACTLY one: an always-failing `apt-get install` prefixed in the
-    // same && chain short-circuits the real install, and every per-statement
-    // pin binds to a statement on the line — none of them sees the skip.
-    expect(installStatements.length).toBe(1);
-    for (const stmt of installStatements) {
-      expect(unwrapCommand(stmt).split(/\s+/), stmt).toContain('-y');
-      // Through sudo, in any of its spellings and behind any other wrapper:
-      // `sudo -n apt-get` is the sibling workflow's convention and
-      // `timeout 280 sudo -n apt-get` is what a bounded install looks like.
-      // Requiring sudo FIRST would red both.
-      expect(runsThroughSudo(stmt), `${stmt} does not run through sudo`).toBe(
-        true,
-      );
-      expect(NO_OP_INSTALL_OPTION.test(stmt), `${stmt} simulates`).toBe(false);
-      expect(NO_OP_INSTALL_LONG.test(stmt), `${stmt} installs nothing`).toBe(
-        false,
-      );
-    }
-    // The index refresh the install depends on: without it a stale list
-    // fails the install on a runner whose image is a few days old — and it
-    // must come FIRST, or the install still reads the stale list.
-    const updateIdx = branchStatements.findIndex((stmt) =>
-      /^apt-get\s+update\b/.test(unwrapCommand(stmt)),
-    );
-    expect(
-      updateIdx,
-      'no apt-get update in the install branch',
-    ).toBeGreaterThan(-1);
-    expect(
-      updateIdx,
-      'apt-get update must come before the install',
-    ).toBeLessThan(
-      branchStatements.findIndex((stmt) =>
+    const statementsBetween = (from, to) =>
+      installLines.slice(from + 1, to).flatMap((l) => rawStatementsOf(l));
+    const branches = [
+      {
+        name: 'root',
+        statements: statementsBetween(elifIdxs[0], elifIdxs[1]),
+        throughSudo: false,
+      },
+      {
+        name: 'sudo',
+        statements: statementsBetween(elifIdxs[1], elseLineIdx),
+        throughSudo: true,
+      },
+    ];
+    for (const branch of branches) {
+      const installStatements = branch.statements.filter((stmt) =>
         /^apt-get\s+install\b/.test(unwrapCommand(stmt)),
-      ),
-    );
-    // ...and through sudo, for the reason the install is: without root it
-    // cannot write the package lists it exists to refresh.
-    expect(
-      installLines
-        .flatMap((l) => rawStatementsOf(l))
-        .some(
-          (stmt) =>
-            /^apt-get\s+update\b/.test(unwrapCommand(stmt)) &&
-            runsThroughSudo(stmt),
-        ),
-      'the apt-get update does not run through sudo',
-    ).toBe(true);
+      );
+      // EXACTLY one per branch: an always-failing `apt-get install`
+      // prefixed in the same && chain short-circuits the real install, and
+      // every per-statement pin binds to a statement on the line — none of
+      // them sees the skip.
+      expect(
+        installStatements.length,
+        `${branch.name} branch: expected exactly one apt-get install`,
+      ).toBe(1);
+      for (const stmt of installStatements) {
+        expect(unwrapCommand(stmt).split(/\s+/), stmt).toContain('-y');
+        // The sudo branch runs through sudo, in any of its spellings and
+        // behind any other wrapper: `sudo -n apt-get` is the sibling
+        // workflow's convention and `timeout 280 sudo -n apt-get` is what a
+        // bounded install looks like. Requiring sudo FIRST would red both.
+        // The root branch must NOT: root lanes may ship no sudo binary, so
+        // a sudo-wrapped chain there exits 127, the guard fires, and
+        // nothing installs.
+        expect(
+          runsThroughSudo(stmt),
+          `${branch.name} branch: ${stmt} sudo expectation`,
+        ).toBe(branch.throughSudo);
+        expect(NO_OP_INSTALL_OPTION.test(stmt), `${stmt} simulates`).toBe(
+          false,
+        );
+        expect(NO_OP_INSTALL_LONG.test(stmt), `${stmt} installs nothing`).toBe(
+          false,
+        );
+      }
+      // The index refresh the install depends on: without it a stale list
+      // fails the install on a runner whose image is a few days old — and
+      // it must come FIRST in the branch, or the install still reads the
+      // stale list. Same sudo shape as the branch's install: without root
+      // (or sudo) it cannot write the package lists it exists to refresh.
+      const updateStatements = branch.statements.filter((stmt) =>
+        /^apt-get\s+update\b/.test(unwrapCommand(stmt)),
+      );
+      expect(
+        updateStatements.length,
+        `${branch.name} branch: expected one apt-get update`,
+      ).toBe(1);
+      expect(
+        branch.statements.indexOf(updateStatements[0]),
+        `${branch.name} branch: apt-get update must come before the install`,
+      ).toBeLessThan(branch.statements.indexOf(installStatements[0]));
+      expect(
+        runsThroughSudo(updateStatements[0]),
+        `${branch.name} branch: ${updateStatements[0]} sudo expectation`,
+      ).toBe(branch.throughSudo);
+    }
     // Nothing foreign may sit on the install's chain: only apt-get calls
     // and the guard's echo, so no prefixed command can short-circuit it.
     for (const line of installLines) {
@@ -582,9 +603,12 @@ describe('ci.yml capture tooling', () => {
     // installed and the real-tmux suite silently skips.
     const lines = logicalLinesOf(steps[nameIndex(INSTALL)].run);
     const ifLine = lines.find((l) => l.startsWith('if '));
-    const elifLine = lines.find((l) => l.startsWith('elif '));
+    const elifLines = lines.filter((l) => l.startsWith('elif '));
     expect(ifLine, 'no `if` line in the install step').toBeDefined();
-    expect(elifLine, 'no `elif` line in the install step').toBeDefined();
+    expect(
+      elifLines.length,
+      'expected the root and sudo install branches',
+    ).toBe(2);
     // The already-installed branch must test for ALL THREE tools with AND,
     // pinned whole: a prefix-only pin let a one-character `&&`→`||` typo
     // (`command -v tmux || command -v zip …`) take the branch on a lane
@@ -592,17 +616,23 @@ describe('ci.yml capture tooling', () => {
     expect(ifLine.replace(/\s+/g, ' ')).toBe(
       'if command -v tmux > /dev/null 2>&1 && command -v zip > /dev/null 2>&1 && command -v unzip > /dev/null 2>&1; then',
     );
-    // Nothing may force either branch: a literal constant, or bash's null
+    // Nothing may force any branch: a literal constant, or bash's null
     // command `:` — `command -v tmux || :` is permanently true.
-    for (const line of [ifLine, elifLine]) {
+    for (const line of [ifLine, ...elifLines]) {
       expect(hasForcingTerm(line), `forced condition :: ${line}`).toBe(false);
       expect(line, line).not.toMatch(/(^|\s)(true|false|:)\s*(&&|\|\||;)/);
     }
-    // The install branch is pinned WHOLE too: a near-miss falsifier
+    // The install branches are pinned WHOLE: a near-miss falsifier
     // (`elif false2 && …`, a command that does not exist and therefore
-    // always fails) kills the branch while satisfying a containment pin and
-    // the forcing-term blacklist alike.
-    expect(elifLine.replace(/\s+/g, ' ')).toBe(
+    // always fails) kills the branch while satisfying a containment pin
+    // and the forcing-term blacklist alike. The root branch sits FIRST:
+    // root-container lanes have no sudo, so their chain must not reach
+    // for it, and the per-branch pins below bind each chain to its
+    // position.
+    expect(elifLines[0].replace(/\s+/g, ' ')).toBe(
+      'elif [ "$(id -u)" = \'0\' ] && command -v apt-get > /dev/null 2>&1; then',
+    );
+    expect(elifLines[1].replace(/\s+/g, ' ')).toBe(
       'elif sudo -n true > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then',
     );
     // The already-installed branch is not empty either: it must verify the
@@ -628,10 +658,10 @@ describe('ci.yml capture tooling', () => {
       ).toBeDefined();
       expect(line, `${probe} is unguarded`).toMatch(/\|\|\s*echo\b/);
     }
-    // And the ELSE fallback exists: on a lane with neither tmux nor
-    // sudo+apt-get — a root-container self-hosted runner, the family this
-    // PR's own evidence is produced on — it is the only signal that the
-    // tooling is missing. Deleting it passed every other pin.
+    // And the ELSE fallback exists: on a lane with no usable install path
+    // — no apt-get at all, and no passwordless sudo when running non-root
+    // — it is the only signal that the tooling is missing. Deleting it
+    // passed every other pin.
     const elseIdx = lines.findIndex((l) => l === 'else');
     expect(elseIdx, 'no `else` fallback branch').toBeGreaterThan(-1);
     // And the conditional is CLOSED: without `fi`, bash rejects the block
