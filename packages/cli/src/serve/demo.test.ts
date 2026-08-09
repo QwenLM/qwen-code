@@ -120,7 +120,9 @@ describe('demo page usage_update handling', () => {
       sseStream(
         { sessionUpdate: 'usage_update', used: 50, size: 200 },
         { sessionUpdate: 'usage_update', used: 51, size: 204 },
-        { sessionUpdate: 'usage_update', used: 60, size: 200 },
+        { sessionUpdate: 'usage_update', used: 51, size: 200 },
+        { sessionUpdate: 'usage_update', used: 100000, size: 131072 },
+        { sessionUpdate: 'usage_update', used: 30, size: 200 },
       ),
     ]);
     const doc = dom.window.document;
@@ -128,15 +130,20 @@ describe('demo page usage_update handling', () => {
 
     const contextUsage = doc.querySelector('#contextUsage') as HTMLElement;
     await waitFor(
-      () => contextUsage.textContent === 'Context: 60 / 200 (30%)',
+      () => contextUsage.textContent === 'Context: 30 / 200 (15%)',
       'meter to reach the final frame',
     );
 
     expect(contextUsage.style.display).toBe('block');
     const entries = ctxEntries(doc);
-    expect(entries).toHaveLength(2);
+    expect(entries).toHaveLength(4);
     expect(entries[0].textContent).toContain('50 / 200 (25%)');
-    expect(entries[1].textContent).toContain('60 / 200 (30%)');
+    expect(entries[1].textContent).toContain('51 / 200 (26%)');
+    expect(entries[2].textContent).toContain('100000 / 131072 (76%)');
+    expect(entries[3].textContent).toContain('30 / 200 (15%)');
+    // Pins the script-scoped let: without the declaration the dedup state
+    // degrades to an implicit window global and nothing else in the suite fails.
+    expect('lastLoggedContextPct' in dom.window).toBe(false);
   });
 
   it('ignores malformed usage_update frames', async () => {

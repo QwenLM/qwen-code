@@ -439,12 +439,12 @@ export function getDemoHtml(_port: number): string {
         const size = update.size;
         if (typeof used === 'number' && typeof size === 'number' && size > 0) {
           const pct = Math.round((used / size) * 100);
+          const label = used + ' / ' + size + ' (' + pct + '%)';
           contextUsage.style.display = 'block';
-          contextUsage.textContent =
-            'Context: ' + used.toLocaleString() + ' / ' + size.toLocaleString() + ' (' + pct + '%)';
+          contextUsage.textContent = 'Context: ' + label;
           if (pct !== lastLoggedContextPct) {
             lastLoggedContextPct = pct;
-            logEvent('CTX', used + ' / ' + size + ' (' + pct + '%)');
+            logEvent('CTX', label);
           }
         }
       } else {
