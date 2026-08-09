@@ -97,14 +97,18 @@ describe('VirtualSubagentSessions', () => {
     ).toThrow('valid id parts');
   });
 
-  it.each(['a'.repeat(500), '界'.repeat(492)])(
+  it.each([
+    ['a'.repeat(500), 696],
+    [`${'界'.repeat(492)}aa`, 2_000],
+  ])(
     'round-trips an agent id at an accepted length boundary',
-    (agentId) => {
+    (agentId, expectedSessionIdLength) => {
       const sessionId = createVirtualSubagentSessionId(
         'parent-session',
         agentId,
       );
 
+      expect(sessionId).toHaveLength(expectedSessionIdLength);
       expect(parseVirtualSubagentSessionId(sessionId)).toEqual({
         parentSessionId: 'parent-session',
         agentId,
