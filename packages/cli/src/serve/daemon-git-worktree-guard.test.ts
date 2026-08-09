@@ -1373,6 +1373,43 @@ it -C ${outsideRepo} reset --hard`,
     ).resolves.toMatchObject({ allowed: false });
   });
 
+  // Relink state crosses scopes in both directions: the symlink a nested
+  // evaluation creates is just as real, and a parent's relink still misleads
+  // a nested run.
+  it.each([
+    () =>
+      `sh -c 'rm -rf src && ln -s ${outsideRepo} src' && git -C src reset --hard`,
+    () => `eval 'ln -s ${outsideRepo} src' && git -C src reset --hard`,
+    () => `echo $(ln -s ${outsideRepo} src) && git -C src reset --hard`,
+    () => `ln -s ${outsideRepo} src && sh -c 'git -C src reset --hard'`,
+    () => `X=ln; $X -s ${path.join(outsideRepo, '.git')} .git && git add -A`,
+    () => `ln -s ${path.join(outsideRepo, '.git')} .git && nice git add -A`,
+  ])('carries relink state across scopes %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it.each([
+    // `<(…)` opens a paren the tokenizer must count, or its `)` pops the
+    // enclosing subshell early and the preceding `cd` is lost.
+    () => `(cd ${outsideRepo}; <(true); git reset --hard)`,
+    // `eval` runs in this shell, so it sees the shell-local assignment.
+    () =>
+      `GIT_DIR=${outsideRepo}/meta; eval 'export GIT_DIR'; git reset --hard`,
+    // Any unreadable word in a shell's argv can be the `-c`.
+    () => `A='-c'; bash $A "$P"`,
+    () => `bash $A "$P"`,
+  ])('fails closed on the round-5 scope gaps %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

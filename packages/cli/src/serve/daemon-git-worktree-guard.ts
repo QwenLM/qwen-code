@@ -379,8 +379,13 @@ function tokenizeSegment(
       runs.at(-1)!.tokens.push({ text: pattern, dynamic: true });
       continue;
     }
-    if (op === '(' || op === ')') {
-      depth = op === '(' ? depth + 1 : Math.max(0, depth - 1);
+    if (op === '(' || op === '<(' || op === '>(') {
+      depth++;
+      runs.push({ tokens: [], depth });
+      continue;
+    }
+    if (op === ')') {
+      depth = Math.max(0, depth - 1);
       runs.push({ tokens: [], depth });
       continue;
     }
@@ -714,10 +719,10 @@ function consumeShellWrapper(
       return { kind: 'static', payload: payloadToken.text };
     }
     if (token.dynamic) {
-      // `bash -c$CMD`: the payload is fused into this token and unresolved.
-      return shellBundleRequestsCommand(token.text)
-        ? { kind: 'dynamic' }
-        : { kind: 'none' };
+      // `bash -c$CMD`, `bash $A "$P"`: any unreadable word in a shell's argv
+      // can be the `-c` that carries the command, so the wrapper as a whole
+      // is undecidable rather than absent.
+      return { kind: 'dynamic' };
     }
     if (shellBundleRequestsCommand(token.text)) {
       const remainder = token.text.slice(token.text.indexOf('c') + 1);
@@ -1487,8 +1492,14 @@ async function evaluateUnrecognizedRun(
   basisCwd: string | undefined,
   entryCwd: string | undefined,
   context: GuardEvaluationContext,
+  relink?: RelinkState,
 ): Promise<GuardDenial | undefined> {
   if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return undefined;
+  // A relinked `.git` redirects discovery for whatever git this run executes,
+  // exactly as it would for a recognized one.
+  if (relink?.gitDir) {
+    return { allowed: false, reason: UNRECOGNIZED_PROGRAM_DENIAL };
+  }
   // `grep -C 5 git CHANGELOG.md` carries a `-C` that has nothing to do with
   // git, so the program's own flag vocabulary decides whether it is a marker.
   const ownsCFlag =
@@ -1520,6 +1531,24 @@ async function evaluateUnrecognizedRun(
   return denyOutsideDiscoveredRepository(canonicalBasis, context);
 }
 
+/**
+ * State that outlives the scope it was created in. A relink performed inside
+ * `sh -c '…'` still changes the real filesystem, and a relink performed in
+ * the parent still misleads a nested run — so this is shared by reference in
+ * both directions rather than merged after the fact.
+ */
+interface RelinkState {
+  readonly targets: string[];
+  gitDir: boolean;
+}
+
+interface EvaluationScope {
+  readonly relink: RelinkState;
+  // Shell variables the nested command can see: `eval` and subshells inherit
+  // them, a `sh -c` subprocess does not.
+  readonly locals?: Map<string, GuardToken>;
+}
+
 interface CommandEvaluation {
   readonly denial?: GuardDenial;
   readonly cwdAfter: string | undefined;
@@ -1536,6 +1565,7 @@ async function evaluateCommandWithCwd(
   entryCwd: string | undefined,
   context: GuardEvaluationContext,
   depth: number,
+  scope: EvaluationScope = { relink: { targets: [], gitDir: false } },
 ): Promise<CommandEvaluation> {
   let trackedCwd = startCwd;
   // Assignments this command exported into the environment of everything that
@@ -1544,13 +1574,11 @@ async function evaluateCommandWithCwd(
   let allExport = false;
   // GIT_* assignments made without `export`. They stay shell-local until a
   // name-only `export GIT_DIR` promotes them into the environment.
-  const shellLocals = new Map<string, GuardToken>();
+  const shellLocals = scope.locals ?? new Map<string, GuardToken>();
   // Paths a run in this command may have re-pointed. Any containment the
   // guard proves for one of them afterwards is proved against the old target.
-  const relinkedTargets: string[] = [];
-  // Set when a relinked path is (or may be) a `.git`, which redirects the
-  // repository discovery of every later command, relocated or not.
-  let relinkedGitDir = false;
+  // Shared with every nested evaluation, in both directions.
+  const relinkedTargets = scope.relink.targets;
   // Exported relocations reach every later command, including the ones nested
   // inside a wrapper payload or a substitution body.
   const activeContext = (): GuardEvaluationContext =>
@@ -1615,6 +1643,9 @@ async function evaluateCommandWithCwd(
         entryCwd,
         activeContext(),
         depth + 1,
+        // A substitution runs in a subshell: it inherits the variables but
+        // its own assignments die with it, so it gets a copy.
+        { relink: scope.relink, locals: new Map(shellLocals) },
       );
       if (nested.denial) {
         return { denial: nested.denial, cwdAfter: trackedCwd };
@@ -1688,6 +1719,12 @@ async function evaluateCommandWithCwd(
             entryCwd,
             ambient,
             depth + 1,
+            {
+              relink: scope.relink,
+              // `eval` runs in this very shell, so it sees these variables;
+              // a `sh -c` subprocess inherits only exported ones.
+              ...(analysis.propagatesCwd ? { locals: shellLocals } : {}),
+            },
           );
           if (nested.denial) {
             return { denial: nested.denial, cwdAfter: trackedCwd };
@@ -1726,7 +1763,7 @@ async function evaluateCommandWithCwd(
             resolvedRelocations.push(trackedCwd);
           }
           if (
-            relinkedGitDir ||
+            scope.relink.gitDir ||
             resolvedRelocations.some((target) =>
               relinkedTargets.some(
                 (relinked) =>
@@ -1747,6 +1784,7 @@ async function evaluateCommandWithCwd(
             trackedCwd,
             entryCwd,
             activeContext(),
+            scope.relink,
           );
           if (denial) return { denial, cwdAfter: trackedCwd };
           break;
@@ -1756,6 +1794,17 @@ async function evaluateCommandWithCwd(
           const expanded = analysis.rest.map((token) =>
             expandShellLocals(token, shellLocals),
           );
+          // The program word is unreadable, so it may be `ln`: record its
+          // operands as possibly re-pointed (`X=ln; $X -s <out>/.git .git`).
+          for (const operand of expanded) {
+            if (operand.text.startsWith('-') || operand.dynamic) continue;
+            if (trackedCwd === undefined) {
+              scope.relink.gitDir = true;
+              continue;
+            }
+            const resolved = path.resolve(trackedCwd, operand.text);
+            if (path.basename(resolved) === '.git') scope.relink.gitDir = true;
+          }
           if (
             analysis.state.unresolved ||
             analysis.state.relocations.length > 0 ||
@@ -1787,6 +1836,7 @@ async function evaluateCommandWithCwd(
             trackedCwd,
             entryCwd,
             inherited,
+            scope.relink,
           );
           if (denial) return { denial, cwdAfter: trackedCwd };
           break;
@@ -1817,6 +1867,7 @@ async function evaluateCommandWithCwd(
             trackedCwd,
             entryCwd,
             activeContext(),
+            scope.relink,
           );
           if (denial) return { denial, cwdAfter: trackedCwd };
           break;
@@ -1836,12 +1887,13 @@ async function evaluateCommandWithCwd(
                 continue;
               }
               if (operand.dynamic || trackedCwd === undefined) {
-                relinkedGitDir = true;
+                scope.relink.gitDir = true;
                 continue;
               }
               const resolved = path.resolve(trackedCwd, operand.text);
               relinkedTargets.push(resolved);
-              if (path.basename(resolved) === '.git') relinkedGitDir = true;
+              if (path.basename(resolved) === '.git')
+                scope.relink.gitDir = true;
             }
           }
           if (analysis.assignmentsOnly) {
@@ -1876,6 +1928,7 @@ async function evaluateCommandWithCwd(
             trackedCwd,
             entryCwd,
             activeContext(),
+            scope.relink,
           );
           if (denial) return { denial, cwdAfter: trackedCwd };
           break;
