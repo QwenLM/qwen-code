@@ -541,25 +541,37 @@ describe('gemini.tsx main function', () => {
   // only daemon-stamped children (QWEN_CODE_SERVE) scrub, direct editor ACP
   // integrations and non-ACP launches keep their own loader vars.
   it.each([
-    ['scrubs for a daemon-spawned child', { acp: true } as CliArgs, true, true],
+    ['scrubs for a daemon-spawned child', { acp: true } as CliArgs, '1', true],
     [
       'keeps for a direct (editor) ACP child',
       { acp: true } as CliArgs,
-      false,
+      undefined,
       false,
     ],
-    ['keeps for a non-ACP launch', {} as CliArgs, false, false],
+    [
+      'keeps when the daemon marker is zero',
+      { acp: true } as CliArgs,
+      '0',
+      false,
+    ],
+    [
+      'keeps when the daemon marker is false',
+      { acp: true } as CliArgs,
+      'false',
+      false,
+    ],
+    ['keeps for a non-ACP launch', {} as CliArgs, undefined, false],
   ])(
     'inherited loader env vars past the ACP handoff (%s)',
-    async (_mode, argv, daemonStamped, expectScrubbed) => {
+    async (_mode, argv, daemonMarker, expectScrubbed) => {
       vi.stubEnv(
         'NODE_OPTIONS',
         '--import file:///other-checkout/register.mjs',
       );
       vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
       vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
-      if (daemonStamped) {
-        vi.stubEnv('QWEN_CODE_SERVE', '1');
+      if (daemonMarker !== undefined) {
+        vi.stubEnv('QWEN_CODE_SERVE', daemonMarker);
       }
 
       const { parseArguments, loadCliConfig } = await import(
