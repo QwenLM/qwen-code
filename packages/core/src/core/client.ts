@@ -182,6 +182,13 @@ export enum SendMessageType {
    * recorded as a user message.
    */
   Teammate = 'teammate',
+  /**
+   * An envelope delivered by another session over peer messaging. Like
+   * Teammate it is not typed input, so it must never enter slash/shell/@
+   * preprocessing — unlike Teammate its content is attacker-influenced,
+   * which is what makes the bypass load-bearing rather than cosmetic.
+   */
+  Peer = 'peer',
   /** Runtime-owned continuation for an active Goal. */
   Goal = 'goal',
 }

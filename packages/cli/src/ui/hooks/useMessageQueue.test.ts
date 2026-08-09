@@ -158,6 +158,7 @@ describe('useMessageQueue', () => {
     expect(submission).toEqual({
       kind: 'user',
       modelText: 'first prompt\n\nsecond prompt',
+      origin: 'typed',
       turnKey: firstPeek,
     });
     expect(result.current.messageQueue).toEqual(['/help']);
@@ -231,6 +232,7 @@ describe('useMessageQueue', () => {
     expect(submission).toEqual({
       kind: 'user',
       modelText: 'user goes first',
+      origin: 'typed',
       turnKey: userTurnKey,
     });
     expect(result.current.pendingSubmissionCount).toBe(1);
@@ -613,6 +615,7 @@ describe('useMessageQueue', () => {
     expect(userSubmission!).toEqual({
       kind: 'user',
       modelText: 'queued user',
+      origin: 'typed',
       turnKey: reservedKey,
     });
   });
@@ -886,6 +889,143 @@ describe('useMessageQueue', () => {
         modelText: 'first\n\nsecond',
       });
       expect(popped!.submittedPrompt).toBeUndefined();
+    });
+  });
+
+  describe('submission origin', () => {
+    it('defaults typed input to the typed origin', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('!rm -rf /');
+      });
+
+      let popped: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        popped = result.current.popNextSubmission();
+      });
+      expect(popped).toMatchObject({ kind: 'user', origin: 'typed' });
+    });
+
+    it('carries the peer origin through to the drained submission', () => {
+      // The drain picks SendMessageType.Peer off this field, which is what
+      // keeps a peer envelope out of shell/slash/@ preprocessing. Losing it
+      // means the envelope is executed as a shell command in `!` mode.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('envelope', false, 'summary', 'peer');
+      });
+
+      let popped: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        popped = result.current.popNextSubmission();
+      });
+      expect(popped).toMatchObject({
+        kind: 'user',
+        modelText: 'envelope',
+        origin: 'peer',
+      });
+    });
+
+    it('does not batch a peer envelope together with typed input', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed first');
+        result.current.addMessage('envelope', false, undefined, 'peer');
+        result.current.addMessage('typed second');
+      });
+
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      expect(first).toMatchObject({
+        modelText: 'typed first\n\ntyped second',
+        origin: 'typed',
+      });
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({ modelText: 'envelope', origin: 'peer' });
+    });
+
+    it('resolves a forced mixed batch as peer', () => {
+      // popAllMessages cannot split by origin — it drains everything for a
+      // cancel. Resolving to 'peer' costs a typed `!cmd` going to the model;
+      // resolving the other way would hand peer content to the shell.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed');
+        result.current.addMessage('envelope', false, undefined, 'peer');
+      });
+
+      let popped: ReturnType<typeof result.current.popAllMessages> = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+      expect(popped).toMatchObject({ origin: 'peer' });
+    });
+
+    it('leaves a peer envelope out of the mid-turn steer drain', () => {
+      // drainQueue returns bare strings, so anything it hands out comes back
+      // through the steer-restore path as 'typed' — which would submit the
+      // envelope as a user query and hand it to the shell in `!` mode. It
+      // stays queued instead and drains at the turn boundary with its tag.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed steer');
+        result.current.addMessage('!rm -rf /', false, 'summary', 'peer');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['typed steer']);
+      expect(result.current.messageQueue).toEqual(['!rm -rf /']);
+
+      let popped: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        popped = result.current.popNextSubmission();
+      });
+      expect(popped).toMatchObject({ modelText: '!rm -rf /', origin: 'peer' });
+    });
+
+    it('leaves a peer envelope queued even on an include-deferred drain', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('envelope', false, 'summary', 'peer');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['envelope']);
+    });
+
+    it('preserves the peer origin across a failed-admission restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.restoreMessages(['envelope'], 'summary', 'peer');
+      });
+
+      let popped: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        popped = result.current.popNextSubmission();
+      });
+      expect(popped).toMatchObject({ modelText: 'envelope', origin: 'peer' });
     });
   });
 });
