@@ -437,6 +437,28 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     const fd = openSync(probePath, 'w');
     closeSync(fd);
     rmSync(probePath, { force: true });
+    // A file the clear phase SPARED still occupies a path this run must
+    // write. Refuse before anything starts rather than truncate it: the
+    // clear verified it is not a capture manifest's artifact, so it belongs
+    // to someone else, and a successful run silently replaced it (measured
+    // with the collision the clear's own comment names — `--out package` in
+    // a Node project rewrote package.json as a capture manifest at exit 0,
+    // no degradation recorded). A previous capture's OWN artifacts never
+    // reach here: the clear removed them.
+    // Only the MANDATORY writes refuse: the .ans and the manifest are
+    // written on every successful run, so a survivor there can only be
+    // replaced. The png is a RUNG, not a requirement — an occupied png path
+    // degrades the ladder instead (see the render below), which keeps a
+    // capture that can still produce text evidence from failing outright.
+    for (const path of [ansPath, manifestPath]) {
+      if (!existsSync(path)) continue;
+      refuse(
+        `--out collides with a file this capture did not write: ${path}. ` +
+          "A previous capture's own artifacts are cleared automatically; " +
+          'this one is not ours to replace. Pick another --out.',
+      );
+      return;
+    }
     // The sibling proves the DIRECTORY writable, not the artifact paths
     // themselves. Whatever survived the clear still has to be overwritable
     // at the end of the run, and the two shapes that are not — a directory
@@ -1021,6 +1043,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // error, and a blank image would be evidence-shaped noise anyway.
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
+    );
+  } else if (pngStamp.existed) {
+    // Something this run did not write occupies the png path, and the clear
+    // phase spared it deliberately. Rendering would replace it — the same
+    // silent destruction the .ans/.json collision refuses over — so the
+    // ladder stops at the text rung and says why.
+    degradations.push(
+      `${pngPath} holds a file this capture did not write — no image ` +
+        'rendered; clear it or pick another --out for a png rung',
     );
   } else if ((freezeProbe = probes.freeze()).status !== 'ok') {
     degradations.push(

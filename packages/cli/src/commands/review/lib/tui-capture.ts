@@ -263,7 +263,16 @@ export function tmuxPlan(opts: {
   // tmux tears the pane, session and server down behind it (probe-verified
   // with a still-running command: `no server running` right after the
   // watchdog fired). `$$` is the holder's pid inside the subshell — a
-  // subshell does not change it — and the holder is its group leader. MANY SHORT periods,
+  // subshell does not change it — and the holder is its group leader. It
+  // IGNORES INT and QUIT, and must: an async subshell in a non-interactive
+  // shell already ignores them per POSIX, so a `--keys C-c` killed only its
+  // `sleep` and it ran straight into the kill — measured end to end with
+  // bash 5.2 as /bin/sh, ONE C-c took pane, session and server down and the
+  // capture refused `no server running` with zero artifacts, while the same
+  // run with this trap captured its marker. (dash does not reproduce it, so
+  // a dash-only probe would have missed it.) `trap ''` is SIG_IGN and
+  // inherits across exec, but nothing here execs anything but `sleep`, so
+  // the captured command keeps its own Ctrl-C behaviour. MANY SHORT periods,
   // not a few long ones: each post-exit signal consumes the period it
   // interrupts, so with three hour-long sleeps the three C-c tokens this
   // command explicitly supports exhausted the whole budget MID-CAPTURE —
@@ -279,7 +288,7 @@ export function tmuxPlan(opts: {
   // semantics, but a --keys C-\ (SIGQUIT) killed the untrapped layer 0 —
   // pane, session, server gone (measured end-to-end). QUIT is trapped for
   // the same reason INT is; both reset to default in the children.
-  const held = `trap : INT QUIT\n( sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`;
+  const held = `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the

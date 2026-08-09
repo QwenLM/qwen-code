@@ -32,7 +32,10 @@ import {
   runCaptureTui,
   tmuxControl,
 } from './capture-tui.js';
-import { tmuxSupportsCaptureN } from './lib/tui-capture.js';
+import {
+  tmuxSupportsCaptureN,
+  tmuxPadsWithCaptureN,
+} from './lib/tui-capture.js';
 
 const tmuxVersionProbe = spawnSync('tmux', ['-V'], {
   encoding: 'utf8',
@@ -333,10 +336,15 @@ describe('capture-tui without tmux (probe seam)', () => {
         } as never),
       );
       expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('--cols must');
-      expect(existsSync(join(dir, 'cap.json'))).toBe(true);
-      expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
-      expect(existsSync(join(dir, 'cap.png'))).toBe(true);
+      // The refusal is now the COLLISION itself, taken before anything
+      // starts: a file the clear phase verified is not a capture artifact
+      // is not ours to replace, and a successful run used to rewrite it.
+      expect(stderr).toContain('collides with a file this capture did not');
+      expect(readFileSync(join(dir, 'cap.json'), 'utf8')).toBe(
+        '{"name":"not-a-manifest","version":"1.0.0"}',
+      );
+      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('user file');
+      expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -592,7 +600,8 @@ describe('capture-tui without tmux (probe seam)', () => {
           } as never),
         );
         expect(process.exitCode).toBe(3);
-        expect(stderr).toContain('not writable');
+        expect(stderr).toContain('collides with a file this capture did not');
+        expect(stderr).toContain('cap.json');
         expect(performance.now() - started).toBeLessThan(3_000);
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -741,10 +750,10 @@ describe('capture-tui without tmux (probe seam)', () => {
           } as never),
         );
         expect(process.exitCode).toBe(3);
-        expect(stderr).toContain('not writable');
+        expect(stderr).toContain('collides with a file this capture did not');
         // BEFORE the window: the 5s settle never ran.
         expect(performance.now() - started).toBeLessThan(3_000);
-        // And the file it could not write is still the user's, untouched.
+        // And the file is still the user's, untouched.
         expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
           'not writable by us',
         );
@@ -781,10 +790,10 @@ describe('capture-tui without tmux (probe seam)', () => {
         } as never),
       );
       expect(process.exitCode).toBe(3);
-      // The undeletable path is also unwritable, so the artifact-path probe
-      // refuses UP FRONT naming it — not after a full capture window at the
-      // final write.
-      expect(stderr).toContain('not writable');
+      // The undeletable path is also occupied, so the collision gate
+      // refuses UP FRONT naming it — not after a full capture window at
+      // the final write.
+      expect(stderr).toContain('collides with a file this capture did not');
       expect(stderr).toContain('cap.ans');
       expect(statSync(join(dir, 'cap.ans')).isDirectory()).toBe(true);
       expect(existsSync(join(dir, 'cap.ans', 'user-file'))).toBe(true);
@@ -2300,6 +2309,38 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('a foreign file');
   });
 
+  it('REFUSES rather than rewrite a foreign file at a mandatory path', async () => {
+    // The collision the clear phase's own comment names: `--out package` in
+    // a Node project. package.json parses but carries no evidence rung, so
+    // the clear spares it — and a fully SUCCESSFUL run then rewrote it as a
+    // capture manifest at exit 0 with nothing recorded. Both files must
+    // come back byte-for-byte.
+    const pkg = '{"name":"my-pkg","version":"1.0.0"}';
+    const notes = 'hand-written notes';
+    writeFileSync(join(dir, 'cap.json'), pkg);
+    writeFileSync(join(dir, 'cap.ans'), notes);
+    const { stderr } = await withStdio(() => run({ settleMs: 0 }));
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('collides with a file this capture did not');
+    expect(readFileSync(join(dir, 'cap.json'), 'utf8')).toBe(pkg);
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(notes);
+  });
+
+  it('degrades rather than rewrite a foreign file at the PNG path', async () => {
+    // The png is a rung, not a requirement: an occupied png path stops the
+    // ladder at the text rung and says why, instead of failing a capture
+    // that can still produce evidence — or replacing the file.
+    const foreign = 'a foreign image';
+    writeFileSync(join(dir, 'cap.png'), foreign);
+    await withFakeFreeze('#!/bin/sh\nprintf x > "$5"\n', () => run());
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toContain('did not write');
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe(foreign);
+  });
+
   it('never CREDITS a png the clear phase protected as this run evidence', async () => {
     // A freeze that exits 0 without writing leaves the user's untouched
     // file at <out>.png. Existence alone credited it: success JSON with
@@ -2674,19 +2715,27 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
-  it('preserves trailing spaces in the physical frame (-N)', async () => {
-    // "A clipped right edge is trailing-space significant": without -N,
-    // capture-pane trims the trailing run and a padding/clipping claim
-    // reads trimmed output as evidence.
-    await run({
-      command: 'printf "AB   \\n"; sleep 30',
-      until: 'AB',
-    });
-    const ans = readFileSync(join(dir, 'cap.ans'), 'utf8');
-    // At least the three printed spaces survive (tmux may pad further);
-    // without -N the whole trailing run is trimmed to "AB\n".
-    expect(ans).toMatch(/AB {3,}(\r?\n|$)/);
-  });
+  // Skipped where production deliberately omits -N: on tmux 3.1-3.2.x its
+  // -N FABRICATES trailing spaces (it pads to the grid allocation) with no
+  // -T to undo it, so the ladder trims there by design and this assertion
+  // would red on every run — Ubuntu 22.04 ships 3.2a, and the local tmux is
+  // what decides.
+  it.skipIf(tmuxPadsWithCaptureN(tmuxVersionProbe.stdout ?? '') === true)(
+    'preserves trailing spaces in the physical frame (-N)',
+    async () => {
+      // "A clipped right edge is trailing-space significant": without -N,
+      // capture-pane trims the trailing run and a padding/clipping claim
+      // reads trimmed output as evidence.
+      await run({
+        command: 'printf "AB   \\n"; sleep 30',
+        until: 'AB',
+      });
+      const ans = readFileSync(join(dir, 'cap.ans'), 'utf8');
+      // At least the three printed spaces survive (tmux may pad further);
+      // without -N the whole trailing run is trimmed to "AB\n".
+      expect(ans).toMatch(/AB {3,}(\r?\n|$)/);
+    },
+  );
 
   it('maps the yargs surface — hyphenated keys reach the right fields', async () => {
     // Every other test hand-builds the args object; this drives the real
