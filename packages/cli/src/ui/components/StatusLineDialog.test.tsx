@@ -214,6 +214,7 @@ describe('StatusLineDialog', () => {
         type: 'preset',
         useThemeColors: false,
         items: ['model'],
+        hideContextIndicator: false,
       },
     };
     settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
@@ -243,6 +244,7 @@ describe('StatusLineDialog', () => {
         type: 'preset',
         useThemeColors: false,
         items: ['model'],
+        hideContextIndicator: false,
       },
     });
     expect(addItem).toHaveBeenCalledWith(

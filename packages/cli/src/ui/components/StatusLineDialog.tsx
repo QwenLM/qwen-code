@@ -176,8 +176,17 @@ export function StatusLineDialog({
 
   const handleConfirm = useCallback(() => {
     const effectiveScope = getEffectiveStatusLineScope(settings);
-    settings.setValue(effectiveScope, 'ui.statusLine', presetConfig);
-    onSaved?.(presetConfig);
+    const hideContextIndicator = normalizeStatusLinePresetConfig(
+      settings.merged.ui?.statusLine,
+    )?.hideContextIndicator;
+    const savedConfig = {
+      ...presetConfig,
+      ...(typeof hideContextIndicator === 'boolean'
+        ? { hideContextIndicator }
+        : {}),
+    };
+    settings.setValue(effectiveScope, 'ui.statusLine', savedConfig);
+    onSaved?.(savedConfig);
     addItem(
       {
         type: MessageType.INFO,
