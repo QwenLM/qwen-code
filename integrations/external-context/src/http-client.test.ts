@@ -201,7 +201,17 @@ describe('postJson bounded body reading', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
-        streamingResponse([new Uint8Array([0xff, 0xfe, 0xfd])], cancelled),
+        // `{"a":"<invalid byte>"}`: the invalid byte sits inside otherwise-
+        // valid JSON, so only fatal decoding rejects it — lax decoding would
+        // resolve `{ a: '\uFFFD' }` and accept corrupted provider content.
+        streamingResponse(
+          [
+            new Uint8Array([
+              0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d,
+            ]),
+          ],
+          cancelled,
+        ),
       ),
     );
 
