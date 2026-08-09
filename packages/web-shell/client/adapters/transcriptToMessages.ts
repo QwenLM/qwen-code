@@ -123,6 +123,20 @@ function isIgnoredWebShellStatus(text: string): boolean {
 const LEGACY_UNRECOGNIZED_EVENT_MARKER = ' (unrecognized daemon event): ';
 
 /**
+ * The legacy `session_update` projection is `<kind>: <json>` — no marker to
+ * key on, so those blocks can only be matched by kind name. Deliberately
+ * scoped to the kinds known to have leaked into transcripts before the
+ * normalizer suppressed them at the source: `usage_update` (#8790, the
+ * original spam report) and `a2ui`, whose command JSON the bridge splits out
+ * of the tool frame precisely to keep it out of transcripts. Requiring the
+ * `: {` shape keeps this from matching prose that merely starts with the word.
+ */
+const LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES = [
+  'usage_update: {',
+  'a2ui: {',
+];
+
+/**
  * Daemon frames the normalizer had no case for are developer diagnostics —
  * a raw JSON dump of an event this client does not understand. They routinely
  * appear whenever the daemon ships a new event kind ahead of the UI, and
@@ -142,9 +156,11 @@ const LEGACY_UNRECOGNIZED_EVENT_MARKER = ' (unrecognized daemon event): ';
  * to be suppressed by name before. Client-dispatched debug blocks have neither
  * a reason nor the marker, so they keep rendering either way.
  *
- * Not recoverable for legacy blocks: the `session_update` projection is
- * `<kind>: <json>` with no marker, so an old block for an unrecognized
- * session-update kind still renders. New projections carry the reason.
+ * Legacy `session_update` blocks have no marker, so they are matched by kind
+ * name instead — see the prefix list above. That list is closed on purpose: a
+ * generic `<word>: {` rule would swallow legitimate diagnostics. An old block
+ * for some other unrecognized session-update kind therefore still renders;
+ * new projections carry the reason and are covered.
  */
 function isUnrecognizedDaemonDebug(
   block: DaemonStatusTranscriptBlock,
@@ -155,7 +171,12 @@ function isUnrecognizedDaemonDebug(
       block.debugReason === 'unrecognized_session_update'
     );
   }
-  return block.text.includes(LEGACY_UNRECOGNIZED_EVENT_MARKER);
+  return (
+    block.text.includes(LEGACY_UNRECOGNIZED_EVENT_MARKER) ||
+    LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES.some((prefix) =>
+      block.text.startsWith(prefix),
+    )
+  );
 }
 
 function getErrorDisplayText(

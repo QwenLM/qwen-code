@@ -1363,6 +1363,56 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('filters legacy usage_update and a2ui blocks that carry no debugReason', () => {
+    // The original spam report. #8790 stopped the SDK inserting new
+    // `usage_update` blocks, but a transcript persisted or projected before
+    // that still holds them, and `WebShellTranscript` renders whatever its
+    // caller passes — so without this the reported spam returns on upgrade.
+    const legacy = (id: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy('legacy-usage', 'usage_update: {"used":46351,"size":1000000}'),
+      legacy('legacy-a2ui', 'a2ui: {"surfaceId":"s1","commands":[]}'),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('does not let the legacy prefixes swallow prose or classified blocks', () => {
+    // The prefix list is a compatibility shim for a specific projection
+    // shape, not a content filter: it must not hide a block the normalizer
+    // explicitly classified, nor text that merely starts with the word.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'malformed-1',
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+        text: 'usage_update: {"used":1}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+      {
+        id: 'prose-1',
+        kind: 'debug',
+        text: 'usage_update: rejected by the proxy',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual(['malformed-1', 'prose-1']);
+  });
+
   it('keeps client-dispatched debug blocks that carry no debugReason', () => {
     // Web Shell dispatches its own `debug` event for the model-switch summary.
     // Only the normalizer stamps `debugReason`, so client-side debug blocks
