@@ -13,6 +13,7 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { isUtf8 } from 'node:buffer';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
@@ -2433,7 +2434,14 @@ describe('ShellExecutionService child_process fallback', () => {
       // Regression: the old per-chunk decoder locked to UTF-8 on an
       // ASCII-only first chunk, garbling subsequent OEM bytes. The fix
       // accumulates raw buffers and decodes once in cleanup().
-      mockGetCachedEncodingForBuffer.mockReturnValueOnce('cp866');
+      // Use mockImplementation (not mockReturnValueOnce) so the test
+      // distinguishes the buffered path from the per-chunk path: an
+      // ASCII-only first chunk returns 'utf-8' (locking a per-chunk
+      // decoder to UTF-8 and garbling later OEM bytes), while the full
+      // buffer returns 'cp866' (decoding everything correctly).
+      mockGetCachedEncodingForBuffer.mockImplementation((buf: Buffer) =>
+        isUtf8(buf) ? 'utf-8' : 'cp866',
+      );
 
       const { result } = await simulateExecution('cmd', (cp) => {
         cp.stdout?.emit('data', Buffer.from('Status: OK\n'));

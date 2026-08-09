@@ -1451,16 +1451,6 @@ export class ShellExecutionService {
           exited = true;
           abortSignal.removeEventListener('abort', abortHandler);
 
-          // Flush streaming decoders (only used in streaming mode for
-          // real-time display — their output is not used for the final
-          // `output` string).
-          if (stdoutDecoder) {
-            stdoutDecoder.decode();
-          }
-          if (stderrDecoder) {
-            stderrDecoder.decode();
-          }
-
           // Decode complete per-stream buffers with proper encoding
           // detection on the full output. This fixes the mojibake bug
           // where per-chunk detection on an ASCII-only first chunk
