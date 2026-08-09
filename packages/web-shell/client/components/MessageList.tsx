@@ -570,7 +570,7 @@ function findFinalAnswerIndex(
 
 function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
-  isResponding: boolean,
+  latestTurnIncomplete: boolean,
 ): ReadonlyMap<string, string> {
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
@@ -582,7 +582,7 @@ function collectFinalAssistantTurnIds(
 
   const turnIdByAssistantId = new Map<string, string>();
   for (let k = 0; k < userIdxs.length; k++) {
-    if (k === userIdxs.length - 1 && isResponding) continue;
+    if (k === userIdxs.length - 1 && latestTurnIncomplete) continue;
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
     const turnHead = items[start];
@@ -2591,6 +2591,8 @@ export const MessageList = memo(
         ),
       [displayItems, latestTurnStartIndex],
     );
+    const latestTurnIncomplete =
+      isResponding || latestTurnHasActiveAgent || latestTurnAwaitsAgentSummary;
     const latestTurnParallelAgentKeys = useMemo(() => {
       const keys = new Set<string>();
       for (let i = latestTurnStartIndex; i < displayItems.length; i += 1) {
@@ -2725,19 +2727,8 @@ export const MessageList = memo(
       return null;
     }, [isResponding, mergedMessages]);
     const finalAssistantTurnIdByAssistantId = useMemo(
-      () =>
-        collectFinalAssistantTurnIds(
-          displayItems,
-          isResponding ||
-            latestTurnHasActiveAgent ||
-            latestTurnAwaitsAgentSummary,
-        ),
-      [
-        displayItems,
-        isResponding,
-        latestTurnAwaitsAgentSummary,
-        latestTurnHasActiveAgent,
-      ],
+      () => collectFinalAssistantTurnIds(displayItems, latestTurnIncomplete),
+      [displayItems, latestTurnIncomplete],
     );
 
     // ── Per-turn collapse ────────────────────────────────────────────────
