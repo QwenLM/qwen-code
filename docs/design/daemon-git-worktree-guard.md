@@ -35,7 +35,7 @@ changed by literal forms of:
 - `git --git-dir <path>` and `git --git-dir=<path>`
 - leading `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, or `GIT_INDEX_FILE`
   assignments
-- the same assignments made through `export`/`declare`/`typeset`/`readonly`
+- the same assignments made through `export`/`declare`/`typeset`/`readonly`/`local`
   (or plain assignments under `set -a`), which stay in the environment of
   every later command in the same chain rather than only their own run. A
   name-only `export GIT_DIR` exports the value an earlier shell-local
@@ -56,8 +56,9 @@ containment basis so a preceding `cd` cannot disappear inside the wrapper),
 and leading shell keywords and reserved words (`{`, `}`, `!`, `if`, `then`,
 `else`, `elif`, `fi`, `for`, `do`, `done`, `while`, `until`, `in`, `case`,
 `esac`, `time`, `coproc`), which can lead a split segment without changing
-what executes. `cd`/`pushd` option words (`-L`, `-P`, `-e`, `-@`, `--`) are
-skipped when locating the directory operand, so containment is evaluated
+what executes. `cd` option words (`-L`, `-P`, `-e`, `-@`, `-q`, `-s`, `--`) are
+skipped when locating the directory operand — `pushd`/`popd` treat any
+leading `-`/`+` word as unresolvable instead, so containment is evaluated
 against the directory the shell actually enters. A segment whose program token
 cannot be classified — including one the daemon cannot read at all (`$CMD`) —
 fails closed when the segment still references Git and
@@ -128,8 +129,18 @@ directory. The command-executing keys are `alias.*`, `core.askPass`,
 `credential.helper`, `diff.<driver>.command`, `diff.<driver>.textconv`,
 `difftool.*`, `filter.*`, `gpg.program`, `merge.<driver>.driver`,
 `mergetool.*`, `pager.*`, `sequence.editor`, and
-`uploadpack.packObjectsHook`, matched case-insensitively because Git config
-keys are; any value starting with `!` counts too.
+`uploadpack.packObjectsHook`, `core.hooksPath` and `gpg.<format>.program`,
+matched case-insensitively because Git config keys are; any value starting
+with `!` counts too. The check runs before the read-only allowance and
+independently of relocation, so such a `-c` is denied even in the session's
+own repository.
+
+`GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG`,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and `SHELLOPTS` name no repository
+the containment check can resolve but do move where git writes or which
+config it reads (measured: `GIT_OBJECT_DIRECTORY=<outside>/.git/objects git
+add` writes the blob there), so they mark the invocation unresolved. So do
+`PATH`/`GIT_EXEC_PATH`, which decide which `git` binary runs at all.
 
 Git global options that consume the next argv entry (`--namespace`,
 `--super-prefix`, `--shallow-file`, `--attr-source`) are modelled as such:
@@ -198,7 +209,9 @@ execution semantics.
   later in the same chain do not clear an exported GIT\_\* relocation, so such a
   chain can be denied even though the real shell would run it inside the
   session (a fail-closed false positive, not a bypass).
-- No heredoc body analysis: Git-shaped text inside a heredoc is scanned as
-  executable lines and can be denied even though the shell never executes it
-  (a fail-closed false positive, not a bypass).
+- No heredoc body analysis: `splitCommands` has no heredoc state, so a
+  heredoc body is scanned as ordinary command lines. Usually that only
+  over-denies (Git-shaped text the shell merely writes to a file), but the
+  direction is not guaranteed — a body can also shift the parse — so treat it
+  as unanalyzed rather than as fail-closed.
 - No attempt to correlate a denial with a previous tool call.

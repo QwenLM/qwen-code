@@ -84,6 +84,19 @@ const GIT_COMMAND_CONFIG_KEY_PATTERNS = [
 // core shell.ts GIT_ENV_SHIFTS_REPO).
 const GIT_DIR_ENV_KEYS = new Set(['GIT_COMMON_DIR', 'GIT_DIR']);
 const GIT_WORK_TREE_ENV_KEYS = new Set(['GIT_INDEX_FILE', 'GIT_WORK_TREE']);
+// Keys that redirect where git writes or which config it reads without
+// naming a repository the containment check can resolve. Measured on git
+// 2.47.3: `GIT_OBJECT_DIRECTORY=<outside>/.git/objects git add` writes the
+// blob there, and `GIT_CONFIG_GLOBAL=<outside>/cfg` makes git read that
+// file — enough to point `core.hooksPath` outside.
+const GIT_UNRESOLVABLE_ENV_KEYS = new Set([
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_OBJECT_DIRECTORY',
+  'SHELLOPTS',
+]);
 
 const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
 const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
@@ -136,7 +149,22 @@ const TIMEOUT_VALUE_FLAGS = new Set(['-k', '-s', '--kill-after', '--signal']);
 // Running one earlier in the same command invalidates any containment the
 // guard proves afterwards: `ln -s <outside> bait && git -C bait reset --hard`
 // is checked while `bait` is still the original directory.
-const PATH_RELINKING_PROGRAMS = new Set(['ln', 'mv']);
+const PATH_RELINKING_PROGRAMS = new Set(['cp', 'ln', 'mv']);
+
+// Programs whose own `-C` means something else entirely (`grep -C 5`,
+// `tar -C dir`), so it must not read as a git relocation marker.
+const PROGRAMS_WITH_OWN_C_FLAG = new Set([
+  'cmake',
+  'cpio',
+  'diff',
+  'grep',
+  'install',
+  'make',
+  'patch',
+  'rsync',
+  'tar',
+  'unzip',
+]);
 
 // Pinned to ToolNames.AGENT/WORKFLOW/CREATE_SUB_SESSION/SEND_MESSAGE in
 // @qwen-code/qwen-code-core. The literals keep this module free of a core
@@ -428,6 +456,8 @@ function hasGitRelocationMarker(tokens: GuardToken[]): boolean {
 const GIT_WORD_PATTERN = /\bgit\b/i;
 // A `cd`/`pushd` inside such a payload relocates the git that follows it just
 // as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
+const TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN =
+  /(^|\s)(--git-dir=?|--work-tree=?)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\+?=/;
 const TEXT_RELOCATION_MARKER_PATTERN =
   /(^|\s)(-C|--git-dir=?|--work-tree=?)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\+?=/;
 
@@ -439,7 +469,7 @@ const GIT_PROGRAM_ENV_KEYS = new Set(['GIT_EXEC_PATH', 'PATH']);
 function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
   const key = leadingEnvAssignmentKey(token.text);
   if (key === null) return;
-  if (GIT_PROGRAM_ENV_KEYS.has(key)) {
+  if (GIT_PROGRAM_ENV_KEYS.has(key) || GIT_UNRESOLVABLE_ENV_KEYS.has(key)) {
     state.unresolved = true;
     return;
   }
@@ -659,6 +689,14 @@ type ShellWrapperScan =
   | { kind: 'static'; payload: string }
   | { kind: 'dynamic' };
 
+// The next real argv entry: a redirection between the flag and its payload
+// (`sh -c > /dev/null 'cmd'`) is not the payload.
+function nextArgvIndex(run: GuardToken[], from: number): number {
+  let index = from;
+  while (index < run.length && run[index]!.redirect) index++;
+  return index;
+}
+
 function consumeShellWrapper(
   run: GuardToken[],
   start: number,
@@ -667,7 +705,7 @@ function consumeShellWrapper(
   while (index < run.length) {
     const token = run[index]!;
     if (token.text === '-c') {
-      const payloadToken = run[index + 1];
+      const payloadToken = run[nextArgvIndex(run, index + 1)];
       if (payloadToken === undefined) {
         // `sh -c` with no payload executes nothing.
         return { kind: 'static', payload: '' };
@@ -691,7 +729,11 @@ function consumeShellWrapper(
       if (remainder.length > 0 && !/^[A-Za-z]+$/.test(remainder)) {
         return { kind: 'static', payload: remainder };
       }
-      const payloadToken = run[index + (/[oO]/.test(remainder) ? 2 : 1)];
+      let payloadIndex = nextArgvIndex(run, index + 1);
+      if (/[oO]/.test(remainder)) {
+        payloadIndex = nextArgvIndex(run, payloadIndex + 1);
+      }
+      const payloadToken = run[payloadIndex];
       if (payloadToken === undefined) {
         return { kind: 'static', payload: '' };
       }
@@ -1228,7 +1270,15 @@ async function evaluateGitInvocation(
     basisCwd !== entryCwd ||
     cwdRelocations.length > 0 ||
     repositoryRelocations.length > 0;
-  if (!relocated) return undefined;
+  if (!relocated) {
+    // Even with no relocation git still discovers its repository by walking
+    // up from here, and a planted `.git` gitfile can point that walk outside.
+    // A session bound to a subdirectory of a repository is unaffected: its
+    // `.git` lives above the boundary and the walk stops at the boundary.
+    return basisCwd === undefined
+      ? undefined
+      : denyOutsideDiscoveredRepository(basisCwd, context);
+  }
 
   // `-C`, `env -C` and `sudo -D` all reach the kernel as a chdir, so each
   // component resolves through its symlinks before the next one applies.
@@ -1331,6 +1381,19 @@ async function denyOutsideDiscoveredRepository(
  * --hard)`) has to be analysed rather than folded into an opaque token.
  * Returns null when a substitution is left unterminated.
  */
+// `$'…'` is ANSI-C quoting: unlike a plain single-quoted string, a backslash
+// escapes inside it, so `$'a\'b'` does not end at the middle quote. Treating
+// it as a plain quote leaves the scanner one quote out of phase and a later
+// `$(…)` invisible. Returns the index just past the closing quote.
+function skipAnsiCQuote(segment: string, start: number): number {
+  let index = start + 2;
+  while (index < segment.length && segment[index] !== "'") {
+    if (segment[index] === '\\') index++;
+    index++;
+  }
+  return index + 1;
+}
+
 function extractCommandSubstitutions(segment: string): string[] | null {
   const bodies: string[] = [];
   let single = false;
@@ -1340,6 +1403,10 @@ function extractCommandSubstitutions(segment: string): string[] | null {
     const character = segment[index]!;
     if (!single && character === '\\' && index + 1 < segment.length) {
       index += 2;
+      continue;
+    }
+    if (!single && character === '$' && segment[index + 1] === "'") {
+      index = skipAnsiCQuote(segment, index);
       continue;
     }
     if (!single && character === '$' && segment[index + 1] === '(') {
@@ -1384,6 +1451,10 @@ function findSubstitutionEnd(segment: string, start: number): number {
       index++;
       continue;
     }
+    if (!single && character === '$' && segment[index + 1] === "'") {
+      index = skipAnsiCQuote(segment, index) - 1;
+      continue;
+    }
     if (character === "'" && !double) {
       single = !single;
       continue;
@@ -1418,9 +1489,18 @@ async function evaluateUnrecognizedRun(
   context: GuardEvaluationContext,
 ): Promise<GuardDenial | undefined> {
   if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return undefined;
+  // `grep -C 5 git CHANGELOG.md` carries a `-C` that has nothing to do with
+  // git, so the program's own flag vocabulary decides whether it is a marker.
+  const ownsCFlag =
+    run.length > 0 && PROGRAMS_WITH_OWN_C_FLAG.has(executableBaseName(run[0]!));
   if (
-    hasGitRelocationMarker(run) ||
-    run.some((token) => TEXT_RELOCATION_MARKER_PATTERN.test(token.text)) ||
+    (!ownsCFlag && hasGitRelocationMarker(run)) ||
+    run.some((token) =>
+      (ownsCFlag
+        ? TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN
+        : TEXT_RELOCATION_MARKER_PATTERN
+      ).test(token.text),
+    ) ||
     state.relocations.length > 0 ||
     state.unresolved ||
     context.ambientRelocations.length > 0 ||
@@ -1465,8 +1545,12 @@ async function evaluateCommandWithCwd(
   // GIT_* assignments made without `export`. They stay shell-local until a
   // name-only `export GIT_DIR` promotes them into the environment.
   const shellLocals = new Map<string, GuardToken>();
-  // Set once a run in this command can have re-pointed an existing path.
-  let relinkedPaths = false;
+  // Paths a run in this command may have re-pointed. Any containment the
+  // guard proves for one of them afterwards is proved against the old target.
+  const relinkedTargets: string[] = [];
+  // Set when a relinked path is (or may be) a `.git`, which redirects the
+  // repository discovery of every later command, relocated or not.
+  let relinkedGitDir = false;
   // Exported relocations reach every later command, including the ones nested
   // inside a wrapper payload or a substitution body.
   const activeContext = (): GuardEvaluationContext =>
@@ -1481,7 +1565,33 @@ async function evaluateCommandWithCwd(
         }
       : context;
   let subshellDepth = 0;
-  const subshellCwds: Array<string | undefined> = [];
+  interface ShellStateSnapshot {
+    readonly cwd: string | undefined;
+    readonly relocations: GitEnvRelocation[];
+    readonly unresolved: boolean;
+    readonly allExport: boolean;
+    readonly locals: Array<[string, GuardToken]>;
+  }
+  const snapshotShellState = (): ShellStateSnapshot => ({
+    cwd: trackedCwd,
+    relocations: [...exported.relocations],
+    unresolved: exported.unresolved,
+    allExport,
+    locals: [...shellLocals],
+  });
+  const restoreShellState = (
+    snapshot: ShellStateSnapshot | undefined,
+  ): void => {
+    if (snapshot === undefined) return;
+    trackedCwd = snapshot.cwd;
+    exported.relocations.length = 0;
+    exported.relocations.push(...snapshot.relocations);
+    exported.unresolved = snapshot.unresolved;
+    allExport = snapshot.allExport;
+    shellLocals.clear();
+    for (const [key, token] of snapshot.locals) shellLocals.set(key, token);
+  };
+  const subshellCwds: ShellStateSnapshot[] = [];
   for (const segment of splitCommands(command)) {
     const substitutions = extractCommandSubstitutions(segment);
     const tokenized =
@@ -1512,12 +1622,13 @@ async function evaluateCommandWithCwd(
     }
     for (const { tokens: run, depth: runDepth } of runs) {
       while (runDepth > subshellDepth) {
-        subshellCwds.push(trackedCwd);
+        subshellCwds.push(snapshotShellState());
         subshellDepth++;
       }
       while (runDepth < subshellDepth) {
-        // Leaving `( … )`: the subshell's cwd changes die with it.
-        trackedCwd = subshellCwds.pop();
+        // Leaving `( … )`: everything the subshell changed dies with it —
+        // its cwd, its exports and its shell-local variables.
+        restoreShellState(subshellCwds.pop());
         subshellDepth--;
       }
       const analysis = analyzeRun(run);
@@ -1599,14 +1710,31 @@ async function evaluateCommandWithCwd(
         case 'git': {
           const invocation = readGitInvocation(analysis.tokens);
           // A path this command relinked defeats a containment check made
-          // afterwards — but only for an invocation that resolves a path.
-          // `mv old new && git add -A` targets nothing and stays allowed.
+          // afterwards. A relinked `.git` redirects discovery for every later
+          // command; otherwise only a run that resolves one of those very
+          // paths is affected, so `mv old new && git add -A` stays allowed.
+          const resolvedRelocations = [
+            ...invocation.cwdTargets,
+            ...invocation.gitDirTargets,
+            ...invocation.workTreeTargets,
+          ].map((target) =>
+            trackedCwd === undefined
+              ? target.text
+              : path.resolve(trackedCwd, target.text),
+          );
+          if (trackedCwd !== undefined && trackedCwd !== entryCwd) {
+            resolvedRelocations.push(trackedCwd);
+          }
           if (
-            relinkedPaths &&
-            (invocation.cwdTargets.length > 0 ||
-              invocation.gitDirTargets.length > 0 ||
-              invocation.workTreeTargets.length > 0 ||
-              trackedCwd !== entryCwd)
+            relinkedGitDir ||
+            resolvedRelocations.some((target) =>
+              relinkedTargets.some(
+                (relinked) =>
+                  target === relinked ||
+                  isWithinRoot(target, relinked) ||
+                  isWithinRoot(relinked, target),
+              ),
+            )
           ) {
             return {
               denial: denyDynamicRelocation(),
@@ -1698,10 +1826,23 @@ async function evaluateCommandWithCwd(
           break;
         case 'other': {
           if (
-            run.length > 0 &&
-            PATH_RELINKING_PROGRAMS.has(executableBaseName(run[0]!))
+            run.some((t) => PATH_RELINKING_PROGRAMS.has(executableBaseName(t)))
           ) {
-            relinkedPaths = true;
+            // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
+            // the relinking program out of run[0], so scan the whole run.
+            for (const operand of run) {
+              if (operand.text.startsWith('-')) continue;
+              if (PATH_RELINKING_PROGRAMS.has(executableBaseName(operand))) {
+                continue;
+              }
+              if (operand.dynamic || trackedCwd === undefined) {
+                relinkedGitDir = true;
+                continue;
+              }
+              const resolved = path.resolve(trackedCwd, operand.text);
+              relinkedTargets.push(resolved);
+              if (path.basename(resolved) === '.git') relinkedGitDir = true;
+            }
           }
           if (analysis.assignmentsOnly) {
             if (allExport) {
@@ -1712,7 +1853,20 @@ async function evaluateCommandWithCwd(
             } else {
               for (const token of run) {
                 const key = leadingEnvAssignmentKey(token.text);
-                if (key !== null) shellLocals.set(key, token);
+                if (key === null) continue;
+                const previous = shellLocals.get(key);
+                if (!isAppendAssignment(token.text) || previous === undefined) {
+                  shellLocals.set(key, token);
+                  continue;
+                }
+                // `X+=…` appends: keep the accumulated value so a later `$X`
+                // expands to what the shell would run.
+                shellLocals.set(key, {
+                  text:
+                    previous.text +
+                    token.text.slice(token.text.indexOf('=') + 1),
+                  dynamic: previous.dynamic || token.dynamic,
+                });
               }
             }
           }
@@ -1737,11 +1891,11 @@ async function evaluateCommandWithCwd(
     // did with parentheses: `(cd <outside>)` opens and closes within it, so
     // the subshell's cwd must not survive into the next segment.
     while (tokenized!.endDepth < subshellDepth) {
-      trackedCwd = subshellCwds.pop();
+      restoreShellState(subshellCwds.pop());
       subshellDepth--;
     }
     while (tokenized!.endDepth > subshellDepth) {
-      subshellCwds.push(trackedCwd);
+      subshellCwds.push(snapshotShellState());
       subshellDepth++;
     }
   }

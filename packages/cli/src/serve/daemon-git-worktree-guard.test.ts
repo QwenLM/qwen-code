@@ -1276,6 +1276,103 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // A relinked `.git` redirects repository discovery for every later command,
+  // relocated or not; a relinked directory only affects a run that resolves
+  // that very path.
+  it.each([
+    () => `ln -s ${path.join(outsideRepo, '.git')} .git && git status`,
+    () => `ln -s ${path.join(outsideRepo, '.git')} .git && git commit -m x`,
+    () => `env ln -s ${outsideRepo} bait && git -C bait reset --hard`,
+    () => `X=1 ln -s ${outsideRepo} bait && git -C bait reset --hard`,
+    () => `nice ln -s ${outsideRepo} bait && git -C bait reset --hard`,
+    () => `cp -s ${outsideRepo} bait && git -C bait reset --hard`,
+  ])('denies Git after the command relinks its path %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  // Git discovers its repository by walking up even with no relocation.
+  it('denies a planted gitfile at the session root', async () => {
+    const decoyRoot = path.join(temporaryRoot, 'decoy-session');
+    await mkdir(decoyRoot, { recursive: true });
+    await writeFile(
+      path.join(decoyRoot, '.git'),
+      `gitdir: ${path.join(outsideRepo, '.git')}\n`,
+    );
+
+    const guard = createDaemonToolGuard();
+    const call = {
+      ...request('git commit -m x'),
+      effectiveCwd: decoyRoot,
+    } as ExternalToolGuardPrepareRequest;
+    await expect(guard(call)).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('leaves a session bound below its repository alone', async () => {
+    // The repository's `.git` lives ABOVE the boundary, so the walk stops at
+    // the boundary and finds nothing — the ordinary monorepo-subdir session.
+    const repoRoot = path.join(temporaryRoot, 'mono');
+    const session = path.join(repoRoot, 'packages', 'app');
+    await mkdir(path.join(repoRoot, '.git'), { recursive: true });
+    await mkdir(session, { recursive: true });
+
+    const guard = createDaemonToolGuard();
+    const call = {
+      ...request('git commit -m x'),
+      effectiveCwd: session,
+    } as ExternalToolGuardPrepareRequest;
+    await expect(guard(call)).resolves.toEqual({ allowed: true });
+  });
+
+  it.each([
+    // Redirects and their `N>` prefixes are never the `-c` payload.
+    () => `sh -c > /dev/null 'git -C ${outsideRepo} reset --hard'`,
+    // These env keys move where git writes or which config it reads.
+    () => `GIT_OBJECT_DIRECTORY=${outsideRepo}/.git/objects git commit -m x`,
+    () => `GIT_CONFIG_GLOBAL=${outsideRepo}/evil.cfg git commit -m x`,
+    () => `GIT_ALTERNATE_OBJECT_DIRECTORIES=${outsideRepo} git commit -m x`,
+    // `$'…'` escapes with a backslash, so the scanner must not lose phase.
+    () => `echo $'a\\'b' $(git -C ${outsideRepo} reset --hard)`,
+    // `+=` builds the value the shell will expand.
+    () => `X=git; X+=' -C ${outsideRepo}'; X+=' reset --hard'; $X`,
+  ])('closes the round-4 shell and environment gaps %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('keeps a subshell from leaking its environment outward', async () => {
+    const guard = createDaemonToolGuard();
+
+    await expect(
+      guard(request(`(export GIT_WORK_TREE=${outsideRepo}); git commit -m x`)),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      guard(request(`(export GIT_WORK_TREE=${outsideRepo}; git reset --hard)`)),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it("leaves a program's own -C flag alone", async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'grep -C 5 git CHANGELOG.md',
+      'tar -C nested -cf out.tar .',
+      'diff -C 3 a.txt b.txt # git',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+    // …while an unrecognized wrapper's -C is still git's.
+    await expect(
+      guard(request(`xargs -I{} git -C ${outsideRepo} reset --hard`)),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
