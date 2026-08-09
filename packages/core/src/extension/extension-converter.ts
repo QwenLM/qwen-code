@@ -83,16 +83,7 @@ export async function convertCompatibleExtension(
   } catch (error) {
     claudeError = error;
   }
-  // Fall back to Qoder.
-  if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
-    signal?.throwIfAborted();
-    return {
-      extensionDir: (await convertQoderPlugin(extensionDir)).convertedDir,
-      originSource: 'Qoder',
-      externalContent: false,
-    };
-  }
-  // Fall back to Gemini.
+  // Fall back to Gemini (matches the pre-merge ordering where Gemini precedes Qoder).
   if (isGeminiExtensionConfig(extensionDir)) {
     signal?.throwIfAborted();
     return {
@@ -102,15 +93,17 @@ export async function convertCompatibleExtension(
       externalContent: false,
     };
   }
+  // Fall back to Qoder.
+  if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    signal?.throwIfAborted();
+    return {
+      extensionDir: (await convertQoderPlugin(extensionDir)).convertedDir,
+      originSource: 'Qoder',
+      externalContent: false,
+    };
+  }
   // Nothing matched: surface the Claude manifest error if one occurred.
   if (claudeError) throw claudeError;
   signal?.throwIfAborted();
   return { extensionDir, originSource: 'QwenCode', externalContent: false };
 }
-
-/**
- * @deprecated Renamed to `convertCompatibleExtension` when Qoder support
- * landed on main; alias kept so this branch's tests keep importing the
- * pre-rename name.
- */
-export { convertCompatibleExtension as convertGeminiOrClaudeExtension };

@@ -11,11 +11,13 @@ import type { ExtensionConfig } from './extensionManager.js';
 import {
   buildQwenExtensionFromPlugin,
   normalizeClaudeMcpServer,
-  resolvePluginRelativeFile,
   type ClaudePluginConfig,
 } from './claude-converter.js';
-import { realPathWithin } from './gemini-converter.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import {
+  realPathWithin,
+  resolvePluginRelativeFile,
+} from './path-confinement.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 export const QODER_PLUGIN_MANIFEST = '.qoder-plugin/plugin.json';

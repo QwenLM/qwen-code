@@ -28,48 +28,6 @@ export type JsonValue =
   | JsonObject
   | JsonArray;
 
-/**
- * True when `child` equals or is nested under `parent`. Both must already be
- * absolute, resolved paths. Shared containment primitive for the symlink
- * confinement guards (kept in one place so the rule can't drift between files).
- */
-export function isPathWithin(child: string, parent: string): boolean {
-  return child === parent || child.startsWith(parent + path.sep);
-}
-
-/**
- * True when `target` exists and its real (symlink-resolved) path stays within
- * `root`'s real path. Both sides are resolved with `fs.realpathSync` so a
- * symlink in an untrusted source cannot point a read/copy at a file outside
- * the package. Returns false for missing or broken paths.
- */
-export function realPathWithin(target: string, root: string): boolean {
-  try {
-    return isPathWithin(fs.realpathSync(target), fs.realpathSync(root));
-  } catch {
-    return false;
-  }
-}
-
-/** Reads a package-relative JSON manifest, or null when absent/unparseable/escaping. */
-export function readExtensionManifest(
-  extensionDir: string,
-  filename: string,
-): Record<string, unknown> | null {
-  const filePath = path.join(extensionDir, filename);
-  if (!fs.existsSync(filePath) || !realPathWithin(filePath, extensionDir)) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 export type VariableContext = {
   [key in keyof typeof VARIABLE_SCHEMA]?: string;
 };

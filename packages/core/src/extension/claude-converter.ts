@@ -20,7 +20,12 @@ import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
 import { copyDirectory } from './gemini-converter.js';
-import { isPathWithin, realPathWithin, readExtensionManifest } from './variables.js';
+import {
+  realPathWithin,
+  readExtensionManifest,
+  resolvePathWithin,
+  resolvePluginRelativeFile,
+} from './path-confinement.js';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
@@ -562,44 +567,6 @@ export async function convertClaudePluginPackage(
 }
 
 /**
- * Resolves a plugin-relative file reference, refusing absolute paths or any
- * path that escapes `pluginSource`. Plugin configs come from untrusted sources
- * (arbitrary git repos / marketplaces), so an absolute or `../`-laden value
- * could otherwise make the converter read sensitive files outside the plugin.
- * Returns the confined absolute path, or null when the reference is unsafe.
- */
-export function resolvePluginRelativeFile(
-  pluginSource: string,
-  relativePath: string,
-): string | null {
-  if (path.isAbsolute(relativePath)) {
-    debugLogger.warn(
-      `Ignoring absolute path "${relativePath}" in plugin config; only paths inside the plugin are allowed.`,
-    );
-    return null;
-  }
-  const resolved = path.resolve(pluginSource, relativePath);
-  const base = path.resolve(pluginSource);
-  if (!isPathWithin(resolved, base)) {
-    debugLogger.warn(
-      `Ignoring path "${relativePath}" in plugin config; it escapes the plugin directory.`,
-    );
-    return null;
-  }
-  // The lexical check above is purely string-based; a symlink whose name stays
-  // inside the plugin can still point its target outside it (e.g.
-  // `skills/leak.txt -> ~/.ssh/id_rsa`). Downstream reads/copies follow
-  // symlinks, so re-verify the real path when the target exists.
-  if (fs.existsSync(resolved) && !realPathWithin(resolved, pluginSource)) {
-    debugLogger.warn(
-      `Ignoring path "${relativePath}" in plugin config; it resolves through a symlink outside the plugin directory.`,
-    );
-    return null;
-  }
-  return resolved;
-}
-
-/**
  * Builds a converted Qwen extension directory from a resolved Claude plugin
  * source directory and its merged config. Shared by the marketplace-based
  * (`convertClaudePluginPackage`) and standalone (`convertClaudePluginStandalone`)
@@ -970,10 +937,15 @@ export function isClaudePluginConfig(
 ): 'standalone' | 'marketplace' | null {
   // pluginName given = user explicitly chose a marketplace plugin.
   if (pluginName) {
-    const m = readExtensionManifest(extensionDir, '.claude-plugin/marketplace.json');
+    const m = readExtensionManifest(
+      extensionDir,
+      '.claude-plugin/marketplace.json',
+    );
     if (m) {
-      if (Array.isArray(m['plugins']) &&
-          m['plugins'].some((p) => (p as { name?: string }).name === pluginName)) {
+      if (
+        Array.isArray(m['plugins']) &&
+        m['plugins'].some((p) => (p as { name?: string }).name === pluginName)
+      ) {
         return 'marketplace';
       }
       throw new Error(`Plugin ${pluginName} not found in marketplace.json`);
@@ -1034,18 +1006,12 @@ async function resolvePluginSource(
 
     // Relative path within marketplace. Confine it: a manifest source like
     // "../../../../etc/ssh" must not resolve outside the marketplace dir.
-    const pluginRoot = marketplaceDir;
-    const sourcePath = path.join(pluginRoot, source);
-    const resolvedSource = path.resolve(sourcePath);
-    const marketplaceBase = path.resolve(marketplaceDir);
-    if (
-      resolvedSource !== marketplaceBase &&
-      !resolvedSource.startsWith(marketplaceBase + path.sep)
-    ) {
-      throw new Error(
-        `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
-      );
-    }
+    // resolvePathWithin rejects absolute/escaping/symlink-escaping sources.
+    const sourcePath = resolvePathWithin(marketplaceDir, source, (kind) =>
+      kind === 'symlink-escape'
+        ? `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`
+        : `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
+    );
 
     if (!fs.existsSync(sourcePath)) {
       throw new Error(
@@ -1053,17 +1019,9 @@ async function resolvePluginSource(
       );
     }
 
-    // The lexical check is string-only; reject a source that reaches outside
-    // the marketplace dir through a symlink before copying it in.
-    if (!realPathWithin(sourcePath, marketplaceDir)) {
-      throw new Error(
-        `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`,
-      );
-    }
-
     // If source path equals marketplace dir (source is '.' or ''),
     // return marketplaceDir directly to avoid copying to subdirectory of self
-    if (path.resolve(sourcePath) === path.resolve(marketplaceDir)) {
+    if (sourcePath === path.resolve(marketplaceDir)) {
       return { pluginSource: marketplaceDir, externalContent: false };
     }
 
@@ -1117,31 +1075,23 @@ async function resolvePluginSource(
     await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
-    if (!source.path || source.path === '.' || path.isAbsolute(source.path)) {
+    if (!source.path || source.path === '.') {
       throw new Error(
         `Invalid plugin subdirectory "${sanitizeForError(String(source.path))}" for ${sanitizeForError(source.url)}`,
       );
     }
-    const subDir = path.resolve(pluginDir, source.path);
-    const repoRoot = path.resolve(pluginDir);
-    if (!subDir.startsWith(repoRoot + path.sep)) {
-      throw new Error(
-        `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
-      );
-    }
+    // resolvePathWithin rejects an absolute path, a value escaping the repo
+    // root, and a subdir that resolves through a symlink outside it.
+    const subDir = resolvePathWithin(pluginDir, source.path, (kind) =>
+      kind === 'absolute'
+        ? `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`
+        : kind === 'symlink-escape'
+          ? `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`
+          : `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
+    );
     if (!fs.existsSync(subDir)) {
       throw new Error(
         `Plugin subdirectory "${sanitizeForError(source.path)}" not found in ${sanitizeForError(source.url)} (ref: ${sanitizeForError(source.ref ?? source.sha ?? 'HEAD')})`,
-      );
-    }
-    // The lexical `startsWith` check above is string-only; `cloneFromGit`
-    // checks out symlinks on macOS/Linux, so a hostile repo can commit the
-    // subdir as a symlink whose name stays inside the clone but whose target
-    // escapes it (e.g. `evil -> /etc`). Re-verify the real path before
-    // returning it as the copy source.
-    if (!realPathWithin(subDir, pluginDir)) {
-      throw new Error(
-        `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`,
       );
     }
     return { pluginSource: subDir, externalContent: true };

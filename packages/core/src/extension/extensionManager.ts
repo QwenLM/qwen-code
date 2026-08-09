@@ -32,8 +32,8 @@ import {
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
   performVariableReplacement,
-  readExtensionManifest,
 } from './variables.js';
+import { readExtensionManifest } from './path-confinement.js';
 import type { JsonValue } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -1497,13 +1497,16 @@ export class ExtensionManager {
       if (!manifest) {
         throw new Error(`Invalid configuration in ${configFilePath}`);
       }
-      const rawConfig = recursivelyHydrateStrings(manifest as unknown as JsonValue, {
-        extensionPath: extensionDir,
-        CLAUDE_PLUGIN_ROOT: extensionDir,
-        workspacePath: workspaceDir,
-        '/': path.sep,
-        pathSeparator: path.sep,
-      }) as unknown as RawExtensionConfig;
+      const rawConfig = recursivelyHydrateStrings(
+        manifest as unknown as JsonValue,
+        {
+          extensionPath: extensionDir,
+          CLAUDE_PLUGIN_ROOT: extensionDir,
+          workspacePath: workspaceDir,
+          '/': path.sep,
+          pathSeparator: path.sep,
+        },
+      ) as unknown as RawExtensionConfig;
 
       const config = resolveExtensionConfigLocale(rawConfig, this.locale);
 

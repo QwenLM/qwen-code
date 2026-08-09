@@ -20,7 +20,7 @@ import {
   isPathWithin,
   realPathWithin,
   readExtensionManifest,
-} from './variables.js';
+} from './path-confinement.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
