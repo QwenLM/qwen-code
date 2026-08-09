@@ -628,6 +628,76 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 
+  it('restores final actions for stale active agents loaded from history', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent, asstMsg('a1')];
+    const c = mount(messages, undefined, {
+      catchingUp: true,
+      isResponding: false,
+    });
+
+    rerenderMessages(c, messages, {
+      catchingUp: false,
+      isResponding: false,
+    });
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('restores final actions when a completed sibling notification is lost', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps completed turn actions while the latest turn awaits agents', () => {
+    const activeAgent = agentMsg('agent-2');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      agentMsg('agent-1'),
+      activeAgent,
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(assistantActions(c, 'a2')).toBe('false');
+  });
+
   it('keeps an automatically expanded terminal group mounted until its delay expires', () => {
     vi.useFakeTimers();
     const firstAgent = agentMsg('agent-1');
