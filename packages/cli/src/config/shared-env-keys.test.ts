@@ -83,7 +83,28 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'CURL_CA_BUNDLE',
       'REQUESTS_CA_BUNDLE',
       'GIT_SSL_CAINFO',
+      'GIT_SSL_CAPATH',
+      'npm_config_cafile',
+      'npm_config_ca',
+      'npm_config_strict_ssl',
+      'PIP_CERT',
     ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // npm treats underscore/hyphen spellings of a config key as the same key,
+  // so the hyphen twin of npm_config_strict_ssl must be excluded too.
+  it('excludes both spellings of the npm strict-ssl knob', () => {
+    expect(isHardcodedProjectEnvExclusion('npm_config_strict_ssl')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('npm_config_strict-ssl')).toBe(true);
+  });
+
+  // CURL_HOME/WGETRC redirect curl/wget at attacker rc files whose proxy/
+  // cacert/insecure directives reach the same MITM outcome the TLS-anchor
+  // tier blocks — the config-file-redirect class, not a search path.
+  it('excludes the curl/wget rc-file redirect vars', () => {
+    for (const key of ['CURL_HOME', 'WGETRC']) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }
   });
@@ -95,6 +116,11 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     for (const key of [
       'GIT_SSH_COMMAND',
       'GIT_SSH',
+      'GIT_EXEC_PATH',
+      'GIT_TEMPLATE_DIR',
+      'GIT_ASKPASS',
+      'GIT_PROXY_COMMAND',
+      'GIT_EDITOR',
       'GIT_EXTERNAL_DIFF',
       'GIT_CONFIG_GLOBAL',
       'GIT_CONFIG_SYSTEM',
@@ -158,6 +184,15 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('PYTHON')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('python')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('npm_config_python')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_EXEC_PATH')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_template_dir')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_askpass')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_PROXY_COMMAND')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_editor')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_SSL_CAPATH')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('pip_cert')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('CURL_HOME')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('wgetrc')).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded
@@ -235,6 +270,12 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('NODE_GYP_FORCE_PYTHON')).toBe(false);
     expect(isLoaderEnvKey('SSL_CERT_FILE')).toBe(false);
     expect(isLoaderEnvKey('GIT_SSH_COMMAND')).toBe(false);
+    expect(isLoaderEnvKey('GIT_EXEC_PATH')).toBe(false);
+    expect(isLoaderEnvKey('GIT_TEMPLATE_DIR')).toBe(false);
+    expect(isLoaderEnvKey('npm_config_cafile')).toBe(false);
+    expect(isLoaderEnvKey('PIP_CERT')).toBe(false);
+    expect(isLoaderEnvKey('CURL_HOME')).toBe(false);
+    expect(isLoaderEnvKey('WGETRC')).toBe(false);
   });
 
   // Library search paths and the interactive-sh-only ENV are deliberately

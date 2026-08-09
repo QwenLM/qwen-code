@@ -49,6 +49,18 @@ const TRACKED_ENV = [
   'GIT_CONFIG_PARAMETERS',
   'GIT_CONFIG_KEY_0',
   'GIT_CONFIG_VALUE_0',
+  'GIT_EXEC_PATH',
+  'GIT_TEMPLATE_DIR',
+  'GIT_ASKPASS',
+  'GIT_PROXY_COMMAND',
+  'GIT_EDITOR',
+  'GIT_SSL_CAPATH',
+  'npm_config_cafile',
+  'npm_config_ca',
+  'npm_config_strict_ssl',
+  'PIP_CERT',
+  'CURL_HOME',
+  'WGETRC',
   'PYTHON',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
@@ -359,6 +371,18 @@ describe('loadEnvironment', () => {
         'GIT_CONFIG_PARAMETERS=core.hooksPath=/workspace-a/evil-hooks',
         'GIT_CONFIG_KEY_0=core.hooksPath',
         'GIT_CONFIG_VALUE_0=/workspace-a/evil-hooks',
+        'GIT_EXEC_PATH=/workspace-a/evil-exec',
+        'GIT_TEMPLATE_DIR=/workspace-a/evil-templates',
+        'GIT_ASKPASS=/workspace-a/evil-askpass',
+        'GIT_PROXY_COMMAND=/workspace-a/evil-proxy.sh',
+        'GIT_EDITOR=/workspace-a/evil-editor.sh',
+        'GIT_SSL_CAPATH=/workspace-a/evil-capath',
+        'npm_config_cafile=/workspace-a/evil-ca.pem',
+        'npm_config_ca=/workspace-a/evil-ca-inline',
+        'npm_config_strict_ssl=false',
+        'PIP_CERT=/workspace-a/evil-ca.pem',
+        'CURL_HOME=/workspace-a',
+        'WGETRC=/workspace-a/evil-wgetrc',
         'PYTHON=/workspace-a/evil-python',
         'RUNTIME_DOTENV=allowed',
         '',
@@ -374,6 +398,18 @@ describe('loadEnvironment', () => {
     expect(process.env['GIT_CONFIG_PARAMETERS']).toBeUndefined();
     expect(process.env['GIT_CONFIG_KEY_0']).toBeUndefined();
     expect(process.env['GIT_CONFIG_VALUE_0']).toBeUndefined();
+    expect(process.env['GIT_EXEC_PATH']).toBeUndefined();
+    expect(process.env['GIT_TEMPLATE_DIR']).toBeUndefined();
+    expect(process.env['GIT_ASKPASS']).toBeUndefined();
+    expect(process.env['GIT_PROXY_COMMAND']).toBeUndefined();
+    expect(process.env['GIT_EDITOR']).toBeUndefined();
+    expect(process.env['GIT_SSL_CAPATH']).toBeUndefined();
+    expect(process.env['npm_config_cafile']).toBeUndefined();
+    expect(process.env['npm_config_ca']).toBeUndefined();
+    expect(process.env['npm_config_strict_ssl']).toBeUndefined();
+    expect(process.env['PIP_CERT']).toBeUndefined();
+    expect(process.env['CURL_HOME']).toBeUndefined();
+    expect(process.env['WGETRC']).toBeUndefined();
     expect(process.env['PYTHON']).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
@@ -800,6 +836,60 @@ describe('loadEnvironment', () => {
     );
     expect(process.env['qwen_server_token']).toBeUndefined();
     expect(process.env['tmpdir']).toBe('/workspace-a/first');
+  });
+
+  // The numbered GIT_CONFIG_KEY_/VALUE_ pairs are hardcoded exclusions via
+  // prefix matching; the reload gate must freeze them exactly like their
+  // literal sibling GIT_CONFIG_COUNT, or a home `.env` edit rotates one half
+  // of the mechanism mid-session while the other half stays at the boot
+  // value. Home-scoped files are exempt from the reject-only tier at boot,
+  // so the boot value applies — and then freezes, edits and removals alike.
+  it('freezes the numbered GIT_CONFIG pairs on reload like GIT_CONFIG_COUNT', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    const homeEnvPath = path.join(process.env['HOME']!, '.env');
+    fs.writeFileSync(
+      homeEnvPath,
+      [
+        'GIT_CONFIG_COUNT=1',
+        'GIT_CONFIG_KEY_0=core.hooksPath',
+        'GIT_CONFIG_VALUE_0=/home-a/hooks',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['GIT_CONFIG_COUNT']).toBe('1');
+    expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    fs.writeFileSync(
+      homeEnvPath,
+      [
+        'GIT_CONFIG_COUNT=2',
+        'GIT_CONFIG_KEY_0=core.fsmonitor',
+        'GIT_CONFIG_VALUE_0=/home-a/fsmonitor',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['GIT_CONFIG_COUNT']).toBe('1');
+    expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
+    // An ordinary key next to them still rotates — the freeze is key-scoped.
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    // Removal is frozen too (symmetric with GIT_CONFIG_COUNT, documented in
+    // the settings.md upgrade note): a home `.env` deletion does not
+    // propagate on reload.
+    fs.writeFileSync(homeEnvPath, ['RUNTIME_DOTENV=allowed', ''].join('\n'));
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['GIT_CONFIG_COUNT']).toBe('1');
+    expect(process.env['GIT_CONFIG_KEY_0']).toBe('core.hooksPath');
+    expect(process.env['GIT_CONFIG_VALUE_0']).toBe('/home-a/hooks');
   });
 
   // The daemon reaches per-workspace .env files only through

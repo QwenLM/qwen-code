@@ -45,31 +45,59 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'NODE_EXTRA_CA_CERTS',
   // The non-Node TLS trust-anchor vars reach the SAME MITM outcome for the
   // curl/git/openssl/python tools a session subprocess routinely shells out
-  // to: they are honored unconditionally as a CA bundle/dir. A project `.env`
-  // pointing any of them at an attacker CA lets an untrusted repo silently
-  // intercept token-bearing traffic (git/npm/pip fetches) for every
-  // workspace's sessions — the exact outcome NODE_EXTRA_CA_CERTS is blocked
-  // for. Like NODE_EXTRA_CA_CERTS these stay reject-from-project-`.env` only:
-  // a value the operator set in their own login shell or home `.env` is their
-  // trusted choice and is preserved.
+  // to: they are honored unconditionally as a CA bundle/dir, and npm/pip
+  // honor their own equivalents (npm_config_cafile / npm_config_ca / PIP_CERT
+  // as attacker CAs, npm_config_strict_ssl=false disables verification with
+  // no CA at all; GIT_SSL_CAPATH is git's directory-form twin of
+  // GIT_SSL_CAINFO). A project `.env` pointing any of them at an attacker CA
+  // lets an untrusted repo silently intercept token-bearing traffic
+  // (git/npm/pip fetches) for every workspace's sessions — the exact outcome
+  // NODE_EXTRA_CA_CERTS is blocked for. Like NODE_EXTRA_CA_CERTS these stay
+  // reject-from-project-`.env` only: a value the operator set in their own
+  // login shell or home `.env` is their trusted choice and is preserved.
   'SSL_CERT_FILE',
   'SSL_CERT_DIR',
   'CURL_CA_BUNDLE',
   'REQUESTS_CA_BUNDLE',
   'GIT_SSL_CAINFO',
+  'GIT_SSL_CAPATH',
+  'npm_config_cafile',
+  'npm_config_ca',
+  // npm treats underscore/hyphen spellings of a config key as the same key
+  // (see canonicalLoaderKey below), so both forms of strict-ssl are listed.
+  'npm_config_strict_ssl',
+  'npm_config_strict-ssl',
+  'PIP_CERT',
+  // CURL_HOME / WGETRC redirect curl/wget at attacker rc files
+  // (`$CURL_HOME/.curlrc`, the file WGETRC names) whose `proxy`, `cacert`, or
+  // `insecure` directives intercept or downgrade the same token-bearing
+  // traffic — the config-file-redirect class this list already blocks for npm
+  // (`npm_config_userconfig`), git (`GIT_CONFIG_GLOBAL`), and OpenSSL
+  // (`OPENSSL_CONF`).
+  'CURL_HOME',
+  'WGETRC',
   // The git command-execution env family: git runs these on any invocation in
   // a session subprocess. GIT_SSH_COMMAND / GIT_SSH (its documented legacy
   // counterpart, still exec'd by git for SSH transports) / GIT_EXTERNAL_DIFF
-  // execute a command directly; GIT_CONFIG_* injects arbitrary config
-  // (`core.hooksPath`, `core.fsmonitor`, …) that turns a routine `git commit`
-  // into attacker-code execution as the daemon user — GIT_CONFIG_PARAMETERS
+  // execute a command directly; GIT_ASKPASS / GIT_PROXY_COMMAND / GIT_EDITOR
+  // are exec'd conditionally (credential prompt, proxy transport, editor);
+  // GIT_EXEC_PATH redirects git's own remote-helper/subcommand lookup at an
+  // attacker directory and GIT_TEMPLATE_DIR plants hooks that run after the
+  // next clone/init; GIT_CONFIG_* injects arbitrary config (`core.hooksPath`,
+  // `core.fsmonitor`, …) that turns a routine `git commit` into
+  // attacker-code execution as the daemon user — GIT_CONFIG_PARAMETERS
   // carries the same injection as one quoted string, so it is blocked with
   // GIT_CONFIG_COUNT and the numbered pairs. core/utils/git-branches.ts
-  // already scrubs exactly these from the repo's own git invocations, so a
-  // project `.env` setting them contradicts that model. Numbered
+  // scrubs the config-injection subset from the repo's own git invocations,
+  // so a project `.env` setting this family contradicts that model. Numbered
   // GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are matched by prefix below.
   'GIT_SSH_COMMAND',
   'GIT_SSH',
+  'GIT_EXEC_PATH',
+  'GIT_TEMPLATE_DIR',
+  'GIT_ASKPASS',
+  'GIT_PROXY_COMMAND',
+  'GIT_EDITOR',
   'GIT_EXTERNAL_DIFF',
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',

@@ -60,7 +60,15 @@ const RELOAD_EXCLUDED_KEYS_CASEFOLDED: ReadonlySet<string> = new Set(
 );
 
 function isReloadExcludedKey(key: string): boolean {
-  return RELOAD_EXCLUDED_KEYS_CASEFOLDED.has(key.toLowerCase());
+  return (
+    RELOAD_EXCLUDED_KEYS_CASEFOLDED.has(key.toLowerCase()) ||
+    // The hardcoded tier's prefix-matched keys (numbered
+    // GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs) must freeze on reload
+    // together with their literal sibling GIT_CONFIG_COUNT — one mechanism,
+    // one gate. The literal hardcoded exclusions are already spread into
+    // RELOAD_EXCLUDED_KEYS, so this adds exactly the prefix coverage.
+    isHardcodedProjectEnvExclusion(key)
+  );
 }
 
 const dotEnvSourcedKeys = new Set<string>();
