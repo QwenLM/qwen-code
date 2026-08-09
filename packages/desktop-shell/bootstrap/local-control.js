@@ -20,14 +20,14 @@ function render(state) {
   inactive.hidden = enabled;
   active.hidden = !enabled;
   toggle.textContent = enabled
-    ? 'Turn off Local Control'
+    ? 'Disconnect phone access'
     : 'Turn on Local Control';
   toggle.className = enabled ? 'stop' : '';
   qr.innerHTML = enabled ? state.qrSvg || '' : '';
   url.textContent = enabled ? state.url || '' : '';
   sleep.textContent = state.sleepInhibited
-    ? 'Your computer will stay awake while Local Control is on.'
-    : 'Local Control is on, but sleep prevention is unavailable.';
+    ? 'Private Wi-Fi only · Unencrypted · Disconnect before changing networks · Mac stays awake'
+    : 'Private Wi-Fi only · Unencrypted · Disconnect before changing networks · Mac may sleep';
   error.hidden = true;
   error.textContent = '';
 }
