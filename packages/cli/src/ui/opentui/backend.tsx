@@ -30,6 +30,8 @@ import type { StreamEvent } from '../model/streamingModel.js';
 import type { HistoryItem as ChatItem } from '../model/streamingModel.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { livePromptEvents } from './live-session.js';
+import { isSlashCommandInput } from './slash-dispatch.js';
+import { commandRouteFor } from './commands-registry.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -465,6 +467,22 @@ function App({
     el?.requestRender();
     if (!text) return;
     setItems((prev) => [...prev, { kind: 'user', id: nid('u'), text }]);
+    // Slash-command routing (parity with the 67-command registry).
+    if (isSlashCommandInput(text)) {
+      const name = text.replace(/^[/?]/, '').split(/\s/)[0] ?? '';
+      const route = commandRouteFor(name);
+      if (name === 'clear') {
+        setItems([]);
+        return;
+      }
+      applyEvent({
+        type: 'text',
+        delta: route
+          ? `/${name} → routed (results: ${route.results.join(',')})`
+          : `unknown command: /${name}`,
+      });
+      return;
+    }
     if (config) {
       // Live client wiring: submit to the real agent loop.
       (async () => {
