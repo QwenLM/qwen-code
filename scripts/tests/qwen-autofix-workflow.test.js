@@ -8143,6 +8143,8 @@ exit 1
           REPAIR_OUTCOME: '',
           REPAIR_COMMITTED: '',
           REPAIR_VERIFIED_HEAD: '',
+          FIRST_PREEXISTING: '',
+          REPAIR_PREEXISTING: '',
           ...env,
         },
       });
@@ -8175,6 +8177,33 @@ exit 1
       status: 0,
       written: expect.stringContaining('verified_head=repair-sha'),
     });
+
+    // The preexisting flag travels WITH the attempt whose outcome is
+    // selected — mutation-proven blind before: deleting the forwarding left
+    // every test green while the report silently lost its PRE-EXISTING
+    // clause.
+    expect(
+      run({ FIRST_OUTCOME: 'failed', FIRST_PREEXISTING: 'true' }).written,
+    ).toContain('preexisting=true');
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'failed',
+        REPAIR_PREEXISTING: 'true',
+      }).written,
+    ).toContain('preexisting=true');
+    // Repair ran and did NOT classify pre-existing: the first pass's flag
+    // must not leak through — the selected attempt's verdict wins.
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        FIRST_PREEXISTING: 'true',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'failed',
+        REPAIR_PREEXISTING: '',
+      }).written,
+    ).not.toContain('preexisting=true');
     const repairedWithoutVerifiedHead = run({
       FIRST_OUTCOME: 'failed',
       FIRST_COMMITTED: 'true',
@@ -11168,9 +11197,12 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     typecheckFail = false,
     addWorkspace = false,
     noisySuccess = false,
+    noisyFailure = false,
+    manyDiagnostics = false,
     touchCore = false,
     baselineCode = '',
     baselineMsg = '',
+    headMsg = '',
     restoreClash = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
@@ -11236,7 +11268,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '  for s in ${FAIL_BUILD_SHAS}; do',
           '    if [[ "$s" == "$head" ]]; then',
           '      code=9999',
-          '      pos="(1,1)"; msg="stub failure"',
+          '      pos="(1,1)"; msg="${HEAD_MSG:-stub failure}"',
           '      if [[ "$head" == "${BASELINE_SHA:-}" ]]; then',
           // The baseline leg emits a SHIFTED position — the strip is what
           // makes the two legs comparable, so the fixture must exercise it.
@@ -11245,7 +11277,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '        if [[ -n "${BASELINE_MSG:-}" ]]; then msg="${BASELINE_MSG}"; fi',
           '        if [[ "${RESTORE_CLASH:-}" == "1" ]]; then echo untracked > clash.txt; fi',
           '      fi',
+          '      if [[ "${NOISY_FAILURE:-}" == "1" ]]; then',
+          '        for i in $(seq 1 800); do echo "noisy failing-build line $i, padding the transcript well past the evidence budget"; done',
+          '      fi',
           '      echo "stub build FAILED at $head"',
+          '      if [[ "${MANY_DIAGS:-}" == "1" ]]; then',
+          '        for i in $(seq 1 2000); do echo "src/m${i}.ts${pos}: error TS7777: mass failure ${i}"; done',
+          '      fi',
           '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
           '      exit 1',
           '    fi',
@@ -11303,10 +11341,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             BASELINE_SHA: baselineSha,
             BASELINE_CODE: baselineCode,
             BASELINE_MSG: baselineMsg,
+            HEAD_MSG: headMsg,
             RESTORE_CLASH: restoreClash ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
             NOISY_SUCCESS: noisySuccess ? '1' : '',
+            NOISY_FAILURE: noisyFailure ? '1' : '',
+            MANY_DIAGS: manyDiagnostics ? '1' : '',
             WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
             RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
           },
@@ -11355,6 +11396,33 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.headAfter).toBe('feature');
   });
 
+  it('keeps distinct messages distinct past the first n (ERE bracket trap)', () => {
+    // `[^\n]` in a POSIX ERE bracket negates {backslash, n} — not
+    // "non-newline" — so the signature truncated at the first `n` and
+    // "Cannot find name a" vs "Cannot find name b" compared EQUAL: a
+    // round-caused defect misread as pre-existing, repair skipped.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      headMsg: "Cannot find name 'roundDefect'",
+      baselineMsg: "Cannot find name 'oldDefect'",
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+  });
+
+  it('caps the rejection document under the render window, fence intact', () => {
+    // The sizing arithmetic is load-bearing only if an over-budget
+    // transcript actually exists: the stub floods ~40 KB around its
+    // diagnostic, and the document must still clear the report step's
+    // head -c 3900 with its closing fence alive.
+    const r = runGate({ failAt: ['feature'], noisyFailure: true });
+    expect(r.status).toBe(1);
+    expect(Buffer.byteLength(r.rejection, 'utf8')).toBeLessThanOrEqual(3900);
+    expect(r.rejection.trimEnd().endsWith('````')).toBe(true);
+  });
+
   it('charges the round when the codes match but the messages differ', () => {
     // Identity is file + code + MESSAGE: common codes (TS2339) collide
     // across unrelated defects in one file, and a code-only signature would
@@ -11369,7 +11437,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('DIFFERENT reason');
   });
 
-  it('rejects retryably when the baseline leg breaks the restore', () => {
+  it('rejects with neither flag when the baseline leg breaks the restore', () => {
     // The baseline run recreates (untracked) a file the branch tracks, so
     // `git checkout` back refuses — the tree can no longer be trusted, and
     // the guard must reject WITHOUT the pre-existing label: a transient
@@ -11379,7 +11447,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       restoreClash: true,
     });
     expect(r.status).toBe(1);
-    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).toContain('outcome=failed');
+    // NEITHER flag: retryable would hand the repair agent a tree DETACHED
+    // at the baseline (its commit orphans; the repair verification's own
+    // checkout dies on the same clash), and preexisting would be a verdict
+    // a transient git failure cannot support. The next scan retries on a
+    // fresh checkout instead.
+    expect(r.outputs).not.toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('could not restore the verification tree');
   });
@@ -11395,6 +11469,21 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('DIFFERENT reason');
+  });
+
+  it('survives a flood of matching diagnostics (SIGPIPE trap)', () => {
+    // grep -q exits at the first line; with thousands of matching
+    // diagnostics comm keeps writing into a dead pipe, takes SIGPIPE 141,
+    // pipefail propagates it, and the old `!`-inverted pipeline misread a
+    // MATCHING flood as "different reason" — the badly-red baseline this
+    // feature exists for. 2000 lines ≈ 140 KB, past any pipe buffer.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      manyDiagnostics: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.outputs).not.toContain('retryable=true');
   });
 
   it('keeps the green path intact', () => {

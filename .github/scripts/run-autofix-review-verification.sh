@@ -66,6 +66,7 @@ reject_fix() {
   local preamble tail_budget
   preamble="**${label}**"
   if [[ "${preexisting}" == 'true' ]]; then
+    # shellcheck disable=SC2016 # intentional: printf format string; the backticks and quote-concatenated apostrophes are literal markdown, not unexpanded expressions
     preamble+="$(printf '\n\nMeasured fact: the same check also fails at \`origin/%s\` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind \`main\`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
   fi
   tail_budget=$(( 3300 - ${#preamble} ))
@@ -100,11 +101,23 @@ baseline_also_fails() {
   # is A/B-eligible) — the baseline IS the tree under test; nothing to
   # compare.
   [[ "${baseline}" != "${current}" ]] || return 1
+  # The head transcript is already complete, and an empty head signature
+  # fails closed regardless of what the baseline would say — so decide it
+  # BEFORE paying the detach + full re-run + restore for a verdict that was
+  # never in question (esbuild/vite/crash failures, the KNOWN LIMIT class).
+  local sig_head
+  sig_head="$(fail_signature "${GATE_LOG}.check")" || true
+  if [[ -z "${sig_head}" ]]; then
+    echo "🔁 no failure identity in the head transcript — charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
   echo "🔁 Baseline A/B: re-running the failed check at origin/${BRANCH}" \
     "(${baseline})" | tee -a "${GATE_LOG}"
   git checkout --quiet --detach "${baseline}" 2>> "${GATE_LOG}" || return 1
   # The baseline transcript goes to a SIDE log: gate-rejection.md renders
-  # `tail -c 3000` of GATE_LOG as the evidence window, and on a green
+  # the SIZED tail of GATE_LOG (tail_budget, see reject_fix) as the
+  # evidence window, and on a green
   # baseline a chatty success transcript would fill it and push the actual
   # failure text out — misdirecting the repair agent, the PR comment, and
   # the next round's LAST_REJECTION block all at once.
@@ -116,10 +129,22 @@ baseline_also_fails() {
   fi
   if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
     # The tree is no longer the one under verification and nothing after
-    # this point may trust it.
-    reject_fix 'could not restore the verification tree after the baseline check'
+    # this point may trust it — INCLUDING the repair agent: HEAD is detached
+    # at the baseline, a repair commit would orphan on it, and the repair
+    # verification's own opening checkout dies on the same clash. Write the
+    # verdict with NEITHER retryable NOR preexisting, so the repair is
+    # skipped and the next scan retries on a fresh checkout.
+    echo "❌ could not restore the verification tree after the baseline check"
+    echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+    exit 1
   fi
   if [[ "${rc}" -ne 1 ]]; then
+    # Both retryable exits below hand the tree to the repair agent with
+    # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
+    # tracked files only) — the mirror of the dist confound that exempted
+    # typecheck from the A/B. The note seeds the repair feedback so the
+    # agent rebuilds before it trusts any dist-consuming check.
+    echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
     echo "🔁 baseline is green — the failure belongs to this round" \
       | tee -a "${GATE_LOG}"
     return 1
@@ -131,17 +156,22 @@ baseline_also_fails() {
   # file + error code (line/column shift with the round's edits). No
   # diagnostics on either side means identity cannot be established, and
   # the rejection stays charged to the round (fail closed).
-  local sig_head sig_base
-  # `|| true`: grep exits 1 on the NORMAL no-match case, and these
-  # assignments only survive `set -e` today because this function is called
-  # from an `if` condition (which suspends errexit). A future unconditional
-  # call site would otherwise turn the documented fail-closed path into a
-  # verdict-less gate crash.
-  sig_head="$(fail_signature "${GATE_LOG}.check")" || true
+  local sig_base
+  # `|| true`: grep exits 1 on the NORMAL no-match case, and the assignment
+  # only survives `set -e` today because this function is called from an
+  # `if` condition (which suspends errexit). A future unconditional call
+  # site would otherwise turn the documented fail-closed path into a
+  # verdict-less gate crash. (sig_head was extracted before the detach.)
   sig_base="$(fail_signature "${ab_log}")" || true
-  if [[ -z "${sig_head}" || -z "${sig_base}" ]] ||
-    ! comm -12 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}") \
-      | grep -q .; then
+  # Captured, not piped through grep -q: grep -q exits at the first line,
+  # comm then dies of SIGPIPE (141), pipefail propagates it, and the `!`
+  # inversion misreads a large MATCHING intersection as "different reason" —
+  # measured at a few hundred shared diagnostics, exactly the badly-red
+  # baseline this feature exists for.
+  local common
+  common="$(comm -12 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}") || true)"
+  if [[ -z "${sig_head}" || -z "${sig_base}" || -z "${common}" ]]; then
+    echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
     echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
       | tee -a "${GATE_LOG}"
     return 1
@@ -163,7 +193,12 @@ fail_signature() {
   # comm(1). KNOWN LIMIT: only tsc diagnostics carry identity; vite/esbuild
   # failures yield an empty signature and deliberately fail closed (charged
   # to the round) — widening needs their position formats normalized first.
-  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+[^\n]*" "${1}" 2> /dev/null \
+  # `.*`, NOT `[^\n]*`: in a POSIX ERE bracket a backslash is literal, so
+  # [^\n] negated {backslash, n} and truncated every message at its first
+  # `n` — "Cannot …" died at character two, collapsing distinct same-code
+  # diagnostics back into one signature. grep -o is line-scoped, so `.*`
+  # cannot cross a newline anyway.
+  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+.*" "${1}" 2> /dev/null \
     | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
 }
 run_check() {
