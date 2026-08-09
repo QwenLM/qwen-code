@@ -152,9 +152,93 @@ export function resolveConcurrencyLimit(
  * Bound the resource ceiling for workflow subagents so a single `agent()`
  * call cannot loop the model indefinitely. Values mirror conservative
  * upstream defaults; P5 will refine via `budget` once it exists.
+ *
+ * These are forced over whatever runConfig an `agentType` declares, because
+ * they are workflow-level safety bounds rather than subagent preferences.
+ * That makes them the binding constraint for every workflow agent, which is
+ * why they are operator-tunable: 50 turns / 10 minutes is right for a typical
+ * dispatch and wrong for a long one (a build-and-test pass, an analysis of a
+ * multi-thousand-line file), and there was previously no way to say so.
+ *
+ * Truncation here is not a visible failure. A subagent stopped by `max_turns`
+ * or `max_time_minutes` ends in a non-GOAL terminate mode, which the dispatch
+ * turns into a throw — and under `parallel()`'s errors-as-data contract that
+ * becomes a `null` element the script must notice. An agent silently missing
+ * from a fan-out is the failure mode these knobs exist to let operators avoid.
  */
-const WORKFLOW_SUBAGENT_MAX_TURNS = 50;
-const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
+export const DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS = 50;
+export const DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
+export const WORKFLOW_SUBAGENT_MAX_TURNS_ENV =
+  'QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS';
+export const WORKFLOW_SUBAGENT_MAX_MINUTES_ENV =
+  'QWEN_CODE_WORKFLOW_SUBAGENT_MAX_MINUTES';
+/**
+ * Absolute upper bounds on the env overrides, in the same spirit as
+ * `HARD_MAX_AGENTS_PER_RUN_CEILING`: the knobs are operator-facing, so a
+ * fat-fingered value must not effectively uncap a runaway agent. 500 turns is
+ * 10× the default. 240 minutes matches the longest budget a workflow run is
+ * realistically given; past that the run-level wall clock
+ * (`QWEN_CODE_MAX_WORKFLOW_SECONDS`) is the right control, not a per-agent cap.
+ */
+export const HARD_MAX_SUBAGENT_TURNS_CEILING = 500;
+export const HARD_MAX_SUBAGENT_MINUTES_CEILING = 240;
+
+/**
+ * Shared resolver for both per-subagent ceilings. Mirrors
+ * `resolveMaxAgentsPerRun`: parse through `parsePositiveIntegerEnv` so only
+ * plain decimal integers are accepted (`Number()` alone would admit `"0x10"`
+ * / `"1e3"` / `"1.0"`), fall back to the default with a debug warning on an
+ * invalid value, and clamp with a warning above the hard ceiling.
+ */
+function resolvePositiveEnvLimit(
+  env: Record<string, string | undefined>,
+  envName: string,
+  fallback: number,
+  ceiling: number,
+): number {
+  const raw = env[envName];
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
+  }
+  const parsed = parsePositiveIntegerEnv(raw, 0);
+  if (parsed < 1) {
+    debugLogger.warn(
+      `Invalid ${envName}=${JSON.stringify(raw)}, using default (${fallback})`,
+    );
+    return fallback;
+  }
+  if (parsed > ceiling) {
+    debugLogger.warn(
+      `${envName}=${parsed} exceeds hard ceiling (${ceiling}); clamping.`,
+    );
+    return ceiling;
+  }
+  return parsed;
+}
+
+/**
+ * The `runConfigOverrides` forced onto every workflow subagent. Resolved per
+ * dispatch rather than once at module load so an embedder that adjusts the
+ * environment mid-session — and the tests — see the current value.
+ */
+export function resolveSubagentRunConfig(
+  env: Record<string, string | undefined> = process.env,
+): { max_turns: number; max_time_minutes: number } {
+  return {
+    max_turns: resolvePositiveEnvLimit(
+      env,
+      WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
+      DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+      HARD_MAX_SUBAGENT_TURNS_CEILING,
+    ),
+    max_time_minutes: resolvePositiveEnvLimit(
+      env,
+      WORKFLOW_SUBAGENT_MAX_MINUTES_ENV,
+      DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      HARD_MAX_SUBAGENT_MINUTES_CEILING,
+    ),
+  };
+}
 
 /**
  * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
@@ -456,10 +540,7 @@ async function runSingleDispatch(
       // cannot loop the model indefinitely. Without this, runConfig was {}
       // and the loop guards never tripped — combined with the cancellation
       // bug below, workflows were effectively unkillable.
-      {
-        max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-        max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
-      },
+      resolveSubagentRunConfig(),
       // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
       // upstream Tg8 — closes the back-channel that would let a subagent
       // deliver its answer via user message instead of the script's read.
@@ -777,10 +858,7 @@ async function runOverridePath(
         // Workflow always bounds resource ceiling regardless of agentType's
         // own runConfig / maxTurns — these are workflow-level safety bounds,
         // not subagent-level preferences. P5 will refine via budget.
-        runConfigOverrides: {
-          max_turns: WORKFLOW_SUBAGENT_MAX_TURNS,
-          max_time_minutes: WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
-        },
+        runConfigOverrides: resolveSubagentRunConfig(),
         eventEmitter,
       },
     );

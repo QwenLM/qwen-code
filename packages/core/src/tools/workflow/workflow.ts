@@ -117,6 +117,16 @@ const WORKFLOW_PARAM_SCHEMA = {
         'THUNKS to parallel, not eager calls: `parallel([() => agent(...)])`, ' +
         'not `parallel([agent(...)])`. At most 1000 agent() calls per run ' +
         '(override via `QWEN_CODE_MAX_WORKFLOW_AGENTS`). ' +
+        'Time bounds — three independent limits, all of which must fit a long ' +
+        'dispatch, so raising only one has no effect: per-agent turns and ' +
+        'minutes (50 / 10 by default, forced over any agentType runConfig; ' +
+        'override via `QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS` and ' +
+        '`QWEN_CODE_WORKFLOW_SUBAGENT_MAX_MINUTES`), the per-call stall ' +
+        'watchdog (60s of no progress; `agent({stallMs})` or ' +
+        '`QWEN_CODE_WORKFLOW_STALL_SECONDS`), and the whole-run wall clock ' +
+        '(30 min; `QWEN_CODE_MAX_WORKFLOW_SECONDS`). An agent stopped by a ' +
+        'turn/minute ceiling ends in a non-GOAL mode, which throws — under ' +
+        'parallel() that surfaces as a `null` element, not an error message. ' +
         '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
         'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',

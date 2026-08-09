@@ -15,6 +15,11 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   resolveMaxAgentsPerRun,
   resolveConcurrencyLimit,
+  resolveSubagentRunConfig,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+  HARD_MAX_SUBAGENT_TURNS_CEILING,
+  HARD_MAX_SUBAGENT_MINUTES_CEILING,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
@@ -1881,6 +1886,29 @@ describe('createProductionDispatch', () => {
     });
   });
 
+  // The ceilings are forced over any agentType's own runConfig, so they bind
+  // every workflow agent. An operator running a long dispatch (build-and-test,
+  // whole-file analysis) needs to raise them — and truncation is not a loud
+  // failure: it ends the subagent in a non-GOAL mode, which becomes a thrown
+  // dispatch and, under parallel(), a `null` element that reads as an agent
+  // silently missing from the fan-out.
+  it('honors the env overrides for the subagent ceilings', async () => {
+    // This config has no `unstubEnvs`, so the stubs are undone explicitly —
+    // a leaked ceiling would silently change every sibling test's runConfig.
+    vi.stubEnv('QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS', '200');
+    vi.stubEnv('QWEN_CODE_WORKFLOW_SUBAGENT_MAX_MINUTES', '45');
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 200,
+        max_time_minutes: 45,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   // T11: disallow SendMessage plus tools that break workflow return/cleanup
   // contracts.
   it('disallows workflow-only floor tools for workflow subagents', async () => {
@@ -2420,6 +2448,68 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       expect(
         resolveMaxAgentsPerRun({ QWEN_CODE_MAX_WORKFLOW_AGENTS: '9999' }),
       ).toBe(9999);
+    });
+
+    // The per-subagent ceilings bind every workflow agent (they are forced
+    // over any agentType's own runConfig), so they need the same operator
+    // escape hatch — and the same protection from a fat-fingered value — as
+    // the per-run agent cap above.
+    it('resolveSubagentRunConfig defaults to 50 turns / 10 minutes', () => {
+      expect(resolveSubagentRunConfig({})).toEqual({
+        max_turns: DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+        max_time_minutes: DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      });
+    });
+
+    it('resolveSubagentRunConfig honors valid overrides', () => {
+      expect(
+        resolveSubagentRunConfig({
+          QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS: '200',
+          QWEN_CODE_WORKFLOW_SUBAGENT_MAX_MINUTES: '45',
+        }),
+      ).toEqual({ max_turns: 200, max_time_minutes: 45 });
+    });
+
+    it('resolveSubagentRunConfig rejects non-decimal-integer values', () => {
+      for (const raw of ['0', '-1', 'abc', '2.5', '0x10', '1e3', '1.0', '']) {
+        expect(
+          resolveSubagentRunConfig({
+            QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS: raw,
+          }).max_turns,
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS);
+      }
+    });
+
+    it('resolveSubagentRunConfig clamps over-ceiling overrides', () => {
+      expect(
+        resolveSubagentRunConfig({
+          QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS: '999999',
+          QWEN_CODE_WORKFLOW_SUBAGENT_MAX_MINUTES: '999999',
+        }),
+      ).toEqual({
+        max_turns: HARD_MAX_SUBAGENT_TURNS_CEILING,
+        max_time_minutes: HARD_MAX_SUBAGENT_MINUTES_CEILING,
+      });
+      // Just under each ceiling is preserved.
+      expect(
+        resolveSubagentRunConfig({
+          QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS: String(
+            HARD_MAX_SUBAGENT_TURNS_CEILING - 1,
+          ),
+        }).max_turns,
+      ).toBe(HARD_MAX_SUBAGENT_TURNS_CEILING - 1);
+    });
+
+    // The two knobs are independent: raising turns must not disturb minutes.
+    it('resolveSubagentRunConfig resolves each ceiling independently', () => {
+      expect(
+        resolveSubagentRunConfig({
+          QWEN_CODE_WORKFLOW_SUBAGENT_MAX_TURNS: '120',
+        }),
+      ).toEqual({
+        max_turns: 120,
+        max_time_minutes: DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      });
     });
 
     it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
