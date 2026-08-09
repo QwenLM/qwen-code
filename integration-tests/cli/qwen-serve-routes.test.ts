@@ -364,6 +364,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_toggle',
+      'workspace_skill_batch_toggle',
       'workspace_skill_manage',
       'workspace_settings',
       'workspace_permissions',

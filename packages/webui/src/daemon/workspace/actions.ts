@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import {
+  EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
+  type DaemonClient,
+} from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
@@ -847,6 +850,15 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.installExtension(params, clientId),
         'Install extension timed out',
+      );
+    },
+
+    async installExtensionArchive(params, clientId) {
+      const client = requireClient(getClient, 'Install extension failed');
+      return withActionTimeout(
+        client.installExtensionArchive(params, clientId),
+        'Install extension timed out',
+        EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS + 10_000,
       );
     },
 
