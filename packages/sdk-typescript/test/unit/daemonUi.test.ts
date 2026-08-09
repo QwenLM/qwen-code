@@ -2555,7 +2555,13 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     // branch with `kind === undefined`. They are broken frames, not kinds from
     // a newer daemon — marking them unrecognized would let renderers hide the
     // only diagnostic they produce.
-    for (const update of [{}, { sessionUpdate: 42 }, { sessionUpdate: '' }]) {
+    for (const update of [
+      {},
+      { sessionUpdate: 42 },
+      { sessionUpdate: '' },
+      // Truthy but no more usable than an empty string.
+      { sessionUpdate: '   ' },
+    ]) {
       expect(
         normalizeDaemonEvent(envelopeOf('session_update', { update })),
       ).toEqual([
@@ -2599,6 +2605,33 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         debugReason: 'unrecognized_event',
       }),
     ]);
+  });
+
+  it('leaves client-dispatched debug blocks without a debugReason', () => {
+    // The mirror of the test above, and the invariant that keeps Web Shell's
+    // model-switch summary visible. Without it, defaulting the field in
+    // `appendStatusBlock` (e.g. `event.debugReason ?? 'unrecognized_event'`)
+    // passes every other test in both suites while silently tagging the
+    // summary as unrecognized, which Web Shell then filters out.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          text: 'Model switched to qwen3-coder-plus',
+          source: 'model_switch_summary',
+        },
+      ],
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        source: 'model_switch_summary',
+      }),
+    );
+    expect(state.blocks[0]).not.toHaveProperty('debugReason');
   });
 
   it('normalizes memory_changed with closed-enum scope + mode', () => {

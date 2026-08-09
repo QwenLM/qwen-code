@@ -852,8 +852,10 @@ function normalizeSessionUpdate(
           // `undefined` for a payload whose discriminator is missing, empty or
           // not a string. That is a broken frame, not a kind from a newer
           // daemon — classifying it as unrecognized would hide the only
-          // diagnostic a malformed `session_update` produces.
-          debugReason: kind
+          // diagnostic a malformed `session_update` produces. A whitespace-only
+          // discriminator is truthy but no more usable than an empty one, so
+          // apply the same `trim()` convention `getFirstString` uses.
+          debugReason: kind?.trim()
             ? 'unrecognized_session_update'
             : 'malformed_payload',
           text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,

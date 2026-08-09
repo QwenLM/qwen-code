@@ -286,10 +286,13 @@ export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {
  * client-dispatched debug events (e.g. Web Shell's model-switch summary) carry
  * no `debugReason` at all and must keep rendering.
  */
-export type DaemonUiDebugReason =
-  | 'unrecognized_event'
-  | 'unrecognized_session_update'
-  | 'malformed_payload';
+export const DAEMON_UI_DEBUG_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+  'malformed_payload',
+] as const;
+
+export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
 
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';

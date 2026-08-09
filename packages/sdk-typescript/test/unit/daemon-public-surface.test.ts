@@ -134,10 +134,12 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
+import { DAEMON_UI_DEBUG_REASONS } from '../../src/daemon/index.js';
 import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonUiDebugReason as DaemonEntryUiDebugReason,
 } from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
@@ -465,5 +467,24 @@ describe('runtime MCP add/remove SDK types', () => {
       originatorClientId: 'client-x',
     };
     expect(res.removed).toBe(true);
+  });
+});
+
+describe('daemon UI debug-reason public surface', () => {
+  it('pins the union shipped by @qwen-code/sdk/daemon', () => {
+    // A type-only guard would not hold here: vitest transpiles through
+    // esbuild, which erases `export type` without checking it, and this
+    // package's tsconfig excludes `test/`, so nothing type-checks this file.
+    // The union therefore ships as a closed enum value — matching
+    // DAEMON_ERROR_KINDS and friends — and the runtime assertion below is
+    // what actually fails if the re-export is dropped or the members drift.
+    expect(DAEMON_UI_DEBUG_REASONS).toEqual([
+      'unrecognized_event',
+      'unrecognized_session_update',
+      'malformed_payload',
+    ]);
+    expectTypeOf<DaemonEntryUiDebugReason>().toEqualTypeOf<
+      'unrecognized_event' | 'unrecognized_session_update' | 'malformed_payload'
+    >();
   });
 });

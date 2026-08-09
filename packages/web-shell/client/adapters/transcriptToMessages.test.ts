@@ -1286,6 +1286,39 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
+  it('filters legacy unrecognized-event blocks that carry no debugReason', () => {
+    // `WebShellTranscript` takes already-projected blocks from its caller, so
+    // blocks projected or persisted by an SDK older than `debugReason` still
+    // arrive with no reason. They must keep being filtered — and not only the
+    // two event types that used to be suppressed by name.
+    const legacy = (id: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy(
+        'legacy-1',
+        'language_changed (unrecognized daemon event): {"language":"en"}',
+      ),
+      legacy(
+        'legacy-2',
+        'session_cwd_changed (unrecognized daemon event): {"cwd":"/work"}',
+      ),
+      legacy(
+        'legacy-3',
+        'some_future_event (unrecognized daemon event): {"a":1}',
+      ),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
   it('filters unrecognized session_update kinds the daemon adds later', () => {
     // The event kind here is deliberately one no normalizer case handles: the
     // filter must key off `debugReason`, not a list of known-noisy prefixes.

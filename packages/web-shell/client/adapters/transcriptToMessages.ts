@@ -116,6 +116,13 @@ function isIgnoredWebShellStatus(text: string): boolean {
 }
 
 /**
+ * Text marker the normalizer stamps on every top-level unrecognized-event
+ * projection (`<type> (unrecognized daemon event): <json>`). Only used for
+ * blocks that predate {@link DaemonUiDebugReason} — see below.
+ */
+const LEGACY_UNRECOGNIZED_EVENT_MARKER = ' (unrecognized daemon event): ';
+
+/**
  * Daemon frames the normalizer had no case for are developer diagnostics —
  * a raw JSON dump of an event this client does not understand. They routinely
  * appear whenever the daemon ships a new event kind ahead of the UI, and
@@ -126,14 +133,29 @@ function isIgnoredWebShellStatus(text: string): boolean {
  * visible: `malformed_payload`, which means a frame this client *does* know
  * arrived broken and is worth surfacing, and client-dispatched debug blocks
  * (e.g. the model-switch summary), which carry no `debugReason` at all.
+ *
+ * `WebShellTranscript` is a public entry point that takes already-projected
+ * blocks from its caller, so blocks projected — or persisted — by an SDK older
+ * than `debugReason` still arrive here with no reason at all. For those, fall
+ * back to the stable text marker the top-level projection has always carried,
+ * which covers every unrecognized event type rather than the two that happened
+ * to be suppressed by name before. Client-dispatched debug blocks have neither
+ * a reason nor the marker, so they keep rendering either way.
+ *
+ * Not recoverable for legacy blocks: the `session_update` projection is
+ * `<kind>: <json>` with no marker, so an old block for an unrecognized
+ * session-update kind still renders. New projections carry the reason.
  */
 function isUnrecognizedDaemonDebug(
   block: DaemonStatusTranscriptBlock,
 ): boolean {
-  return (
-    block.debugReason === 'unrecognized_event' ||
-    block.debugReason === 'unrecognized_session_update'
-  );
+  if (block.debugReason !== undefined) {
+    return (
+      block.debugReason === 'unrecognized_event' ||
+      block.debugReason === 'unrecognized_session_update'
+    );
+  }
+  return block.text.includes(LEGACY_UNRECOGNIZED_EVENT_MARKER);
 }
 
 function getErrorDisplayText(
