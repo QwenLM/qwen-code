@@ -727,6 +727,20 @@ mod tests {
     }
 
     #[test]
+    fn reports_an_uncreatable_default_workspace() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-error-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(home.join("Documents"), b"not a directory").expect("block Documents");
+
+        assert!(create_default_workspace(&home).is_err());
+        fs::remove_dir_all(home).expect("cleanup");
+    }
+
+    #[test]
     fn allows_platform_bootstrap_origins() {
         assert!(is_bootstrap_url(
             &Url::parse("tauri://localhost/").expect("tauri bootstrap")
