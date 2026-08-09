@@ -17,6 +17,7 @@ import {
 } from './supervisor-client.js';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
+  AgentViewAnswerRequest,
   AgentViewCoordinationDispatchAck,
   AgentViewCoordinationDispatchRequest,
   AgentViewCoordinationReassignRequest,
@@ -41,6 +42,7 @@ import {
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { isLoaderEnvKey } from '../config/shared-env-keys.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
@@ -73,7 +75,7 @@ export interface AgentViewSupervisorClientHandle {
   attach(sessionId: string): Promise<unknown>;
   peek(sessionId: string): Promise<unknown>;
   send(sessionId: string, text: string): Promise<unknown>;
-  answer(sessionId: string, text: string): Promise<unknown>;
+  answer(request: AgentViewAnswerRequest): Promise<unknown>;
   logs(sessionId: string): Promise<unknown>;
   stop(sessionId: string): Promise<unknown>;
   kill(sessionId: string): Promise<unknown>;
@@ -307,13 +309,8 @@ function createSupervisorHandle(
         { sessionId, text },
         authOptions,
       ),
-    answer: (sessionId: string, text: string) =>
-      callAgentViewSupervisor(
-        socketPath,
-        'answer',
-        { sessionId, text },
-        authOptions,
-      ),
+    answer: (request: AgentViewAnswerRequest) =>
+      callAgentViewSupervisor(socketPath, 'answer', request, authOptions),
     logs: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'logs', { sessionId }, authOptions),
     stop: (sessionId: string) =>
@@ -534,7 +531,8 @@ function currentCoordinationEnvironment(): Record<string, string> {
     Object.entries(sanitizeChildEnv(process.env)).filter(
       (entry): entry is [string, string] =>
         typeof entry[1] === 'string' &&
-        !entry[0].startsWith('QWEN_AGENT_VIEW_'),
+        !entry[0].startsWith('QWEN_AGENT_VIEW_') &&
+        !isLoaderEnvKey(entry[0]),
     ),
   );
 }

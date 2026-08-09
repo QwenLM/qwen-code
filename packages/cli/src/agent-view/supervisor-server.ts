@@ -7,7 +7,10 @@
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as path from 'node:path';
-import { AGENT_VIEW_PROTOCOL_VERSION , AGENT_VIEW_MAX_COORDINATION_WORKERS } from './protocol.js';
+import {
+  AGENT_VIEW_PROTOCOL_VERSION,
+  AGENT_VIEW_MAX_COORDINATION_WORKERS,
+} from './protocol.js';
 import type {
   AgentViewSupervisorOperation,
   AgentViewSupervisorRequestMap,
@@ -454,11 +457,12 @@ function parseSupervisorParams<Op extends AgentViewSupervisorOperation>(
       typeof params['taskFile'] !== 'string' ||
       !isStringRecord(params['environment']) ||
       !path.isAbsolute(params['taskFile']) ||
-      (params['writeMode'] !== 'read-only' &&
+      (params['writeMode'] !== undefined &&
+        params['writeMode'] !== 'read-only' &&
         params['writeMode'] !== 'isolated-writer')
     ) {
       throw new Error(
-        'Reassignment requires full coordination/task IDs, an absolute taskFile, and a valid writeMode.',
+        'Reassignment requires full coordination/task IDs, an absolute taskFile, and an optional valid writeMode.',
       );
     }
   }
@@ -477,6 +481,24 @@ function parseSupervisorParams<Op extends AgentViewSupervisorOperation>(
     ) {
       throw new Error(
         'Worker control requires a positive generation and non-negative ackSequence.',
+      );
+    }
+  }
+  if (op === 'answer') {
+    if (
+      !isRecord(params) ||
+      typeof params['sessionId'] !== 'string' ||
+      !Number.isSafeInteger(params['generation']) ||
+      Number(params['generation']) < 1 ||
+      typeof params['promptId'] !== 'string' ||
+      !params['promptId'] ||
+      typeof params['callId'] !== 'string' ||
+      !params['callId'] ||
+      typeof params['text'] !== 'string' ||
+      !params['text'].trim()
+    ) {
+      throw new Error(
+        'Answer requires sessionId, generation, promptId, callId, and text.',
       );
     }
   }

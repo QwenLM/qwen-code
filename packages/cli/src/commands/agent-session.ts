@@ -5,6 +5,7 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+import type { AgentViewAnswerRequest } from '../agent-view/protocol.js';
 import { writeStderrLineSafe, writeStdoutLine } from '../utils/stdioHelpers.js';
 
 interface SessionArgs {
@@ -20,11 +21,17 @@ interface SessionTextArgs extends SessionArgs {
   text: string;
 }
 
+interface AnswerArgs extends SessionTextArgs {
+  generation: number;
+  'prompt-id': string;
+  'call-id': string;
+}
+
 interface AgentSessionSupervisor {
   attach(id: string): Promise<unknown>;
   peek(id: string): Promise<unknown>;
   send(id: string, text: string): Promise<unknown>;
-  answer(id: string, text: string): Promise<unknown>;
+  answer(request: AgentViewAnswerRequest): Promise<unknown>;
   logs(id: string): Promise<unknown>;
   stop(id: string): Promise<unknown>;
   kill(id: string): Promise<unknown>;
@@ -105,7 +112,7 @@ export const peekCommand = sessionCommand(
 function sessionTextCommand(
   command: string,
   describe: string,
-  method: 'send' | 'answer',
+  method: 'send',
 ): CommandModule<unknown, SessionTextArgs> {
   return {
     command,
@@ -137,11 +144,51 @@ export const sendCommand = sessionTextCommand(
   'send',
 );
 
-export const answerCommand = sessionTextCommand(
-  'answer <id>',
-  'Answer an Agent View session waiting for input',
-  'answer',
-);
+export const answerCommand: CommandModule<unknown, AnswerArgs> = {
+  command: 'answer <id>',
+  describe: 'Answer an exact Agent View pending input',
+  builder: (yargs: Argv) =>
+    yargs
+      .positional('id', {
+        type: 'string',
+        demandOption: true,
+        description: 'Agent View session ID',
+      })
+      .option('generation', {
+        type: 'number',
+        demandOption: true,
+        description: 'Pending input generation from agent-view peek',
+      })
+      .option('prompt-id', {
+        type: 'string',
+        demandOption: true,
+        description: 'Pending input prompt ID from agent-view peek',
+      })
+      .option('call-id', {
+        type: 'string',
+        demandOption: true,
+        description: 'Pending input call ID from agent-view peek',
+      })
+      .option('text', {
+        type: 'string',
+        demandOption: true,
+        description: 'Answer text',
+      }),
+  handler: async (argv) => {
+    const text = argv.text.trim();
+    if (!text) throw new Error('Answer text cannot be empty.');
+    const supervisor = await getSessionSupervisor();
+    writeJsonResult(
+      await supervisor.answer({
+        sessionId: argv.id,
+        generation: argv.generation,
+        promptId: argv['prompt-id'],
+        callId: argv['call-id'],
+        text,
+      }),
+    );
+  },
+};
 
 export const stopCommand = sessionCommand(
   'stop <id>',

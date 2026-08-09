@@ -41,8 +41,16 @@ export interface AgentViewCoordinationReassignRequest {
   coordinationId: string;
   taskId: string;
   taskFile: string;
-  writeMode: AgentViewCoordinationWriteMode;
+  writeMode?: AgentViewCoordinationWriteMode;
   environment: Record<string, string>;
+}
+
+export interface AgentViewAnswerRequest {
+  sessionId: string;
+  generation: number;
+  promptId: string;
+  callId: string;
+  text: string;
 }
 
 export interface AgentViewCoordinationDispatchAck {
@@ -96,7 +104,7 @@ export interface AgentViewCoordinationManifestAttempt {
   writeMode: AgentViewCoordinationWriteMode;
   inputSnapshot: AgentViewInputSnapshot;
   worktree?: AgentViewWorktreeState;
-  worktreePhase?: 'planned' | 'provisioned';
+  worktreePhase?: 'planned' | 'provisioned' | 'launching' | 'launched';
 }
 
 export interface AgentViewCoordinationManifest {
@@ -140,6 +148,14 @@ export interface AgentViewLastError {
 }
 
 export type AgentViewInputKind = 'blocking' | 'soft';
+
+export interface AgentViewPendingInput {
+  generation: number;
+  promptId: string;
+  callId: string;
+  type: 'tool_confirmation' | 'ask_user_question';
+  summary: string;
+}
 
 export interface AgentViewWorktreeState {
   mode: 'none' | 'worktree' | 'shared-unisolated';
@@ -208,6 +224,7 @@ export interface AgentViewActivityFile {
   lastResult?: string;
   activePromptId?: string;
   lastCompletedPromptId?: string;
+  pendingInput?: AgentViewPendingInput;
   staleReason?: 'checkout_changed';
   queuedPromptCount?: number;
   queuedPromptPreview?: string;
@@ -286,6 +303,8 @@ export interface AgentViewSessionSnapshot {
   activity?: AgentViewActivityFile;
   worker?: AgentViewWorkerFile;
   rosterEntry?: AgentViewRosterEntry;
+  result?: AgentViewCoordinationResult;
+  staleReason?: 'checkout_changed';
 }
 
 export type AgentViewWorkerEvent = (
@@ -316,6 +335,9 @@ export type AgentViewWorkerEvent = (
       summary?: string;
       waitingFor?: string;
       inputKind?: AgentViewInputKind;
+      callId?: string;
+      inputType?: AgentViewPendingInput['type'];
+      inputSummary?: string;
       lastResult?: string;
       at?: string;
     }
@@ -351,8 +373,9 @@ export type AgentViewWorkerControlEvent =
       type: 'answer';
       sequence: number;
       at: string;
+      promptId: string;
+      callId: string;
       text?: string;
-      callId?: string;
       outcome?: AgentViewWorkerAnswerOutcome;
       payload?: Record<string, unknown>;
     }

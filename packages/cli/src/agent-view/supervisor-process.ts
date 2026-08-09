@@ -10,9 +10,12 @@ import type { Socket } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  AGENT_WORKTREE_SLUG_PATTERN,
   generateAgentWorktreeSlug,
   GitWorktreeService,
+  readWorktreeSessionMarker,
   worktreeBranchForSlug,
+  writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentViewAttachLeaseManager,
@@ -26,6 +29,7 @@ import {
   AGENT_VIEW_PROTOCOL_VERSION,
 } from './protocol.js';
 import type {
+  AgentViewAnswerRequest,
   AgentViewActivityFile,
   AgentViewCoordinationDispatchAck,
   AgentViewCoordinationDispatchRequest,
@@ -123,10 +127,6 @@ const MAX_COORDINATION_ARTIFACT_PATH_BYTES = 4 * 1024;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-interface CoordinationTaskInput extends AgentViewCoordinationTaskRequest {
-  content: Buffer;
-}
-
 interface CoordinationAttemptSpec {
   lineage: AgentViewCoordinationLineage;
   sessionId: string;
@@ -142,6 +142,7 @@ type AgentViewWorkerControlInput = WithoutSequence<AgentViewWorkerControlEvent>;
 
 interface ProvisionedCoordinationWorktree {
   service: GitWorktreeService;
+  sessionId: string;
   state: AgentViewWorktreeState & {
     mode: 'worktree';
     path: string;
@@ -688,6 +689,15 @@ class AgentViewSupervisorProcessHandler
           `Coordination task ${request.taskId} cannot be reassigned from its current state.`,
         );
       }
+      const writeMode =
+        request.writeMode ??
+        manifestLatest?.writeMode ??
+        latest?.snapshot.launch?.writeMode;
+      if (!writeMode) {
+        throw new Error(
+          `Coordination task ${request.taskId} has no write mode to inherit.`,
+        );
+      }
       const attempt: CoordinationAttemptSpec = {
         lineage: {
           coordinationId: request.coordinationId,
@@ -697,7 +707,7 @@ class AgentViewSupervisorProcessHandler
         sessionId: randomUUID(),
         promptId: randomUUID(),
         content: task.content,
-        writeMode: task.writeMode,
+        writeMode,
       };
       await this.assertCoordinationCapacity([attempt]);
       const acknowledgements = await this.launchCoordinationAttempts(
@@ -818,6 +828,7 @@ class AgentViewSupervisorProcessHandler
             getAgentViewStorePaths(this.store).globalDir,
             'agent-view-worktrees',
           ),
+          writerAttempt.sessionId,
         );
         manifest = {
           ...manifest,
@@ -1088,6 +1099,14 @@ class AgentViewSupervisorProcessHandler
       },
       store,
     );
+    if (writer) {
+      await markCoordinationManifestWorktreePhase(
+        attempt.lineage.coordinationId,
+        attempt.sessionId,
+        'launching',
+        store,
+      );
+    }
     const host = await this.workers.launchPtyHostForSupervisor(
       launch,
       store,
@@ -1111,6 +1130,14 @@ class AgentViewSupervisorProcessHandler
       },
       store,
     );
+    if (writer) {
+      await markCoordinationManifestWorktreePhase(
+        attempt.lineage.coordinationId,
+        attempt.sessionId,
+        'launched',
+        store,
+      );
+    }
     return {
       type: 'dispatch_ack',
       ...attempt.lineage,
@@ -1164,6 +1191,7 @@ class AgentViewSupervisorProcessHandler
         );
       }
     }
+    this.notifyChanged();
     return {
       type: 'coordination_snapshot',
       coordinationId,
@@ -1191,6 +1219,30 @@ class AgentViewSupervisorProcessHandler
         !record.snapshot.launch.inputSnapshot ||
         !record.snapshot.launch.writeMode
       ) {
+        let worktree =
+          record?.snapshot.state.worktree.mode === 'worktree'
+            ? record.snapshot.state.worktree
+            : attempt.worktree;
+        if (
+          !record &&
+          manifest &&
+          (attempt.worktreePhase === 'planned' ||
+            attempt.worktreePhase === 'provisioned') &&
+          worktree?.mode === 'worktree' &&
+          (await cleanupPersistedCoordinationWorktree(
+            manifest.projectCwd,
+            attempt.sessionId,
+            worktree,
+            this.store,
+          ))
+        ) {
+          worktree = { mode: 'none' };
+          await markCoordinationManifestWorktreeCleaned(
+            manifest.coordinationId,
+            attempt.sessionId,
+            this.store,
+          );
+        }
         sessions.push({
           lineage: attempt.lineage,
           sessionId: attempt.sessionId,
@@ -1198,11 +1250,7 @@ class AgentViewSupervisorProcessHandler
           writeMode: attempt.writeMode,
           inputSnapshot: attempt.inputSnapshot,
           state: 'failed',
-          ...(record?.snapshot.state.worktree.mode === 'worktree'
-            ? { worktree: record.snapshot.state.worktree }
-            : attempt.worktree?.mode === 'worktree'
-              ? { worktree: attempt.worktree }
-              : {}),
+          ...(worktree?.mode === 'worktree' ? { worktree } : {}),
         });
         recordsBySessionId.delete(attempt.sessionId);
         continue;
@@ -1281,7 +1329,10 @@ class AgentViewSupervisorProcessHandler
         worktree.mode === 'worktree' &&
         (result?.artifacts.length ?? 0) === 0
       ) {
-        const cleaned = await cleanupStoredCoordinationWorktree(state);
+        const cleaned = await cleanupStoredCoordinationWorktree(
+          state,
+          this.store,
+        );
         if (cleaned) {
           worktree = { mode: 'none' };
           await writeAgentViewSessionState(
@@ -1554,6 +1605,7 @@ class AgentViewSupervisorProcessHandler
         event,
         this.store,
         await this.hasPendingWorkerInputControl(event.sessionId),
+        await this.hasPendingWorkerAnswerControl(event.sessionId),
       );
       await recordWorkerEventSequence(event, this.store);
       if (
@@ -1594,6 +1646,17 @@ class AgentViewSupervisorProcessHandler
   private async validateWorkerPromptCorrelation(
     event: Extract<AgentViewWorkerEvent, { type: 'state' }>,
   ): Promise<void> {
+    if (
+      event.sessionState === 'needs_input' &&
+      (!event.promptId ||
+        !event.callId ||
+        !event.inputType ||
+        !event.inputSummary)
+    ) {
+      throw new Error(
+        `Agent View needs_input identity is incomplete for ${event.sessionId}.`,
+      );
+    }
     if (!event.promptId) return;
     const queuedPrompt = (
       await this.loadWorkerControls(event.sessionId)
@@ -1863,12 +1926,19 @@ class AgentViewSupervisorProcessHandler
       if (activity !== storedActivity) {
         this.notifyChanged();
       }
+      const result = state.coordination
+        ? await readAgentViewCoordinationResult(sessionId, store)
+        : undefined;
       return {
         sessionId,
         state,
         activity,
         worker: await readAgentViewWorker(sessionId, store),
         live: this.workers.has(sessionId),
+        ...(result ? { result } : {}),
+        ...(activity?.staleReason === 'checkout_changed'
+          ? { staleReason: 'checkout_changed' as const }
+          : {}),
       };
     });
   }
@@ -1883,14 +1953,19 @@ class AgentViewSupervisorProcessHandler
     return { sessionId, sent: true };
   }
   async answer(params?: Record<string, unknown>) {
-    const sessionId = await resolveManagedSessionId(
-      requireSessionId(params),
-      this.store,
-    );
-    const text = requireText(params);
-    await this.queueAnswerForSession(sessionId, text);
+    const request: AgentViewAnswerRequest = {
+      sessionId: await resolveManagedSessionId(
+        requireSessionId(params),
+        this.store,
+      ),
+      generation: positiveIntegerParam(params, 'generation'),
+      promptId: requireStringParam(params, 'promptId'),
+      callId: requireStringParam(params, 'callId'),
+      text: requireText(params),
+    };
+    await this.queueAnswerForSession(request);
     this.notifyChanged();
-    return { sessionId, answered: true };
+    return { sessionId: request.sessionId, answered: true };
   }
   async logs(params?: Record<string, unknown>) {
     const sessionId = await resolveManagedSessionId(
@@ -2088,9 +2163,18 @@ class AgentViewSupervisorProcessHandler
       const state = await readAgentViewSessionState(sessionId, store);
       if (!state) return { sessionId, removed: true };
       await markStoppedSession(sessionId, store, 'exited');
+      const result = await readAgentViewCoordinationResult(sessionId, store);
       if (
         state.worktree.mode === 'worktree' &&
-        !(await cleanupStoredCoordinationWorktree(state))
+        (result?.artifacts.length ?? 0) > 0
+      ) {
+        throw new Error(
+          `Coordination worktree ${state.worktree.path} is referenced by collected artifacts and was preserved.`,
+        );
+      }
+      if (
+        state.worktree.mode === 'worktree' &&
+        !(await cleanupStoredCoordinationWorktree(state, store))
       ) {
         throw new Error(
           `Coordination worktree ${state.worktree.path} contains retained work; collect it before removing the session.`,
@@ -2504,18 +2588,17 @@ class AgentViewSupervisorProcessHandler
   }
 
   private async queueAnswerForSession(
-    sessionId: string,
-    text: string,
+    request: AgentViewAnswerRequest,
   ): Promise<void> {
-    return this.withSessionMutation(sessionId, async () => {
-      await this.queueAnswerForSessionLocked(sessionId, text);
+    return this.withSessionMutation(request.sessionId, async () => {
+      await this.queueAnswerForSessionLocked(request);
     });
   }
 
   private async queueAnswerForSessionLocked(
-    sessionId: string,
-    text: string,
+    request: AgentViewAnswerRequest,
   ): Promise<void> {
+    const { sessionId } = request;
     let state = await readAgentViewSessionState(sessionId, this.store);
     if (!state) {
       throw new Error(`No Agent View session found for ${sessionId}.`);
@@ -2540,10 +2623,21 @@ class AgentViewSupervisorProcessHandler
     }
 
     const now = new Date().toISOString();
-    const activity = await readAgentViewActivity(sessionId, this.store);
-    if (getAgentViewActivityInputState(activity) === 'soft_question') {
-      await this.queuePromptForSessionLocked(sessionId, text);
-      return;
+    const [activity, worker] = await Promise.all([
+      readAgentViewActivity(sessionId, this.store),
+      readAgentViewWorker(sessionId, this.store),
+    ]);
+    const pendingInput = activity?.pendingInput;
+    if (
+      !pendingInput ||
+      currentWorkerGeneration(worker) !== request.generation ||
+      pendingInput.generation !== request.generation ||
+      pendingInput.promptId !== request.promptId ||
+      pendingInput.callId !== request.callId
+    ) {
+      throw new Error(
+        `Agent View answer target is stale or does not match ${sessionId}.`,
+      );
     }
     if (!this.workers.has(sessionId)) {
       await this.workers.reconnectSessionHost(sessionId);
@@ -2561,16 +2655,17 @@ class AgentViewSupervisorProcessHandler
     }
     await this.appendWorkerControl(sessionId, {
       type: 'answer',
-      text,
+      promptId: request.promptId,
+      callId: request.callId,
+      text: request.text,
       at: now,
     });
     await writeAgentViewActivity(
       sessionId,
       {
+        ...activity,
         schemaVersion: 1,
-        ...(activity?.waitingFor === 'response'
-          ? getQueuedPromptActivityPatch(text, now)
-          : {}),
+        pendingInput: undefined,
         lastActivityAt: now,
         capabilities: activity?.capabilities ?? [],
       },
@@ -2583,6 +2678,14 @@ class AgentViewSupervisorProcessHandler
   ): Promise<boolean> {
     return (await this.loadWorkerControls(sessionId)).events.some(
       (event) => event.type === 'prompt' || event.type === 'answer',
+    );
+  }
+
+  private async hasPendingWorkerAnswerControl(
+    sessionId: string,
+  ): Promise<boolean> {
+    return (await this.loadWorkerControls(sessionId)).events.some(
+      (event) => event.type === 'answer',
     );
   }
 
@@ -3819,6 +3922,7 @@ async function applyWorkerEvent(
   event: AgentViewWorkerEvent,
   options: { globalDir?: string },
   hasPendingControl: boolean,
+  hasPendingAnswerControl: boolean,
 ): Promise<void> {
   const state = await readAgentViewSessionState(event.sessionId, options);
   if (!state) {
@@ -3884,6 +3988,23 @@ async function applyWorkerEvent(
                   inferInputKind(event.sessionState, event.waitingFor),
               }
             : { inputKind: undefined }),
+          ...(event.type === 'state' &&
+          event.sessionState === 'needs_input' &&
+          event.promptId &&
+          event.callId &&
+          event.inputType &&
+          event.inputSummary &&
+          !hasPendingAnswerControl
+            ? {
+                pendingInput: {
+                  generation: event.generation,
+                  promptId: event.promptId,
+                  callId: event.callId,
+                  type: event.inputType,
+                  summary: event.inputSummary,
+                },
+              }
+            : { pendingInput: undefined }),
           ...(event.type === 'state' && event.lastResult
             ? { lastResult: event.lastResult }
             : { lastResult: undefined }),
@@ -3916,6 +4037,7 @@ async function applyWorkerEvent(
             lastResult: event.summary,
             waitingFor: undefined,
             inputKind: undefined,
+            pendingInput: undefined,
             activePromptId: undefined,
             lastCompletedPromptId: event.promptId,
             capabilities: existingActivity?.capabilities ?? [],
@@ -4126,6 +4248,17 @@ function requireText(params: Record<string, unknown> | undefined): string {
   return text;
 }
 
+function requireStringParam(
+  params: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  const value = params?.[key];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Agent View ${key} is required.`);
+  }
+  return value;
+}
+
 function positiveIntegerParam(
   params: Record<string, unknown> | undefined,
   key: string,
@@ -4190,10 +4323,23 @@ function parseCoordinationReassignParams(
     'coordination ID',
   );
   const taskId = requireFullUuid(params?.['taskId'], 'task ID');
+  const taskFile = params?.['taskFile'];
+  const writeMode = params?.['writeMode'];
+  if (typeof taskFile !== 'string' || !path.isAbsolute(taskFile)) {
+    throw new Error('Coordination task file must be absolute.');
+  }
+  if (
+    writeMode !== undefined &&
+    writeMode !== 'read-only' &&
+    writeMode !== 'isolated-writer'
+  ) {
+    throw new Error('Coordination task write mode is invalid.');
+  }
   return {
     coordinationId,
     taskId,
-    ...parseCoordinationTaskRequest(params),
+    taskFile: path.resolve(taskFile),
+    ...(writeMode ? { writeMode } : {}),
     environment: parseCoordinationEnvironment(params?.['environment']),
   };
 }
@@ -4226,9 +4372,9 @@ function parseCoordinationTaskRequest(
   return { taskFile: path.resolve(taskFile), writeMode };
 }
 
-async function readCoordinationTaskInput(
-  task: AgentViewCoordinationTaskRequest,
-): Promise<CoordinationTaskInput> {
+async function readCoordinationTaskInput<T extends { taskFile: string }>(
+  task: T,
+): Promise<T & { content: Buffer }> {
   let stat;
   try {
     stat = await fs.lstat(task.taskFile);
@@ -4269,6 +4415,7 @@ async function requireCoordinationDirectory(cwd: string): Promise<string> {
 async function planCoordinationWorktree(
   parentCwd: string,
   worktreesDir: string,
+  sessionId: string,
 ): Promise<ProvisionedCoordinationWorktree> {
   const initialService = new GitWorktreeService(parentCwd);
   const repoRoot = await initialService.getRepoTopLevel();
@@ -4285,6 +4432,7 @@ async function planCoordinationWorktree(
   const slug = generateAgentWorktreeSlug();
   return {
     service,
+    sessionId,
     state: {
       mode: 'worktree',
       path: service.getUserWorktreePath(slug),
@@ -4317,6 +4465,7 @@ async function provisionCoordinationWorktree(
   ) {
     throw new Error('The coordination writer worktree did not match its plan.');
   }
+  await writeWorktreeSessionMarker(state.path, planned.sessionId);
   const [head, dirty] = await Promise.all([
     new GitWorktreeService(state.path).getCurrentCommitHash(),
     service.hasWorktreeChanges(state.path),
@@ -4334,6 +4483,7 @@ async function cleanupPristineCoordinationWorktree(
 ): Promise<boolean> {
   if (
     worktree.state.owner !== 'agent-view' ||
+    !AGENT_WORKTREE_SLUG_PATTERN.test(worktree.state.slug) ||
     worktree.state.branch !== worktreeBranchForSlug(worktree.state.slug) ||
     path.resolve(worktree.state.path) !==
       path.resolve(worktree.service.getUserWorktreePath(worktree.state.slug))
@@ -4343,30 +4493,67 @@ async function cleanupPristineCoordinationWorktree(
   if (await worktree.service.isUserWorktreeRemoved(worktree.state.slug)) {
     return true;
   }
-  if (await worktree.service.hasUnmergedWorktreeCommits(worktree.state.slug)) {
+  if (
+    await worktree.service.removeUnchangedUserWorktreeBranch(
+      worktree.state.slug,
+      worktree.state.baseCommit,
+    )
+  ) {
+    return true;
+  }
+  let marker: string | null;
+  let registered: { branch: string; headCommit: string } | null;
+  try {
+    [marker, registered] = await Promise.all([
+      readWorktreeSessionMarker(worktree.state.path),
+      worktree.service.getRegisteredWorktreeBranch(worktree.state.path),
+    ]);
+  } catch {
     return false;
   }
-  const exists = await fs
-    .stat(worktree.state.path)
-    .then(() => true)
-    .catch(() => false);
   if (
-    exists &&
-    (await worktree.service.hasWorktreeChanges(worktree.state.path))
+    marker !== worktree.sessionId ||
+    !registered ||
+    registered.branch !== worktree.state.branch ||
+    registered.headCommit !== worktree.state.baseCommit
   ) {
+    return false;
+  }
+  if (await worktree.service.hasWorktreeChanges(worktree.state.path)) {
     return false;
   }
   const removed = await worktree.service.removeUserWorktree(
     worktree.state.slug,
-    { deleteBranch: true, preserveChanges: true },
+    {
+      deleteBranch: false,
+      preserveChanges: true,
+    },
   );
-  return removed.success && removed.branchPreserved !== true;
+  if (!removed.success) return false;
+  return worktree.service.removeUnchangedUserWorktreeBranch(
+    worktree.state.slug,
+    worktree.state.baseCommit,
+  );
 }
 
 async function cleanupStoredCoordinationWorktree(
   state: AgentViewSessionStateFile,
+  store: AgentViewStoreOptions,
 ): Promise<boolean> {
-  const worktree = state.worktree;
+  return cleanupPersistedCoordinationWorktree(
+    state.projectCwd,
+    state.sessionId,
+    state.worktree,
+    store,
+  );
+}
+
+async function cleanupPersistedCoordinationWorktree(
+  projectCwd: string,
+  sessionId: string,
+  worktree: AgentViewWorktreeState,
+  store: AgentViewStoreOptions,
+): Promise<boolean> {
   if (
     worktree.mode !== 'worktree' ||
     worktree.owner !== 'agent-view' ||
@@ -4377,15 +4564,17 @@ async function cleanupStoredCoordinationWorktree(
   ) {
     return false;
   }
-  const initialService = new GitWorktreeService(state.projectCwd);
+  const worktreesDir = path.resolve(
+    getAgentViewStorePaths(store).globalDir,
+    'agent-view-worktrees',
+  );
+  if (path.dirname(path.resolve(worktree.path)) !== worktreesDir) return false;
+  const initialService = new GitWorktreeService(projectCwd);
   const repoRoot = await initialService.getRepoTopLevel();
   if (!repoRoot) return false;
   return cleanupPristineCoordinationWorktree({
-    service: new GitWorktreeService(
-      repoRoot,
-      undefined,
-      path.dirname(path.resolve(worktree.path)),
-    ),
+    service: new GitWorktreeService(repoRoot, undefined, worktreesDir),
+    sessionId,
     state: {
       mode: 'worktree',
       path: worktree.path,
@@ -4421,6 +4610,47 @@ async function markCoordinationManifestWorktreeCleaned(
     attempts.every((attempt, index) => attempt === manifest.attempts[index])
   ) {
     return;
+  }
+  await writeAgentViewCoordinationManifest(
+    {
+      ...manifest,
+      updatedAt: new Date().toISOString(),
+      attempts,
+    },
+    store,
+  );
+}
+
+async function markCoordinationManifestWorktreePhase(
+  coordinationId: string,
+  sessionId: string,
+  worktreePhase: 'launching' | 'launched',
+  store: AgentViewStoreOptions,
+): Promise<void> {
+  const manifest = await readAgentViewCoordinationManifest(
+    coordinationId,
+    store,
+  );
+  if (!manifest) {
+    throw new Error(
+      `Coordination ${coordinationId} lost its ownership manifest before writer launch.`,
+    );
+  }
+  let matched = false;
+  const attempts = manifest.attempts.map((attempt) => {
+    if (
+      attempt.sessionId !== sessionId ||
+      attempt.worktree?.mode !== 'worktree'
+    ) {
+      return attempt;
+    }
+    matched = true;
+    return { ...attempt, worktreePhase };
+  });
+  if (!matched) {
+    throw new Error(
+      `Coordination writer ${sessionId} lost its ownership receipt before launch.`,
+    );
   }
   await writeAgentViewCoordinationManifest(
     {
@@ -4663,8 +4893,19 @@ function parseWorkerEvent(
     const summary = stringParam(params, 'summary');
     const waitingFor = stringParam(params, 'waitingFor');
     const inputKind = inputKindParam(params);
+    const callId = stringParam(params, 'callId');
+    const inputType = inputTypeParam(params);
+    const inputSummary = stringParam(params, 'inputSummary');
     const lastResult = stringParam(params, 'lastResult');
     const promptId = stringParam(params, 'promptId');
+    if (
+      sessionState === 'needs_input' &&
+      (!promptId || !callId || !inputType || !inputSummary)
+    ) {
+      throw new Error(
+        'Agent View needs_input requires promptId, callId, inputType, and inputSummary.',
+      );
+    }
     const at = stringParam(params, 'at');
     return {
       type,
@@ -4675,6 +4916,9 @@ function parseWorkerEvent(
       ...(summary !== undefined ? { summary } : {}),
       ...(waitingFor !== undefined ? { waitingFor } : {}),
       ...(inputKind !== undefined ? { inputKind } : {}),
+      ...(callId !== undefined ? { callId } : {}),
+      ...(inputType !== undefined ? { inputType } : {}),
+      ...(inputSummary !== undefined ? { inputSummary } : {}),
       ...(lastResult !== undefined ? { lastResult } : {}),
       ...(promptId !== undefined ? { promptId } : {}),
       ...(at !== undefined ? { at } : {}),
@@ -4720,6 +4964,15 @@ function inputKindParam(
 ): 'blocking' | 'soft' | undefined {
   const value = params['inputKind'];
   return value === 'blocking' || value === 'soft' ? value : undefined;
+}
+
+function inputTypeParam(
+  params: Record<string, unknown>,
+): 'tool_confirmation' | 'ask_user_question' | undefined {
+  const value = params['inputType'];
+  return value === 'tool_confirmation' || value === 'ask_user_question'
+    ? value
+    : undefined;
 }
 
 function stringParam(

@@ -128,7 +128,13 @@ export async function handleCoordinationReassign(
     coordinationId: argv.coordinationId,
     taskId: argv.taskId,
     taskFile: path.resolve(argv.task),
-    writeMode: argv.writer ? 'isolated-writer' : 'read-only',
+    ...(argv.writer === undefined
+      ? {}
+      : {
+          writeMode: argv.writer
+            ? ('isolated-writer' as const)
+            : ('read-only' as const),
+        }),
   });
   writeCoordinationOutput(acknowledgement, argv.json === true, (ack) =>
     formatDispatchText([ack]),
@@ -232,8 +238,7 @@ export const coordinationReassignCommand: CommandModule<
       })
       .option('writer', {
         type: 'boolean',
-        default: false,
-        description: 'Run the replacement as the isolated writer',
+        description: 'Override inherited mode (--writer or --no-writer)',
       })
       .option('json', {
         type: 'boolean',

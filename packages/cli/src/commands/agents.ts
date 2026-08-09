@@ -7,7 +7,9 @@
 import * as path from 'node:path';
 import type { Argv, CommandModule } from 'yargs';
 import type {
+  AgentViewAnswerRequest,
   AgentViewActivityFile,
+  AgentViewCoordinationResult,
   AgentViewLaunchFile,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
@@ -49,7 +51,7 @@ export interface AgentsInteractiveActions {
   dispatchPrompt(prompt: string): Promise<unknown>;
   peekSelected(sessionId: string): Promise<AgentViewPeekPanel>;
   sendToSession(sessionId: string, text: string): Promise<unknown>;
-  answerSession(sessionId: string, text: string): Promise<unknown>;
+  answerSession(request: AgentViewAnswerRequest): Promise<unknown>;
   pinSession(sessionId: string): Promise<unknown>;
   renameSession(sessionId: string, displayName: string): Promise<unknown>;
   stopSession(sessionId: string): Promise<unknown>;
@@ -107,7 +109,7 @@ export async function runAgentsInteractiveSession({
     peekSelected: async (sessionId) =>
       formatPeekPanel(await supervisor.peek(sessionId)),
     sendToSession: (sessionId, text) => supervisor.send(sessionId, text),
-    answerSession: (sessionId, text) => supervisor.answer(sessionId, text),
+    answerSession: (request) => supervisor.answer(request),
     pinSession: (sessionId) => supervisor.pin(sessionId),
     renameSession: (sessionId, displayName) =>
       supervisor.rename(sessionId, displayName),
@@ -178,6 +180,15 @@ async function toRosterRows(
     ),
     workers: Object.fromEntries(
       snapshots.map((snapshot) => [snapshot.sessionId, snapshot.worker]),
+    ),
+    results: Object.fromEntries(
+      snapshots.map((snapshot) => [snapshot.sessionId, snapshot.result]),
+    ),
+    staleReasons: Object.fromEntries(
+      snapshots.map((snapshot) => [
+        snapshot.sessionId,
+        snapshot.staleReason ?? snapshot.activity?.staleReason,
+      ]),
     ),
     rosterEntries: snapshots
       .map((snapshot) => snapshot.rosterEntry)
@@ -280,11 +291,27 @@ function formatAgentsJson(
         pinned: Boolean(snapshot.rosterEntry?.pinned),
         createdAt: snapshot.state.createdAt,
         updatedAt: snapshot.state.updatedAt,
+        ...(snapshot.state.coordination
+          ? { coordination: snapshot.state.coordination }
+          : {}),
+        ...(snapshot.result ? { result: snapshot.result } : {}),
+        ...((snapshot.staleReason ?? snapshot.activity?.staleReason)
+          ? {
+              staleReason:
+                snapshot.staleReason ?? snapshot.activity?.staleReason,
+            }
+          : {}),
         ...(snapshot.activity?.summary
           ? { summary: snapshot.activity.summary }
           : {}),
         ...(snapshot.activity?.waitingFor
           ? { waitingFor: snapshot.activity.waitingFor }
+          : {}),
+        ...(snapshot.activity?.pendingInput
+          ? { pendingInput: snapshot.activity.pendingInput }
+          : {}),
+        ...(snapshot.worker?.generation
+          ? { generation: snapshot.worker.generation }
           : {}),
         ...(snapshot.activity?.queuedPromptCount
           ? { queuedPromptCount: snapshot.activity.queuedPromptCount }
@@ -323,6 +350,17 @@ function toSnapshot(value: unknown): AgentViewSessionSnapshot | undefined {
   }
   const state = value['state'];
   if (!isSessionState(state)) return undefined;
+  const activity = isActivity(value['activity'])
+    ? value['activity']
+    : undefined;
+  const result = isCoordinationResult(value['result'])
+    ? value['result']
+    : undefined;
+  const staleReason =
+    value['staleReason'] === 'checkout_changed' ||
+    activity?.staleReason === 'checkout_changed'
+      ? 'checkout_changed'
+      : undefined;
   return {
     sessionId:
       typeof value['sessionId'] === 'string'
@@ -330,11 +368,13 @@ function toSnapshot(value: unknown): AgentViewSessionSnapshot | undefined {
         : state.sessionId,
     state,
     ...(isLaunch(value['launch']) ? { launch: value['launch'] } : {}),
-    ...(isActivity(value['activity']) ? { activity: value['activity'] } : {}),
+    ...(activity ? { activity } : {}),
     ...(isWorker(value['worker']) ? { worker: value['worker'] } : {}),
     ...(isRosterEntry(value['rosterEntry'])
       ? { rosterEntry: value['rosterEntry'] }
       : {}),
+    ...(result ? { result } : {}),
+    ...(staleReason ? { staleReason } : {}),
   };
 }
 
@@ -365,6 +405,28 @@ function isLaunch(value: unknown): value is AgentViewLaunchFile {
 
 function isWorker(value: unknown): value is AgentViewWorkerFile {
   return isRecord(value) && typeof value['protocolVersion'] === 'number';
+}
+
+function isCoordinationResult(
+  value: unknown,
+): value is AgentViewCoordinationResult {
+  if (!isRecord(value) || !isRecord(value['lineage'])) return false;
+  const lineage = value['lineage'];
+  return (
+    value['schemaVersion'] === 1 &&
+    typeof value['sessionId'] === 'string' &&
+    typeof value['promptId'] === 'string' &&
+    typeof value['generation'] === 'number' &&
+    (value['outcome'] === 'completed' ||
+      value['outcome'] === 'failed' ||
+      value['outcome'] === 'handback') &&
+    typeof value['summary'] === 'string' &&
+    Array.isArray(value['artifacts']) &&
+    typeof value['completedAt'] === 'string' &&
+    typeof lineage['coordinationId'] === 'string' &&
+    typeof lineage['taskId'] === 'string' &&
+    typeof lineage['attemptId'] === 'string'
+  );
 }
 
 function isRosterEntry(
@@ -513,19 +575,51 @@ function formatPeekPanel(value: unknown): AgentViewPeekPanel {
     ? value['activity']
     : undefined;
   const state = isSessionState(value['state']) ? value['state'] : undefined;
-  const coordination = state?.coordination;
+  const result = isCoordinationResult(value['result'])
+    ? value['result']
+    : undefined;
+  const coordination = state?.coordination ?? result?.lineage;
+  const staleReason =
+    value['staleReason'] === 'checkout_changed' ||
+    activity?.staleReason === 'checkout_changed'
+      ? 'checkout_changed'
+      : undefined;
   const worktree = state?.worktree;
+  const outcome =
+    result?.outcome ??
+    (coordination && state?.sessionState === 'failed' ? 'failed' : undefined);
+  const shouldReassign = Boolean(
+    coordination &&
+      (staleReason || outcome === 'failed' || outcome === 'handback'),
+  );
   const lines = [
-    coordination
-      ? `Coordination: ${formatSessionShortId(coordination.coordinationId)} · task ${formatSessionShortId(coordination.taskId)} · attempt ${formatSessionShortId(coordination.attemptId)}`
+    coordination ? `Coordination: ${coordination.coordinationId}` : undefined,
+    coordination ? `Task: ${coordination.taskId}` : undefined,
+    coordination ? `Attempt: ${coordination.attemptId}` : undefined,
+    outcome ? `Outcome: ${outcome}` : undefined,
+    staleReason ? `Stale: ${staleReason}` : undefined,
+    shouldReassign
+      ? 'Action: Reassign this task with the coordination and task IDs above.'
       : undefined,
     worktree?.mode === 'worktree'
       ? `Worktree: ${worktree.path ?? state?.activeCwd}${worktree.branch ? ` · ${worktree.branch}` : ''}`
       : undefined,
+    activity?.pendingInput
+      ? `${
+          activity.pendingInput.type === 'ask_user_question'
+            ? 'Question'
+            : 'Confirmation'
+        }: ${activity.pendingInput.summary}`
+      : undefined,
     activity?.waitingFor ? `Waiting: ${activity.waitingFor}` : undefined,
     activity?.queuedPromptCount ? formatQueuedPromptLine(activity) : undefined,
-    activity?.lastResult ? `Result: ${activity.lastResult}` : undefined,
-    activity?.summary ? `Summary: ${activity.summary}` : undefined,
+    result?.summary
+      ? `Summary: ${result.summary}`
+      : activity?.lastResult
+        ? `Result: ${activity.lastResult}`
+        : activity?.summary
+          ? `Summary: ${activity.summary}`
+          : undefined,
   ].filter((line): line is string => Boolean(line));
   return {
     title: sessionId,

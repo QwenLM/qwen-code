@@ -11,6 +11,7 @@ import type {
   AgentViewCoordinationWriteMode,
   AgentViewInputSnapshot,
   AgentViewInputKind,
+  AgentViewPendingInput,
   AgentViewWorkerControlEvent,
   AgentViewSessionState,
   AgentViewWorkerEvent,
@@ -94,6 +95,9 @@ export interface AgentViewWorkerStateReport {
   summary?: string;
   waitingFor?: string;
   inputKind?: AgentViewInputKind;
+  callId?: string;
+  inputType?: AgentViewPendingInput['type'];
+  inputSummary?: string;
   lastResult?: string;
 }
 
@@ -348,8 +352,9 @@ function isAgentViewWorkerControlEvent(
   }
   return (
     value['type'] === 'answer' &&
+    typeof value['promptId'] === 'string' &&
+    typeof value['callId'] === 'string' &&
     (value['text'] === undefined || typeof value['text'] === 'string') &&
-    (value['callId'] === undefined || typeof value['callId'] === 'string') &&
     (value['outcome'] === undefined ||
       isAgentViewWorkerAnswerOutcome(value['outcome'])) &&
     (value['payload'] === undefined || isRecord(value['payload']))

@@ -32,30 +32,32 @@ If changes are requested, implement the smallest correct change in the current w
 
 Create one concise task file per assignment under `.qwen/coordination-tasks/`. Do not put secrets in a task file. Each file must state the objective, allowed scope, completion condition, and required evidence.
 
+Copy the Agent View commands below as written. `QWEN_CODE_CLI` points to the Qwen Code build running this skill, while the `qwen` fallback supports older hosts that do not export it. The `${...:-...}` syntax requires a POSIX-compatible shell.
+
 Dispatch one to three tasks atomically. Use `--task` for read-only investigators and at most one `--writer` for an isolated implementation attempt:
 
 ```bash
-qwen agent-view dispatch --task <absolute-task-file> --task <absolute-task-file> --json
-qwen agent-view dispatch --task <absolute-task-file> --writer <absolute-task-file> --json
+"${QWEN_CODE_CLI:-qwen}" agent-view dispatch --task <absolute-task-file> --task <absolute-task-file> --json
+"${QWEN_CODE_CLI:-qwen}" agent-view dispatch --task <absolute-task-file> --writer <absolute-task-file> --json
 ```
 
 Preserve the full IDs from the acknowledgement. Collect only with the full coordination ID:
 
 ```bash
-qwen agent-view collect <full-coordination-id> --json
+"${QWEN_CODE_CLI:-qwen}" agent-view collect <full-coordination-id> --json
 ```
 
 Managed coordination attempts are one-shot. Inspect state or retained output with:
 
 ```bash
-qwen agent-view peek <session-id>
-qwen agent-view logs <session-id>
+"${QWEN_CODE_CLI:-qwen}" agent-view peek <session-id>
+"${QWEN_CODE_CLI:-qwen}" agent-view logs <session-id>
 ```
 
 Do not use `send`, `answer`, `attach`, or generic `respawn` for a managed attempt; those commands fail closed because a headless attempt has no interactive continuation consumer. If the latest attempt is `handback`, failed, or stale, reassign the same task instead of erasing its lineage:
 
 ```bash
-qwen agent-view reassign <full-coordination-id> <full-task-id> --task <absolute-task-file> --json
+"${QWEN_CODE_CLI:-qwen}" agent-view reassign <full-coordination-id> <full-task-id> --task <absolute-task-file> --json
 ```
 
 Never treat `checkout_changed` as current evidence. A writer result is an ownership receipt, not an automatic merge. Review the returned worktree diff and base commit, then apply only the accepted changes to the source workspace as Leader. Never delete a preserved dirty worktree on the user's behalf.

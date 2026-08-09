@@ -952,12 +952,16 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
    * Updates the tool's description and schema based on available subagents.
    */
   private updateDescriptionAndSchema(): void {
+    const advertisedSubagents = this.availableSubagents.filter(
+      (subagent) =>
+        subagent.name.toLowerCase() !== COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+    );
     let subagentDescriptions = '';
-    if (this.availableSubagents.length === 0) {
+    if (advertisedSubagents.length === 0) {
       subagentDescriptions =
         'No subagents are currently configured. You can create subagents using the /agents command.';
     } else {
-      subagentDescriptions = this.availableSubagents
+      subagentDescriptions = advertisedSubagents
         .map((subagent) => `- **${subagent.name}**: ${subagent.description}`)
         .join('\n');
     }
@@ -1390,7 +1394,12 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   getAvailableSubagentNames(): string[] {
-    return this.availableSubagents.map((subagent) => subagent.name);
+    return this.availableSubagents
+      .filter(
+        (subagent) =>
+          subagent.name.toLowerCase() !== COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+      )
+      .map((subagent) => subagent.name);
   }
 }
 

@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { render } from 'ink';
+import type { AgentViewAnswerRequest } from '../../agent-view/protocol.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { AgentViewRoster } from './AgentViewRoster.js';
@@ -21,7 +22,7 @@ export interface AgentViewAppActions {
   dispatchPrompt(prompt: string): Promise<unknown>;
   peekSelected(sessionId: string): Promise<AgentViewPeekPanel>;
   sendToSession(sessionId: string, text: string): Promise<unknown>;
-  answerSession(sessionId: string, text: string): Promise<unknown>;
+  answerSession(request: AgentViewAnswerRequest): Promise<unknown>;
   pinSession(sessionId: string): Promise<unknown>;
   renameSession(sessionId: string, displayName: string): Promise<unknown>;
   stopSession(sessionId: string): Promise<unknown>;
@@ -45,10 +46,9 @@ export interface AgentViewAppProps {
   initialPeekPanel?: AgentViewPeekPanel;
 }
 
-interface ReplyTarget {
-  sessionId: string;
-  mode: 'answer' | 'send';
-}
+type ReplyTarget =
+  | { sessionId: string; mode: 'send' }
+  | (Omit<AgentViewAnswerRequest, 'text'> & { mode: 'answer' });
 
 interface PeekSubmittedPreview {
   sessionId: string;
@@ -264,7 +264,13 @@ export function AgentViewApp({
       void (async () => {
         try {
           if (target.mode === 'answer') {
-            await actions.answerSession(target.sessionId, submitted);
+            await actions.answerSession({
+              sessionId: target.sessionId,
+              generation: target.generation,
+              promptId: target.promptId,
+              callId: target.callId,
+              text: submitted,
+            });
           } else {
             await actions.sendToSession(target.sessionId, submitted);
           }
@@ -533,10 +539,19 @@ function getReplyTarget(row: AgentRosterRow): ReplyTarget | undefined {
   if ((row.queuedPromptCount ?? 0) > 0 || !row.actions.canReply) {
     return undefined;
   }
-  return {
-    sessionId: row.sessionId,
-    mode: row.actions.needsBlockingAnswer ? 'answer' : 'send',
-  };
+  if (!row.actions.needsBlockingAnswer) {
+    return { sessionId: row.sessionId, mode: 'send' };
+  }
+  const pendingInput = row.pendingInput;
+  return pendingInput
+    ? {
+        sessionId: row.sessionId,
+        mode: 'answer',
+        generation: pendingInput.generation,
+        promptId: pendingInput.promptId,
+        callId: pendingInput.callId,
+      }
+    : undefined;
 }
 
 function getPeekQueuedPrompts(

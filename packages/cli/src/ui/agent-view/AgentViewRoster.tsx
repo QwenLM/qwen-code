@@ -793,15 +793,26 @@ function getPanelDisplayLines(
   queuedPrompts: readonly string[] | undefined,
 ): string[] {
   const parsed = parsePanelLines(panel.lines);
-  const output =
+  const coordinationStatus = formatCoordinationStatus(row, parsed);
+  const summary =
+    cleanRowText(row.coordinationResult?.summary) ??
     cleanRowText(row.lastResult) ??
     parsed.result ??
     parsed.summary ??
-    parsed.other.at(-1);
+    (coordinationStatus ? undefined : parsed.other.at(-1));
   const queuedLine = getQueuedPromptLine(queuedPrompts);
-  return [output, queuedLine ?? formatWaitingLine(row.waitingFor)].filter(
-    (line): line is string => Boolean(line),
-  );
+  return [
+    ...(row.coordination
+      ? [
+          `Coordination: ${row.coordination.coordinationId}`,
+          `Task: ${row.coordination.taskId}`,
+          `Attempt: ${row.coordination.attemptId}`,
+        ]
+      : []),
+    coordinationStatus ? `Status: ${coordinationStatus}` : summary,
+    coordinationStatus && summary ? `Summary: ${summary}` : undefined,
+    queuedLine ?? formatWaitingLine(row.waitingFor),
+  ].filter((line): line is string => Boolean(line));
 }
 
 function formatWaitingLine(waitingFor: string | undefined): string | undefined {
@@ -815,6 +826,9 @@ function formatWaitingLine(waitingFor: string | undefined): string | undefined {
 function parsePanelLines(lines: readonly string[]): {
   result?: string;
   summary?: string;
+  outcome?: string;
+  staleReason?: string;
+  reassign?: boolean;
   other: string[];
 } {
   return lines
@@ -823,12 +837,29 @@ function parsePanelLines(lines: readonly string[]): {
     .reduce<{
       result?: string;
       summary?: string;
+      outcome?: string;
+      staleReason?: string;
+      reassign?: boolean;
       other: string[];
     }>(
       (parsed, line) => {
         if (/^State:\s*/i.test(line)) return parsed;
         if (/^Cwd:\s*/i.test(line)) return parsed;
         if (/^Worker:\s*/i.test(line)) return parsed;
+        const outcome = line.match(/^Outcome:\s*(.+)$/i);
+        if (outcome?.[1]) {
+          parsed.outcome = outcome[1];
+          return parsed;
+        }
+        const staleReason = line.match(/^Stale:\s*(.+)$/i);
+        if (staleReason?.[1]) {
+          parsed.staleReason = staleReason[1];
+          return parsed;
+        }
+        if (/^Action:\s*Reassign\b/i.test(line)) {
+          parsed.reassign = true;
+          return parsed;
+        }
         const result = line.match(/^Result:\s*(.+)$/i);
         if (result?.[1]) {
           parsed.result = result[1];
@@ -970,7 +1001,42 @@ function formatRowName(row: AgentRosterRow): string {
 }
 
 function formatRowOutput(row: AgentRosterRow): string {
+  const coordinationStatus = formatCoordinationStatus(row);
+  if (coordinationStatus) {
+    if (
+      row.staleReason ||
+      row.coordinationResult?.outcome === 'failed' ||
+      row.coordinationResult?.outcome === 'handback' ||
+      row.state === 'failed'
+    ) {
+      return coordinationStatus;
+    }
+    const summary = cleanRowText(row.coordinationResult?.summary);
+    return summary ? `${coordinationStatus} · ${summary}` : coordinationStatus;
+  }
   return cleanRowText(row.subtitle) ?? cleanRowText(row.lastResult) ?? '';
+}
+
+function formatCoordinationStatus(
+  row: AgentRosterRow,
+  peek?: ReturnType<typeof parsePanelLines>,
+): string | undefined {
+  if (!row.coordination) return undefined;
+  const staleReason = row.staleReason ?? peek?.staleReason;
+  const outcome =
+    row.coordinationResult?.outcome ??
+    peek?.outcome ??
+    (row.state === 'failed' ? 'failed' : undefined);
+  const shouldReassign =
+    Boolean(staleReason) ||
+    outcome === 'failed' ||
+    outcome === 'handback' ||
+    peek?.reassign === true;
+  return (
+    [staleReason, outcome, shouldReassign ? 'reassign task' : undefined]
+      .filter((value): value is string => Boolean(value))
+      .join(' · ') || undefined
+  );
 }
 
 function cleanRowText(value: string | undefined): string | undefined {

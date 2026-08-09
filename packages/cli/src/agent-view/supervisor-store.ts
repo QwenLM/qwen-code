@@ -242,18 +242,28 @@ export async function listAgentViewSessionSnapshots(
     roster.sessions.map((entry) => [entry.sessionId, entry]),
   );
   const snapshots = await Promise.all(
-    states.map(async (state) => ({
-      sessionId: state.sessionId,
-      state,
-      launch: redactAgentViewLaunch(
-        await readAgentViewLaunch(state.sessionId, options),
-      ),
-      activity: await readAgentViewActivity(state.sessionId, options),
-      worker: redactAgentViewWorker(
-        await readAgentViewWorker(state.sessionId, options),
-      ),
-      rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
-    })),
+    states.map(async (state) => {
+      const [launch, activity, worker, result] = await Promise.all([
+        readAgentViewLaunch(state.sessionId, options),
+        readAgentViewActivity(state.sessionId, options),
+        readAgentViewWorker(state.sessionId, options),
+        state.coordination
+          ? readAgentViewCoordinationResult(state.sessionId, options)
+          : undefined,
+      ]);
+      return {
+        sessionId: state.sessionId,
+        state,
+        launch: redactAgentViewLaunch(launch),
+        activity,
+        worker: redactAgentViewWorker(worker),
+        rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
+        ...(result ? { result } : {}),
+        ...(activity?.staleReason === 'checkout_changed'
+          ? { staleReason: 'checkout_changed' as const }
+          : {}),
+      };
+    }),
   );
   return snapshots.sort((left, right) =>
     right.state.updatedAt.localeCompare(left.state.updatedAt),
@@ -773,12 +783,38 @@ function normalizeActivity(
     lastResult: stringValue(raw['lastResult']),
     activePromptId: stringValue(raw['activePromptId']),
     lastCompletedPromptId: stringValue(raw['lastCompletedPromptId']),
+    pendingInput: normalizePendingInput(raw['pendingInput']),
     queuedPromptCount: numberValue(raw['queuedPromptCount']),
     queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
     lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
   }) as AgentViewActivityFile;
+}
+
+function normalizePendingInput(
+  value: unknown,
+): AgentViewActivityFile['pendingInput'] {
+  if (
+    !isRecord(value) ||
+    !isPositiveSafeInteger(value['generation']) ||
+    typeof value['promptId'] !== 'string' ||
+    !value['promptId'] ||
+    typeof value['callId'] !== 'string' ||
+    !value['callId'] ||
+    (value['type'] !== 'tool_confirmation' &&
+      value['type'] !== 'ask_user_question') ||
+    typeof value['summary'] !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    generation: value['generation'],
+    promptId: value['promptId'],
+    callId: value['callId'],
+    type: value['type'],
+    summary: value['summary'],
+  };
 }
 
 function redactAgentViewWorker(
@@ -870,7 +906,9 @@ function normalizeCoordinationManifestAttempt(
     !value['inputSnapshot'].startsWith('sha256:') ||
     (worktreePhase !== undefined &&
       worktreePhase !== 'planned' &&
-      worktreePhase !== 'provisioned') ||
+      worktreePhase !== 'provisioned' &&
+      worktreePhase !== 'launching' &&
+      worktreePhase !== 'launched') ||
     (worktreePhase !== undefined &&
       (!isRecord(worktree) ||
         worktree['mode'] !== 'worktree' ||
@@ -903,7 +941,10 @@ function normalizeCoordinationManifestAttempt(
           },
         }
       : {}),
-    ...(worktreePhase === 'planned' || worktreePhase === 'provisioned'
+    ...(worktreePhase === 'planned' ||
+    worktreePhase === 'provisioned' ||
+    worktreePhase === 'launching' ||
+    worktreePhase === 'launched'
       ? { worktreePhase }
       : {}),
   };
@@ -977,8 +1018,9 @@ function isWorkerControlEvent(
   }
   return (
     value['type'] === 'answer' &&
+    typeof value['promptId'] === 'string' &&
+    typeof value['callId'] === 'string' &&
     (value['text'] === undefined || typeof value['text'] === 'string') &&
-    (value['callId'] === undefined || typeof value['callId'] === 'string') &&
     (value['outcome'] === undefined ||
       isWorkerAnswerOutcome(value['outcome'])) &&
     (value['payload'] === undefined || isRecord(value['payload']))

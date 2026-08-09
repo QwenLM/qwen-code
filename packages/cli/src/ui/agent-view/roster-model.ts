@@ -7,6 +7,7 @@
 import type {
   AgentViewActivityFile,
   AgentViewCoordinationLineage,
+  AgentViewCoordinationResult,
   AgentViewLaunchFile,
   AgentViewProcessState,
   AgentViewRosterEntry,
@@ -36,6 +37,8 @@ export interface BuildAgentRosterRowsOptions {
   launches?: Record<string, AgentViewLaunchFile | undefined>;
   activities?: Record<string, AgentViewActivityFile | undefined>;
   workers?: Record<string, AgentViewWorkerFile | undefined>;
+  results?: Record<string, AgentViewCoordinationResult | undefined>;
+  staleReasons?: Record<string, AgentViewActivityFile['staleReason']>;
   filter?: string;
   now?: Date | string;
 }
@@ -66,10 +69,13 @@ export interface AgentRosterRow {
   alive: boolean;
   aliveIndicator: AgentRosterAliveIndicator;
   coordination?: AgentViewCoordinationLineage;
+  coordinationResult?: AgentViewCoordinationResult;
+  staleReason?: AgentViewActivityFile['staleReason'];
   worktreeMode: AgentViewSessionStateFile['worktree']['mode'];
   summary?: string;
   waitingFor?: string;
   inputKind?: AgentViewActivityFile['inputKind'];
+  pendingInput?: AgentViewActivityFile['pendingInput'];
   lastResult?: string;
   queuedPromptCount?: number;
   queuedPromptPreview?: string;
@@ -91,6 +97,9 @@ export function buildAgentRosterRows(
       options.launches?.[session.sessionId],
       options.activities?.[session.sessionId],
       options.workers?.[session.sessionId],
+      options.results?.[session.sessionId],
+      options.staleReasons?.[session.sessionId] ??
+        options.activities?.[session.sessionId]?.staleReason,
       now,
     ),
   );
@@ -113,6 +122,8 @@ function toRosterRow(
   launch: AgentViewLaunchFile | undefined,
   activity: AgentViewActivityFile | undefined,
   worker: AgentViewWorkerFile | undefined,
+  result: AgentViewCoordinationResult | undefined,
+  staleReason: AgentViewActivityFile['staleReason'],
   now: number,
 ): AgentRosterRow {
   const ageMs = Math.max(0, now - toTime(session.createdAt));
@@ -153,10 +164,16 @@ function toRosterRow(
     alive: aliveIndicator === 'alive',
     aliveIndicator,
     ...(session.coordination ? { coordination: session.coordination } : {}),
+    ...(result ? { coordinationResult: result } : {}),
+    ...(staleReason ? { staleReason } : {}),
     worktreeMode: session.worktree.mode,
-    summary: cleanText(activity?.summary) ?? cleanText(launch?.initialPrompt),
+    summary:
+      cleanText(result?.summary) ??
+      cleanText(activity?.summary) ??
+      cleanText(launch?.initialPrompt),
     waitingFor: activity?.waitingFor,
     inputKind: activity?.inputKind,
+    pendingInput: activity?.pendingInput,
     lastResult: activity?.lastResult,
     queuedPromptCount: activity?.queuedPromptCount,
     queuedPromptPreview: activity?.queuedPromptPreview,
@@ -240,6 +257,8 @@ function getSearchText(row: AgentRosterRow): string {
     row.coordination?.coordinationId,
     row.coordination?.taskId,
     row.coordination?.attemptId,
+    row.coordinationResult?.outcome,
+    row.staleReason,
   ]
     .filter((value): value is string => Boolean(value))
     .join(' ')

@@ -8,6 +8,7 @@ import type { Readable, Writable } from 'node:stream';
 import * as net from 'node:net';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
+  AgentViewAnswerRequest,
   AgentViewCoordinationDispatchAck,
   AgentViewCoordinationDispatchRequest,
   AgentViewCoordinationReassignRequest,
@@ -111,7 +112,7 @@ export interface AgentViewSupervisorRequestMap {
   resize: { sessionId: string; columns: number; rows: number };
   peek: { sessionId: string };
   send: { sessionId: string; text: string };
-  answer: { sessionId: string; text: string };
+  answer: AgentViewAnswerRequest;
   logs: { sessionId: string };
   stop: { sessionId: string };
   kill: { sessionId: string };

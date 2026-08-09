@@ -331,6 +331,9 @@ export interface AgentViewWorkerUiStateReport {
   summary?: string;
   waitingFor?: string;
   inputKind?: 'blocking' | 'soft';
+  callId?: string;
+  inputType?: 'tool_confirmation' | 'ask_user_question';
+  inputSummary?: string;
   lastResult?: string;
 }
 
@@ -352,21 +355,41 @@ export function getAgentViewWorkerStateForUi({
   }
 
   const toolCalls = pendingToolCalls ?? [];
-  const waitingTool = toolCalls.find(
-    (tool) => tool.status === 'awaiting_approval',
-  );
-  const waitingFor =
-    waitingTool?.request?.name ?? getNestedAgentViewWaitingFor(toolCalls);
-  if (streamingState === StreamingState.WaitingForConfirmation) {
+  const answerableToolCalls = getAgentViewAnswerableToolCalls(toolCalls);
+  const waitingTool = answerableToolCalls[0];
+  if (
+    streamingState === StreamingState.WaitingForConfirmation &&
+    waitingTool?.request.callId &&
+    answerableToolCalls.filter(
+      (toolCall) => toolCall.request.callId === waitingTool.request.callId,
+    ).length === 1
+  ) {
+    const details = waitingTool.confirmationDetails;
     return {
       sessionState: 'needs_input',
-      ...(waitingFor ? { waitingFor } : {}),
+      waitingFor: waitingTool.request.name,
       inputKind: 'blocking',
+      callId: waitingTool.request.callId,
+      inputType:
+        details.type === 'ask_user_question'
+          ? 'ask_user_question'
+          : 'tool_confirmation',
+      inputSummary:
+        details.type === 'ask_user_question'
+          ? details.questions.map((question) => question.question).join(' ') ||
+            waitingTool.request.name ||
+            'User input required'
+          : details.title ||
+            waitingTool.request.name ||
+            'Tool confirmation required',
       ...(lastResult ? { lastResult } : {}),
     };
   }
 
-  if (streamingState === StreamingState.Responding) {
+  if (
+    streamingState === StreamingState.Responding ||
+    streamingState === StreamingState.WaitingForConfirmation
+  ) {
     return {
       sessionState: 'working',
       ...(lastResult ? { lastResult } : {}),
@@ -375,7 +398,7 @@ export function getAgentViewWorkerStateForUi({
 
   if (lastResult && looksLikeUserQuestion(lastResult)) {
     return {
-      sessionState: 'needs_input',
+      sessionState: 'idle',
       waitingFor: 'response',
       inputKind: 'soft',
       lastResult,
@@ -414,11 +437,12 @@ export async function answerAgentViewPendingToolCall(
   event: Extract<AgentViewWorkerControlEvent, { type: 'answer' }>,
   pendingToolCalls: WaitingToolCall[],
 ): Promise<boolean> {
-  const toolCall = pendingToolCalls.find(
+  const matchingToolCalls = pendingToolCalls.filter(
     (call) =>
       call.status === 'awaiting_approval' &&
-      (!event.callId || call.request.callId === event.callId),
+      call.request.callId === event.callId,
   );
+  const toolCall = matchingToolCalls.length === 1 ? matchingToolCalls[0] : null;
   if (!toolCall?.confirmationDetails?.onConfirm) {
     return false;
   }
@@ -480,6 +504,7 @@ export async function applyAgentViewWorkerControlEventForUi(
   pendingToolCalls: readonly unknown[],
   enqueuePrompt: (text: string, promptId?: string) => void,
   stopCurrentTurn?: () => void,
+  activePromptId?: string,
 ): Promise<void> {
   if (event.type === 'prompt') {
     enqueuePrompt(event.text, event.promptId);
@@ -495,22 +520,14 @@ export async function applyAgentViewWorkerControlEventForUi(
     return;
   }
 
-  const answeredToolCall = await answerAgentViewPendingToolCall(
+  if (!activePromptId || event.promptId !== activePromptId) {
+    return;
+  }
+
+  await answerAgentViewPendingToolCall(
     event,
     getAgentViewAnswerableToolCalls(pendingToolCalls),
   );
-  if (!answeredToolCall && event.text?.trim()) {
-    enqueuePrompt(event.text);
-  }
-}
-
-function getNestedAgentViewWaitingFor(
-  toolCalls: readonly AgentViewStatusToolCall[],
-): string {
-  const nested = toolCalls.find((toolCall) =>
-    Boolean(getNestedAgentViewPendingConfirmation(toolCall.liveOutput)),
-  );
-  return nested?.request?.name ?? 'user input';
 }
 
 function getNestedAgentViewPendingConfirmation(
@@ -3068,6 +3085,7 @@ export const AppContainer = (props: AppContainerProps) => {
                 lastResult: 'Stopped by user',
               });
             },
+            activeAgentViewPromptIdRef.current,
           );
           acknowledgeAgentViewWorkerControlEvents(event.sequence);
         }

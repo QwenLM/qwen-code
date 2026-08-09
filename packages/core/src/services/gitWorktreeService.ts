@@ -2139,6 +2139,52 @@ export class GitWorktreeService {
     }
   }
 
+  async removeUnchangedUserWorktreeBranch(
+    slug: string,
+    expectedCommit: string,
+  ): Promise<boolean> {
+    if (GitWorktreeService.validateUserWorktreeSlug(slug)) return false;
+    try {
+      await fs.lstat(this.getUserWorktreePath(slug));
+      return false;
+    } catch (error) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        debugLogger.warn(
+          `removeUnchangedUserWorktreeBranch failed for slug ${slug}: ${error}`,
+        );
+        return false;
+      }
+    }
+    const branchName = worktreeBranchForSlug(slug);
+    try {
+      const git = await this.getGit();
+      const out = await git.raw([
+        'for-each-ref',
+        '--count=1',
+        '--format=%(objectname)',
+        `refs/heads/${branchName}`,
+      ]);
+      const head = out.trim();
+      if (!head) return true;
+      if (head !== expectedCommit) return false;
+      await git.raw([
+        'update-ref',
+        '-d',
+        `refs/heads/${branchName}`,
+        expectedCommit,
+      ]);
+      return true;
+    } catch (error) {
+      debugLogger.warn(
+        `removeUnchangedUserWorktreeBranch failed for slug ${slug}: ${error}`,
+      );
+      return false;
+    }
+  }
+
   /**
    * Removes a user worktree, optionally deleting its branch.
    *
