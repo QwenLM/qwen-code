@@ -1285,12 +1285,13 @@ class AgentViewSupervisorProcessHandler
   ): Promise<AgentViewCoordinationSessionSnapshot> {
     return this.withSessionMutation(record.snapshot.sessionId, async () => {
       const sessionId = record.snapshot.sessionId;
-      const [storedState, launch, storedActivity, result] = await Promise.all([
-        readAgentViewSessionState(sessionId, this.store),
-        readAgentViewLaunch(sessionId, this.store),
-        readAgentViewActivity(sessionId, this.store),
-        readAgentViewCoordinationResult(sessionId, this.store),
-      ]);
+      const [storedState, launch, storedActivity, storedResult] =
+        await Promise.all([
+          readAgentViewSessionState(sessionId, this.store),
+          readAgentViewLaunch(sessionId, this.store),
+          readAgentViewActivity(sessionId, this.store),
+          readAgentViewCoordinationResult(sessionId, this.store),
+        ]);
       if (
         !storedState?.coordination ||
         !launch?.promptId ||
@@ -1299,10 +1300,40 @@ class AgentViewSupervisorProcessHandler
       ) {
         throw new Error(`Coordination session ${sessionId} is incomplete.`);
       }
-      const state = await this.workers.refreshMissingWorkerState(storedState);
+      let state = await this.workers.refreshMissingWorkerState(storedState);
       const lineage = state.coordination;
       if (!lineage) {
         throw new Error(`Coordination session ${sessionId} lost its lineage.`);
+      }
+      const exitConfirmed =
+        !isAliveProcessState(state.processState) &&
+        (await this.workers.isSessionExitConfirmed(sessionId));
+      let result = storedResult;
+      if (!result && exitConfirmed) {
+        const completedAt = new Date().toISOString();
+        result = {
+          schemaVersion: 1,
+          lineage,
+          sessionId,
+          promptId: launch.promptId,
+          generation: currentWorkerGeneration(
+            await readAgentViewWorker(sessionId, this.store),
+          ),
+          outcome: 'failed',
+          summary:
+            'Coordination worker exited before its terminal result was persisted.',
+          artifacts: [],
+          completedAt,
+        };
+        state = {
+          ...state,
+          sessionState: 'failed',
+          updatedAt: completedAt,
+        };
+        await Promise.all([
+          writeAgentViewCoordinationResult(result, this.store),
+          writeAgentViewSessionState(state, this.store),
+        ]);
       }
       const terminal = isTerminalCoordinationState(state, result);
       const stale =
@@ -1325,7 +1356,7 @@ class AgentViewSupervisorProcessHandler
       if (
         terminal &&
         !isAliveProcessState(state.processState) &&
-        (await this.workers.isSessionExitConfirmed(sessionId)) &&
+        exitConfirmed &&
         worktree.mode === 'worktree' &&
         (result?.artifacts.length ?? 0) === 0
       ) {
