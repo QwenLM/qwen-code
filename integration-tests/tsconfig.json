@@ -3,12 +3,159 @@
   "compilerOptions": {
     "noEmit": true,
     "allowJs": true,
+    // Nothing references this project and it emits nothing, but the root
+    // config turns `composite` on for the packages that do. Composite demands
+    // that every file in the program appear in `include`, and these tests
+    // import package sources across the repo by relative path, so inheriting
+    // it produced 300+ TS6307 "not listed within the file list" errors.
+    "composite": false,
+    // The root turns `noPropertyAccessFromIndexSignature` on, which forced
+    // bracket-access rewrites in production SDK sources just to satisfy this
+    // test program (packages/desktop already sets it false). Relax it here so
+    // packages keep their own compiler regime and the tests keep dot access.
+    "noPropertyAccessFromIndexSignature": false,
+    // Matches packages/cli. The suite drives browser-side code in
+    // `terminal-capture/` and pulls SDK sources that reference `WebSocket` /
+    // `HeadersInit`, none of which exist in the root's ES2023-only lib.
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "baseUrl": ".",
+    // Resolve workspace packages from source so `tsc -p` here does not depend
+    // on whether someone had built them recently — a missing dist used to fail
+    // resolution outright and a stale one silently typechecked against old
+    // declarations. nodenext does no extension or index probing on
+    // substituted paths, so every subpath the program imports needs an
+    // explicit entry naming its source file; a bare wildcard falls through to
+    // the package exports map, i.e. back to dist. Keep these in sync with the
+    // packages' exports maps. The runtime vitest aliases
+    // (`integration-tests/vitest.config.ts`) still point at the built SDK
+    // bundle to exercise the published-bundle shape; these entries only affect
+    // type resolution.
+    //
+    // Keep notes like this OUT of `paths` itself: every value there must be an
+    // array, so a `"//"` string key makes tsc abort with TS5063 before it type
+    // checks a single file — which is how this project silently went unchecked.
     "paths": {
-      "//": "Resolve types from SDK source rather than dist so `tsc -p` here does not require a fresh `npm run build` of the SDK package before checking integration tests. The runtime vitest alias (`integration-tests/vitest.config.ts`) still points at the built `dist/index.mjs` to exercise the published-bundle shape; this paths entry only affects type resolution.",
-      "@qwen-code/sdk": ["../packages/sdk-typescript/src/index.ts"]
+      // These tests import package sources by relative path
+      // (`../../packages/cli/src/...`), so those files get checked here too
+      // and must resolve their own imports.
+      "@qwen-code/qwen-code-core": ["../packages/core/src/index.ts"],
+      "@qwen-code/qwen-code-core/transcriptRecords": [
+        "../packages/core/src/utils/transcript-records.ts"
+      ],
+      "@qwen-code/qwen-code-core/goalWire": [
+        "../packages/core/src/goals/goal-wire.ts"
+      ],
+      "@qwen-code/qwen-code-core/memoryScopes": [
+        "../packages/core/src/memory/scopes.ts"
+      ],
+      "@qwen-code/qwen-code-core/userPromptSubmitContext": [
+        "../packages/core/src/hooks/user-prompt-submit-context.ts"
+      ],
+      "@qwen-code/sdk": ["../packages/sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/daemon": [
+        "../packages/sdk-typescript/src/daemon/index.ts"
+      ],
+      "@qwen-code/sdk/daemon/transcript": [
+        "../packages/sdk-typescript/src/daemon/transcript.ts"
+      ],
+      "@qwen-code/sdk/daemon/transports": [
+        "../packages/sdk-typescript/src/daemon/transports.ts"
+      ],
+      "@qwen-code/sdk/daemon/types": [
+        "../packages/sdk-typescript/src/daemon/types.ts"
+      ],
+      "@qwen-code/sdk/daemon/ui/transcript": [
+        "../packages/sdk-typescript/src/daemon/ui/transcript.ts"
+      ],
+      "@qwen-code/acp-bridge": ["../packages/acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/bridge": ["../packages/acp-bridge/src/bridge.ts"],
+      "@qwen-code/acp-bridge/bridgeClient": [
+        "../packages/acp-bridge/src/bridgeClient.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeErrors": [
+        "../packages/acp-bridge/src/bridgeErrors.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeFileSystem": [
+        "../packages/acp-bridge/src/bridgeFileSystem.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeOptions": [
+        "../packages/acp-bridge/src/bridgeOptions.ts"
+      ],
+      "@qwen-code/acp-bridge/bridgeTypes": [
+        "../packages/acp-bridge/src/bridgeTypes.ts"
+      ],
+      "@qwen-code/acp-bridge/channelControlTimeouts": [
+        "../packages/acp-bridge/src/channel-control-timeouts.ts"
+      ],
+      "@qwen-code/acp-bridge/childHeapPolicy": [
+        "../packages/acp-bridge/src/child-heap-policy.ts"
+      ],
+      "@qwen-code/acp-bridge/daemonEventTypes": [
+        "../packages/acp-bridge/src/daemonEventTypes.ts"
+      ],
+      "@qwen-code/acp-bridge/daemonMemoryBudget": [
+        "../packages/acp-bridge/src/daemon-memory-budget.ts"
+      ],
+      "@qwen-code/acp-bridge/eventBus": [
+        "../packages/acp-bridge/src/eventBus.ts"
+      ],
+      "@qwen-code/acp-bridge/externalToolGuard": [
+        "../packages/acp-bridge/src/externalToolGuard.ts"
+      ],
+      "@qwen-code/acp-bridge/logRedaction": [
+        "../packages/acp-bridge/src/logRedaction.ts"
+      ],
+      "@qwen-code/acp-bridge/mcpTimeouts": [
+        "../packages/acp-bridge/src/mcpTimeouts.ts"
+      ],
+      "@qwen-code/acp-bridge/sessionArtifacts": [
+        "../packages/acp-bridge/src/sessionArtifacts.ts"
+      ],
+      "@qwen-code/acp-bridge/spawnChannel": [
+        "../packages/acp-bridge/src/spawnChannel.ts"
+      ],
+      "@qwen-code/acp-bridge/status": ["../packages/acp-bridge/src/status.ts"],
+      "@qwen-code/acp-bridge/transcriptReplay": [
+        "../packages/acp-bridge/src/transcript-replay.ts"
+      ],
+      "@qwen-code/acp-bridge/workspacePaths": [
+        "../packages/acp-bridge/src/workspacePaths.ts"
+      ],
+      // qwen-serve-webui-live-journal-recovery.test.ts imports this subpath;
+      // without an entry it resolves through the exports map to dist.
+      "@qwen-code/webui/daemon-react-sdk": [
+        "../packages/webui/src/daemon-react-sdk.ts"
+      ],
+      // channel-plugin.test.ts and the plugin-example sources it imports
+      // both import `@qwen-code/channel-base`. Map it to source so the
+      // typecheck does not depend on channel-base's dist and both import
+      // sites share one declaration — mixing src and dist declarations
+      // produces duplicate-private-class errors.
+      "@qwen-code/channel-base": ["../packages/channels/base/src/index.ts"],
+      // cli's channel-registry.ts imports the eight builtin channel
+      // adapters and html.ts imports web-templates; without entries they
+      // resolve through their exports maps to dist, leaving the typecheck
+      // dependent on those packages being built.
+      "@qwen-code/channel-telegram": [
+        "../packages/channels/telegram/src/index.ts"
+      ],
+      "@qwen-code/channel-weixin": ["../packages/channels/weixin/src/index.ts"],
+      "@qwen-code/channel-dingtalk": [
+        "../packages/channels/dingtalk/src/index.ts"
+      ],
+      "@qwen-code/channel-wecom": ["../packages/channels/wecom/src/index.ts"],
+      "@qwen-code/channel-feishu": ["../packages/channels/feishu/src/index.ts"],
+      "@qwen-code/channel-qqbot": ["../packages/channels/qqbot/src/index.ts"],
+      "@qwen-code/channel-github": ["../packages/channels/github/src/index.ts"],
+      "@qwen-code/channel-gitlab": ["../packages/channels/gitlab/src/index.ts"],
+      "@qwen-code/web-templates": ["../packages/web-templates/src/index.ts"],
+      // node-pty declares `types` at the top level but its `exports` map is a
+      // bare string with no `types` condition, so nodenext resolution never
+      // reaches the declarations and every pty handle degrades to `any` —
+      // which is what silently untyped the `data` / `exitCode` callbacks in
+      // test-helper.ts. Point at the shipped .d.ts directly.
+      "@lydell/node-pty": ["../node_modules/@lydell/node-pty/node-pty.d.ts"]
     }
   },
-  "include": ["**/*.ts"],
-  "references": [{ "path": "../packages/core" }]
+  "include": ["**/*.ts", "**/*.tsx"]
 }

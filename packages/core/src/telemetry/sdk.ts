@@ -56,6 +56,39 @@ let telemetryInitPromise: Promise<void> | undefined;
 let telemetryShutdownPromise: Promise<void> | undefined;
 let activeMetricReader: PeriodicExportingMetricReader | undefined;
 
+const OTEL_EXPORTER_ENV_VARS = [
+  'OTEL_TRACES_EXPORTER',
+  'OTEL_LOGS_EXPORTER',
+  'OTEL_METRICS_EXPORTER',
+] as const;
+
+function startSdkWithExplicitExporters(currentSdk: NodeSDK): void {
+  const previousValues = new Map<
+    (typeof OTEL_EXPORTER_ENV_VARS)[number],
+    string | undefined
+  >();
+  for (const name of OTEL_EXPORTER_ENV_VARS) {
+    previousValues.set(name, process.env[name]);
+    delete process.env[name];
+  }
+
+  try {
+    // qwen-code supplies explicit exporters for every enabled signal. Prevent
+    // sdk-node's OTEL_*_EXPORTER auto-configuration from constructing a second
+    // exporter (the bundled CLI intentionally omits those packages).
+    currentSdk.start();
+  } finally {
+    for (const name of OTEL_EXPORTER_ENV_VARS) {
+      const previousValue = previousValues.get(name);
+      if (previousValue === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = previousValue;
+      }
+    }
+  }
+}
+
 export function isTelemetrySdkInitialized(): boolean {
   return telemetryInitialized;
 }
@@ -83,7 +116,7 @@ export function initializeTelemetry(
       const started = await startTelemetrySdk(config);
       if (!started) return;
       sdk = started.sdk;
-      sdk.start();
+      startSdkWithExplicitExporters(sdk);
       debugLogger.debug('OpenTelemetry SDK started successfully.');
       telemetryInitialized = true;
       activeMetricReader = started.metricReader;
