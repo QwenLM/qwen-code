@@ -9611,6 +9611,81 @@ describe('useGeminiStream', () => {
       expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
     });
 
+    async function markContextRefreshIntent() {
+      mockHandleSlashCommand.mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: 'remember this',
+        refreshContextFilesOnWrite: true,
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('/remember fact');
+      });
+      mockRefreshMemoryInstruction.mockClear();
+      return result;
+    }
+
+    async function submitContinuationAndCompleteTool(
+      result: ReturnType<typeof renderTestHook>['result'],
+      text: string,
+      submitType: SendMessageType,
+      promptId?: string,
+      extra?: { goal?: QueuedGoalTurn },
+    ) {
+      await act(async () => {
+        await result.current.submitQuery(text, submitType, promptId, extra);
+      });
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      await act(async () => {
+        await onComplete?.([
+          createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+        ]);
+      });
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
+      });
+    }
+
+    it.each([
+      ['Retry', SendMessageType.Retry],
+      ['Notification', SendMessageType.Notification],
+    ])(
+      'preserves context-file refresh intent across a %s turn',
+      async (_label, submitType) => {
+        const result = await markContextRefreshIntent();
+        await submitContinuationAndCompleteTool(
+          result,
+          'retry remember write',
+          submitType,
+        );
+      },
+    );
+
+    it('preserves context-file refresh intent across a Goal turn', async () => {
+      const result = await markContextRefreshIntent();
+      const goal: QueuedGoalTurn = {
+        kind: 'goal',
+        permit: {
+          goalId: 'goal-memory-refresh',
+          revision: 1,
+          turnId: 'turn-memory-refresh',
+        },
+        turnKey: 'goal-runtime:turn-memory-refresh',
+        continuationContext: 'continue remembered fact write',
+      };
+      await submitContinuationAndCompleteTool(
+        result,
+        goal.continuationContext,
+        SendMessageType.Goal,
+        'prompt-id-goal-memory-refresh',
+        { goal },
+      );
+    });
+
     it('does not run the legacy save_memory refresh when managed-memory writes refresh the batch', async () => {
       mockRefreshMemoryAfterManagedWrite.mockResolvedValueOnce(true);
       const mockPerformMemoryRefresh = vi.fn();

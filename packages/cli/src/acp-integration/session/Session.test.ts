@@ -20522,6 +20522,39 @@ describe('Session', () => {
       expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['retry', { 'qwen.daemon.retry': true }, false],
+      ['continue', { 'qwen.daemon.continueLastTurn': true }, true],
+    ])(
+      'preserves context-file refresh intent across an ACP %s turn',
+      async (_label, meta, seedInterruptedHistory) => {
+        await markAcpContextRefreshIntent();
+        refreshMemoryInstructionSpy.mockClear();
+        if (seedInterruptedHistory) {
+          vi.mocked(mockChat.getHistory).mockReturnValue([
+            { role: 'user', parts: [{ text: 'unanswered question' }] },
+          ]);
+        }
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'continue remembered fact write' }],
+          _meta: meta,
+        } as Parameters<typeof session.prompt>[0]);
+
+        allowAcpWriteFile();
+        await runAcpWriteFile(
+          '/repo/QWEN.md',
+          'prompt-preserved-context-write',
+        );
+
+        expect(refreshMemoryInstructionSpy).toHaveBeenCalledWith(mockConfig, {
+          logContext:
+            'ACP session test-session-id context-file memory tool batch',
+        });
+      },
+    );
+
     it('does not refresh context-file instructions for ordinary ACP QWEN.md writes', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'wrote context',
