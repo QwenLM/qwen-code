@@ -28,6 +28,18 @@ import {
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+
+// EXACTLY what production composes for <output-file>
+// (backgroundShellRegistry.ts renders escapeXml(stripDisplayControlChars(…))).
+// Hand-rolling either half is how this went wrong twice: a
+// single-occurrence `replace` for the `&`, then a single-occurrence one for
+// the control character — each correct only while os.tmpdir() happened to
+// hold nothing the pipeline transforms. Composing the real functions cannot
+// drift from production at all.
+function renderedPath(outputFile: string): string {
+  return escapeXml(stripDisplayControlChars(outputFile));
+}
 
 let tmpDirs: string[] = [];
 
@@ -304,7 +316,7 @@ describe('BackgroundShellRegistry', () => {
         '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
       expect(modelText).toContain(
-        `<output-file>${escapeXml(outputPath)}</output-file>`,
+        `<output-file>${renderedPath(outputPath)}</output-file>`,
       );
       expect(meta).toEqual({
         shellId: 'a',
@@ -372,7 +384,7 @@ describe('BackgroundShellRegistry', () => {
       // behaving correctly (probe-verified), which is the same
       // "passes here, fails there" dependence this PR exists to remove.
       expect(modelText).toContain(
-        `<output-file>${escapeXml(outputPath)}</output-file>`,
+        `<output-file>${renderedPath(outputPath)}</output-file>`,
       );
     });
 
@@ -441,7 +453,7 @@ describe('BackgroundShellRegistry', () => {
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
       expect(modelText).toContain(
-        `<output-file>${escapeXml(outputPath.replace('\x03', ''))}</output-file>`,
+        `<output-file>${renderedPath(outputPath)}</output-file>`,
       );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
