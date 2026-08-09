@@ -1324,6 +1324,9 @@ describe('ParallelAgentsGroup activity rendering', () => {
     act(() => row.click());
     expect(container.textContent).toContain('nested agent output');
     expect(row.getAttribute('aria-expanded')).toBe('true');
+    act(() => row.click());
+    expect(container.textContent).not.toContain('nested agent output');
+    expect(row.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('opens nested agents through the details provider when available', () => {
