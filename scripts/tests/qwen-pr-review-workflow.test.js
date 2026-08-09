@@ -1685,10 +1685,10 @@ describe('docs-only gate and relay, executed', () => {
   });
 
   it("tightens a micro diff's budget without touching its effort or posting", () => {
-    // Below the review skill's sweep floor (25 changed lines) the automatic
-    // run keeps --effort high and its inline comments — the pipeline itself
-    // shrinks on a micro diff — but its kill switch halves to the same
-    // 90-minute floor the docs downgrade uses.
+    // Below the independent churn bound (25 changed lines — NOT the skill's
+    // SWEEP_FLOOR, which weighs source/unified-diff lines) the automatic run
+    // keeps --effort high and its inline comments — only the kill switch
+    // halves, to the same 90-minute floor the docs downgrade uses.
     const r = runGate({
       autoReview: 'true',
       wrapper: '#!/bin/bash\necho full\n',
