@@ -743,7 +743,7 @@ describe('createDaemonChannelBridgeFacade', () => {
 });
 
 describe('runChannelDaemonWorker', () => {
-  it('wires permanent classifier-session deletion to the owning workspace', async () => {
+  it('wires permanent classifier-session deletion to the worker workspace', async () => {
     const sdk = createSdk();
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -752,13 +752,10 @@ describe('runChannelDaemonWorker', () => {
       loadDaemonSdk: async () => sdk,
     });
     const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
-      deleteSessionData?: (
-        sessionId: string,
-        workspaceCwd: string,
-      ) => Promise<void>;
+      deleteSessionData?: (sessionId: string) => Promise<void>;
     };
 
-    await options.deleteSessionData?.('classifier-session', '/workspace');
+    await options.deleteSessionData?.('classifier-session');
 
     expect(sdk.client.workspaceByCwd).toHaveBeenCalledWith('/workspace');
     expect(sdk.deleteSessionsData).toHaveBeenCalledWith(['classifier-session']);
@@ -779,14 +776,11 @@ describe('runChannelDaemonWorker', () => {
       loadDaemonSdk: async () => sdk,
     });
     const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
-      deleteSessionData?: (
-        sessionId: string,
-        workspaceCwd: string,
-      ) => Promise<void>;
+      deleteSessionData?: (sessionId: string) => Promise<void>;
     };
 
     await expect(
-      options.deleteSessionData?.('classifier-session', '/workspace'),
+      options.deleteSessionData?.('classifier-session'),
     ).resolves.toBeUndefined();
     await handle.close();
   });
@@ -805,14 +799,11 @@ describe('runChannelDaemonWorker', () => {
       loadDaemonSdk: async () => sdk,
     });
     const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
-      deleteSessionData?: (
-        sessionId: string,
-        workspaceCwd: string,
-      ) => Promise<void>;
+      deleteSessionData?: (sessionId: string) => Promise<void>;
     };
 
     await expect(
-      options.deleteSessionData?.('classifier-session', '/workspace'),
+      options.deleteSessionData?.('classifier-session'),
     ).rejects.toThrow('storage locked');
     await handle.close();
   });
@@ -831,14 +822,11 @@ describe('runChannelDaemonWorker', () => {
       loadDaemonSdk: async () => sdk,
     });
     const options = mockDaemonChannelBridge.mock.calls.at(-1)?.[0] as {
-      deleteSessionData?: (
-        sessionId: string,
-        workspaceCwd: string,
-      ) => Promise<void>;
+      deleteSessionData?: (sessionId: string) => Promise<void>;
     };
 
     await expect(
-      options.deleteSessionData?.('classifier-session', '/workspace'),
+      options.deleteSessionData?.('classifier-session'),
     ).rejects.toThrow('Session classifier-session was not deleted.');
     await handle.close();
   });

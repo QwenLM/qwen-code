@@ -857,8 +857,7 @@ export class SessionService {
       if ('text' in part) {
         const textPart = part as { text: string };
         const text = textPart.text;
-        // Truncate long prompts for display
-        return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+        return this.truncatePromptForDisplay(text);
       }
     }
     return '';
@@ -877,9 +876,7 @@ export class SessionService {
       if (payload?.displayText !== undefined) {
         const displayText = payload.displayText;
         if (displayText) {
-          return displayText.length > 200
-            ? `${displayText.slice(0, 200)}...`
-            : displayText;
+          return this.truncatePromptForDisplay(displayText);
         }
         continue;
       }
@@ -889,6 +886,13 @@ export class SessionService {
       }
     }
     return '';
+  }
+
+  private truncatePromptForDisplay(text: string): string {
+    const codePoints = Array.from(text);
+    return codePoints.length > 200
+      ? `${codePoints.slice(0, 200).join('')}...`
+      : text;
   }
 
   /**

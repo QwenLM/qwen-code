@@ -488,8 +488,8 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
-    deleteSessionData: async (sessionId, workspaceCwd) => {
-      const workspaceClient = client.workspaceByCwd?.(workspaceCwd);
+    deleteSessionData: async (sessionId) => {
+      const workspaceClient = client.workspaceByCwd?.(daemonWorkspace);
       if (!workspaceClient) {
         throw new Error('Daemon SDK does not support session data deletion.');
       }

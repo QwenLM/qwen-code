@@ -8267,9 +8267,10 @@ describe('createAcpSessionBridge', () => {
         {
           sessionId: session.sessionId,
           prompt: [
-            { type: 'text', text: 'hidden context\n\nqueued behind first' },
+            { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+            { type: 'text', text: 'hidden channel instructions' },
           ],
-          _meta: { 'qwen.daemon.promptDisplayText': 'queued behind first' },
+          _meta: { 'qwen.daemon.promptDisplayText': '' },
         },
         undefined,
         { promptId: 'prompt-second' },
@@ -8283,7 +8284,7 @@ describe('createAcpSessionBridge', () => {
       expect(addedEvents[0]?.promptId).toBe('prompt-second');
       expect(
         (addedEvents[0] as BridgeEvent & { data: { text: string } }).data.text,
-      ).toBe('queued behind first');
+      ).toBe('[image]');
 
       const pending = bridge.getPendingPrompts(session.sessionId);
       expect(pending).toHaveLength(2);
@@ -8314,9 +8315,10 @@ describe('createAcpSessionBridge', () => {
       expect(
         (startedEvents[0] as BridgeEvent & { data: { text: string } }).data
           .text,
-      ).toBe('queued behind first');
+      ).toBe('[image]');
       expect(handle.agent.promptCalls[1]?.prompt).toEqual([
-        { type: 'text', text: 'hidden context\n\nqueued behind first' },
+        { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+        { type: 'text', text: 'hidden channel instructions' },
       ]);
       const completedEvents = events.filter(
         (e) => e.type === 'pending_prompt_completed',

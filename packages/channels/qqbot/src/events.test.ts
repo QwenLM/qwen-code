@@ -290,6 +290,7 @@ describe('handleC2C', () => {
     expect(env['senderId']).toBe('user-openid-1');
     expect(env['chatId']).toBe('user-openid-1');
     expect(env['text']).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
+    expect(env['displayText']).toBe('你好，帮我查一下天气');
   });
 
   it('斜杠命令不包装 atMention', async () => {
@@ -414,6 +415,7 @@ describe('handleGroup', () => {
     expect(env['text']).toBe(
       '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: <@OPENID_BOT> 你好',
     );
+    expect(env['displayText']).toBe('你好');
   });
 
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
@@ -1068,6 +1070,7 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['isGroup']).toBe(true);
     expect(env['text']).toContain('[atMention=false]');
+    expect(env['displayText']).toBe('hello world');
   });
 
   it('policy=keyword 时只有匹配关键词才触发', async () => {

@@ -133,7 +133,10 @@ export interface ChannelAgentBridge {
     sessionId: string,
     expectedBindingToken?: object,
   ): Promise<void>;
-  /** Permanently remove an internal bridge session and its persisted data. */
+  /**
+   * Daemon-mode hook for permanently removing an internal session's data.
+   * Standalone bridges may omit it and fall back to discardSession.
+   */
   deleteSessionData?(sessionId: string): Promise<void>;
   respondToPermission?(
     requestId: string,

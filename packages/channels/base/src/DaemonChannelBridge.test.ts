@@ -145,8 +145,34 @@ describe('DaemonChannelBridge', () => {
     await bridge.newSession('/repo');
     await bridge.deleteSessionData?.('session-1');
 
-    expect(deleteSessionData).toHaveBeenCalledWith('session-1', '/repo');
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1');
     expect(bridge.listSessions()).toEqual([]);
+    events.close();
+    bridge.stop();
+  });
+
+  it('deletes session data after the live binding has already died', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    events.push({
+      v: 1,
+      type: 'session_died',
+      data: { sessionId: 'session-1', reason: 'child_exit' },
+    });
+    await waitFor(() => expect(bridge.listSessions()).toEqual([]));
+
+    await bridge.deleteSessionData?.('session-1');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1');
     events.close();
     bridge.stop();
   });

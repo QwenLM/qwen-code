@@ -347,6 +347,23 @@ async function expandArchived(): Promise<void> {
   });
 }
 
+async function switchSessionSource(
+  label: 'Tasks' | 'Channels',
+): Promise<HTMLButtonElement> {
+  const tab = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  ).find((button) => button.textContent?.trim() === label);
+  expect(tab).toBeDefined();
+  await act(async () => {
+    tab!.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+    tab!.click();
+    await Promise.resolve();
+  });
+  return tab!;
+}
+
 function sessionAction(label: string): HTMLButtonElement | undefined {
   return Array.from(
     container.querySelectorAll<HTMLButtonElement>(
@@ -514,6 +531,9 @@ beforeEach(() => {
   archived.reload.mockReset();
   archived.reload.mockResolvedValue(undefined);
   useSessions.mockClear();
+  useSessions.mockImplementation((options?: { archiveState?: string }) =>
+    options?.archiveState === 'archived' ? archived : active,
+  );
   useChannels.mockClear();
   active.sessions.length = 0;
   archived.sessions.length = 0;
@@ -2945,19 +2965,72 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Task session');
     expect(container.textContent).not.toContain('Channel session');
 
-    const channelsTab = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ).find((button) => button.textContent?.trim() === 'Channels');
-    await act(async () => {
-      channelsTab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-      channelsTab!.click();
-      await Promise.resolve();
-    });
+    await switchSessionSource('Channels');
 
     expect(container.textContent).not.toContain('Task session');
     expect(container.textContent).toContain('Channel session');
+  });
+
+  it('preserves channel completion state while the tasks source is active', async () => {
+    const channelSession: DaemonSessionSummary = {
+      sessionId: 'channel-session',
+      displayName: 'Channel session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      hasActivePrompt: true,
+    };
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    let channelResult = {
+      ...active,
+      sessions: [channelSession],
+      loading: false,
+    };
+    const taskResult = {
+      ...active,
+      sessions: [taskSession],
+      loading: false,
+    };
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') return archived;
+        return options?.sourceType === 'channel' ? channelResult : taskResult;
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = { ...channelResult, loading: false };
+    renderSidebar();
+    await switchSessionSource('Tasks');
+
+    channelResult = {
+      ...channelResult,
+      sessions: [taskSession],
+      loading: false,
+    };
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = {
+      ...channelResult,
+      sessions: [{ ...channelSession, hasActivePrompt: false }],
+      loading: false,
+    };
+    renderSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('Channel session'));
+    expect(row).toBeDefined();
+    expect(row!.querySelector('[class*="sessionStatusDot"]')).not.toBeNull();
   });
 
   it('applies the source switch to the archived list', async () => {
@@ -2983,16 +3056,7 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Archived task session');
     expect(container.textContent).not.toContain('Archived channel session');
 
-    const channelsTab = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ).find((button) => button.textContent?.trim() === 'Channels');
-    await act(async () => {
-      channelsTab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-      channelsTab!.click();
-      await Promise.resolve();
-    });
+    await switchSessionSource('Channels');
 
     // Both halves of the archived application: the request carries the
     // channel sourceType, and the client-side dedupe filter keeps archived
@@ -3027,13 +3091,7 @@ describe('WebShellSidebar session source switch', () => {
       )?.[0]?.sourceType,
     ).toBe('default');
 
-    await act(async () => {
-      channelsTab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-      channelsTab!.click();
-      await Promise.resolve();
-    });
+    await switchSessionSource('Channels');
 
     expect(channelsTab?.getAttribute('data-state')).toBe('active');
     expect(
@@ -3082,17 +3140,7 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 2_000),
     ).toBe(false);
-    const channelsTab = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ).find((button) => button.textContent?.trim() === 'Channels');
-
-    await act(async () => {
-      channelsTab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-      channelsTab!.click();
-      await Promise.resolve();
-    });
+    const channelsTab = await switchSessionSource('Channels');
     expect(channelsTab?.getAttribute('data-state')).toBe('active');
     const activePoll = setIntervalSpy.mock.calls.findLast(
       ([, timeout]) => timeout === 2_000,
@@ -3120,18 +3168,9 @@ describe('WebShellSidebar session source switch', () => {
     });
     renderSidebar();
     await ensureWorkspaceExpanded('project');
-    const channelsTab = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ).find((button) => button.textContent?.trim() === 'Channels');
-    await act(async () => {
-      channelsTab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-      channelsTab!.click();
-      await Promise.resolve();
-    });
+    await switchSessionSource('Channels');
 
-    expect(useChannels).toHaveBeenCalledWith({
+    expect(useChannels).toHaveBeenLastCalledWith({
       autoLoad: false,
       enabled: false,
     });
@@ -3220,18 +3259,9 @@ describe('WebShellSidebar session source switch', () => {
 
     renderSidebar();
     await ensureWorkspaceExpanded('project');
-    const channelsTab = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ).find((button) => button.textContent?.trim() === 'Channels');
-    await act(async () => {
-      channelsTab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      );
-      channelsTab!.click();
-      await Promise.resolve();
-    });
+    await switchSessionSource('Channels');
 
-    expect(useChannels).toHaveBeenCalledWith({
+    expect(useChannels).toHaveBeenLastCalledWith({
       autoLoad: true,
       enabled: true,
     });

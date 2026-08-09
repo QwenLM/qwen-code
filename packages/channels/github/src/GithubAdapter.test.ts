@@ -1519,6 +1519,9 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.text).toBe(
         'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
       );
+      expect(channel.inboundEnvelopes[0]!.displayText).toBe(
+        'Review requested: feat: divide',
+      );
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'For review_requested, return a formal review summary',
       );
@@ -1654,6 +1657,7 @@ describe('GithubChannel', () => {
         senderId: 'maintainer',
         isMentioned: true,
         text: 'Triage this issue and respond with the next action.',
+        displayText: 'Issue assigned: broken build',
       });
       expect(channel.inboundEnvelopes[1]).toMatchObject({
         senderId: 'bob',
@@ -1702,6 +1706,9 @@ describe('GithubChannel', () => {
         );
         expect(channel.inboundEnvelopes[0]!.text).toContain('@alice: first');
         expect(channel.inboundEnvelopes[0]!.text).toContain('@bob: second');
+        expect(channel.inboundEnvelopes[0]!.displayText).toBe(
+          '- @alice: first\n- @bob: second',
+        );
       },
     );
 

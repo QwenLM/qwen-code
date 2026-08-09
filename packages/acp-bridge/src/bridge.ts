@@ -1013,6 +1013,7 @@ function echoPromptToSessionBus(
     if (displayText !== undefined && part.type === 'text') {
       if (displayTextPublished) continue;
       displayTextPublished = true;
+      if (!displayText) continue;
       displayPart = { ...part, text: displayText };
     }
     // Non-text blocks are published verbatim. Channel text uses the display
@@ -6037,13 +6038,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
+      const channelDisplayText = getChannelPromptDisplayText(entry, req._meta);
+      const pendingText =
+        channelDisplayText === undefined
+          ? extractPromptText(req.prompt)
+          : channelDisplayText ||
+            (req.prompt.some((block) => block.type === 'image')
+              ? '[image]'
+              : '');
       const pendingEntry: PendingPromptEntry = {
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
-        text:
-          getChannelPromptDisplayText(entry, req._meta) ??
-          extractPromptText(req.prompt),
+        text: pendingText,
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
       };

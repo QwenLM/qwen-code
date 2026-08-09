@@ -804,7 +804,10 @@ export function WebShellSidebar({
   const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
-  const previousRunningRef = useRef<Map<string, boolean> | null>(null);
+  const previousRunningBySourceRef = useRef<
+    Record<SidebarSessionSource, Map<string, boolean> | null>
+  >({ default: null, channel: null });
+  const lastTrackedSessionSourceRef = useRef(sessionSource);
   const autoOpenedContextRef = useRef<string | null>(null);
   const pollInFlightRef = useRef(false);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
@@ -1487,14 +1490,25 @@ export function WebShellSidebar({
   }, [sessionListReloadToken, reload]);
 
   useEffect(() => {
+    if (lastTrackedSessionSourceRef.current !== sessionSource) {
+      lastTrackedSessionSourceRef.current = sessionSource;
+      return;
+    }
+    if (loading || error) return;
+
     const runningBySessionId = new Map(
-      sessions.map((session) => [
-        getIdentityForSession(session),
-        Boolean(session.hasActivePrompt),
-      ]),
+      sessions
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        )
+        .map((session) => [
+          getIdentityForSession(session),
+          Boolean(session.hasActivePrompt),
+        ]),
     );
-    const previousRunningBySessionId = previousRunningRef.current;
-    previousRunningRef.current = runningBySessionId;
+    const previousRunningBySessionId =
+      previousRunningBySourceRef.current[sessionSource];
+    previousRunningBySourceRef.current[sessionSource] = runningBySessionId;
     if (previousRunningBySessionId === null) return;
 
     setCompletedUnreadIds((current) => {
@@ -1517,7 +1531,6 @@ export function WebShellSidebar({
       for (const sessionIdentity of next) {
         if (
           sessionIdentity === currentSessionIdentity ||
-          !runningBySessionId.has(sessionIdentity) ||
           runningBySessionId.get(sessionIdentity)
         ) {
           next.delete(sessionIdentity);
@@ -1527,7 +1540,15 @@ export function WebShellSidebar({
 
       return changed ? next : current;
     });
-  }, [currentSessionIdentity, getIdentityForSession, sessions]);
+  }, [
+    currentSessionIdentity,
+    error,
+    getIdentityForSession,
+    loading,
+    selectedSessionSource,
+    sessionSource,
+    sessions,
+  ]);
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
@@ -2618,9 +2639,10 @@ export function WebShellSidebar({
     );
   }, [organizationEnabled, searchQuery, selectedSessionSource, sessions]);
 
+  const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
     () =>
-      selectedSessionSource === 'channel' && channelCatalogData
+      selectedSessionSource === 'channel' && channelCatalogLoaded
         ? groupSessionsByChannelType(
             filteredSessions,
             channelTypeCatalog,
@@ -2629,7 +2651,7 @@ export function WebShellSidebar({
           )
         : null,
     [
-      channelCatalogData,
+      channelCatalogLoaded,
       channelInstances,
       channelTypeCatalog,
       filteredSessions,

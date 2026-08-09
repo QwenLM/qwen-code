@@ -108,6 +108,7 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
+  userDisplayTexts: ReadonlyArray<string | undefined> = [],
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
@@ -120,6 +121,21 @@ export async function tryGenerateSessionTitle(
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const dialog = filterToDialog(fullHistory);
+    if (userDisplayTexts.some((displayText) => displayText !== undefined)) {
+      let displayTextIndex = userDisplayTexts.length - 1;
+      for (let index = dialog.length - 1; index >= 0; index--) {
+        if (dialog[index].role !== 'user') continue;
+        const hasRecordedDisplayText = displayTextIndex >= 0;
+        const displayText = hasRecordedDisplayText
+          ? userDisplayTexts[displayTextIndex--]
+          : '';
+        if (displayText === undefined) continue;
+        dialog[index] = {
+          ...dialog[index],
+          parts: displayText ? [{ text: displayText }] : [],
+        };
+      }
+    }
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };

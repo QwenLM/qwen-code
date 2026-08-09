@@ -156,6 +156,76 @@ describe('tryGenerateSessionTitle', () => {
     expect(callOpts.maxAttempts).toBe(1);
   });
 
+  it('uses the user-facing projection instead of hidden prompt context', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as {
+      contents: Content[];
+    };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden channel instructions');
+  });
+
+  it('projects every recorded user turn when retrying title generation', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden first instructions' }] },
+        { role: 'model', parts: [{ text: 'First reply' }] },
+        { role: 'user', parts: [{ text: 'hidden second instructions' }] },
+        { role: 'model', parts: [{ text: 'Second reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greetings' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+      '再见',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).toContain('再见');
+    expect(prompt).not.toContain('hidden first instructions');
+    expect(prompt).not.toContain('hidden second instructions');
+  });
+
+  it('omits unprojected older user turns from resumed channel history', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'older hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Older reply' }] },
+        { role: 'user', parts: [{ text: 'current hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Current reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '当前消息',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('当前消息');
+    expect(prompt).not.toContain('older hidden instructions');
+    expect(prompt).not.toContain('current hidden instructions');
+  });
+
   it('sanitizes residual markdown and trailing punctuation from the model result', async () => {
     const { config } = makeConfig({
       fastModel: 'qwen-turbo',

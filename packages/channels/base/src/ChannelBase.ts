@@ -5305,7 +5305,16 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
-          buffer.push({ text: promptText, displayText, envelope });
+          const bufferedDisplayText =
+            (envelope.isGroup || this.config.sessionScope === 'single') &&
+            !recognizedSlashCommand
+              ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
+              : displayText;
+          buffer.push({
+            text: promptText,
+            displayText: bufferedDisplayText,
+            envelope,
+          });
           try {
             this.onPromptBuffered(
               envelope.chatId,

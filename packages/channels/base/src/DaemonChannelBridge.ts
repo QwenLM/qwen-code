@@ -87,10 +87,7 @@ export interface DaemonChannelBridgeOptions {
   modelServiceId?: string;
   sessionScope?: SessionScope;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
-  deleteSessionData?: (
-    sessionId: string,
-    workspaceCwd: string,
-  ) => Promise<void>;
+  deleteSessionData?: (sessionId: string) => Promise<void>;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -246,9 +243,8 @@ export class DaemonChannelBridge
     const deleteSessionData = options.deleteSessionData;
     if (deleteSessionData) {
       this.deleteSessionData = async (sessionId) => {
-        const session = this.ensureSession(sessionId);
         try {
-          await deleteSessionData(sessionId, session.workspaceCwd);
+          await deleteSessionData(sessionId);
         } finally {
           this.removeSessionBinding(sessionId);
         }

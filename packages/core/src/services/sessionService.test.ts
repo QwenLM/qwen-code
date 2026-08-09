@@ -412,6 +412,35 @@ describe('SessionService', () => {
       expect(result.items[0].prompt).toBe('');
     });
 
+    it('should use a later prompt after an empty display prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
+    });
+
     it('should NOT populate messageCount during listing', async () => {
       // Listing must avoid the full-file readline that counting requires
       // — message counts are now lazy and provided by

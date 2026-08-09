@@ -152,6 +152,7 @@ export function WorkspaceSection({
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const sessionLoadRequestId = useRef(0);
+  const channelCatalogLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
@@ -233,13 +234,16 @@ export function WorkspaceSection({
 
   const loadChannelCatalog = useCallback(async () => {
     if (disabled || readOnly || !channelGroupingEnabled) return;
+    const requestId = ++channelCatalogLoadRequestId.current;
     try {
       const workspaceClient = client.workspaceByCwd(workspace.cwd);
       const [catalog, snapshot] = await Promise.all([
         workspaceClient.workspaceChannelTypes(),
         workspaceClient.workspaceChannels(),
       ]);
-      setChannelCatalog({ catalog, snapshot });
+      if (requestId === channelCatalogLoadRequestId.current) {
+        setChannelCatalog({ catalog, snapshot });
+      }
     } catch (err) {
       // Keep the last known catalog across a transient failure; the next
       // poll tick retries.
@@ -249,6 +253,7 @@ export function WorkspaceSection({
 
   useEffect(() => {
     if (!renderSessions || disabled || readOnly || !channelGroupingEnabled) {
+      channelCatalogLoadRequestId.current += 1;
       setChannelCatalog(undefined);
       return;
     }

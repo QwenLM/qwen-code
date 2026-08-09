@@ -1401,6 +1401,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
           : 'Triage this issue and respond with the next action.',
+      displayText:
+        reason === 'review_requested'
+          ? `Review requested: ${title}`
+          : `Issue assigned: ${title}`,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -1450,6 +1454,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: ctx.threadId,
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
+      displayText: summary,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,

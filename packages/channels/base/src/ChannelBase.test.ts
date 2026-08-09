@@ -14406,7 +14406,10 @@ describe('ChannelBase', () => {
         return Promise.resolve('coalesced response');
       });
 
-      const ch = createChannel({ dispatchMode: 'collect' });
+      const ch = createChannel({
+        dispatchMode: 'collect',
+        groupPolicy: 'open',
+      });
 
       // Send first message — starts processing
       const p1 = ch.handleInbound(envelope({ text: 'first' }));
@@ -14418,6 +14421,9 @@ describe('ChannelBase', () => {
       const p2 = ch.handleInbound(
         envelope({
           text: 'second',
+          senderName: 'Alice',
+          isGroup: true,
+          isMentioned: true,
           messageId: 'msg-2',
           metadata: 'hidden policy second',
         }),
@@ -14425,6 +14431,9 @@ describe('ChannelBase', () => {
       const p3 = ch.handleInbound(
         envelope({
           text: 'third',
+          senderName: 'Bob',
+          isGroup: true,
+          isMentioned: true,
           messageId: 'msg-3',
           metadata: 'hidden policy third',
         }),
@@ -14470,7 +14479,7 @@ describe('ChannelBase', () => {
       expect(secondCallText).toContain('hidden policy third');
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
-      ).toMatchObject({ displayText: 'second\n\nthird' });
+      ).toMatchObject({ displayText: '[Alice] second\n\n[Bob] third' });
 
       // Both responses should have been sent
       expect(ch.sent).toEqual(
@@ -17093,7 +17102,9 @@ describe('ChannelBase', () => {
         expect(collectedPrompt).toContain('follow-up while webhook runs');
         expect(
           (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
-        ).toMatchObject({ displayText: 'follow-up while webhook runs' });
+        ).toMatchObject({
+          displayText: '[Webhook] follow-up while webhook runs',
+        });
       });
 
       it('waits for bridge recovery before resolving a webhook session', async () => {

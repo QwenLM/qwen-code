@@ -454,6 +454,101 @@ describe('WorkspaceSection label', () => {
     warn.mockRestore();
   });
 
+  it('ignores a stale channel catalog response', async () => {
+    let resolveStale!: (value: {
+      revision: string;
+      instances: Record<string, unknown>;
+    }) => void;
+    const staleSnapshot = new Promise<{
+      revision: string;
+      instances: Record<string, unknown>;
+    }>((resolve) => {
+      resolveStale = resolve;
+    });
+    const workspaceChannelTypes = vi.fn().mockResolvedValue([
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: 'feishu',
+        displayName: 'Feishu',
+        manageable: true,
+        fields: [],
+      },
+    ]);
+    const workspaceChannels = vi
+      .fn()
+      .mockReturnValueOnce(staleSnapshot)
+      .mockResolvedValue({
+        revision: 'new',
+        instances: {
+          instance: {
+            name: 'instance',
+            config: { type: 'feishu' },
+            secrets: {},
+            startsWithServe: false,
+          },
+        },
+      });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions: vi.fn().mockResolvedValue([
+          {
+            sessionId: 'channel-session',
+            displayName: 'Channel session',
+            sourceType: 'channel',
+            sourceId: 'instance',
+          },
+        ]),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        workspaceChannelTypes,
+        workspaceChannels,
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'channel',
+      channelGroupingEnabled: true,
+      reloadToken: 0,
+    });
+    await flush();
+    renderSection({
+      client,
+      expanded: true,
+      sourceType: 'channel',
+      channelGroupingEnabled: true,
+      reloadToken: 1,
+    });
+    await flush();
+    expect(
+      container.querySelector('section[aria-label="Feishu"]'),
+    ).not.toBeNull();
+
+    resolveStale({
+      revision: 'old',
+      instances: {
+        instance: {
+          name: 'instance',
+          config: { type: 'dingtalk' },
+        },
+      },
+    });
+    await flush();
+
+    expect(
+      container.querySelector('section[aria-label="Feishu"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).toBeNull();
+  });
+
   it('refreshes the channel catalog on the session poll tick', async () => {
     const workspaceChannelTypes = vi.fn().mockResolvedValue([
       {
