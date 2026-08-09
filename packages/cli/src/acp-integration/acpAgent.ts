@@ -4805,7 +4805,7 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    let sessionId = normalizeSessionIdForLookup(params.sessionId);
     const sessionSource = getSessionSource(params);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
@@ -4887,17 +4887,19 @@ class QwenAgent implements Agent {
       // Load per-request settings only after reserving a non-live id. The check
       // must resolve `advanced.runtimeOutputDir` from this request's cwd.
       const settings = loadSettingsCached(params.cwd);
-      const exists = await this.runWithPinnedRuntimeBaseDir(
+      const persistedSessionId = await this.runWithPinnedRuntimeBaseDir(
         settings,
         params.cwd,
         async () => {
           const sessionService = new SessionService(params.cwd);
-          return sessionService.sessionExists(sessionId);
+          if (await sessionService.sessionExists(sessionId)) return sessionId;
+          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         },
       );
-      if (!exists) {
+      if (!persistedSessionId) {
         throw RequestError.resourceNotFound(`session:${sessionId}`);
       }
+      sessionId = persistedSessionId;
       // Adopt into the "latest loaded" cache only once the session is
       // confirmed — a failed probe for a stale id must not repoint
       // agent-level readers at this request's workspace.
@@ -5022,7 +5024,7 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    let sessionId = normalizeSessionIdForLookup(params.sessionId);
     const sessionSource = getSessionSource(params);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
@@ -5047,17 +5049,19 @@ class QwenAgent implements Agent {
     try {
       // Same per-request settings discipline as `loadSession`.
       const settings = loadSettingsCached(params.cwd);
-      const exists = await this.runWithPinnedRuntimeBaseDir(
+      const persistedSessionId = await this.runWithPinnedRuntimeBaseDir(
         settings,
         params.cwd,
         async () => {
           const sessionService = new SessionService(params.cwd);
-          return sessionService.sessionExists(sessionId);
+          if (await sessionService.sessionExists(sessionId)) return sessionId;
+          return sessionService.findSessionIdIgnoringCase?.(sessionId);
         },
       );
-      if (!exists) {
+      if (!persistedSessionId) {
         throw RequestError.resourceNotFound(`session:${sessionId}`);
       }
+      sessionId = persistedSessionId;
       this.settings = settings;
 
       const config = await this.newSessionConfig(
@@ -11962,7 +11966,7 @@ class QwenAgent implements Agent {
     } = {},
   ): Promise<Session> {
     this.assertManagedSessionAdmission();
-    const sessionId = config.getSessionId();
+    const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const geminiClient = config.getGeminiClient();
     const needsInitialize = !geminiClient.isInitialized();
 

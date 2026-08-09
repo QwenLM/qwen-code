@@ -73,6 +73,11 @@ async function persistedSessionExists(
   if ((await sessionService.getSessionLocation(sessionId)) !== undefined) {
     return true;
   }
+  if (
+    (await sessionService.findSessionIdIgnoringCase?.(sessionId)) !== undefined
+  ) {
+    return true;
+  }
 
   for (const state of ['active', 'archived'] as const) {
     try {
