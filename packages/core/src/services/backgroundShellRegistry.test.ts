@@ -27,6 +27,7 @@ import {
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { escapeXml } from '../utils/xml.js';
 
 let tmpDirs: string[] = [];
 
@@ -302,7 +303,9 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain(
         '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
-      expect(modelText).toContain(`<output-file>${outputPath}</output-file>`);
+      expect(modelText).toContain(
+        `<output-file>${escapeXml(outputPath)}</output-file>`,
+      );
       expect(meta).toEqual({
         shellId: 'a',
         status: 'completed',
@@ -361,8 +364,15 @@ describe('BackgroundShellRegistry', () => {
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
       expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
+      // Through the SAME pipeline production uses: escapeXml handles all
+      // five metacharacters globally, and a hand-rolled `replace` only
+      // matched the first one — so the expectation was correct only while
+      // os.tmpdir() itself held none of & < > " '. A TMPDIR under an
+      // `o&brien` or `o'brien` directory failed this test with production
+      // behaving correctly (probe-verified), which is the same
+      // "passes here, fails there" dependence this PR exists to remove.
       expect(modelText).toContain(
-        `<output-file>${outputPath.replace('&', '&amp;')}</output-file>`,
+        `<output-file>${escapeXml(outputPath)}</output-file>`,
       );
     });
 
@@ -431,7 +441,7 @@ describe('BackgroundShellRegistry', () => {
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
       expect(modelText).toContain(
-        `<output-file>${outputPath.replace('\x03', '')}</output-file>`,
+        `<output-file>${escapeXml(outputPath.replace('\x03', ''))}</output-file>`,
       );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
