@@ -48,6 +48,7 @@ import {
   promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
+import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -319,13 +320,39 @@ function classifyReturn(
       return 'yielded';
     }
   }
-  const receipt = DRY_RECEIPT_RE.exec(text);
+  // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
+  // failure modes bound this from opposite sides. An auditor's admission of
+  // what its soft ceiling cut short must not double as the receipt's
+  // substantive clause — stripped, a return whose only substance was its
+  // disclosures reads `unknown` and the chunk stays under audit. But a
+  // receipt that is substantive WITHOUT them — a real walk of the
+  // territory, proven by the same tool-call and territory-read bar as
+  // ever, that found nothing new and separately disclosed exploration it
+  // did not take — still retires: an earlier draft read any gap-bearing
+  // return as `unknown`, and since a reverse auditor's ceiling is routinely
+  // met (its brief orders a 65-82 KB findings list read in full), that made
+  // convergence impossible and ran every budgeted loop to the round cap —
+  // the exact never-retire failure this module's own docstrings warn
+  // about. The gap itself is not lost: coverage reports it and Step 3D
+  // rules on it; retirement certifies the audit that DID happen, not the
+  // exploration that did not.
+  const judged = stripBudgetGapLines(text);
+  const receipt = DRY_RECEIPT_RE.exec(judged);
+  // The clause is cut at any INLINE disclosure marker before its substance
+  // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
+  // slips past the line-based strip, and the `[\s\S]*` capture would
+  // otherwise absorb the gap text and get its substantiveness from it —
+  // the admission doubling as the receipt again, one line lower.
+  const clause = receipt?.[1] ?? '';
+  const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
+  const judgedClause =
+    inlineGap === null ? clause : clause.slice(0, inlineGap.index);
   if (
     rec.successfulToolCalls > 0 &&
     rec.diffToolCalls > 0 &&
     openedTheTerritory(rec.diffReads, territory) &&
     receipt !== null &&
-    substantiveClause(receipt[1] ?? '')
+    substantiveClause(judgedClause)
   ) {
     return 'dry';
   }

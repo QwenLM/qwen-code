@@ -57,6 +57,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Fail instead of retrying the next port when the requested port is busy. */
+  strictPort?: boolean;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience); required when bound beyond loopback (boot fails
@@ -318,6 +320,12 @@ export interface ServeOptions {
    */
   initializeTimeoutMs?: number;
   /**
+   * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
+   * to an explicitly set initialize timeout when that value is larger. An
+   * explicit value here wins outright, including below the default.
+   */
+  sessionRestoreTimeoutMs?: number;
+  /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
    * (wait forever). Default: 300000 (5 min).
@@ -451,6 +459,7 @@ export interface CapabilitiesEnvelope {
     maxPendingPromptsPerSession?: number | null;
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
+    sessionRestoreTimeoutMs?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
