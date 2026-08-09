@@ -2873,7 +2873,7 @@ export class Session implements SessionContext {
       const summary = scheduler.getExitSummary();
       this.#stopCronSchedulerInRuntime();
       if (summary) {
-        await this.messageEmitter.emitAgentMessage(summary);
+        await this.#emitAgentDiagnosticMessage(summary);
       }
     }
   }

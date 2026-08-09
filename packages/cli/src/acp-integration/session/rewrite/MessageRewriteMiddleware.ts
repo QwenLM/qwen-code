@@ -49,6 +49,7 @@ export class MessageRewriteMiddleware {
   private readonly timeoutMs: number;
   private turnIndex = 0;
   private generation = 0;
+  private generationAbortController = new AbortController();
   private turnMeta: Record<string, unknown> | undefined;
   private turnOwnerPromptId: string | undefined;
 
@@ -166,9 +167,11 @@ export class MessageRewriteMiddleware {
 
     // Always enforce a timeout, combined with caller's signal if provided
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const rewriteSignal = signal
-      ? AbortSignal.any([signal, timeoutSignal])
-      : timeoutSignal;
+    const rewriteSignal = AbortSignal.any([
+      ...(signal ? [signal] : []),
+      timeoutSignal,
+      this.generationAbortController.signal,
+    ]);
 
     this.pendingRewrites.push(
       (async () => {
@@ -202,6 +205,8 @@ export class MessageRewriteMiddleware {
               replacesMessageText: content.messages.length > 0,
             },
           );
+          if (generation !== this.generation) return;
+          this.rewriter.commitOutput(rewritten);
         } catch (error) {
           debugLogger.warn(
             `Turn ${turnIdx}: rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -212,6 +217,8 @@ export class MessageRewriteMiddleware {
   }
 
   discardTurn(): void {
+    this.generationAbortController.abort();
+    this.generationAbortController = new AbortController();
     this.generation++;
     this.turnBuffer.discard();
     this.turnMeta = undefined;

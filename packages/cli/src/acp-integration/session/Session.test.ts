@@ -4321,6 +4321,54 @@ describe('Session', () => {
         expect(payload.resultText).toBeUndefined();
       });
 
+      it('does not append the scheduler exit summary to a cancelled turn result', async () => {
+        const scheduler = {
+          hasPendingWork: false,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue('Scheduler exit summary'),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        let releaseStream!: () => void;
+        const streamGate = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'main answer' },
+            });
+            await streamGate;
+            yield* createEmptyStream();
+          })(),
+        );
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'cancel me' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(agentMessageChunks()).toContain('main answer'),
+        );
+
+        await session.cancelPendingPrompt();
+        releaseStream();
+        await prompt;
+
+        expect(agentMessageChunks()).toContain('Scheduler exit summary');
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'cancelled',
+            resultText: 'main answer',
+          }),
+        );
+      });
+
       it('does not persist voice bridge status as the main answer', async () => {
         mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
         Object.assign(mockSettings.merged as Record<string, unknown>, {
