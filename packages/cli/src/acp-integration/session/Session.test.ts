@@ -13264,6 +13264,14 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordSlashCommand,
         ).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Review complete.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
       });
 
       it('returns cancelled when /advisor finishes after cancellation', async () => {
