@@ -350,10 +350,14 @@ describe('listLiveSessions', () => {
     // record would fail the whole tool for every session on the machine,
     // and it is never swept because its writer is alive — so the bound
     // belongs here, at the parse boundary.
+    // A real start token, so the record survives the liveness check and
+    // the epoch bound is the only thing left that can reject it. With
+    // `procStart: null` this passed on Linux via `isSameProcess` instead,
+    // and stayed green with the bound removed.
     await writeRaw(`${process.pid}.json`, {
       schemaVersion: 1,
       pid: process.pid,
-      procStart: null,
+      procStart: readProcStartToken(process.pid),
       sessionId: 's-poison',
       cwd: '/w/app',
       name: 'app-aa',

@@ -144,6 +144,23 @@ describe('sendToPeer', () => {
     expect(sendPeerFrame).not.toHaveBeenCalled();
   });
 
+  // Whitespace-only content clears the wire contract's `length === 0`
+  // check, so it is delivered rather than dropped — it interrupts the
+  // receiving session with a message it cannot act on. The tool schema's
+  // `minLength: 1` does not catch it either.
+  it('refuses a whitespace-only message', async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+
+    const outcome = await sendToPeer({
+      target: 'app-ab',
+      message: ' \n\t ',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(outcome).toEqual({ kind: 'empty' });
+    expect(sendPeerFrame).not.toHaveBeenCalled();
+  });
+
   it('asserts bypass when this session is in YOLO', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     await sendToPeer({

@@ -678,6 +678,29 @@ describe('SendMessageTool — peer mode', () => {
     expect(result.llmContent).toContain('just exited');
   });
 
+  // The schema's `minLength: 1` stops `''` at build time, so the 'empty'
+  // guidance is only ever reached for content that is blank but not
+  // zero-length. Both halves are pinned here: if `minLength` grew a trim
+  // the guidance would become dead code, and if `sendToPeer` dropped its
+  // trim the blank message would be delivered instead.
+  it('reaches the empty-message guidance for whitespace-only text', async () => {
+    sendToPeer.mockResolvedValue({ kind: 'empty' });
+
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: '   ' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('Re-send with the message text');
+  });
+
+  it('rejects a zero-length message before it can be sent', () => {
+    expect(() =>
+      toolWithoutTeam().build({ to: 'docs-cd', message: '' }),
+    ).toThrow();
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
   it('falls through to the team error when messaging is off', async () => {
     sendToPeer.mockResolvedValue({ kind: 'disabled' });
 

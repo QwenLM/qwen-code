@@ -121,9 +121,17 @@ export async function sendDeliveryStatus(
 /**
  * Errnos that mean "listening, but not accepting this instant".
  *
- * A peer whose accept backlog is full is busy, not dead. The kernel says
- * so with `EAGAIN` on a unix socket and with `EBUSY` on a Windows named
+ * A peer whose accept backlog is full is busy, not dead. Linux says so
+ * with `EAGAIN` on a unix socket and Windows with `EBUSY` on a named
  * pipe, so both spellings have to be recognised on every platform.
+ *
+ * Not exhaustive, and deliberately so: macOS/BSD report a full backlog as
+ * `ECONNREFUSED`, the same code a socket file with nobody behind it
+ * gives. The two are indistinguishable at this layer, and guessing wrong
+ * in the other direction is the more expensive mistake — treating
+ * `ECONNREFUSED` as busy would make every leftover socket look alive and
+ * defeat the sweep. So on Darwin a momentarily busy peer is reported as
+ * gone rather than retryable, and the caller re-lists to find it again.
  *
  * Exported because liveness (`probePeerSocket`) and the send-side advice
  * (`describeSendFailure`) must agree on this set. If they drift, a peer

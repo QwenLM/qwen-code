@@ -150,6 +150,55 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(m.getHeld()).toHaveLength(0);
   });
 
+  // AppContainer's hold notice is driven entirely by the second argument:
+  // it announces when `added` is set and stays quiet otherwise, so that
+  // walking the held set down one approval at a time does not report the
+  // user's own decisions back as fresh inbound holds. The gate tests pin
+  // that by mocking `onHeldChange` at the gate; this pins the relay in
+  // between, which is what a subscriber actually sees.
+  it('relays the newly held message, and only on an addition', async () => {
+    const { messaging: m } = await start(ApprovalMode.YOLO);
+    const seen: Array<{ heldCount: number; addedId: string | undefined }> = [];
+    const unsubscribe = m.onHeldChange((held, added) =>
+      seen.push({ heldCount: held.length, addedId: added?.frame.msgId }),
+    );
+
+    for (const content of ['run the deploy', 'and the migration']) {
+      await sendPeerFrame(
+        m.socketPath!,
+        buildUserFrame({ content, from: '/tmp/peer.sock' }),
+      );
+      await settle();
+    }
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toEqual({
+      heldCount: 1,
+      addedId: m.getHeld()[0].frame.msgId,
+    });
+    expect(seen[1]).toEqual({
+      heldCount: 2,
+      addedId: m.getHeld()[1].frame.msgId,
+    });
+
+    // Approving walks the set down. Those notifications carry no
+    // addition, which is what suppresses the spurious notices.
+    m.decide(m.getHeld()[0].frame.msgId, 'approve');
+    m.decide(m.getHeld()[0].frame.msgId, 'approve');
+    expect(seen.slice(2)).toEqual([
+      { heldCount: 1, addedId: undefined },
+      { heldCount: 0, addedId: undefined },
+    ]);
+
+    unsubscribe();
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({ content: 'one more', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+    expect(seen).toHaveLength(4);
+  });
+
   it('buffers a message that arrives before the queue is wired', async () => {
     const started = await PeerMessaging.start({
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),

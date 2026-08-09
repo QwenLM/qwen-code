@@ -147,8 +147,8 @@ class SendMessageInvocation extends BaseToolInvocation<
 
       case 'empty': {
         const msg =
-          `"${to}" is another Qwen Code session, and an empty message would be ` +
-          'dropped on arrival. Re-send with the message text.';
+          `"${to}" is another Qwen Code session, and a message with no text ` +
+          'has nothing for it to act on. Re-send with the message text.';
         return {
           llmContent: msg,
           returnDisplay: 'Empty message.',
@@ -456,7 +456,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
             description: 'Message text to send.',
             // A peer session's wire format rejects empty content and drops
             // the frame without a receipt, so an empty send has no meaning
-            // on any route.
+            // on any route. This only covers the literal empty string —
+            // whitespace-only content passes here and is caught in
+            // `sendToPeer`, which answers with the 'empty' guidance below.
             minLength: 1,
             // Cap message size so a teammate can't grow the
             // recipient's inbox file unboundedly with a single send.

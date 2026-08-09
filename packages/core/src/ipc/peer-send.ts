@@ -99,7 +99,12 @@ export async function sendToPeer(
   // returns null) and an unparseable frame is dropped with only a debug
   // log — no delivery status comes back. Reporting 'sent' for one would
   // tell the model a message landed that no one will ever see.
-  if (options.message.length === 0) return { kind: 'empty' };
+  //
+  // Trimmed, so whitespace-only content is caught here too. It clears the
+  // wire contract's `length === 0` check and really is delivered, which
+  // is worse than a drop: it interrupts the receiving session with a
+  // blank message it cannot act on.
+  if (options.message.trim().length === 0) return { kind: 'empty' };
 
   const peer = resolved.peer;
   const address = formatPeerAddress(peer, peers);

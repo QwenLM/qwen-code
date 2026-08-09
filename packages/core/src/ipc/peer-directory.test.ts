@@ -194,10 +194,26 @@ describe('resolvePeerTarget', () => {
     },
   );
 
+  // The path branch matches literally. Asserting only that an unrelated
+  // stale path misses is vacuous — a session name can never equal a path
+  // (`RECORD_NAME` has no '/'), so every implementation returns 'none'
+  // for it. What can actually regress is the comparison itself widening
+  // to a substring test, which would route a dead session's reply address
+  // to whichever live peer its path happens to contain.
   it.skipIf(process.platform === 'win32')(
-    'does not fall back to a name match when the socket path is stale',
+    'matches a reply address literally rather than by containment',
     () => {
-      expect(resolvePeerTarget([a, c], '/tmp/gone.sock')).toEqual({
+      // A stale path that has a live peer's path as a prefix.
+      expect(resolvePeerTarget([a, c], `${a.ipcPath}.old`)).toEqual({
+        kind: 'none',
+      });
+      // A stale path that is a prefix of a live peer's path.
+      expect(resolvePeerTarget([a, c], a.ipcPath.slice(0, -1))).toEqual({
+        kind: 'none',
+      });
+      // And the only reachable peer is still not a fallback for a path
+      // that matches nothing.
+      expect(resolvePeerTarget([a], '/tmp/gone.sock')).toEqual({
         kind: 'none',
       });
     },
