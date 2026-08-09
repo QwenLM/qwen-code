@@ -298,10 +298,19 @@ describe('osc8 helpers', () => {
   describe('BARE_URL_PATTERN', () => {
     it.each([
       'https://ja.wikipedia.org/wiki/人々',
+      'https://ja.wikipedia.org/wiki/〆切',
       'https://example.com/二〇二六年報',
       'https://zh.wikipedia.org/wiki/北京',
     ])('keeps word-forming CJK characters in %s', (url) => {
       expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
+    });
+
+    it('stops before common CJK punctuation', () => {
+      expect(
+        new RegExp(BARE_URL_PATTERN).exec(
+          'https://example.com/page。下一步',
+        )?.[0],
+      ).toBe('https://example.com/page');
     });
   });
 

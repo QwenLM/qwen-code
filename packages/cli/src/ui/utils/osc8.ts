@@ -191,7 +191,7 @@ export const MD_LINK_CAPTURE = /^\[(.*?)\]\(((?:[^()]|\([^()]*\))*)\)$/;
  * still matched and left to `trimTrailingUrlPunctuation` so visible bytes stay
  * unchanged on unsupported terminals.
  */
-export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s\u00a0\u2013-\u2015\u2018-\u201f\u2026\u3000-\u3004\u3006\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+`;
+export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s\u00a0\u2013-\u2015\u2018-\u201f\u2026\u3000-\u3004\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+`;
 
 /**
  * Should the markdown renderers wrap a `[label](url)` token in an OSC 8
