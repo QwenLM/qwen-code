@@ -2582,6 +2582,15 @@ export const MessageList = memo(
         ),
       [backgroundSummaryGraceActive, displayItems, latestTurnStartIndex],
     );
+    const latestTurnHasActiveAgent = useMemo(
+      () =>
+        turnHasActiveAgent(
+          displayItems,
+          latestTurnStartIndex,
+          displayItems.length - 1,
+        ),
+      [displayItems, latestTurnStartIndex],
+    );
     const latestTurnParallelAgentKeys = useMemo(() => {
       const keys = new Set<string>();
       for (let i = latestTurnStartIndex; i < displayItems.length; i += 1) {
@@ -2716,8 +2725,19 @@ export const MessageList = memo(
       return null;
     }, [isResponding, mergedMessages]);
     const finalAssistantTurnIdByAssistantId = useMemo(
-      () => collectFinalAssistantTurnIds(displayItems, isResponding),
-      [displayItems, isResponding],
+      () =>
+        collectFinalAssistantTurnIds(
+          displayItems,
+          isResponding ||
+            latestTurnHasActiveAgent ||
+            latestTurnAwaitsAgentSummary,
+        ),
+      [
+        displayItems,
+        isResponding,
+        latestTurnAwaitsAgentSummary,
+        latestTurnHasActiveAgent,
+      ],
     );
 
     // ── Per-turn collapse ────────────────────────────────────────────────

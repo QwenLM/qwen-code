@@ -584,7 +584,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('does not mark narration as final while an agent is active', () => {
+  it('keeps latest assistant content when active agents are pinned after it', () => {
     const activeAgent = agentMsg('agent-1');
     activeAgent.tools[0]!.status = 'pending';
     const c = mount([
@@ -594,14 +594,38 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(
-      c
-        .querySelector('[data-testid="msg-a1"]')
-        ?.getAttribute('data-assistant-actions'),
-    ).toBe('false');
+    expect(assistantActions(c, 'a1')).toBe('false');
     click(toggle(c, 'u1'));
     expect(has(c, 'a1')).toBe(true);
     expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('does not mark narration as final before agents are summarized', () => {
+    const activeAgent = agentMsg('agent-1');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      activeAgent,
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    const awaitingSummaryMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ];
+    rerenderMessages(c, awaitingSummaryMessages);
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    rerenderMessages(c, [...awaitingSummaryMessages, asstMsg('summary')]);
+    expect(assistantActions(c, 'a1')).toBe('false');
+    expect(assistantActions(c, 'summary')).toBe('true');
   });
 
   it('keeps an automatically expanded terminal group mounted until its delay expires', () => {
