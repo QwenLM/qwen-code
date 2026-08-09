@@ -42,6 +42,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  lstatSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -317,18 +318,25 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     mtimeMs: number;
     ino: number;
   }
+  // lstat, never stat: a SYMLINK is an occupant in its own right. Following
+  // it made a dangling link read as "nothing here" — the collision gate
+  // never fired and the .ans and manifest writes then followed the link
+  // OUT of the --out base (probe-verified end to end: a run reported
+  // success with the manifest naming <out>.json while the bytes landed at
+  // the link's target). A live-target link was refused correctly; only the
+  // dangling shape slipped through.
   const stampOf = (path: string): Stamp => {
     try {
-      const st = statSync(path);
+      const st = lstatSync(path);
       return { existed: true, size: st.size, mtimeMs: st.mtimeMs, ino: st.ino };
     } catch {
       return { existed: false, size: 0, mtimeMs: 0, ino: 0 };
     }
   };
   const changed = (path: string, stamp: Stamp): boolean => {
-    if (!stamp.existed) return existsSync(path);
+    if (!stamp.existed) return occupied(path);
     try {
-      const st = statSync(path);
+      const st = lstatSync(path);
       return (
         st.ino !== stamp.ino ||
         st.size !== stamp.size ||
@@ -342,6 +350,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // Default to "already there, untouched" so anything taken before the
   // stamps exist can neither claim an evidence rung nor authorize a delete.
   const untouched: Stamp = { existed: true, size: -1, mtimeMs: -1, ino: -1 };
+  // Occupancy is a LINK-level question everywhere it is asked: existsSync
+  // follows symlinks, so a dangling one answered false at every gate below.
+  const occupied = (path: string): boolean => {
+    try {
+      lstatSync(path);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   let ansStamp: Stamp = untouched;
   let pngStamp: Stamp = untouched;
   let manifestStamp: Stamp = untouched;
@@ -393,7 +411,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // its own 10s test timeout until the runner killed it). Only a
       // regular file can be a capture manifest anyway; anything else is
       // unverifiable, which the catch below already treats as "not ours".
-      if (!statSync(manifestPath).isFile()) throw new Error('not a file');
+      if (!lstatSync(manifestPath).isFile()) throw new Error('not a file');
       const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         evidence?: unknown;
         pngPath?: unknown;
@@ -474,7 +492,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // degrades the ladder instead (see the render below), which keeps a
     // capture that can still produce text evidence from failing outright.
     for (const path of [ansPath, manifestPath]) {
-      if (!existsSync(path)) continue;
+      if (!occupied(path)) continue;
       refuse(
         `--out collides with a file this capture did not write: ${path}. ` +
           "A previous capture's own artifacts are cleared automatically; " +

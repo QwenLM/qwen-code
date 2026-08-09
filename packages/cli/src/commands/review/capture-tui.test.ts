@@ -17,6 +17,8 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  symlinkSync,
+  lstatSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -2362,6 +2364,43 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     );
     // ...and the foreign png is untouched.
     expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('a foreign file');
+  });
+
+  it('degrades on a DANGLING SYMLINK at the png path — the render must not escape', async () => {
+    // The png path is a rung, so it degrades rather than refuses — but the
+    // occupancy question is the same lstat one: with a stat-based stamp the
+    // link read as absent, freeze rendered THROUGH it, and the image landed
+    // outside the --out base while the manifest recorded `evidence: 'png'`
+    // (probe-verified: 1 file at the link target, rung claimed).
+    const elsewhere = join(dir, 'elsewhere');
+    mkdirSync(elsewhere, { recursive: true });
+    symlinkSync(join(elsewhere, 'png-victim.png'), join(dir, 'cap.png'));
+    await withFakeFreeze('#!/bin/sh\nprintf PNGBYTES > "$5"\n', () => run());
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toContain('did not write');
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses a DANGLING SYMLINK at a mandatory path — writes must not escape', async () => {
+    // existsSync and statSync follow links, so a dangling one read as
+    // "nothing here": the collision gate never fired and writeFileSync's
+    // O_CREAT then created the pane text and the manifest at the links'
+    // TARGETS, outside the --out base, while the run reported success and
+    // the manifest named <out>.json (probe-verified end to end). Occupancy
+    // is an lstat question — the link itself is the occupant.
+    const elsewhere = join(dir, 'elsewhere');
+    mkdirSync(elsewhere, { recursive: true });
+    symlinkSync(join(elsewhere, 'ans-victim.txt'), join(dir, 'cap.ans'));
+    const { stderr } = await withStdio(() => run({ settleMs: 0 }));
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('collides with a file this capture did not');
+    // Nothing escaped the base, and the link is still the user's.
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(lstatSync(join(dir, 'cap.ans')).isSymbolicLink()).toBe(true);
   });
 
   it('REFUSES rather than rewrite a foreign file at a mandatory path', async () => {
