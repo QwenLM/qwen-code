@@ -691,10 +691,36 @@ export function createGoalRuntime(
           currentTurnFeedback = undefined;
           currentProposal = undefined;
           snapshot = { ...snapshot, activity: 'idle' };
+          // Promote a waiting reservation instead of minting a continuation,
+          // exactly as `finishTurn` does. A continuation only reaches the
+          // model once the host drains it, and the host that owns the drain
+          // is blocked by the very caller waiting on `queuedTurnKey` -- so
+          // scheduling one here strands that caller in `claimGoalTurn`
+          // forever.
+          const nextTurnKey = queuedTurnKey;
+          if (
+            nextTurnKey &&
+            snapshot.goal?.status === 'active' &&
+            !pendingProposal &&
+            !verificationAttempt
+          ) {
+            queuedTurnKey = undefined;
+            continuationQueued = false;
+            currentPermit = {
+              goalId: snapshot.goal.goalId,
+              revision: snapshot.goal.revision,
+              turnId: randomUUID(),
+            };
+            currentPermitHost = host;
+            currentTurnKey = nextTurnKey;
+            currentTurnFeedback = nextVerifierFeedback;
+            nextVerifierFeedback = undefined;
+            snapshot = { ...snapshot, activity: 'running' };
+          }
           broadcast();
           released = true;
         }
-        if (released) queueContinuation();
+        if (released && !currentPermit) queueContinuation();
         return released;
       });
     },

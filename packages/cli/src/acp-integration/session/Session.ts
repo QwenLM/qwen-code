@@ -1789,18 +1789,60 @@ export class Session implements SessionContext {
           result?.stopReason === 'max_tokens' ||
           cancelledByUser ||
           turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON);
-      if (shouldPause && runtime.getSnapshot().goal?.status === 'active') {
-        await runtime.dispatch({
-          action: 'pause',
-          expectedGoalId: turn.permit.goalId,
-          expectedRevision: turn.permit.revision,
-        });
-        return;
+      // Same latched-write-failure hazard as the flush above, one step later:
+      // `pause` and `finishTurn` both persist through
+      // `appendRecordStrict`, which re-throws the latched failure forever.
+      // Letting that escape would leave `currentPermit` set and the runtime
+      // `running`, so no continuation is ever scheduled again and every later
+      // prompt hangs in `claimGoalTurn`. Fall back to `releaseTurn`, which is
+      // in-memory only, so the loop survives the already-degraded session.
+      try {
+        if (shouldPause && runtime.getSnapshot().goal?.status === 'active') {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: turn.permit.goalId,
+            expectedRevision: turn.permit.revision,
+          });
+          return;
+        }
+        await runtime.finishTurn(turn.permit);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to record ACP Goal turn settlement: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        await runtime.releaseTurn(turn.turnKey);
       }
-      await runtime.finishTurn(turn.permit);
     } catch (error) {
       debugLogger.warn(
         `Failed to settle ACP Goal turn: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Stops an autonomous Goal loop when the Stop-hook blocking cap fires.
+   *
+   * `abortGoalForStopHookCap` only knows about the legacy `activeGoalStore`,
+   * which no longer has a writer for daemon sessions, so ACP needs the
+   * canonical runtime acted on directly.
+   */
+  async #pauseGoalForStopHookCap(): Promise<void> {
+    try {
+      const runtime = await this.config.getGoalRuntimeReady();
+      const goal = runtime.getSnapshot().goal;
+      if (goal?.status !== 'active') return;
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: goal.goalId,
+        expectedRevision: goal.revision,
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to pause the Goal after the Stop hook cap: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -3097,6 +3139,18 @@ export class Session implements SessionContext {
           reservedGoalRuntime = runtime;
           reservedGoalTurnKey = `goal-user:${randomUUID()}`;
           runtime.beginTurn(reservedGoalTurnKey);
+          // A runtime continuation that is queued but has not started yet
+          // holds the runtime's permit, and `#drainGoalQueue` is gated on
+          // this prompt's `pendingPrompt`: the drain cannot start the
+          // continuation until we finish, and we cannot start until its
+          // permit is free. Drop it the way an arriving prompt already drops
+          // queued cron and notification work -- the release above promotes
+          // the reservation, and the runtime mints a fresh continuation once
+          // this prompt settles.
+          for (const queued of this.goalQueue.splice(0)) {
+            queued.controller.abort(NEW_PROMPT_ABORT_REASON);
+            await runtime.releaseTurn(queued.turnKey);
+          }
         }
       } catch (error) {
         if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
@@ -4443,11 +4497,20 @@ export class Session implements SessionContext {
           'Stop',
           stopHookBlockingCap,
         );
-        abortGoalForStopHookCap(
-          this.config,
-          this.config.getSessionId(),
-          warning,
-        );
+        if (
+          !abortGoalForStopHookCap(
+            this.config,
+            this.config.getSessionId(),
+            warning,
+          )
+        ) {
+          // The legacy store is empty for daemon sessions, so the cap above
+          // stops nothing on its own: without this the goal stays active,
+          // `finishTurn` mints the next continuation, and the blocked Stop
+          // hook loops the session forever. Pause the canonical runtime the
+          // way the TUI's interrupted-exit path does.
+          await this.#pauseGoalForStopHookCap();
+        }
         this.todoStopGuard.suspend();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);

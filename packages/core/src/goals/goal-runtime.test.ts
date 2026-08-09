@@ -634,6 +634,30 @@ describe('goal runtime', () => {
     });
   });
 
+  it('promotes a waiting reservation when the current turn is released', async () => {
+    // The host drains continuations one at a time and the caller holding
+    // `queued-user` is what blocks that drain, so minting a fresh
+    // continuation here would leave the reservation waiting on a turn that
+    // can never start. `finishTurn` promotes in the same situation.
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const initialPermit = host.started[0];
+
+    expect(runtime.beginTurn('queued-user')).toBeUndefined();
+    await expect(
+      runtime.releaseTurn(`goal-runtime:${initialPermit.turnId}`),
+    ).resolves.toBe(true);
+
+    expect(runtime.permitForTurn('queued-user')).toBeDefined();
+    expect(host.started).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active' },
+    });
+  });
+
   it('releases a promoted user reservation and resumes autonomously', async () => {
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });

@@ -13961,6 +13961,187 @@ describe('Session', () => {
           expect.objectContaining({ action: 'pause' }),
         );
       });
+
+      it('does not strand a prompt behind a Goal continuation the drain cannot start', async () => {
+        // `/goal set` activates the goal midway through its own prompt, so
+        // the runtime mints a continuation while `#drainGoalQueue` is still
+        // gated on that prompt. A second prompt arriving before the first
+        // unwinds reserves a turn key behind the continuation's permit --
+        // and the drain cannot start the continuation until this prompt
+        // finishes, while this prompt cannot start until the continuation
+        // gives the permit back. Neither side moves without dropping the
+        // un-started continuation.
+        session.dispose();
+        const continuationPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'continuation-turn',
+        };
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn',
+        };
+        const activeGoal = {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'check weather',
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        };
+        let goalActive = false;
+        let currentTurnKey: string | undefined;
+        let queuedTurnKey: string | undefined;
+        mockGoalRuntime.getSnapshot.mockImplementation(() => ({
+          v: 2,
+          activity: currentTurnKey ? 'running' : 'idle',
+          goal: goalActive ? activeGoal : null,
+        }));
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) => {
+          if (turnKey !== currentTurnKey) return undefined;
+          return turnKey.startsWith('goal-runtime:')
+            ? continuationPermit
+            : userPermit;
+        });
+        mockGoalRuntime.beginTurn.mockImplementation((turnKey: string) => {
+          if (!goalActive) return undefined;
+          if (currentTurnKey) {
+            queuedTurnKey ??= turnKey;
+            return undefined;
+          }
+          currentTurnKey = turnKey;
+          return turnKey.startsWith('goal-runtime:')
+            ? continuationPermit
+            : userPermit;
+        });
+        // Releasing promotes the waiting reservation rather than minting a
+        // fresh continuation -- the runtime behaviour this fix relies on.
+        mockGoalRuntime.releaseTurn.mockImplementation(
+          async (turnKey: string) => {
+            if (turnKey !== currentTurnKey) return false;
+            currentTurnKey = queuedTurnKey;
+            queuedTurnKey = undefined;
+            return true;
+          },
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (_model, request: { config: { abortSignal: AbortSignal } }) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* createEmptyStream();
+              })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        const activating = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'set a goal to check weather' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        // The dispatch commits mid-prompt: the goal goes active and the
+        // runtime hands the session a continuation it cannot drain yet.
+        goalActive = true;
+        currentTurnKey = 'goal-runtime:continuation-turn';
+        await boundGoalHost!.startGoalTurn({
+          permit: continuationPermit,
+          continuationContext: 'check weather',
+        });
+        await Promise.resolve();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+        const second = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        await Promise.all([activating, second]);
+
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          'goal-runtime:continuation-turn',
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          userPermit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+      });
+
+      it('releases a Goal turn whose settlement cannot be persisted', async () => {
+        // `ChatRecordingService` latches a write failure permanently, so the
+        // journal writes inside `finishTurn` re-throw it forever. Letting
+        // that escape would leave the runtime's permit set and `running`, so
+        // no continuation is ever scheduled again and every later prompt
+        // hangs in `claimGoalTurn`.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-latched',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-latched' ? permit : undefined,
+        );
+        mockGoalRuntime.finishTurn.mockRejectedValue(
+          new Error('transcript write failed'),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+            'goal-runtime:turn-latched',
+          );
+        });
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
     });
 
     describe('tool preparation stream lifecycle', () => {
@@ -17374,6 +17555,74 @@ describe('Session', () => {
                 text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
               },
             },
+          });
+        });
+
+        it('pauses the canonical Goal runtime when the blocking cap fires', async () => {
+          // `abortGoalForStopHookCap` only reads the legacy
+          // `activeGoalStore`, which has no writer for daemon sessions --
+          // so on its own the cap stops nothing here: the goal stays active,
+          // the runtime mints the next continuation, and a Stop hook that
+          // always blocks loops the session forever.
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 3,
+            turnId: 'user-turn',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 3,
+              objective: 'check weather',
+              status: 'active',
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          });
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(1);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(result).toEqual({ stopReason: 'end_turn' });
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 3,
           });
         });
 
