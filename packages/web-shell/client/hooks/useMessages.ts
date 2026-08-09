@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useTranscriptBlocks,
@@ -16,6 +19,8 @@ type Translator = (
   key: string,
   vars?: Record<string, string | number>,
 ) => string;
+
+const BACKGROUND_AGENT_RECONCILIATION_RETRY_MS = 3_000;
 
 export interface BackgroundAgentResolution {
   status: string;
@@ -49,6 +54,14 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function isMissingBackgroundAgent(error: unknown, callId: string): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
+  const body = getRecord(error.body);
+  return (
+    body?.['code'] === 'session_not_found' && body?.['toolCallId'] === callId
+  );
 }
 
 export function getBackgroundAgentNotificationKey(
@@ -152,18 +165,31 @@ export function useMessagesFromBlocks(
     () => transcriptBlocksToLocalizedMessages(blocks, t),
     [blocks, t],
   );
+  const [resolutionSnapshot, setResolutionSnapshot] = useState<{
+    sessionId: string;
+    resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
+  }>();
+  const reconciledMessages = useMemo(() => {
+    if (
+      !resolutionSnapshot ||
+      resolutionSnapshot.sessionId !== connection.sessionId
+    ) {
+      return messages;
+    }
+    return reconcileBackgroundAgentResolutions(
+      messages,
+      resolutionSnapshot.resolutions,
+    );
+  }, [connection.sessionId, messages, resolutionSnapshot]);
   const pendingBackgroundAgentKey = useMemo(
-    () => getPendingBackgroundAgentKey(messages),
-    [messages],
+    () => getPendingBackgroundAgentKey(reconciledMessages),
+    [reconciledMessages],
   );
   const backgroundAgentNotificationKey = useMemo(
     () => getBackgroundAgentNotificationKey(blocks),
     [blocks],
   );
-  const [resolutionSnapshot, setResolutionSnapshot] = useState<{
-    sessionId: string;
-    resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
-  }>();
+  const [reconciliationAttempt, setReconciliationAttempt] = useState(0);
   const reconciliationRequestRef = useRef<
     | {
         key: string;
@@ -199,11 +225,19 @@ export function useMessagesFromBlocks(
         ? existingRequest.request
         : Promise.allSettled(
             callIds.map(async (callId) => {
-              const resolution = await workspace.client.resolveSubagentSession(
-                sessionId,
-                callId,
-              );
-              return [callId, resolution] as const;
+              try {
+                const resolution =
+                  await workspace.client.resolveSubagentSession(
+                    sessionId,
+                    callId,
+                  );
+                return [callId, resolution] as const;
+              } catch (error) {
+                if (isMissingBackgroundAgent(error, callId)) {
+                  return [callId, { status: 'failed' }] as const;
+                }
+                throw error;
+              }
             }),
           ).then((results) => {
             const resolutions = new Map<string, BackgroundAgentResolution>();
@@ -212,13 +246,14 @@ export function useMessagesFromBlocks(
                 result.status === 'fulfilled' &&
                 isTerminalBackgroundAgentStatus(result.value[1].status)
               ) {
-                resolutions.set(...result.value);
+                resolutions.set(result.value[0], result.value[1]);
               }
             });
             return resolutions;
           });
     reconciliationRequestRef.current = { key: requestKey, request };
     let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     request
       .then((resolutions) => {
         if (active) {
@@ -229,6 +264,14 @@ export function useMessagesFromBlocks(
               ...resolutions,
             ]),
           }));
+          if (resolutions.size < callIds.length) {
+            retryTimer = setTimeout(() => {
+              if (reconciliationRequestRef.current?.request === request) {
+                reconciliationRequestRef.current = undefined;
+              }
+              setReconciliationAttempt((attempt) => attempt + 1);
+            }, BACKGROUND_AGENT_RECONCILIATION_RETRY_MS);
+          }
         }
       })
       .catch(() => {
@@ -238,6 +281,7 @@ export function useMessagesFromBlocks(
       });
     return () => {
       active = false;
+      clearTimeout(retryTimer);
     };
   }, [
     backgroundAgentNotificationKey,
@@ -246,21 +290,11 @@ export function useMessagesFromBlocks(
     connection.sessionId,
     connection.status,
     pendingBackgroundAgentKey,
+    reconciliationAttempt,
     workspace.client,
   ]);
 
-  return useMemo(() => {
-    if (
-      !resolutionSnapshot ||
-      resolutionSnapshot.sessionId !== connection.sessionId
-    ) {
-      return messages;
-    }
-    return reconcileBackgroundAgentResolutions(
-      messages,
-      resolutionSnapshot.resolutions,
-    );
-  }, [connection.sessionId, messages, resolutionSnapshot]);
+  return reconciledMessages;
 }
 
 export function useMessages(t: Translator): Message[] {

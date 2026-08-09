@@ -3,11 +3,11 @@
 import { act, createElement, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  DaemonStatusTranscriptBlock,
-  DaemonTranscriptBlock,
+import {
+  DaemonHttpError,
+  type DaemonStatusTranscriptBlock,
+  type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   type BackgroundAgentResolution,
   getBackgroundAgentNotificationKey,
@@ -226,7 +226,7 @@ describe('background agent task reconciliation', () => {
     ).toMatchObject([{ role: 'tool_group', tools: [{ status: 'pending' }] }]);
   });
 
-  it('queries once for a pending card, ignores streaming, and retries after reconnect', async () => {
+  it('queries once for a pending card and retains terminal state after reconnect', async () => {
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession.mockResolvedValue(
@@ -273,9 +273,7 @@ describe('background agent task reconciliation', () => {
     await act(async () => renderConsumer());
     hookState.connection.status = 'connected';
     await act(async () => renderConsumer());
-    await vi.waitFor(() =>
-      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
-    );
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
 
     await act(async () => root.unmount());
   });
@@ -307,7 +305,7 @@ describe('background agent task reconciliation', () => {
     );
     expect(container.textContent).toBe('pending');
 
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
       expect(container.textContent).toBe('completed');
@@ -321,7 +319,11 @@ describe('background agent task reconciliation', () => {
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession.mockRejectedValue(
-      new DaemonHttpError(404, { code: 'session_not_found' }, 'not found'),
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
     );
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -471,9 +473,10 @@ describe('background agent task reconciliation', () => {
 
     await act(async () => renderConsumer());
     await vi.waitFor(() => {
-      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
       expect(container.textContent).toBe('completed,pending');
     });
+    expect(hookState.resolveSubagentSession.mock.calls[2]?.[1]).toBe('agent-b');
 
     hookState.resolveSubagentSession.mockImplementation(
       (_sessionId: string, callId: string) =>

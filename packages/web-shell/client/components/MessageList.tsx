@@ -1363,6 +1363,20 @@ function turnHasActiveAgent(
   );
 }
 
+function turnHasActiveBackgroundAgent(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+): boolean {
+  return someTurnToolCall(
+    items,
+    start,
+    end,
+    (tool) =>
+      isBackgroundSubAgentToolCall(tool) && isActiveToolStatus(tool.status),
+  );
+}
+
 function turnHasAutomaticallyExpandedAgent(
   items: DisplayItem[],
   start: number,
@@ -1437,6 +1451,7 @@ function turnAwaitsBackgroundSummary(
   start: number,
   end: number,
   agentNotificationsOnly = false,
+  waitForUnmatchedAgentCompletions = true,
 ): boolean {
   let lastNotificationIndex = -1;
   let latestNotificationAgentCallId: string | undefined;
@@ -1518,7 +1533,11 @@ function turnAwaitsBackgroundSummary(
         break;
       }
     }
-    if (sawAgentCompletion && unmatchedAgentCallIds.size > 0) {
+    if (
+      waitForUnmatchedAgentCompletions &&
+      sawAgentCompletion &&
+      unmatchedAgentCallIds.size > 0
+    ) {
       return true;
     }
   }
@@ -2571,6 +2590,20 @@ export const MessageList = memo(
       }
       return 0;
     }, [displayItems]);
+    const latestTurnHasActiveBackgroundAgent = useMemo(
+      () =>
+        !establishingBackgroundNotificationBaseline &&
+        turnHasActiveBackgroundAgent(
+          displayItems,
+          latestTurnStartIndex,
+          displayItems.length - 1,
+        ),
+      [
+        displayItems,
+        establishingBackgroundNotificationBaseline,
+        latestTurnStartIndex,
+      ],
+    );
     const latestTurnAwaitsAgentSummary = useMemo(
       () =>
         backgroundSummaryGraceActive &&
@@ -2579,20 +2612,19 @@ export const MessageList = memo(
           latestTurnStartIndex,
           displayItems.length - 1,
           true,
+          latestTurnHasActiveBackgroundAgent,
         ),
-      [backgroundSummaryGraceActive, displayItems, latestTurnStartIndex],
-    );
-    const latestTurnHasActiveAgent = useMemo(
-      () =>
-        turnHasActiveAgent(
-          displayItems,
-          latestTurnStartIndex,
-          displayItems.length - 1,
-        ),
-      [displayItems, latestTurnStartIndex],
+      [
+        backgroundSummaryGraceActive,
+        displayItems,
+        latestTurnHasActiveBackgroundAgent,
+        latestTurnStartIndex,
+      ],
     );
     const latestTurnIncomplete =
-      isResponding || latestTurnHasActiveAgent || latestTurnAwaitsAgentSummary;
+      isResponding ||
+      latestTurnHasActiveBackgroundAgent ||
+      latestTurnAwaitsAgentSummary;
     const latestTurnParallelAgentKeys = useMemo(() => {
       const keys = new Set<string>();
       for (let i = latestTurnStartIndex; i < displayItems.length; i += 1) {
