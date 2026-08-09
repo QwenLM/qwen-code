@@ -2525,9 +2525,11 @@ export const agentPromptCommand: CommandModule = {
   describe:
     "Build a review agent's launch prompt from the plan (the diff path, its line " +
     "ranges and the agent's own brief are welded in, not left to the caller to " +
-    'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
-    'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
-    'on stderr); 5 the reverse audit CONVERGED — every chunk holds two ' +
+    'remember). Exit codes: 0 built; 4 a build was refused — the review time ' +
+    'budget refused another reverse-audit round (BUDGET line on stderr), or ' +
+    'the compose floor refused a verifier so compose/submit still fit ' +
+    '(VERIFY BUDGET line) — both termination rules, not errors: stop and ' +
+    'compose, do not retry; 5 the reverse audit CONVERGED — every chunk holds two ' +
     'consecutive substantive dry audits and none is due a cold check, so stop ' +
     'the loop and proceed to Step 6 (also a termination rule, and a clean one: ' +
     'no disclosure is owed); anything else is a bad call or a broken plan.',

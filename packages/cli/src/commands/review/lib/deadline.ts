@@ -337,6 +337,13 @@ export function verifyBudgetExhausted(
     if (Number.isFinite(f) && f >= 0) floor = f;
   }
 
+  // A zero floor disables the gate ENTIRELY — the documented escape hatch.
+  // This must return before the comparison below: past the deadline
+  // `remainingSeconds` is negative, and `negative >= 0` is false, so a
+  // comparison-only check would fire the "disabled" gate exactly when it was
+  // asked to stand down.
+  if (floor <= 0) return null;
+
   const remainingSeconds = Math.floor(deadline - nowMs / 1000);
   if (remainingSeconds >= floor) return null;
   return { remainingSeconds, composeFloorSeconds: floor };

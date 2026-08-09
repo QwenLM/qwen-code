@@ -420,6 +420,12 @@ describe('reverseAuditBudgetMessage', () => {
     expect(msg).toContain('budget-stop marker');
     expect(msg).toContain('proceed to Step 6');
     expect(msg).toContain('do not relaunch auditors');
+    // The load-bearing tail rules — a reword that drops any of these
+    // silently loosens the termination contract, so pin each.
+    expect(msg).toContain('agent-prompt --role verify');
+    expect(msg).toContain('never a hand-rolled agent');
+    expect(msg).toContain('compose floor');
+    expect(msg).toContain('Do NOT re-verify findings already');
   });
 
   it('says "the next round" when no round number was passed', () => {
@@ -475,6 +481,16 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
     // Floor 0 disables the gate entirely — the escape hatch.
     expect(
       verifyBudgetExhausted({ ...near, [COMPOSE_FLOOR_ENV]: '0' }, NOW_MS),
+    ).toBeNull();
+    // And it disables it PAST the deadline too: remainingSeconds is negative
+    // there, and a comparison-only check (negative >= 0 is false) would fire
+    // the supposedly-disabled gate. Zero must mean off unconditionally.
+    const pastDeadline = { [DEADLINE_ENV]: String(NOW_S - 300) };
+    expect(
+      verifyBudgetExhausted(
+        { ...pastDeadline, [COMPOSE_FLOOR_ENV]: '0' },
+        NOW_MS,
+      ),
     ).toBeNull();
     // A garbled override falls back to the default, which 300s fails.
     expect(
