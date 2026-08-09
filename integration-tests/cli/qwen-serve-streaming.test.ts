@@ -363,6 +363,51 @@ async function* sseFrames(
   yield* parseSseStream(res.body!, opts.signal);
 }
 
+describePOSIX('qwen serve — turn result polling', () => {
+  it('returns the completed turn result by promptId', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [
+            {
+              type: 'text',
+              text: 'return the fake response for turn polling',
+            },
+          ],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(
+          async () => {
+            const response = await fetch(
+              `${base}/session/${session.sessionId}/turns/${accepted.promptId}`,
+              { headers: { Authorization: `Bearer ${TOKEN}` } },
+            );
+            if (!response.ok) return { status: response.status };
+            return response.json();
+          },
+          { timeout: 30_000 },
+        )
+        .toMatchObject({
+          sessionId: session.sessionId,
+          promptId: accepted.promptId,
+          state: 'completed',
+          resultText: 'fake response complete',
+        });
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
+});
+
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {
     const session = await client.createOrAttachSession({
