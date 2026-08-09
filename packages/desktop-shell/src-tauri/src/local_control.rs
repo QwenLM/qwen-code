@@ -442,9 +442,15 @@ fn local_control_url(
 }
 
 fn primary_lan_ipv4() -> Result<Ipv4Addr, String> {
-    let routed = routed_ipv4().ok();
-    let interfaces = NetworkInterface::show()
-        .map_err(|_| "Local Control could not inspect IPv4 networks.".to_string())?;
+    select_lan_ipv4(routed_ipv4().ok(), NetworkInterface::show().ok())
+}
+
+fn select_lan_ipv4(
+    routed: Option<Ipv4Addr>,
+    interfaces: Option<Vec<NetworkInterface>>,
+) -> Result<Ipv4Addr, String> {
+    let interfaces =
+        interfaces.ok_or_else(|| "Local Control could not inspect IPv4 networks.".to_string())?;
     let physical = interfaces
         .into_iter()
         .filter(|interface| {
@@ -561,7 +567,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::{
         choose_lan_ipv4, find_header_end, local_control_url, rewrite_request, runtime_socket_addr,
-        spawn_proxy, Connections,
+        select_lan_ipv4, spawn_proxy, Connections,
     };
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -591,13 +597,25 @@ mod tests {
             vec!["203.0.113.10".parse().expect("public interface")],
         )
         .is_err());
+        let routed = Ipv4Addr::new(192, 168, 1, 20);
+        assert_eq!(
+            choose_lan_ipv4(Some(routed), vec![routed, Ipv4Addr::new(192, 168, 2, 5)],)
+                .expect("routed LAN"),
+            routed,
+        );
+    }
+
+    #[test]
+    fn rejects_unverified_networks_when_interface_enumeration_fails() {
+        let routed = Ipv4Addr::new(192, 168, 1, 20);
+        assert!(select_lan_ipv4(Some(routed), None).is_err());
     }
 
     #[test]
     fn shares_only_the_current_local_session() {
         let url = local_control_url(
             &Url::parse(
-                "http://127.0.0.1:4170/session/a%20b?workspace=work%2Ftree&token=runtime&theme=light#old",
+                "http://127.0.0.1:4170/session/a%20b?token=runtime&workspace=work%2Ftree&theme=light#old",
             )
             .expect("current URL"),
             "192.168.1.20".parse().expect("LAN address"),
@@ -609,6 +627,15 @@ mod tests {
             url,
             "http://192.168.1.20:49152/session/a%20b?workspace=work%2Ftree#token=pair-token"
         );
+
+        let url = local_control_url(
+            &Url::parse("http://127.0.0.1:4170/").expect("runtime URL"),
+            "192.168.1.20".parse().expect("LAN address"),
+            49152,
+            "pair-token",
+        )
+        .expect("Local Control URL");
+        assert_eq!(url, "http://192.168.1.20:49152/#token=pair-token");
     }
 
     #[test]
