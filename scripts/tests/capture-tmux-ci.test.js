@@ -132,6 +132,12 @@ function outsideQuotes(stmt) {
   return out;
 }
 
+// The shell separator alphabet, defined ONCE. It was encoded three times —
+// a quote-aware char loop, a quote-blind regex, and the guard walk's `ops`
+// — and the copies had already drifted; a pin whose model of bash depends
+// on which function you ask is not a model.
+const SEPARATORS = /(\|\||&&|;|\||(?<!>)&(?!>))/;
+
 // Is this statement a real apt-get invocation, or a mention of one? A
 // `command -v apt-get` probe names it without running it; anything else
 // that reaches apt-get — behind any wrapper, in any group — runs it.
@@ -254,7 +260,12 @@ const NO_OP_INSTALL_FLAGS = new Set([
 // `-o APT::Get::Simulate=true` is exactly what `-s` sets, and the token
 // blacklist above cannot see it.
 const NO_OP_INSTALL_OPTION =
-  /-o\s*(APT::Get::)?(Simulate|Just-Print|Download-Only|Print-URIs|No-Act|Recon)\s*=\s*(true|1|yes)/i;
+  /(-o|--option)[\s=]*(APT::Get::)?(Simulate|Just-Print|Download-Only|Print-URIs|No-Act|Recon)\s*=\s*(true|1|yes|on|with|enable)/i;
+
+// The same no-op modes as long options with a value (`--simulate=yes`), and
+// the two flags that make apt print and exit without installing anything.
+const NO_OP_INSTALL_LONG =
+  /--(simulate|just-print|dry-run|recon|no-act|download-only|print-uris)(=(true|1|yes|on)|\b)|--(version|help)\b/i;
 
 // Statements that HARD-FAIL the step, so nothing may BE one. `exit` and
 // `false` were the known pair; `return` and `exec` are the same family
@@ -401,6 +412,12 @@ describe('ci.yml capture tooling', () => {
     expect(install).toBeGreaterThan(-1);
     expect(runTests).toBeGreaterThan(-1);
     expect(install).toBeLessThan(runTests);
+    // ...and AFTER the step whose output its `if:` reads. Above it, the
+    // output is empty, the condition is false, and the step never runs —
+    // the same silent skip, reached by moving rather than editing.
+    const profile = steps.findIndex((st) => st.id === 'ci_profile');
+    expect(profile, 'no ci_profile step').toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(profile);
     // Over LOGICAL lines (comments cannot satisfy these) and by WHOLE
     // package token: `\btmux` matches across a hyphen, so a refactor to
     // `powerline-tmux` kept the pin green while installing no tmux.
@@ -448,6 +465,9 @@ describe('ci.yml capture tooling', () => {
         `${stmt} does not run through sudo`,
       ).toBe(true);
       expect(NO_OP_INSTALL_OPTION.test(stmt), `${stmt} simulates`).toBe(false);
+      expect(NO_OP_INSTALL_LONG.test(stmt), `${stmt} installs nothing`).toBe(
+        false,
+      );
     }
     // The index refresh the install depends on: without it a stale list
     // fails the install on a runner whose image is a few days old — and it
@@ -467,14 +487,29 @@ describe('ci.yml capture tooling', () => {
         /^apt-get\s+install\b/.test(unwrapCommand(stmt)),
       ),
     );
+    // ...and through sudo, for the reason the install is: without root it
+    // cannot write the package lists it exists to refresh.
+    expect(
+      installLines
+        .flatMap((l) => rawStatementsOf(l))
+        .some(
+          (stmt) =>
+            /^apt-get\s+update\b/.test(unwrapCommand(stmt)) &&
+            /^sudo\b/.test(stmt.trim()),
+        ),
+      'the apt-get update does not run through sudo',
+    ).toBe(true);
     // Nothing foreign may sit on the install's chain: only apt-get calls
     // and the guard's echo, so no prefixed command can short-circuit it.
     for (const line of installLines) {
       if (!/apt-get\s+install\b/.test(line)) continue;
       for (const stmt of rawStatementsOf(line)) {
         const bare = unwrapCommand(stmt);
+        // Subcommand too, not just the leading word: `apt-get remove -y
+        // tmux` appended to the chain passed a word-only allowlist while
+        // undoing the install it sits next to.
         expect(
-          /^(apt-get|echo)\b/.test(bare),
+          /^(apt-get\s+(update|install)\b|echo\b)/.test(bare),
           `${bare} shares the install chain`,
         ).toBe(true);
       }
@@ -553,6 +588,15 @@ describe('ci.yml capture tooling', () => {
     expect(elifLine.replace(/\s+/g, ' ')).toBe(
       'elif command -v sudo > /dev/null 2>&1 && command -v apt-get > /dev/null 2>&1; then',
     );
+    // The already-installed branch is not empty either: it must verify the
+    // tool it claims is present, advisorily. An emptied body (`:`) leaves a
+    // broken-but-installed tmux undetected on the lane that takes it.
+    const thenIdx = lines.findIndex((l) => l.startsWith('if '));
+    const elifIdx = lines.findIndex((l) => l.startsWith('elif '));
+    expect(
+      lines.slice(thenIdx + 1, elifIdx).some((l) => /\btmux -V\b/.test(l)),
+      'the already-installed branch verifies nothing',
+    ).toBe(true);
     // And the ELSE fallback exists: on a lane with neither tmux nor
     // sudo+apt-get — a root-container self-hosted runner, the family this
     // PR's own evidence is produced on — it is the only signal that the
@@ -602,7 +646,9 @@ describe('ci.yml capture tooling', () => {
         const stmt =
           line
             .slice(0, at)
-            .split(/;|&&|\|\||\||(?<!>)&|\bthen\b|\belse\b|\bdo\b/)
+            .split(
+              new RegExp(`${SEPARATORS.source}|\\bthen\\b|\\belse\\b|\\bdo\\b`),
+            )
             .pop() + 'apt-get';
         // isAptGet strips grouping punctuation and every wrapper (with its
         // options) before deciding — a `( sudo apt-get …` or a
@@ -616,9 +662,10 @@ describe('ci.yml capture tooling', () => {
         // status the pipeline's last command: either one ends the guard's
         // reach, and the apt-get is unguarded.
         let guarded = false;
-        // Same alphabet as statementsOf: `2>&1` and `&>` are redirections,
-        // not separators.
-        const ops = /(\|\||&&|;|\||(?<!>)&(?!>))/g;
+        // The ONE alphabet, shared with statementsOf — `2>&1` and `&>` are
+        // redirections, not separators, and a copy of this rule that drifts
+        // from the other is how a guarded chain got misread as unguarded.
+        const ops = new RegExp(SEPARATORS.source, 'g');
         for (let m = ops.exec(rest); m !== null; m = ops.exec(rest)) {
           if (m[1] === '&&') continue;
           guarded = m[1] === '||' && /^\|\|\s*echo\b/.test(rest.slice(m.index));
@@ -642,10 +689,13 @@ describe('ci.yml capture tooling', () => {
         // runner parses stdout, so bytes sent to a file or /dev/null, or to
         // stderr, are just log noise — and `::warning::` must open the
         // line, since the runner does not scan mid-line.
+        // The TARGET may be quoted (`>'/dev/null'`) — blanking quoted spans
+        // leaves the operator, so match on the operator alone rather than
+        // requiring a visible target after it.
         expect(
           outsideQuotes(stmt),
           `annotation redirected away :: ${line}`,
-        ).not.toMatch(/\d?>(>|&\d)?\s*\S/);
+        ).not.toMatch(/\d?>(>|&\d)?/);
         expect(stmt, `annotation not at line start :: ${line}`).toMatch(
           /^echo\s+(-[a-zA-Z]+\s+)*['"]?::warning::/,
         );
