@@ -1138,6 +1138,8 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     process.exitCode = undefined;
   });
   afterEach(() => {
+    probes.tmux = realTmuxProbe;
+    probes.freeze = realFreezeProbe;
     rmSync(dir, { recursive: true, force: true });
     process.exitCode = undefined;
   });
