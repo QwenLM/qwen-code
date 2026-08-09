@@ -173,6 +173,14 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     const { t } = useI18n();
     const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
     const pctDisplay = pct.toFixed(1);
+    // Same thresholds as the /context panel's progress bar
+    // (ContextUsageMessage): >80% error, >60% warning.
+    const contextFillClass =
+      pct > 80
+        ? `${styles.contextFill} ${styles.contextFillError}`
+        : pct > 60
+          ? `${styles.contextFill} ${styles.contextFillWarning}`
+          : styles.contextFill;
     const modeIndicator = getModeIndicator(currentMode, t);
     const [, setGoalTick] = useState(0);
     const taskPillRef = useRef<HTMLButtonElement>(null);
@@ -195,9 +203,12 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
       : '';
     const hasLeftContent = !!taskPillLabel || !compact;
+    // The context pill renders in compact mode too: the default chat layout
+    // mounts the StatusBar compact, and the pill is the only always-on
+    // context-occupancy indicator.
     const hasRightContent =
       (!compact && !!currentModel) ||
-      (!compact && contextWindow > 0 && tokenCount > 0) ||
+      (contextWindow > 0 && tokenCount > 0) ||
       !!goalLabel;
 
     useImperativeHandle(
@@ -336,16 +347,21 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               <span className={styles.model}>{currentModel}</span>
             </button>
           )}
-          {!compact && contextWindow > 0 && tokenCount > 0 && (
+          {contextWindow > 0 && tokenCount > 0 && (
             <button
               type="button"
               className={styles.contextButton}
               onClick={onShowContext}
               title={t('contextUsage.title')}
+              aria-label={t('status.contextUsed', { pct: pctDisplay })}
             >
-              <span className={styles.context}>
-                {t('status.contextUsed', { pct: pctDisplay })}
+              <span className={styles.contextBar} aria-hidden="true">
+                <span
+                  className={contextFillClass}
+                  style={{ width: `${Math.min(pct, 100)}%` }}
+                />
               </span>
+              <span className={styles.context}>{pctDisplay}%</span>
             </button>
           )}
           {goalLabel &&

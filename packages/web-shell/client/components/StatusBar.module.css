@@ -138,24 +138,55 @@
 .contextButton {
   display: inline-flex;
   align-items: center;
-  padding: 0;
+  gap: 7px;
+  padding: 2px 8px 2px 6px;
   margin: 0;
-  border: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   background: none;
   font: inherit;
   color: inherit;
   cursor: pointer;
 }
 
+.contextButton:hover,
+.contextButton:focus-visible {
+  border-color: var(--muted-foreground);
+}
+
 .contextButton:hover .context,
 .contextButton:focus-visible .context {
   color: var(--foreground);
-  text-decoration: underline;
+}
+
+.contextBar {
+  width: 52px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.contextFill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--agent-blue-500);
+  transition: width 0.25s ease;
+}
+
+.contextFillWarning {
+  background: var(--warning-color);
+}
+
+.contextFillError {
+  background: var(--error-color);
 }
 
 .context {
   font-size: 11px;
   color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
 }
 
 .goal {
