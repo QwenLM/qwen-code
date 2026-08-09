@@ -26,8 +26,8 @@ function render(state) {
   qr.innerHTML = enabled ? state.qrSvg || '' : '';
   url.textContent = enabled ? state.url || '' : '';
   sleep.textContent = state.sleepInhibited
-    ? 'Private network only · Unencrypted · Disconnect before changing networks · Computer stays awake'
-    : 'Private network only · Unencrypted · Disconnect before changing networks · Computer may sleep';
+    ? 'Trusted Wi-Fi · Unencrypted · Re-enable after network changes'
+    : 'Trusted Wi-Fi · Unencrypted · May sleep · Re-enable after network changes';
   error.hidden = true;
   error.textContent = '';
 }
