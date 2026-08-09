@@ -349,6 +349,29 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain(command);
     });
 
+    it('strips BIDI OVERRIDES from the notification, not just C0/C1', () => {
+      // The shared helper this renders through removes U+202A-202E and
+      // U+2066-2069 as well as C0/C1 — the registry's own former copy did
+      // not. Those characters reorder how a path DISPLAYS without changing
+      // its bytes, so `/tmp/a<RLO>evil<PDI>/out.log` can render as
+      // something else entirely in a model-facing envelope. This pins the
+      // stronger behaviour that came with the shared helper.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      const outputPath = join(makeTempDir(), 'a\u202Eevil\u2069.log');
+      reg.register(makeEntry({ shellId: 'bidi', outputPath }));
+
+      reg.complete('bidi', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain(
+        `<output-file>${renderedPath(outputPath)}</output-file>`,
+      );
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
+    });
+
     it('escapes XML and strips display control characters on failure', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
