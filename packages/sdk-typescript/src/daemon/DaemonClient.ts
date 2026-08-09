@@ -161,6 +161,7 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSkillBatchToggleResult,
   DaemonSkillToggleResult,
   DaemonSkillInstallRequest,
   DaemonSkillMutationResult,
@@ -462,6 +463,18 @@ export class DaemonPendingPromptLimitError extends Error {
   }
 }
 
+export class DaemonSessionIdProtocolError extends Error {
+  constructor(
+    readonly requestedSessionId: string,
+    readonly actualSessionId: string,
+  ) {
+    super(
+      `Daemon returned session "${actualSessionId}" instead of requested session "${requestedSessionId}".`,
+    );
+    this.name = 'DaemonSessionIdProtocolError';
+  }
+}
+
 export interface DaemonTurnError extends DaemonHttpError {
   _daemonTurnError: true;
 }
@@ -488,6 +501,11 @@ export interface CreateSessionRequest {
    * `400 workspace_mismatch` `DaemonHttpError`.
    */
   workspaceCwd?: string;
+  /**
+   * UUID v1-v5 to assign to a new thread session. This is creation, not an
+   * idempotent attach; use load/resume after an ambiguous response.
+   */
+  sessionId?: string;
   modelServiceId?: string;
   /**
    * Per-request session-scope override. The production daemon defaults
@@ -1044,7 +1062,7 @@ export class DaemonClient {
 
   async requireCapability(capability: string): Promise<void> {
     const caps = await this.capabilities();
-    if (!caps.features.includes(capability)) {
+    if (!Array.isArray(caps.features) || !caps.features.includes(capability)) {
       throw new DaemonCapabilityMissingError(
         capability,
         `daemon does not advertise the ${capability} feature`,
@@ -2269,6 +2287,9 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
+    if (req.sessionId !== undefined && req.sessionId !== null) {
+      await this.requireCapability('session_id_override');
+    }
     if (req.sourceType !== undefined || req.sourceId !== undefined) {
       await this.requireCapability('session_source_metadata');
     }
@@ -2291,6 +2312,7 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
+          ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
           // `!== undefined` (not truthy) so a buggy caller passing
           // `sessionScope: '' | null` doesn't get the field silently
@@ -2314,7 +2336,17 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'POST /session');
-        return (await res.json()) as DaemonSession;
+        const session = (await res.json()) as DaemonSession;
+        if (
+          typeof req.sessionId === 'string' &&
+          session.sessionId !== req.sessionId.toLowerCase()
+        ) {
+          throw new DaemonSessionIdProtocolError(
+            req.sessionId.toLowerCase(),
+            session.sessionId,
+          );
+        }
+        return session;
       },
     );
   }
@@ -3173,6 +3205,36 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSkillToggleResult;
+      },
+    );
+  }
+
+  /**
+   * Toggle up to 100 user-invocable skills and return every target outcome.
+   *
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
+   */
+  async setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ skillNames, enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/skills/enable');
+        }
+        return (await res.json()) as DaemonSkillBatchToggleResult;
       },
     );
   }
@@ -5867,6 +5929,19 @@ export class WorkspaceDaemonClient {
       `/skills/${urlEncode(skillName)}/enable`,
       'POST /workspaces/:workspace/skills/:name/enable',
       { enabled },
+      opts?.clientId,
+    );
+  }
+
+  setWorkspaceSkillsEnabled(
+    skillNames: readonly string[],
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSkillBatchToggleResult> {
+    return this.post(
+      '/skills/enable',
+      'POST /workspaces/:workspace/skills/enable',
+      { skillNames, enabled },
       opts?.clientId,
     );
   }

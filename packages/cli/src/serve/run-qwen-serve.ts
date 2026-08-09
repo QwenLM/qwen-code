@@ -399,6 +399,8 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type PersistDisabledSkillsBatchResult =
+  import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
 type ChannelWebhookConfigRuntime = {
   loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
   parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
@@ -3875,6 +3877,90 @@ async function runQwenServeImpl(
           settingsChanges,
         };
       });
+    const persistDisabledSkillsBatchFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      enabled: boolean,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistDisabledSkillsBatchResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const {
+          resolveSkillSettings,
+          skillSettingStrings,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
+        const fresh = loadSettingsForPersistence(workspace);
+        const resolved = resolveSkillSettings(fresh);
+        const initialDisabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'disabled',
+        );
+        const initialEnabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'enabled',
+        );
+        let next = { disabled: initialDisabled, enabled: initialEnabled };
+        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
+
+        for (const skillName of skillNames) {
+          const normalizedName = skillName.trim().toLowerCase();
+          const disablement = resolved.disablements.get(normalizedName);
+          if (disablement?.reason === 'hard' && disablement.lockedScope) {
+            outcomes.push({
+              skillName,
+              error: new runtime.WorkspaceSkillNotToggleableError(
+                skillName,
+                'locked',
+                disablement.lockedScope,
+              ),
+            });
+            continue;
+          }
+          const updated = updateWorkspaceSkillSettingLists(
+            next,
+            skillName,
+            enabled,
+            resolved.defaultDisabledNames.has(normalizedName) &&
+              !resolved.enabledNames.has(normalizedName),
+          );
+          const changed =
+            JSON.stringify(updated.disabled) !==
+              JSON.stringify(next.disabled) ||
+            JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
+          next = updated;
+          outcomes.push({ skillName, changed });
+        }
+
+        const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
+          [];
+        if (JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)) {
+          settingsChanges.push({
+            key: 'skills.disabled',
+            value: next.disabled.length > 0 ? next.disabled : undefined,
+          });
+        }
+        if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
+          settingsChanges.push({
+            key: 'skills.enabled',
+            value: next.enabled.length > 0 ? next.enabled : undefined,
+          });
+        }
+        if (settingsChanges.length > 0) {
+          assertGenerationOpen?.();
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: WORKSPACE_SETTING_SCOPE,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+        }
+        return { outcomes, settingsChanges };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -4062,6 +4148,7 @@ async function runQwenServeImpl(
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
@@ -4470,6 +4557,7 @@ async function runQwenServeImpl(
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
+        persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
         reloadDaemonEnv: (workspace, assertGenerationOpen) =>
@@ -5028,6 +5116,7 @@ async function runQwenServeImpl(
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
+          persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
           persistSetting: persistSettingFn,
           persistSettings: persistSettingsFn,
           reloadDaemonEnv: (workspace, assertGenerationOpen) =>
@@ -5555,6 +5644,7 @@ async function runQwenServeImpl(
 
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      getSessionBridges: () => runtimeBridges,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       ...(workspaceTrustHotReloadAvailable
         ? {
@@ -5648,6 +5738,7 @@ async function runQwenServeImpl(
       clientMcpSenderRegistry,
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:
@@ -7450,6 +7541,7 @@ async function runQwenServeImpl(
         const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
+          opts.strictPort !== true &&
           opts.port !== 0 &&
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1
