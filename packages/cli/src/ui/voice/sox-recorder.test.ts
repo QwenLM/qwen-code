@@ -38,6 +38,19 @@ vi.mock('node:fs/promises', () => ({
   rm: mocks.rm,
 }));
 
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  // Deterministic CP-866 decode so the suite can distinguish the recorder
+  // routing sox stderr through decodeProcessOutput from a naive
+  // chunk.toString() (which yields U+FFFD for these bytes). CP-866 is
+  // ASCII-compatible in 0x00-0x7F, so the ASCII stderr used by the other
+  // tests decodes identically.
+  decodeProcessOutput: (buffer: Buffer | string) => {
+    if (!Buffer.isBuffer(buffer)) return String(buffer);
+    if (buffer.length === 0) return '';
+    return new TextDecoder('cp866').decode(buffer);
+  },
+}));
+
 import { createSoxRecorder } from './sox-recorder.js';
 
 class FakeChildProcess extends EventEmitter {
@@ -129,6 +142,28 @@ describe('createSoxRecorder', () => {
 
     await expect(recorder.stop()).rejects.toThrow(
       'Voice recorder failed with exit code 2: permission denied.',
+    );
+  });
+
+  it('decodes non-UTF-8 sox stderr via decodeProcessOutput (not toString)', async () => {
+    const child = new FakeChildProcess();
+    mocks.spawn.mockReturnValue(child);
+    mocks.mkdtemp.mockResolvedValue('/tmp/qwen-voice-abc');
+
+    const recorder = createSoxRecorder();
+    await startRecorder(recorder);
+    // CP-866 bytes for "Ошибка". A naive chunk.toString() (utf-8) would
+    // garble these into U+FFFD; decodeProcessOutput must decode them to the
+    // Cyrillic text. This gates the OEM-code-page stderr decode change —
+    // reverting sox-recorder.ts to chunk.toString() fails this test.
+    child.stderr.emit(
+      'data',
+      Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+    );
+    child.emit('close', 2);
+
+    await expect(recorder.stop()).rejects.toThrow(
+      'Voice recorder failed with exit code 2: Ошибка.',
     );
   });
 

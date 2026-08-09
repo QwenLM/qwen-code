@@ -120,11 +120,20 @@ vi.mock('../utils/shell-utils.js', () => ({
 vi.mock('../utils/systemEncoding.js', () => ({
   getCachedEncodingForBuffer: mockGetCachedEncodingForBuffer,
   getSystemEncoding: mockGetSystemEncoding,
-  decodeProcessOutput: (buffer: Buffer) => {
+  // Mirror the real decodeProcessOutput contracts: the Buffer.isBuffer
+  // string guard, the optional pre-detected encoding, and the try/catch
+  // utf-8 fallback for labels WHATWG TextDecoder rejects (cp437/cp850/cp852).
+  // A bare `new TextDecoder(...)` here throws RangeError out of cleanup()
+  // during the 'exit' emit and leaves the execution promise unsettled.
+  decodeProcessOutput: (buffer: Buffer | string, encoding?: string) => {
+    if (!Buffer.isBuffer(buffer)) return String(buffer);
     if (buffer.length === 0) return '';
-    return new TextDecoder(mockGetCachedEncodingForBuffer(buffer)).decode(
-      buffer,
-    );
+    const label = encoding ?? mockGetCachedEncodingForBuffer(buffer);
+    try {
+      return new TextDecoder(label).decode(buffer);
+    } catch {
+      return new TextDecoder('utf-8').decode(buffer);
+    }
   },
 }));
 
@@ -2438,6 +2447,35 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toContain('АБВГ');
     });
 
+    it('decodes a child that emits only stderr (stdout stays empty)', async () => {
+      // Pins the cleanup() empty-stream guard: with no stdout chunks the
+      // stdout branch is skipped and the combined output is the stderr text
+      // alone (no stray separator or stdout contamination).
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stderr?.emit('data', Buffer.from('only stderr'));
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+      expect(result.output).toBe('only stderr');
+    });
+
+    it('decodes a child that emits only stdout (stderr stays empty)', async () => {
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stdout?.emit('data', Buffer.from('only stdout'));
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+      expect(result.output).toBe('only stdout');
+    });
+
+    it('decodes a child that emits no output as an empty string', async () => {
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+      expect(result.output).toBe('');
+    });
+
     it('bounds buffered child_process output before building the final string', async () => {
       const abortController = new AbortController();
       const handle = await ShellExecutionService.execute(
@@ -2966,6 +3004,49 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(dataChunks).toContain('post-promote-stderr\n');
     });
 
+    it('R1-1: stderr-only child post-promote tail uses stderr-detected encoding (not utf-8 fallthrough)', async () => {
+      // Regression: the promote handoff derived the encoding from
+      // stdoutChunks only. In buffered mode a child that writes solely to
+      // stderr leaves stdoutChunks empty, so the encoding fell through to
+      // 'utf-8' and the post-promote OEM stderr tail mojibaked. The fix
+      // falls back through stderrChunks (via the label cleanup() captured).
+      mockPlatform.mockReturnValue('linux');
+      mockGetCachedEncodingForBuffer.mockReturnValueOnce('cp866');
+      const events: Array<{ type: string; chunk?: string | unknown }> = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          // Pre-promote: stderr-only OEM output so cleanup() has stderr
+          // bytes to detect from (stdoutChunks stays empty).
+          cp.stderr?.emit(
+            'data',
+            Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+          );
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_stderr_only',
+          } satisfies ShellAbortReason);
+          // Post-promote: more stderr OEM bytes — must decode as cp866.
+          cp.stderr?.emit(
+            'data',
+            Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+          );
+        },
+        {
+          postPromote: {
+            onData: (event) => events.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      const dataChunks = events
+        .filter((e) => e.type === 'data')
+        .map((e) => e.chunk);
+      // cp866 bytes decode to "Ошибка"; a utf-8 fallthrough would garble
+      // them into U+FFFD instead.
+      expect(dataChunks).toContain('Ошибка');
+    });
+
     it('PR-2.5 child_process: onSettle fires on `close` (NOT `exit`) so late chunks land before the registry transitions', async () => {
       // Pin the `close`-not-`exit` contract: child can emit buffered
       // data AFTER 'exit' but BEFORE 'close'. If onSettle fired on
@@ -3281,7 +3362,11 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
         ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
-        expect.objectContaining({ windowsVerbatimArguments: true }),
+        expect.objectContaining({
+          detached: false,
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+        }),
       );
     });
 

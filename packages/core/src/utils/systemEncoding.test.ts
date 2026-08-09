@@ -497,14 +497,15 @@ describe('Shell Command Processor - Encoding Functions', () => {
   });
 
   describe('decodeProcessOutput', () => {
-    it('detects UTF-8 for pure ASCII buffer', () => {
+    it('decodes a pure ASCII buffer unchanged', () => {
       const buf = Buffer.from('Error: (none)\n');
-      expect(getCachedEncodingForBuffer(buf)).toBe('utf-8');
+      expect(decodeProcessOutput(buf)).toBe('Error: (none)\n');
     });
 
-    it('detects UTF-8 for valid UTF-8 buffer with Cyrillic', () => {
-      const buf = Buffer.from('Ошибка при создании файла', 'utf-8');
-      expect(getCachedEncodingForBuffer(buf)).toBe('utf-8');
+    it('decodes a valid UTF-8 buffer with Cyrillic to the exact text', () => {
+      const text = 'Ошибка при создании файла';
+      const buf = Buffer.from(text, 'utf-8');
+      expect(decodeProcessOutput(buf)).toBe(text);
     });
 
     it('does NOT detect utf-8 for CP-866 bytes outside ASCII range', () => {
@@ -517,14 +518,40 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
     it('decodes complete mixed buffer correctly (ASCII prefix + CP-866)', () => {
       const asciiChunk = Buffer.from('Status: OK\n');
-      const cp866Chunk = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
+      // CP-866 bytes for "Ошибка". `'cp866'` is a valid WHATWG TextDecoder
+      // label, so pin the exact decoded text rather than loose prefix /
+      // no-replacement assertions (any single-byte label would pass those).
+      const cp866Chunk = Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]);
       const fullBuffer = Buffer.concat([asciiChunk, cp866Chunk]);
-      mockedChardetDetect.mockReturnValue('ISO-8859-5');
+      mockedChardetDetect.mockReturnValue('cp866');
 
       const decoded = decodeProcessOutput(fullBuffer);
 
-      expect(decoded.startsWith('Status: OK\n')).toBe(true);
-      expect(decoded).not.toContain('\uFFFD');
+      expect(decoded).toBe('Status: OK\nОшибка');
+    });
+
+    it('decodes mostly-valid UTF-8 with a stray byte as UTF-8, not a chardet guess', () => {
+      // Real shell output can be overwhelmingly valid UTF-8 with an
+      // occasional stray byte (mixed-encoding file content, legacy tool
+      // banners). isUtf8() rejects the whole buffer on that single byte, so
+      // detection must still prefer UTF-8 — decoding the stray byte to
+      // U+FFFD while keeping the surrounding multi-byte text intact —
+      // instead of handing the buffer to chardet, whose single-byte guess
+      // (e.g. windows-1252) would silently mojibake all the valid content.
+      const body = 'line: 你好 мир OK\n'.repeat(100);
+      const buffer = Buffer.concat([
+        Buffer.from(body, 'utf-8'),
+        Buffer.from([0x93]),
+      ]);
+      mockedChardetDetect.mockReturnValue('windows-1252');
+
+      const decoded = decodeProcessOutput(buffer);
+
+      expect(decoded).toContain('你好');
+      expect(decoded).toContain('мир');
+      expect(decoded).toContain('\uFFFD');
+      // Detection short-circuits to utf-8 before consulting chardet.
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
     });
 
     it('returns an empty string for an empty buffer', () => {

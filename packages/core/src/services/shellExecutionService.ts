@@ -819,6 +819,13 @@ export class ShellExecutionService {
         let error: Error | null = null;
         let exited = false;
 
+        // Encoding labels detected when cleanup() decodes the buffered
+        // per-stream output. Captured so the background-promote handoff can
+        // reuse them instead of re-running detection (chardet is O(n)) over
+        // the same bytes cleanup() already analyzed.
+        let detectedStdoutEncoding: string | undefined;
+        let detectedStderrEncoding: string | undefined;
+
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
@@ -911,9 +918,16 @@ export class ShellExecutionService {
 
           if (streamStdout) {
             // Streaming text mode: per-chunk decode for real-time display.
-            // Decoder is created lazily on first chunk — acceptable here
-            // because streaming output is for display only, not for the
-            // final `output` string.
+            // The decoder is created lazily on the first chunk, so an
+            // ASCII-only first chunk locks it to UTF-8 and later OEM bytes
+            // garble. Unlike the buffered path (which re-decodes the whole
+            // buffer at exit), streamed chunks cannot be re-decoded after
+            // the fact — they are emitted as they arrive. Note these chunks
+            // are not merely cosmetic: background-shell persists them to the
+            // shell output file and acp-bridge records them in session
+            // history, so the first-chunk lock is a known limitation of the
+            // streaming path (tracked separately) rather than a display-only
+            // concern.
             if (!stdoutDecoder || !stderrDecoder) {
               const encoding = getCachedEncodingForBuffer(data);
               try {
@@ -1111,15 +1125,18 @@ export class ShellExecutionService {
           // the same `encoding` start fresh.
           //
           // In buffered mode the foreground decoders are never created
-          // (raw chunks accumulate in stdoutChunks instead), so re-detect
-          // from the accumulated buffer rather than falling straight to
-          // utf-8 — otherwise a non-UTF-8 child's post-promote tail would
-          // mojibake even though its pre-promote snapshot decoded fine.
+          // (raw chunks accumulate in stdoutChunks/stderrChunks instead),
+          // so reuse the labels cleanup() detected rather than falling
+          // straight to utf-8 — otherwise a non-UTF-8 child's post-promote
+          // tail would mojibake even though its pre-promote snapshot
+          // decoded fine. Both streams are consulted (stdout first, then
+          // stderr) so a stderr-only child is covered, and the labels are
+          // reused from cleanup() instead of re-running detection.
           const detectedEncoding =
             stdoutDecoder?.encoding ??
-            (stdoutChunks.length > 0
-              ? getCachedEncodingForBuffer(Buffer.concat(stdoutChunks))
-              : 'utf-8');
+            detectedStdoutEncoding ??
+            detectedStderrEncoding ??
+            'utf-8';
           // SEPARATE decoders for stdout and stderr. A single shared
           // decoder corrupts interleaved multibyte UTF-8 (the streaming
           // state machine assumes one byte source); independent
@@ -1448,14 +1465,23 @@ export class ShellExecutionService {
           // detection on the full output. This fixes the mojibake bug
           // where per-chunk detection on an ASCII-only first chunk
           // locked the decoder to UTF-8, garbling subsequent OEM bytes.
-          // Deliberate extra concat: whole-buffer encoding detection
-          // requires one additional full-output-sized allocation at
-          // cleanup peak (bounded, GC-eligible after return).
+          // Each stream is detected independently (stdout and stderr can
+          // differ) and the labels are captured for the background-promote
+          // handoff to reuse. Deliberate extra concat: decoding requires one
+          // additional full-output-sized allocation at cleanup peak
+          // (bounded, GC-eligible after return). Detection CPU stays bounded
+          // — chardet's O(n) statistical pass runs on a capped head sample
+          // (CHARDET_SAMPLE_BYTES), so even a max-size buffer pays only a
+          // constant detection cost in the 'exit' handler.
           if (stdoutChunks.length > 0) {
-            stdout = decodeProcessOutput(Buffer.concat(stdoutChunks));
+            const concatenated = Buffer.concat(stdoutChunks);
+            detectedStdoutEncoding = getCachedEncodingForBuffer(concatenated);
+            stdout = decodeProcessOutput(concatenated, detectedStdoutEncoding);
           }
           if (stderrChunks.length > 0) {
-            stderr = decodeProcessOutput(Buffer.concat(stderrChunks));
+            const concatenated = Buffer.concat(stderrChunks);
+            detectedStderrEncoding = getCachedEncodingForBuffer(concatenated);
+            stderr = decodeProcessOutput(concatenated, detectedStderrEncoding);
           }
 
           const finalBuffer = Buffer.concat(outputChunks);

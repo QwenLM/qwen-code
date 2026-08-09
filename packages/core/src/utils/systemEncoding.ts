@@ -25,9 +25,20 @@ export function resetEncodingCache(): void {
 }
 
 /**
+ * Byte budget for chardet's statistical pass. chardet's `detect()` runs a
+ * full O(n) scan with no sampling, so handing it the entire output buffer
+ * (up to `maxBufferedOutputBytes`, 64 MiB by default) can stall the event
+ * loop for seconds in the 'exit' handler. Detection confidence is
+ * statistical, so a fixed head sample is enough (~11 ms at 64 KiB
+ * regardless of total size).
+ */
+const CHARDET_SAMPLE_BYTES = 64 * 1024;
+
+/**
  * Detects the encoding of a buffer.
  *
- * Strategy: try UTF-8 first, then chardet, then system encoding.
+ * Strategy: try strict UTF-8, then UTF-8 with replacement for
+ * mostly-valid buffers, then chardet, then system encoding.
  * UTF-8 is tried first because modern developer tools, PowerShell Core,
  * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
  * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
@@ -43,7 +54,25 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
     return 'utf-8';
   }
 
-  // Buffer is not valid UTF-8 — try chardet, then system encoding
+  // Not strictly valid UTF-8, but a few stray bytes in otherwise-valid
+  // UTF-8 (mixed-encoding file content, legacy tool banners) must not be
+  // handed to chardet: its statistical guess (commonly windows-1252) would
+  // decode the entire buffer with a single-byte label and silently mojibake
+  // all the valid multi-byte content. If invalid bytes are scarce relative
+  // to the buffer, treat it as UTF-8 and let the non-fatal TextDecoder
+  // substitute U+FFFD for just the bad bytes.
+  const decoded = new TextDecoder('utf-8').decode(buffer);
+  let replacements = 0;
+  for (let i = 0; i < decoded.length; i++) {
+    if (decoded.charCodeAt(i) === 0xfffd) {
+      replacements++;
+    }
+  }
+  if (replacements / buffer.length < 0.01) {
+    return 'utf-8';
+  }
+
+  // Substantially invalid UTF-8 — try chardet, then system encoding.
   const detected = detectEncodingFromBuffer(buffer);
   if (detected) {
     return detected;
@@ -60,19 +89,31 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
   return 'utf-8';
 }
 
-export function decodeProcessOutput(buffer: Buffer | string): string {
+/**
+ * Decodes a process output buffer to a string using detected encoding.
+ *
+ * @param buffer The buffer (or already-decoded string) to decode.
+ * @param encoding Optional pre-detected encoding label. When provided,
+ *   detection is skipped — callers that already computed the label (e.g.
+ *   to share it across stdout/stderr or a background-promote handoff) pass
+ *   it here to avoid re-running chardet over the same bytes.
+ */
+export function decodeProcessOutput(
+  buffer: Buffer | string,
+  encoding?: string,
+): string {
   if (!Buffer.isBuffer(buffer)) return String(buffer);
   if (buffer.length === 0) return '';
-  const encoding = getCachedEncodingForBuffer(buffer);
+  const label = encoding ?? getCachedEncodingForBuffer(buffer);
   try {
-    return new TextDecoder(encoding).decode(buffer);
+    return new TextDecoder(label).decode(buffer);
   } catch {
     // The detected label may be a Windows OEM code page (cp437/cp850/cp852)
     // that Node's WHATWG TextDecoder rejects with RangeError. Fall back to
     // utf-8 so a throw never escapes into an 'exit'/'data' handler, which
     // would otherwise leave the shell-execution promise unsettled.
     debugLogger.debug(
-      `TextDecoder rejected encoding label "${encoding}"; falling back to utf-8`,
+      `TextDecoder rejected encoding label "${label}"; falling back to utf-8`,
     );
     return new TextDecoder('utf-8').decode(buffer);
   }
@@ -195,9 +236,15 @@ export function windowsCodePageToEncoding(cp: number): string | null {
  * @return The detected encoding as a lowercase string, or null if detection fails.
  */
 export function detectEncodingFromBuffer(buffer: Buffer): string | null {
-  // Try chardet statistical detection first — works well for larger files
+  // Try chardet statistical detection first — works well for larger files.
+  // Detection runs on a bounded head sample (CHARDET_SAMPLE_BYTES) so a
+  // large buffer doesn't pay chardet's full O(n) byte-statistics pass.
   try {
-    const detected = chardetDetect(buffer);
+    const sample =
+      buffer.length > CHARDET_SAMPLE_BYTES
+        ? buffer.subarray(0, CHARDET_SAMPLE_BYTES)
+        : buffer;
+    const detected = chardetDetect(sample);
     if (detected && typeof detected === 'string') {
       return detected.toLowerCase();
     }
