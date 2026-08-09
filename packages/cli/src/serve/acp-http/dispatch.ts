@@ -35,6 +35,11 @@ import {
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
 } from '../acp-session-bridge.js';
+import type {
+  BridgeChannelQuarantinedError,
+  RestoreInProgressError,
+  SessionRestoreTimeoutError,
+} from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -46,6 +51,7 @@ import {
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
@@ -758,6 +764,62 @@ export function toRpcError(err: unknown): {
   }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
+    case 'SessionRestoreTimeoutError': {
+      const restoreError = err as SessionRestoreTimeoutError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: restoreError.message,
+        data: {
+          code: 'session_restore_timeout',
+          errorKind: 'restore_timeout',
+          httpStatus: 504,
+          retryable: true,
+          retryAfterSeconds: restoreRetryAfterSeconds(restoreError.timeoutMs),
+          sessionId: restoreError.sessionId,
+          action: restoreError.action,
+          timeoutMs: restoreError.timeoutMs,
+        },
+      };
+    }
+    case 'RestoreInProgressError': {
+      // Without this case the fence degrades to the default arm — an opaque
+      // `internal` 500 with no code, reason, or hint. SDK transport
+      // negotiation prefers acp-ws and acp-http over REST, so unpinned
+      // clients land exactly here: they cannot distinguish a retryable fence
+      // from a genuine internal error, and cannot honor the longer backoff
+      // the protocol reference tells them to.
+      const fenceError = err as RestoreInProgressError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: fenceError.message,
+        data: {
+          code: 'restore_in_progress',
+          errorKind: 'restore_in_progress',
+          httpStatus: 409,
+          retryable: true,
+          reason: fenceError.reason,
+          retryAfterSeconds: fenceError.retryAfterSeconds,
+          sessionId: fenceError.sessionId,
+          activeAction: fenceError.activeAction,
+          requestedAction: fenceError.requestedAction,
+        },
+      };
+    }
+    case 'BridgeChannelQuarantinedError': {
+      const unavailableError = err as BridgeChannelQuarantinedError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: unavailableError.message,
+        data: {
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          httpStatus: 503,
+          retryable: true,
+          reason: unavailableError.reason,
+          retryAfterSeconds: unavailableError.retryAfterSeconds,
+        },
+      };
+    }
     case 'SessionArchivedError':
       return {
         code: RPC.INTERNAL_ERROR,
