@@ -68,6 +68,9 @@ const REGISTRY_FILE_MODE = 0o600;
 /** Refuse to parse anything larger; a record is a few hundred bytes. */
 const MAX_RECORD_BYTES = 64 * 1024;
 
+/** Largest millisecond offset a `Date` can represent (ECMA-262 21.4.1.1). */
+const MAX_DATE_EPOCH_MS = 8.64e15;
+
 /**
  * Only `<digits>.json` is a candidate record.
  *
@@ -177,9 +180,16 @@ export async function registerSession(
     // the directory already exists — chmod is what actually guarantees
     // 0700 on an upgrade from a build that created it more loosely.
     await fs.chmod(dir, REGISTRY_DIR_MODE);
+    // `noFollow` is load-bearing, not hygiene. The 0700 directory keeps
+    // other uids out but not other same-uid processes, which this feature
+    // already treats as adversarial, and PIDs are allocated predictably
+    // enough to plant a symlink at a record path before it is written.
+    // Without it, both the write and the forced 0600 chmod travel through
+    // the link onto whatever the attacker aimed it at.
     await atomicWriteJSON(getSessionRecordPath(pid), record, {
       mode: REGISTRY_FILE_MODE,
       forceMode: true,
+      noFollow: true,
     });
     return true;
   } catch (error) {
@@ -210,7 +220,7 @@ export async function patchSessionRecord(
     await atomicWriteJSON(
       filePath,
       { ...existing, ...patch },
-      { mode: REGISTRY_FILE_MODE, forceMode: true },
+      { mode: REGISTRY_FILE_MODE, forceMode: true, noFollow: true },
     );
   } catch (error) {
     debugLogger.debug(`patchSessionRecord failed: ${describe(error)}`);
@@ -390,7 +400,14 @@ async function readRecord(
     typeof name !== 'string' ||
     (kind !== 'interactive' && kind !== 'headless') ||
     typeof startedAt !== 'number' ||
-    !Number.isFinite(startedAt)
+    !Number.isFinite(startedAt) ||
+    // Consumers turn this into a `Date` (`list_agents` reports it as an
+    // ISO string), and `toISOString` throws `RangeError` outside the Date
+    // epoch range. A single out-of-range record would take down the whole
+    // tool for every session on the machine, so bound it at the parse
+    // boundary. `Number.isSafeInteger` is not enough — its ceiling is a
+    // thousand times the Date maximum.
+    Math.abs(startedAt) > MAX_DATE_EPOCH_MS
   ) {
     return null;
   }

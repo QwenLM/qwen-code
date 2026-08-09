@@ -22,7 +22,11 @@ import {
   suggestPeerNames,
   type PeerSessionInfo,
 } from './peer-directory.js';
-import { PeerSendError, sendPeerFrame } from './uds-client.js';
+import {
+  BUSY_PEER_ERRNOS,
+  PeerSendError,
+  sendPeerFrame,
+} from './uds-client.js';
 
 /**
  * This session's own reply address and display name.
@@ -130,12 +134,15 @@ export async function sendToPeer(
  */
 export function describeSendFailure(error: unknown): string {
   if (error instanceof PeerSendError) {
+    // Shares one errno set with `probePeerSocket`, so a peer the probe
+    // called alive can never fail here with unclassified advice.
+    if (BUSY_PEER_ERRNOS.includes(error.code ?? '')) {
+      return 'the session is alive but momentarily busy. Retry the same name shortly.';
+    }
     switch (error.code) {
       case 'ENOENT':
       case 'ECONNREFUSED':
         return 'that session just exited — its address is stale. List the agents again to see who is reachable now.';
-      case 'EBUSY':
-        return 'the session is alive but momentarily busy. Retry the same name shortly.';
       case 'ETIMEDOUT':
         return 'the session accepted the connection but never read the message.';
       default:

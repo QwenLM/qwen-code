@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApprovalMode } from '../config/approval-mode.js';
-import { PeerSendError } from './uds-client.js';
+import { BUSY_PEER_ERRNOS, PeerSendError } from './uds-client.js';
 
 const readOwnSessionRecord = vi.fn();
 const listMessageablePeers = vi.fn();
@@ -253,6 +253,21 @@ describe('describeSendFailure', () => {
     ).toContain('stale');
     expect(describeSendFailure(new PeerSendError('x', 'EBUSY'))).toContain(
       'Retry the same name',
+    );
+  });
+
+  it('classifies every busy errno, not just the Windows spelling', () => {
+    // A full accept backlog is EAGAIN on unix and EBUSY on a named pipe.
+    // probePeerSocket calls both alive, so both have to land on the retry
+    // advice here — otherwise a peer the probe reported as reachable
+    // fails with the raw errno.
+    for (const code of BUSY_PEER_ERRNOS) {
+      expect(describeSendFailure(new PeerSendError('x', code))).toContain(
+        'Retry the same name',
+      );
+    }
+    expect(BUSY_PEER_ERRNOS).toEqual(
+      expect.arrayContaining(['EBUSY', 'EAGAIN']),
     );
   });
 

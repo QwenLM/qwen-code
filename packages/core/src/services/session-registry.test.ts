@@ -129,6 +129,36 @@ describe('registerSession', () => {
     },
   );
 
+  // Symlinks are not creatable without elevation on the win32 gate.
+  it.skipIf(process.platform === 'win32')(
+    'does not write through a symlink planted at the record path',
+    async () => {
+      // The 0700 directory excludes other uids but not other same-uid
+      // processes, which this feature already treats as adversarial. PIDs
+      // are allocated predictably enough to plant a link for an upcoming
+      // one, and both the write and the forced 0600 chmod would follow it.
+      const victim = path.join(tmpDir, 'precious.txt');
+      await fs.writeFile(victim, 'do not clobber', { mode: 0o644 });
+      await fs.mkdir(getSessionRegistryDir(), { recursive: true });
+      await fs.symlink(victim, getSessionRecordPath(process.pid));
+
+      expect(
+        await registerSession({
+          sessionId: 's1',
+          cwd: '/w/app',
+          kind: 'interactive',
+        }),
+      ).toBe(true);
+
+      expect(await fs.readFile(victim, 'utf8')).toBe('do not clobber');
+      expect((await fs.stat(victim)).mode & 0o777).toBe(0o644);
+      // The link itself was atomically replaced, so it is not left armed.
+      const planted = await fs.lstat(getSessionRecordPath(process.pid));
+      expect(planted.isSymbolicLink()).toBe(false);
+      expect(planted.isFile()).toBe(true);
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'tightens a pre-existing loose registry directory',
     async () => {
@@ -195,6 +225,39 @@ describe('patchSessionRecord', () => {
     await patchSessionRecord({ sessionId: 'new' });
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
   });
+
+  // Symlinks are not creatable without elevation on the win32 gate.
+  it.skipIf(process.platform === 'win32')(
+    'replaces a planted symlink instead of contaminating its target',
+    async () => {
+      // readRecord follows the link and accepts a *valid* record, so the
+      // damaging shape is a link aimed at a sibling session's record: the
+      // merge lands the patch on the sibling's pid and reply address.
+      const sibling = {
+        schemaVersion: 1,
+        pid: DEAD_PID,
+        procStart: null,
+        sessionId: 'sibling',
+        cwd: '/w/other',
+        name: 'other-bb',
+        kind: 'interactive',
+        startedAt: 1000,
+        qwenVersion: null,
+        peerProtocol: 1,
+      };
+      const victim = await writeRaw(`${DEAD_PID}.json`, sibling);
+      await fs.symlink(victim, getSessionRecordPath(process.pid));
+
+      await patchSessionRecord({ sessionId: 'patched' });
+
+      // The sibling record is untouched and the link was replaced by a
+      // real file, not written through.
+      expect(JSON.parse(await fs.readFile(victim, 'utf8'))).toEqual(sibling);
+      expect((await fs.lstat(getSessionRecordPath(process.pid))).isFile()).toBe(
+        true,
+      );
+    },
+  );
 });
 
 describe('unregisterSession', () => {
@@ -278,6 +341,28 @@ describe('listLiveSessions', () => {
     // selfPid is set elsewhere so this record goes through the liveness
     // path rather than the trust-our-own-record shortcut.
     expect(await listLiveSessions({ selfPid: DEAD_PID })).toEqual([]);
+  });
+
+  it('rejects a startedAt outside the Date epoch range', async () => {
+    // `list_agents` renders this field with `new Date(startedAt)
+    // .toISOString()`, which throws RangeError past ±8.64e15. One poison
+    // record would fail the whole tool for every session on the machine,
+    // and it is never swept because its writer is alive — so the bound
+    // belongs here, at the parse boundary.
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: null,
+      sessionId: 's-poison',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: 1e300,
+      ipcPath: '/tmp/poison.sock',
+    });
+
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+    expect(() => new Date(1e300).toISOString()).toThrow(RangeError);
   });
 
   it('ignores files that are not <pid>.json', async () => {

@@ -119,13 +119,25 @@ export async function sendDeliveryStatus(
 }
 
 /**
+ * Errnos that mean "listening, but not accepting this instant".
+ *
+ * A peer whose accept backlog is full is busy, not dead. The kernel says
+ * so with `EAGAIN` on a unix socket and with `EBUSY` on a Windows named
+ * pipe, so both spellings have to be recognised on every platform.
+ *
+ * Exported because liveness (`probePeerSocket`) and the send-side advice
+ * (`describeSendFailure`) must agree on this set. If they drift, a peer
+ * the probe reports as reachable fails to send with unclassified advice.
+ */
+export const BUSY_PEER_ERRNOS: readonly string[] = ['EBUSY', 'EAGAIN'];
+
+/**
  * True when something is listening on `socketPath`.
  *
- * `EBUSY` counts as alive: the peer is listening but its backlog is full,
- * which is a busy session, not a dead one. Everything else — including a
- * socket file left behind by a crashed process — is dead, which is the
- * point: a stale socket inode still stats fine, so only a dial can tell
- * the difference.
+ * A busy peer counts as alive (see `BUSY_PEER_ERRNOS`). Everything else —
+ * including a socket file left behind by a crashed process — is dead,
+ * which is the point: a stale socket inode still stats fine, so only a
+ * dial can tell the difference.
  */
 export function probePeerSocket(socketPath: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -140,7 +152,7 @@ export function probePeerSocket(socketPath: string): Promise<boolean> {
     };
     socket.on('connect', () => settle(true));
     socket.on('error', (error: NodeJS.ErrnoException) =>
-      settle(error.code === 'EBUSY'),
+      settle(BUSY_PEER_ERRNOS.includes(error.code ?? '')),
     );
     socket.setTimeout(PROBE_TIMEOUT_MS, () => settle(false));
   });
