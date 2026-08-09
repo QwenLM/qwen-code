@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::menu::{Menu, SubmenuBuilder};
+use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
@@ -46,6 +46,8 @@ struct RuntimeStopped {
 struct ApplicationState {
     runtime: Mutex<Option<DesktopRuntime>>,
     local_control: Mutex<Option<LocalControlSession>>,
+    local_control_menu: MenuItem<tauri::Wry>,
+    local_control_off_menu: MenuItem<tauri::Wry>,
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
@@ -68,6 +70,8 @@ fn main() {
                 if let Err(error) = show_local_control_window(app) {
                     eprintln!("{error}");
                 }
+            } else if event.id() == "local-control-off" {
+                stop_local_control(app);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -117,9 +121,16 @@ fn main() {
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let menu = Menu::default(&handle)?;
+    let local_control_menu =
+        MenuItemBuilder::with_id("local-control", "Local Control: Off…").build(&handle)?;
+    let local_control_off_menu =
+        MenuItemBuilder::with_id("local-control-off", "Turn Off Local Control")
+            .enabled(false)
+            .build(&handle)?;
     menu.append(
         &SubmenuBuilder::new(&handle, "Control")
-            .text("local-control", "Local Control…")
+            .item(&local_control_menu)
+            .item(&local_control_off_menu)
             .build()?,
     )?;
     handle.set_menu(menu)?;
@@ -181,6 +192,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     handle.manage(ApplicationState {
         runtime: Mutex::new(None),
         local_control: Mutex::new(None),
+        local_control_menu,
+        local_control_off_menu,
         settings,
         log_path,
         origin,
@@ -294,6 +307,7 @@ fn enable_local_control(
     let session = LocalControlSession::start(&runtime_url, &runtime_token)?;
     let info = session.info();
     *local_control = Some(session);
+    set_local_control_menu_state(&app, true);
     let _ = app.emit("local-control-changed", &info);
     Ok(info)
 }
@@ -456,8 +470,19 @@ fn stop_runtime(app: &AppHandle) {
 fn stop_local_control(app: &AppHandle) {
     if let Some(mut session) = lock(&app.state::<ApplicationState>().local_control).take() {
         session.stop();
+        set_local_control_menu_state(app, false);
         let _ = app.emit("local-control-changed", LocalControlInfo::inactive());
     }
+}
+
+fn set_local_control_menu_state(app: &AppHandle, active: bool) {
+    let state = app.state::<ApplicationState>();
+    let _ = state.local_control_menu.set_text(if active {
+        "Local Control: On…"
+    } else {
+        "Local Control: Off…"
+    });
+    let _ = state.local_control_off_menu.set_enabled(active);
 }
 
 fn initial_workspace(app: &AppHandle) -> Option<PathBuf> {
