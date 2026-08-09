@@ -1582,7 +1582,10 @@ export function convertOpenAIChunkToGemini(
       // candidate has committed to a complete opening tag with real content,
       // though, releasing it leaks the whole block — production thinking-tag
       // leaks are longer than the cap (issue #6666). Keep those held; the
-      // finish-time branch below rejects them as PROTOCOL_TAG_LEAK.
+      // fail-closed throw below rejects them once they exceed the cap.
+      // Accepted trade-off: a legitimate balanced literal longer than the cap
+      // whose closing tag has not arrived yet is rejected too — at that point
+      // it is indistinguishable from an unclosed leak.
       const confirmedOpeningTagCandidate =
         LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
         !combinedCandidateText.trimStart().startsWith('</') &&

@@ -571,6 +571,23 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('fails closed when a confirmed opening tag exceeds the buffer limit mid-stream', () => {
+      // The production leaks are longer than the 128-char candidate cap; the
+      // confirmed opening tag must keep them held until the fail-closed throw
+      // fires mid-stream instead of the cap releasing them as visible text.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('long-unclosed', {
+            content: '<thinking>' + 'x'.repeat(200),
+          }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('leaks the production <thinking> shape without provider provenance', () => {
       // Control for the test above: without contentOnlyThinkingTagLeaks the
       // same stream passes through verbatim — the defense is provider-gated,
