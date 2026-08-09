@@ -7,6 +7,7 @@ import type {
   DaemonStatusTranscriptBlock,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   type BackgroundAgentResolution,
   getBackgroundAgentNotificationKey,
@@ -276,6 +277,70 @@ describe('background agent task reconciliation', () => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
     );
 
+    await act(async () => root.unmount());
+  });
+
+  it('retries a running background agent until it reaches a terminal status', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockResolvedValueOnce(backgroundAgentResolution('running'))
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    function Consumer() {
+      const messages = useMessages(t);
+      const status =
+        messages[0]?.role === 'tool_group'
+          ? messages[0].tools[0]?.status
+          : undefined;
+      return createElement('div', null, status);
+    }
+
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    );
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => root.unmount());
+    vi.useRealTimers();
+  });
+
+  it('treats a missing background agent as terminal', async () => {
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(404, { code: 'session_not_found' }, 'not found'),
+    );
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    function Consumer() {
+      const messages = useMessages(t);
+      const status =
+        messages[0]?.role === 'tool_group'
+          ? messages[0].tools[0]?.status
+          : undefined;
+      return createElement('div', null, status);
+    }
+
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    );
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
     await act(async () => root.unmount());
   });
 
