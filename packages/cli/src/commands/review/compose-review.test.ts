@@ -189,7 +189,13 @@ function recordStep45(
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
+  opts: {
+    toolCalls?: number;
+    text?: string;
+    opens?: string[];
+    /** `[offset, limit]` making the diff reads ranged, as a compliant agent's are. */
+    range?: [number, number];
+  } = {},
 ): void {
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
@@ -212,7 +218,18 @@ function transcript(
         message: {
           role: 'model',
           parts: [
-            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+            {
+              functionCall: {
+                name: 'read_file',
+                args: opts.range
+                  ? {
+                      file_path: DIFF,
+                      offset: opts.range[0],
+                      limit: opts.range[1],
+                    }
+                  : { file_path: DIFF },
+              },
+            },
           ],
         },
       }),
@@ -1152,6 +1169,114 @@ describe('composeReview — not-reviewed entries that carry their own reason', (
     );
     // The self-explained entry must not be folded into the whiff sentence.
     expect(r.body).not.toContain('issue-fidelity, security');
+  });
+});
+
+describe('composeReview — budget-gap disclosures (a channel, never a cap)', () => {
+  it('renders disclosed gaps in the body and still approves a clean run', () => {
+    // The agent read its whole territory (ranged read) and disclosed one
+    // optional-depth check its tool budget cut short. The disclosure must
+    // reach the author mechanically — whether or not the orchestrator
+    // relays anything — and must NOT cap the verdict: judging which gaps
+    // name a required trace is the orchestrator's ruling (Step 3D), and
+    // capping on every routine budget stop would make the soft ceiling
+    // hard.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: second-order callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    // Not base(): its planPath DEFAULT (coveredPlan()) is evaluated on every
+    // call and rewrites this run's a1/a2 transcripts with clean ones.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    // Attributed to its agent and wrapped as inline code — a gap carrying
+    // an @-mention, a #123 reference or a stray `</details>` must reach
+    // the body inert.
+    expect(r.body).toContain(
+      'Not explored to full depth (tool budget reached): ' +
+        'chunk 1: `second-order callers of the renamed export`.',
+    );
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('drops its mechanical line for a gap the caller promoted — one register, not two', () => {
+    // Step 3D has the orchestrator promote a required-trace gap into
+    // unreviewedDimensions with the gap's own text as the scope. The
+    // promoted entry caps and renders verbatim; the mechanical line must
+    // yield, or the body says one budget stop twice in two contradicting
+    // framings (#7188's double-disclosure regression, reopened).
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: second-order callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        'second-order callers of the renamed export — stopped at the agent tool budget',
+      ],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not reviewed: second-order callers of the renamed export — stopped at the agent tool budget.',
+    );
+    expect(r.body).not.toContain('Not explored to full depth');
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('a disclosed gap denies the "no blockers" certification', () => {
+    // "Reviewed — no blockers." two lines above "Not explored to full
+    // depth" is the opener certifying what the disclosure takes back.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'One suggestion filed.\n' +
+        'Budget gap: the callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('Not explored to full depth');
+    expect(r.body).not.toContain('no blockers');
   });
 });
 
