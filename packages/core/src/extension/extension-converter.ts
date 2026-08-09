@@ -16,6 +16,10 @@ import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
 } from './claude-converter.js';
+import {
+  convertQoderPlugin,
+  QODER_PLUGIN_MANIFEST,
+} from './qoder-converter.js';
 import type { ExtensionConfig } from './extensionManager.js';
 import type {
   ExtensionNetworkPolicy,
@@ -31,6 +35,7 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
   'gemini-extension.json',
   '.claude-plugin/marketplace.json',
   '.claude-plugin/plugin.json',
+  QODER_PLUGIN_MANIFEST,
 ] as const;
 
 function removeConvertedDirectory(directory: string): void {
@@ -151,7 +156,7 @@ function mergeHooks(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
-export async function convertGeminiOrClaudeExtension(
+export async function convertCompatibleExtension(
   extensionDir: string,
   pluginName?: string,
   networkPolicy?: ExtensionNetworkPolicy,
@@ -160,11 +165,13 @@ export async function convertGeminiOrClaudeExtension(
 ): Promise<{
   extensionDir: string;
   originSource: ExtensionOriginSource;
+  externalContent: boolean;
   requiresClaudeFileAdaptation: boolean;
 }> {
   signal?.throwIfAborted();
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
+  let externalContent = false;
   let requiresClaudeFileAdaptation = false;
   const configFilePath = path.join(
     extensionDir,
@@ -176,6 +183,7 @@ export async function convertGeminiOrClaudeExtension(
   const hasClaudePlugin = fs.existsSync(
     path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]),
   );
+
   // `pluginName` has two meanings: a selector inside a marketplace repo, or an
   // alias retained for a direct plugin-root install. New metadata disambiguates
   // them. Legacy metadata keeps the old manifest-first behavior so an update
@@ -201,22 +209,23 @@ export async function convertGeminiOrClaudeExtension(
     marketplaceLocation !== 'missing-marketplace' &&
     !selectedMarketplaceEntryUsesRoot
   ) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(
-        extensionDir,
-        pluginName,
-        networkPolicy,
-        signal,
-        true,
-      )
-    ).convertedDir;
+    const converted = await convertClaudePluginPackage(
+      extensionDir,
+      pluginName,
+      networkPolicy,
+      signal,
+      true,
+    );
+    newExtensionDir = converted.convertedDir;
     originSource = 'Claude';
+    externalContent = converted.externalContent;
   } else if (hasQwenConfig) {
     newExtensionDir = extensionDir;
   } else if (isGeminiExtension && hasClaudePlugin) {
     const geminiConversion = await convertGeminiExtensionPackage(extensionDir);
     let claudeConversion:
       | Awaited<ReturnType<typeof convertClaudePluginStandalone>>
+      | Awaited<ReturnType<typeof convertClaudePluginPackage>>
       | undefined;
     try {
       signal?.throwIfAborted();
@@ -245,6 +254,7 @@ export async function convertGeminiOrClaudeExtension(
         return {
           extensionDir: newExtensionDir,
           originSource,
+          externalContent,
           requiresClaudeFileAdaptation,
         };
       }
@@ -265,6 +275,10 @@ export async function convertGeminiOrClaudeExtension(
       );
       newExtensionDir = geminiConversion.convertedDir;
       originSource = 'Gemini';
+      externalContent =
+        'externalContent' in claudeConversion
+          ? claudeConversion.externalContent
+          : false;
       requiresClaudeFileAdaptation = Boolean(claudeHooks);
     } catch (error) {
       removeConvertedDirectory(geminiConversion.convertedDir);
@@ -279,16 +293,19 @@ export async function convertGeminiOrClaudeExtension(
       .convertedDir;
     originSource = 'Gemini';
   } else if (pluginName && !isExplicitExtensionRoot) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(
-        extensionDir,
-        pluginName,
-        networkPolicy,
-        signal,
-        true,
-      )
-    ).convertedDir;
+    const converted = await convertClaudePluginPackage(
+      extensionDir,
+      pluginName,
+      networkPolicy,
+      signal,
+      true,
+    );
+    newExtensionDir = converted.convertedDir;
     originSource = 'Claude';
+    externalContent = converted.externalContent;
+  } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
+    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
+    originSource = 'Qoder';
   } else if (hasClaudePlugin) {
     newExtensionDir = (await convertClaudePluginStandalone(extensionDir, true))
       .convertedDir;
@@ -298,6 +315,7 @@ export async function convertGeminiOrClaudeExtension(
   return {
     extensionDir: newExtensionDir,
     originSource,
+    externalContent,
     requiresClaudeFileAdaptation,
   };
 }

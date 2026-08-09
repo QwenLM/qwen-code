@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { convertGeminiOrClaudeExtension } from './extension-converter.js';
+import { convertCompatibleExtension as convertGeminiOrClaudeExtension } from './extension-converter.js';
 import { ExtensionManager, type ExtensionConfig } from './extensionManager.js';
 import { ExtensionStore } from './extension-store.js';
 import { ExtensionStorage } from './storage.js';

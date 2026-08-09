@@ -28,6 +28,9 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 
 const setupGithubMock = vi.hoisted(() => vi.fn());
 
@@ -44,14 +47,23 @@ const PARENT_ENV: WorkspaceRuntimeEnvMetadata = {
 
 function makeBridge(): HttpAcpBridge {
   return {
-    spawnOrAttach: vi.fn(async (req: { workspaceCwd: string }) => ({
-      sessionId:
-        req.workspaceCwd === '/ws-b' ? 'secondary-session' : 'primary-session',
-      workspaceCwd: req.workspaceCwd,
-      attached: false,
-      clientId:
-        req.workspaceCwd === '/ws-b' ? 'secondary-client' : 'primary-client',
-    })),
+    spawnOrAttach: vi.fn(
+      async (req: { workspaceCwd: string; sessionId?: string }) => ({
+        sessionId:
+          req.sessionId ??
+          (req.workspaceCwd === '/ws-b'
+            ? 'secondary-session'
+            : 'primary-session'),
+        workspaceCwd: req.workspaceCwd,
+        attached: false,
+        clientId:
+          req.workspaceCwd === '/ws-b' ? 'secondary-client' : 'primary-client',
+      }),
+    ),
+    getSessionSummary: vi.fn((sessionId: string) => {
+      throw new SessionNotFoundError(sessionId);
+    }),
+    killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => {}),
     executeShellCommand: vi.fn(async () => ({
       exitCode: 0,
@@ -249,11 +261,28 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
 
     const app = express();
     app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     handle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as unknown as DaemonWorkspaceService,
       fsFactory: workspaceRegistry.primary.routeFileSystemFactory,
       enabled: true,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          workspaceRegistry.listManaged().map((runtime) => runtime.bridge),
+        getPersistenceTargets: () =>
+          workspaceRegistry.listManaged().map((runtime) => ({
+            workspaceCwd: runtime.workspaceCwd,
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          workspaceRegistry
+            .listEntries()
+            .find((entry) => entry.current?.runtime.bridge === bridge)
+            ?.workspaceId,
+      }),
       daemonEnv: {
         ...process.env,
         HTTPS_PROXY: 'http://primary-proxy.example:8080',
@@ -604,6 +633,244 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
     expect(primary['error']).toMatchObject({ code: -32602 });
     expect(primaryBridge.executeShellCommand).not.toHaveBeenCalled();
+  });
+
+  it('shares caller-supplied sessionId admission across primary and qualified mounts', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440181';
+    let releasePrimary!: () => void;
+    const primaryGate = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    vi.mocked(primaryBridge.spawnOrAttach).mockImplementationOnce(
+      async (request) => {
+        await primaryGate;
+        return {
+          sessionId: request.sessionId!,
+          workspaceCwd: request.workspaceCwd,
+          attached: false,
+          clientId: 'primary-client',
+        };
+      },
+    );
+
+    const primary = sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(primaryBridge.spawnOrAttach).toHaveBeenCalledOnce(),
+    );
+
+    const secondary = await sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws-b',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    expect(secondary['error']).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'pending',
+      },
+    });
+    expect(secondaryBridge.spawnOrAttach).not.toHaveBeenCalled();
+
+    releasePrimary();
+    await expect(primary).resolves.toMatchObject({
+      result: { sessionId },
+    });
+  });
+
+  it('uses the concrete primary bridge generation for restore admission', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440182';
+    await writeStoredSession(sessionId, '/ws');
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    primaryBridge.loadSession = vi.fn(async (request) => {
+      await restoreGate;
+      return {
+        sessionId,
+        workspaceCwd: request.workspaceCwd,
+        attached: false,
+        clientId: request.clientId ?? 'old-primary-client',
+        state: {},
+        hasActivePrompt: false,
+      };
+    });
+
+    const first = sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/load',
+      params: { sessionId, workspaceCwd: '/ws' },
+    });
+    await vi.waitFor(() =>
+      expect(primaryBridge.loadSession).toHaveBeenCalledOnce(),
+    );
+
+    const entry = workspaceRegistry.primaryEntry;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    const replacementBridge = makeBridge();
+    replacementBridge.resumeSession = vi.fn(async (request) => ({
+      sessionId,
+      workspaceCwd: request.workspaceCwd,
+      attached: false,
+      clientId: request.clientId ?? 'new-primary-client',
+      state: {},
+      hasActivePrompt: false,
+    }));
+    workspaceRegistry.activateReplacement(
+      entry,
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: replacementBridge,
+      }),
+      'policy-2',
+    );
+
+    const second = await sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/resume',
+      params: { sessionId, workspaceCwd: '/ws' },
+    });
+    expect(second['error']).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_workspace_conflict',
+        conflict: 'pending',
+        workspaceId: 'primary-id',
+      },
+    });
+    expect(replacementBridge.resumeSession).not.toHaveBeenCalled();
+
+    releaseRestore();
+    await expect(first).resolves.toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(primaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
+  it('rolls back session/new when its generation changes while building the response', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440183';
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => {
+      releaseContext = resolve;
+    });
+    primaryBridge.getSessionContextStatus = vi.fn(async () => {
+      await contextGate;
+      return { v: 1 as const, sessionId, workspaceCwd: '/ws', state: {} };
+    });
+
+    const pending = sendWsRequest('/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(primaryBridge.getSessionContextStatus).toHaveBeenCalledOnce(),
+    );
+
+    const entry = workspaceRegistry.primaryEntry;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    workspaceRegistry.activateReplacement(
+      entry,
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: makeBridge(),
+      }),
+      'policy-2',
+    );
+    releaseContext();
+
+    await expect(pending).resolves.toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(primaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+  });
+
+  it('uses the registry generation guard for qualified ACP mounts', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440184';
+    let releaseContext!: () => void;
+    const contextGate = new Promise<void>((resolve) => {
+      releaseContext = resolve;
+    });
+    secondaryBridge.getSessionContextStatus = vi.fn(async () => {
+      await contextGate;
+      return { v: 1 as const, sessionId, workspaceCwd: '/ws-b', state: {} };
+    });
+
+    const pending = sendWsRequest('/workspaces/secondary-id/acp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+      params: {
+        workspaceCwd: '/ws-b',
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(secondaryBridge.getSessionContextStatus).toHaveBeenCalledOnce(),
+    );
+
+    const entry = workspaceRegistry.getEntryByWorkspaceId('secondary-id')!;
+    expect(workspaceRegistry.beginReplacement(entry, 'policy-2')).toBe(true);
+    releaseContext();
+
+    await expect(pending).resolves.toMatchObject({
+      error: {
+        code: -32603,
+        data: {
+          httpStatus: 503,
+          errorKind: 'workspace_runtime_unavailable',
+          retryable: true,
+        },
+      },
+    });
+    expect(secondaryBridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
   });
 
   it('rejects a body workspaceCwd that differs from the selected mount', async () => {
@@ -995,12 +1262,29 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     ]);
     const app = express();
     app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     const singleHandle = mountAcpHttp(app, primaryBridge, {
       boundWorkspace: '/ws',
       workspace: {} as DaemonWorkspaceService,
       enabled: true,
       workspaceRegistry: registry,
       workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          registry.listManaged().map((runtime) => runtime.bridge),
+        getPersistenceTargets: () =>
+          registry.listManaged().map((runtime) => ({
+            workspaceCwd: runtime.workspaceCwd,
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          registry
+            .listEntries()
+            .find((entry) => entry.current?.runtime.bridge === bridge)
+            ?.workspaceId,
+      }),
     })!;
     const singleServer = await new Promise<Server>((resolve) => {
       const listening = app.listen(0, '127.0.0.1', () => resolve(listening));

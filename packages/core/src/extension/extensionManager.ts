@@ -63,7 +63,7 @@ import {
   loadMarketplaceConfigFromSource,
   parseInstallSource,
 } from './marketplace.js';
-import { convertGeminiOrClaudeExtension } from './extension-converter.js';
+import { convertCompatibleExtension } from './extension-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
@@ -251,6 +251,7 @@ export interface ExtensionManagerOptions {
 export interface PrepareExtensionInstallOptions {
   installMetadata: ExtensionInstallMetadata;
   initialActivation: InitialExtensionActivation;
+  localSourcePath?: string;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
   requestSetting?: (setting: ExtensionSetting) => Promise<string>;
   cwd?: string;
@@ -1605,6 +1606,7 @@ export class ExtensionManager {
       options.signal,
       true,
       false,
+      options.localSourcePath,
     )) as PreparedExtensionMutation;
   }
 
@@ -1681,7 +1683,11 @@ export class ExtensionManager {
     signal: AbortSignal | undefined,
     prepareOnly: boolean,
     emitMutation: boolean,
+    localSourcePathOverride?: string,
   ): Promise<Extension | PreparedExtensionMutation> {
+    if (localSourcePathOverride && installMetadata.type !== 'local') {
+      throw new Error('A local source path requires a local install.');
+    }
     installMetadata = this.withNetworkPolicy(installMetadata)!;
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
@@ -1719,6 +1725,7 @@ export class ExtensionManager {
       await fs.promises.mkdir(extensionsDir, { recursive: true });
 
       if (
+        !localSourcePathOverride &&
         !path.isAbsolute(installMetadata.source) &&
         (installMetadata.type === 'local' || installMetadata.type === 'link')
       ) {
@@ -1770,7 +1777,11 @@ export class ExtensionManager {
           // See #6334.
           await fs.promises.rm(tempDir, { recursive: true, force: true });
           await fs.promises.mkdir(tempDir, { recursive: true });
-          await cloneFromGit(installMetadata, tempDir, signal);
+          installMetadata.gitCommit = await cloneFromGit(
+            installMetadata,
+            tempDir,
+            signal,
+          );
           if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
@@ -1791,16 +1802,22 @@ export class ExtensionManager {
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' &&
-        isSupportedArchivePath(installMetadata.source)
+        isSupportedArchivePath(
+          localSourcePathOverride ?? installMetadata.source,
+        )
       ) {
         tempDir = await ExtensionStorage.createTmpDir();
-        await extractArchiveFile(installMetadata.source, tempDir, signal);
+        await extractArchiveFile(
+          localSourcePathOverride ?? installMetadata.source,
+          tempDir,
+          signal,
+        );
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
         installMetadata.type === 'link'
       ) {
-        localSourcePath = installMetadata.source;
+        localSourcePath = localSourcePathOverride ?? installMetadata.source;
       } else {
         throw new Error(`Unsupported install type: ${installMetadata.type}`);
       }
@@ -1808,14 +1825,18 @@ export class ExtensionManager {
       signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
-        const { extensionDir, originSource, requiresClaudeFileAdaptation } =
-          await convertGeminiOrClaudeExtension(
-            sourceBeforeConversion,
-            installMetadata.pluginName,
-            installMetadata.networkPolicy,
-            signal,
-            installMetadata.pluginSourceKind,
-          );
+        const {
+          extensionDir,
+          originSource,
+          externalContent,
+          requiresClaudeFileAdaptation,
+        } = await convertCompatibleExtension(
+          sourceBeforeConversion,
+          installMetadata.pluginName,
+          installMetadata.networkPolicy,
+          signal,
+          installMetadata.pluginSourceKind,
+        );
         signal?.throwIfAborted();
 
         if (extensionDir !== sourceBeforeConversion) {
@@ -1823,6 +1844,13 @@ export class ExtensionManager {
         }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
+        installMetadata.externalContent = externalContent;
+        if (externalContent) {
+          // The commit recorded above belongs to the outer clone (e.g. the
+          // marketplace repo), not plugin content fetched from a nested
+          // source; drop it so update checks don't compare the wrong repo.
+          installMetadata.gitCommit = undefined;
+        }
 
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
@@ -1953,12 +1981,14 @@ export class ExtensionManager {
               : path.join(stagingPath, newExtensionConfig.hooks)
             : null;
 
+        const usesPluginVariables =
+          originSource === 'Claude' ||
+          originSource === 'Qoder' ||
+          requiresClaudeFileAdaptation;
         if (
-          ((originSource === 'Claude' || requiresClaudeFileAdaptation) &&
-            fs.existsSync(hooksDir)) ||
-          ((originSource === 'Claude' || requiresClaudeFileAdaptation) &&
-            configHooksPath &&
-            fs.existsSync(configHooksPath))
+          usesPluginVariables &&
+          (fs.existsSync(hooksDir) ||
+            (configHooksPath && fs.existsSync(configHooksPath)))
         ) {
           try {
             await performVariableReplacement(stagingPath, destinationPath);

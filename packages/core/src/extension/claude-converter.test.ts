@@ -1482,6 +1482,7 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
         JSON.stringify({ name: 'p', version: '1.0.0' }),
         'utf-8',
       );
+      return 'test-commit';
     });
 
     writeMarketplace({
@@ -1533,6 +1534,7 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
     vi.mocked(cloneFromGit).mockImplementation(async (_meta, dir) => {
       // The clone succeeded but does not contain the requested subdir.
       fs.mkdirSync(path.join(dir as string, 'other'), { recursive: true });
+      return 'test-commit';
     });
     writeMarketplace({
       source: 'git-subdir',
@@ -1551,6 +1553,7 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
       // A hostile repo commits the subdir as a symlink whose name stays inside
       // the clone but whose target escapes it.
       fs.symlinkSync(secretDir, path.join(dir as string, 'sub'));
+      return 'test-commit';
     });
     writeMarketplace({
       source: 'git-subdir',

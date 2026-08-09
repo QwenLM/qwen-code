@@ -117,12 +117,15 @@ env:
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
   MAX_ROUNDS: '10'
-  # Suggestions may improve a PR, but continuing to implement them after ten
+  # Suggestions may improve a PR, but continuing to implement them after five
   # change-producing rounds expands the diff and creates fresh review churn.
-  # From round 11 onward, only Critical findings, formally requested changes,
+  # From round 6 onward, only Critical findings, formally requested changes,
   # failed checks, and base conflicts may drive code changes; lower-severity
-  # feedback is recorded and left open.
-  CRITICAL_ONLY_AFTER_ROUND: '10'
+  # feedback is recorded and left open. Lowered from 10: at 10 the threshold
+  # only ever bound takeover PRs (the strict cap discards a plain PR at round
+  # 10 before Critical-only could engage), so long-running managed PRs spent
+  # ten rounds growing their diff on suggestions before the brake applied.
+  CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode. An account is an
   # ACCOUNTABILITY unit, not a throttle: a human login can host an automated
   # reviewer loop with the exact regeneration property the review bot has
@@ -164,14 +167,27 @@ env:
   INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
-  MAX_TARGETS_PER_SCAN: '10'
+  # TUNABLE WITHOUT A CODE CHANGE: set the repository variable to re-size the
+  # loop as the takeover pool grows — Settings → Variables, no PR, no deploy.
+  # The literal here is only the fallback when the variable is unset.
+  # Why 30: 37 PRs carried autofix/takeover on 2026-08-08, so the previous
+  # budget of 10 emitted at most 27% of the eligible set per tick and pushed
+  # the rest a scan further out every time. It must also stay strictly above
+  # the address matrix's max-parallel or the matrix can never fill, and the
+  # same-repo candidate pool was 51, so 30 still bounds a pathological
+  # backlog. RAISE BOTH TOGETHER: this must stay above QWEN_AUTOFIX_MAX_PARALLEL.
+  MAX_TARGETS_PER_SCAN: '${{ vars.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN || 30 }}'
   # Upper bound on candidates INSPECTED per scan: idle candidates consume
   # serial API calls even when they emit nothing, and takeover widens the
   # candidate pool. Candidates are inspected NEWEST-first; past the budget
   # the oldest tail defers — old quiet PRs are the least likely to hold new
   # feedback, and a deferred PR with a live conflict is still picked up by
   # the shepherd's conflict lever.
-  MAX_CANDIDATE_INSPECTIONS: '60'
+  # TUNABLE WITHOUT A CODE CHANGE, for the same reason as the two above: this
+  # one gates whether a PR is even LOOKED AT, so it has to grow ahead of the
+  # candidate pool or the oldest PRs starve. The pool was 51 same-repo open
+  # PRs on 2026-08-08, still under the 60 fallback.
+  MAX_CANDIDATE_INSPECTIONS: '${{ vars.QWEN_AUTOFIX_MAX_CANDIDATE_INSPECTIONS || 60 }}'
   # Maintainer-facing engagement labels (applying labels requires GitHub
   # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
   # including a human-authored one — into the loop; SKIP opts any PR out
@@ -3277,14 +3293,29 @@ jobs:
       # Measured at 3, on the scan that selected 7 PRs: the legs started
       # 3-at-a-time and each new one began 3-4s after a slot freed, so the
       # 7th PR waited 81 minutes for a slot it could have had immediately.
-      # 5 halves that tail while staying a real bound — the point of the cap
-      # is that a backlog cannot open an unbounded number of agent runs at
-      # once, not the specific number. The 300-minute job cap raises the
-      # worst-case hold to 5 runner-hours per slot (25 across the fleet) and
-      # holds the per-PR head-write concurrency group for the same window.
-      # The cap itself does not lengthen the queueing tail above; the raised
-      # 120-minute budget does, for the PRs that exhaust it.
-      max-parallel: 5
+      # 5 halved that tail — the point of the cap is that a backlog cannot
+      # open an unbounded number of agent runs at once, not the specific
+      # number.
+      # TUNABLE WITHOUT A CODE CHANGE: set QWEN_AUTOFIX_MAX_PARALLEL in
+      # Settings → Variables to re-size the fleet as the takeover pool grows;
+      # the literal below is only the fallback when the variable is unset.
+      # Verified on a live runner that `max-parallel` accepts this expression
+      # and schedules by it — a 6-leg matrix at 3 started 3, then began the
+      # 4th only once a slot freed.
+      # Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
+      # ~14% of them at a time and the tail measured at 3 simply reappeared
+      # at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
+      # legs occupy under a quarter of it, and the executed legs sampled that
+      # day finished in 3-28 minutes.
+      # The 300-minute job cap puts the worst case at 5 runner-hours per slot
+      # (100 across the fleet at 20) and holds the per-PR head-write
+      # concurrency group for the same window. Different PRs never share that
+      # group, so raising this does not add push contention.
+      # RAISE BOTH TOGETHER: this must stay strictly below
+      # MAX_TARGETS_PER_SCAN, or the scan cannot emit enough legs to fill the
+      # matrix and the extra slots sit idle. A test pins that for the
+      # fallbacks; for the variables it is an operator invariant.
+      max-parallel: '${{ fromJSON(vars.QWEN_AUTOFIX_MAX_PARALLEL || 20) }}'
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
     # Serialises every writer of THIS PR's head branch, across workflows.
