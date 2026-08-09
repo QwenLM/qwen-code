@@ -43,12 +43,12 @@ Qwen Code 不需要从零实现一套 Herdr，也不应该把 Herdr 变成原生
 | Agent View 主干 | 认证 supervisor socket、协议、session store、terminal bridge | 目前 handler 只有 status/list/shutdown；不能启动 managed worker |
 | `GitWorktreeService` / `--worktree` | 创建、校验、恢复、清理工作树 | Agent Team 和 `qwen --bg` 尚未形成可靠的 ownership 闭环 |
 
-截至 2026-08-08，Agent View 的用户可用部分仍在开放的堆叠 PR 中：
+截至 2026-08-09，Agent View 的用户可用部分仍在开放的堆叠 PR 中。以下同时区分 GitHub 的 `mergeable` 与 `mergeStateStatus`，避免把“可计算合并”误写成“门禁已通过”：
 
-- #7800：PTY workers；状态为 open/blocked。
-- #7801：session lifecycle；状态为 open/dirty，基于 #7800。
-- #7802：CLI commands；状态为 open/unstable，基于 #7801。
-- #7803：roster UI；状态为 open/dirty，基于 #7802。
+- #7800：PTY workers；`MERGEABLE` / `BLOCKED`，changes requested。
+- #7801：session lifecycle；`CONFLICTING` / `DIRTY`，changes requested，基于 #7800。
+- #7802：CLI commands；`MERGEABLE` / `UNSTABLE`，changes requested，基于 #7801。
+- #7803：roster UI；`CONFLICTING` / `DIRTY`，基于 #7802。
 
 所以不能把 #7799 已合并等同于“Agent View 已经可用”，也不应在这四个 PR 尚未收口时从 main 复制一套相同能力。
 
@@ -61,7 +61,7 @@ Qwen Code 不需要从零实现一套 Herdr，也不应该把 Herdr 变成原生
 3. prompt、result 和 wait 尚需稳定的 turn/prompt correlation；不能用“最近一次 idle”作为某次委派的 ACK。
 4. 输出末尾的 `?`/`？` 只能做 UI hint，不能作为 `needs_input` 的自动化真相源。
 5. Agent View sideband token 不能泄露给 worker 启动的 shell、hook、MCP、monitor 或嵌套 Qwen 子进程。
-6. 当前 `qwen --bg` 在 worktree startup 之前提前返回；`--bg --worktree` 不能被当成已经支持。
+6. `main` 尚无 `--bg`；#7802 中的实现会在 worktree startup 之前提前返回，因此该堆叠实现的 `--bg --worktree` 也不能被当成已经支持。
 
 安全边界必须写实：同一 OS 用户下、获得任意代码执行权限的恶意进程仍可能检查兄弟进程或用户文件；Agent View 不是 OS sandbox。首期 token 设计防止持久化泄漏、误继承、旧 worker 重放和普通跨 session 冒充，不宣称抵抗同 UID 的主动恶意进程。
 
@@ -258,18 +258,20 @@ qwen --bg --read-only --task-file <absolute-task-file> --output-format json
 输出合同只包含 dispatch ACK，不伪装成 worker result：
 
 ```json
-{"coordinationId":"...","taskId":"...","attemptId":"...","sessionId":"...","promptId":"...","inputSnapshot":"...","state":"starting"}
+{"type":"dispatch_ack","coordinationId":"...","taskId":"...","attemptId":"...","sessionId":"...","promptId":"...","inputSnapshot":"...","state":"starting"}
 ```
 
-非 Git 任务的 `inputSnapshot` 为 `null`。同时让 `qwen agents --json --all` 暴露 lineage labels、`activePromptId`、`lastCompletedPromptId`、`inputSnapshot`、`resultPath`、`staleReason` 和相应状态。Coordinator 只接受与自己 `promptId` 匹配、位于 supervisor session directory 内且未 stale 的 result；不得通过前后两次 list 差集猜测新 session，也不得解析短 ID 或 UI 文案。
+`--output-format json` 保留现有非交互输出语义；`type: dispatch_ack` 是必须校验的判别字段，不能让调用方按字段形状猜测。非 Git 任务的 `inputSnapshot` 为 `null`。同时让 `qwen agents --json --all` 暴露 lineage labels、`activePromptId`、`lastCompletedPromptId`、`inputSnapshot`、`resultPath`、`staleReason` 和相应状态。Coordinator 只接受与自己 `promptId` 匹配、位于 supervisor session directory 内且未 stale 的 result；不得通过前后两次 list 差集猜测新 session，也不得解析短 ID 或 UI 文案。
 
 dispatch 还必须传递一个受限 execution profile，而不是让模型提交任意 argv。该 profile 在 argv 解析后、任何 settings-derived side effect 之前锁定：启动只读取认证、模型等惰性配置，忽略自定义 sandbox command、extensions、hooks、MCP、skills、settings watcher 和其他可能执行代码的配置；如需 sandbox，只能选择仓库内置、不可被用户设置改写的 safe profile。完整 config 初始化不得先启动这些组件再从工具列表移除。
 
-`--read-only` 冻结 mode/tool 配置，并在所有工具发现之后再用正向 allowlist 做第二层校验：`read_file`、`grep_search`、`glob`、`list_directory`、`ask_user_question`。LSP、shell、monitor、edit/write、mode switch、delegation/Team/Arena/background 和其他未列工具全部不可用；用户设置不能扩大清单。writer profile 后续使用用户明确选择的 approval mode，永不由 Coordinator 自动升级为 `yolo`，并同样禁用 delegation、Team、Arena、background 和嵌套 `qwen --bg`。
+`--read-only` 冻结 mode/tool 配置，并在所有工具发现之后再用正向 allowlist 做第二层校验：`read_file`、`grep_search`、`glob`、`list_directory`。不要新增第二份独立字符串清单：从 `subagent-plan-tool-policy.ts` 导出一个由这四个纯文件读取工具组成的 canonical base，Coordinator 与现有 plan-required teammate policy 都从它派生；后者已有的 `exit_plan_mode`、`lsp`、`task_list`、`tool_search`、`read_mcp_resource` 是该场景的显式增量。这样既复用唯一基础，又不把会启动语言服务、访问 MCP 或修改 task ownership 的能力误归为通用只读。
+
+只读 profile 同时固定 `settings.toolSearch.enabled = false`，并在启动时声明上述四个内置工具，不能依赖 deferred tool loading。LSP、shell、monitor、edit/write、user question、mode switch、delegation/Team/Arena/background 和其他未列工具全部不可用；用户设置不能扩大清单。writer profile 后续使用用户明确选择的 approval mode，永不由 Coordinator 自动升级为 `yolo`，并同样禁用 delegation、Team、Arena、background 和嵌套 `qwen --bg`。
 
 嵌套拒绝必须覆盖两条来源：Agent View 在受控 worker process-spawn boundary 注入不可持久化的 managed-worker identity；Agent Team 在 teammate 的 shell/process-spawn boundary 传播 denial-only teammate identity；`qwen --bg` 在创建 supervisor activity 前拒绝二者。writer 有 shell 权限时，这个标记是防止误递归的产品边界，不冒充抵抗主动清除环境的安全沙箱；支持 executable policy 的平台同时拒绝 worker 再启动 `qwen`，否则验收必须明确记录该限制。
 
-主动 E2E 必须先配置会写 sentinel file 的自定义 sandbox command、hook、MCP server 和 extension，确认它们在只读 worker 启动期间从未执行；再核对最终工具清单，并让只读 worker 尝试 edit/write/shell/monitor/MCP/custom tool、切换 mode、启动 Team/Arena 和嵌套 `qwen --bg`，确认全部被拒绝。writer 和 Agent Team teammate 也分别尝试嵌套 dispatch。只要启动前净化或最终正向 allowlist 不能在任意用户配置下成立，就停止 shared-checkout Experiment，将 Phase 2 的 worktree ownership 交付提前；随后只以 disposable worktree 和“isolated investigation”文案继续，不能宣称 shared read-only。
+主动 E2E 必须先配置会写 sentinel file 的自定义 sandbox command、hook、MCP server 和 extension，确认它们在只读 worker 启动期间从未执行；再核对最终工具清单，并让只读 worker 尝试 edit/write/shell/monitor/MCP/custom tool、`cron_create`、`save_memory`、`create_sub_session`、`loop_wakeup`、`workflow`、`enter_worktree` / `exit_worktree`、切换 mode、启动 Team/Arena 和嵌套 `qwen --bg`，确认全部被拒绝。writer 和 Agent Team teammate 也分别尝试嵌套 dispatch。只要启动前净化或最终正向 allowlist 不能在任意用户配置下成立，就停止 shared-checkout Experiment，将 Phase 2 的 worktree ownership 交付提前；随后只以 disposable worktree 和“isolated investigation”文案继续，不能宣称 shared read-only。
 
 主要文件：
 
@@ -286,7 +288,7 @@ dispatch 还必须传递一个受限 execution profile，而不是让模型提�
 
 ```bash
 cd packages/core
-npx vitest run src/config/config.test.ts
+npx vitest run src/config/config.test.ts src/agents/runtime/subagent-plan-tool-policy.test.ts
 
 cd packages/cli
 npx vitest run src/config/config.test.ts src/commands/agents.test.ts
@@ -308,6 +310,8 @@ npx vitest run src/config/config.test.ts src/commands/agents.test.ts
 
 MVP 是明确的两段式交互：dispatch turn 不等待 worker；用户或后续 Leader turn 显式调用 `collect <coordination-id>`。collect 只读取一次 `qwen agents --json --all` 快照：已完成则按匹配 ID 汇总，仍运行则返回当前状态和待完成 session，不启动轮询循环。首期不增加后台 coordinator runner、通知唤醒或 continuation 机制。
 
+Phase 1 任务必须自包含，worker 没有 `ask_user_question`。任何 permission/user-question 阻塞都视为只读 profile 或任务拆分失败；公开 `answer` seam 仍留在 Phase 3。
+
 Skill 证明有效前不新增通用 coordinator class、task service 或配置系统。
 
 #### 1.3 只读 MVP 场景
@@ -322,18 +326,18 @@ MVP 不承诺 Leader turn 被取消时自动停止 worker，也不承诺 Leader 
 
 #### 1.4 Phase 1 go/no-go
 
-用固定的 10 个可分解真实任务做 paired run；同一任务的单 Agent 和 Coordinator 各运行 3 次，评分者看不到 runtime。每个任务预先写 0–4 分 rubric：0=失败，1=主要目标未完成，2=核心目标正确，3=完整且无关键错误，4=完整并有独立证据/额外有效覆盖。
+用固定的 10 个可分解真实任务做 paired run；每个任务运行默认工具单 Agent、工具对齐的只读单 Agent、2-worker Coordinator 各 3 次，评分者看不到 runtime。默认工具组是发布门槛，工具对齐组只用于区分 orchestration 与 tool restriction 的影响。每个任务预先写 0–4 分 rubric：0=失败，1=主要目标未完成，2=核心目标正确，3=完整且无关键错误，4=完整并有独立证据/额外有效覆盖。
 
-2-worker 和 3-worker 结果分层报告，不能混成一个平均数。进入写入阶段必须同时满足：
+该样本只提供方向性 go/no-go 证据，不宣称统计显著性。3-worker 作为探索数据单独报告但不参与首个 gate；进入写入阶段必须同时满足：
 
 - task/result 关联错误、跨 session 输入、误报 completed、漏报 stale 和 shared checkout 修改均为 0。
-- Coordinator 的中位质量分不低于 paired 单 Agent。
+- Coordinator 的中位质量分不低于 paired 默认工具单 Agent；同时报告与工具对齐单 Agent 的差异。
 - 至少 7/10 个任务满足其一：质量不降且 wall time 降低至少 20%；或 wall time 不恶化超过 20% 且质量提高至少 0.5 分。
-- 2-worker 总 token 不超过单 Agent 的 2.5 倍；3-worker 不超过 3.5 倍。
+- 2-worker 总 token 不超过默认工具单 Agent 的 2.5 倍。
 - “人工纠偏”统一计为初始请求后用户额外发送的纠错、attach、重发或手工恢复动作，平均不超过每任务 0.5 次。
 - edit/write/shell/monitor、MCP/custom tool、mode switch、Team/Arena 和嵌套 `qwen --bg` 的主动越权用例全部被拒绝。
 
-未过门槛时保留 Agent View 本身，删除/隐藏项目 Skill，不继续做 worktree 和 handoff。
+未过门槛时保留 Agent View 本身，删除/隐藏项目 Skill，不继续做 worktree 和 handoff。Experiment 1 从 PR 1 首个可用构建起最多运行 4 周；届时仍无法形成结论则默认 no-go 并移除项目级 Skill。
 
 ### Phase 2：单写者 worktree 闭环
 
@@ -512,7 +516,7 @@ Reporter 不属于 Phase 0–4，也不负责调度其他 Agent。若单独实�
 
 ### 7.1 固定条件
 
-- 同一仓库 commit、同一模型/provider、相同 approval mode 和工具集合。
+- 同一仓库 commit、同一模型/provider 和相同 approval mode。工具对齐单 Agent 与 Coordinator 使用完全相同的只读清单；默认单 Agent 使用当前发布默认工具，作为真实 ship gate。
 - 预先写定 task split 和结果评分，不在看到结果后改标准。
 - Qwen-native 与 Herdr-Qwen 使用相同 Leader/worker prompt 和 worker 数。
 - 每个任务使用 paired run 和相同重复次数；记录全部失败和人工干预，不只保留成功样本，并报告中位数、IQR 和原始结果。
