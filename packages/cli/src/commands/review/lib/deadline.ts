@@ -91,6 +91,35 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
 export const DEFAULT_RESERVE_SECONDS = 4800;
 
 /**
+ * The slice of the tail that composing and submitting a review need on
+ * their own, with no verification in it. The reserve above covers the
+ * terminal round's verification PLUS this; a review that stops verifying at
+ * this boundary still composes and posts everything it has proved.
+ *
+ * A distinct, smaller floor exists because the two costs fail differently.
+ * A round's verification scales with its finding count and — on a security
+ * PR whose findings are shell/git bypasses re-checked with real filesystem
+ * E2E — with the per-finding cost, without bound; compose-review is one CLI
+ * call and the submission a handful of `gh` calls, both bounded. So the
+ * verification is what a wall runs into, and the fix is to gate the
+ * VERIFIER on this floor: below it, no verify shard is built, the
+ * findings in hand keep their `— [unverified]` tag (compose-review caps the
+ * verdict on it), and compose still runs. Measured: PR #8687, a 4 269-line
+ * cross-worktree git guard, ran the audit to a correct budget stop with
+ * ~110 minutes left, then a single hand-rolled re-verification agent
+ * re-running a 15-family bypass battery with real bash+git consumed all of
+ * it — the wall hit mid-verification, compose never ran, and ~20
+ * E2E-confirmed Critical bypasses were never posted. Twenty minutes is
+ * insurance sized like the reserve, not arithmetic: compose + anchor
+ * resolution + submit has no measured upper bound, and over-reserving only
+ * ends verification a shard early, disclosed as an unverified tag.
+ */
+export const DEFAULT_COMPOSE_FLOOR_SECONDS = 1200;
+
+/** Override for the compose floor, in seconds. */
+export const COMPOSE_FLOOR_ENV = 'QWEN_REVIEW_DEADLINE_COMPOSE_FLOOR_SECONDS';
+
+/**
  * The admission estimate for a round nothing has measured yet — round 1, or
  * a record dir that lost its stamps. Thirty minutes covers a measured
  * small-PR round (~17 min, #8456) with margin; a large PR's first round may
@@ -269,6 +298,71 @@ export function reverseAuditBudgetExhausted(
   };
 }
 
+export interface ComposeFloorExhausted {
+  /** Whole seconds until the deadline; can be negative when already past. */
+  remainingSeconds: number;
+  /** The compose floor the remaining time failed to clear. */
+  composeFloorSeconds: number;
+}
+
+/**
+ * Decide whether a verification shard still fits before the compose floor:
+ * the deterministic backstop that keeps the terminal round's verification
+ * from consuming the time compose-review and submission need. Returns
+ * `null` when a verify build may proceed — or when no deadline is set (a
+ * local run), so the gate is inert exactly where the reverse-audit gate is.
+ *
+ * This fires only when the reserve has already been spent down into the
+ * compose floor — the reverse-audit gate keeps `reserve` (which includes
+ * this floor) ahead of the last round, so a healthy run never reaches it.
+ * It is the cover for the one span the reserve cannot bound: a terminal
+ * verification whose cost the finding set made larger than the reserve
+ * planned for.
+ */
+export function verifyBudgetExhausted(
+  env: NodeJS.ProcessEnv,
+  nowMs: number = Date.now(),
+): ComposeFloorExhausted | null {
+  const raw = env[DEADLINE_ENV];
+  if (raw === undefined || raw.trim() === '') return null;
+  const deadline = Number(raw);
+  if (!Number.isFinite(deadline) || deadline <= 0) return null;
+
+  let floor = DEFAULT_COMPOSE_FLOOR_SECONDS;
+  const floorRaw = env[COMPOSE_FLOOR_ENV];
+  if (floorRaw !== undefined && floorRaw.trim() !== '') {
+    const f = Number(floorRaw);
+    // `>= 0` like the reserve: 0 is the escape hatch that disables the
+    // verify gate while leaving the reverse-audit gate untouched.
+    if (Number.isFinite(f) && f >= 0) floor = f;
+  }
+
+  const remainingSeconds = Math.floor(deadline - nowMs / 1000);
+  if (remainingSeconds >= floor) return null;
+  return { remainingSeconds, composeFloorSeconds: floor };
+}
+
+/**
+ * The stderr line the verify gate prints on refusal — a termination rule
+ * for the verification pass, not an error, spelled so the orchestrator
+ * composes now rather than re-attempting the build.
+ */
+export function verifyBudgetMessage(spent: ComposeFloorExhausted): string {
+  const minutesLeft = Math.max(0, Math.floor(spent.remainingSeconds / 60));
+  const floorMinutes = Math.round(spent.composeFloorSeconds / 60);
+  return (
+    `VERIFY BUDGET: ${minutesLeft} minute(s) remain before this review's ` +
+    `deadline — below the ${floorMinutes}-minute floor compose-review and ` +
+    `submission need, so no verification shard will be built. This is a ` +
+    `termination rule, not an error: do not rebuild the verifier. Proceed ` +
+    `to Step 6 NOW and compose. Findings still carrying \`— [unverified]\` ` +
+    `keep that tag — compose-review caps the verdict on it and posts them ` +
+    `as needing human review — because a review that stops verifying here ` +
+    `still posts everything it found, while one that keeps verifying past ` +
+    `this floor is killed before it posts anything.`
+  );
+}
+
 export interface BudgetStop {
   /** The exact `unreviewedDimensions` entry, composed here so the text that
    * caps the verdict is this module's in both channels. */
@@ -407,9 +501,13 @@ export function reverseAuditBudgetMessage(
     `itself; also add exactly this entry to unreviewedDimensions so the ` +
     `terminal report says it too — ` +
     `\`${budgetStopEntry(round)}\` — ` +
-    `and proceed to Step 6 with the findings already confirmed. Spend what ` +
-    `time remains only on verifying findings already in hand, composing, and ` +
-    `submitting. A review that stops here still reports everything it ` +
-    `proved; a review that runs past its deadline is killed holding all of it.`
+    `and proceed to Step 6. Verify the last round's findings ONLY through ` +
+    `\`agent-prompt --role verify\` (never a hand-rolled agent) — it is gated ` +
+    `on the compose floor and will refuse once too little time remains, ` +
+    `leaving any still-\`[unverified]\` findings tagged for compose-review to ` +
+    `cap — then compose and submit. Do NOT re-verify findings already ` +
+    `confirmed in earlier rounds. A review that stops here still reports ` +
+    `everything it proved; a review that runs past its deadline is killed ` +
+    `holding all of it.`
   );
 }

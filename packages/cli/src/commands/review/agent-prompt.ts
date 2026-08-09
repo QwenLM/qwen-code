@@ -49,6 +49,8 @@ import {
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
   stampRound,
+  verifyBudgetExhausted,
+  verifyBudgetMessage,
   writeBudgetStop,
 } from './lib/deadline.js';
 import {
@@ -2357,6 +2359,26 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(args.plan, args.round)
   ) {
     return;
+  }
+
+  // The verify gate: the deterministic backstop that keeps the terminal
+  // round's verification from consuming the time compose-review and
+  // submission need. It fires only once the reverse-audit reserve has been
+  // spent down into the compose floor — a healthy run never reaches it,
+  // because the reverse-audit gate keeps the whole reserve (compose floor
+  // included) ahead of the last round. When it fires, no verify shard is
+  // built, the findings keep their `— [unverified]` tag, and the
+  // orchestrator composes on that (compose-review caps the verdict on the
+  // tag). Measured: PR #8687 stopped the audit correctly with ~110 minutes
+  // left, then spent all of it on a re-verification battery and was killed
+  // before compose ran — ~20 confirmed Critical bypasses never posted.
+  if (args.role === 'verify') {
+    const spent = verifyBudgetExhausted(process.env);
+    if (spent !== null) {
+      writeStderrLine(verifyBudgetMessage(spent));
+      process.exitCode = 4;
+      return;
+    }
   }
 
   // The reverse-audit gate for a --chunk build, placed after the plan read

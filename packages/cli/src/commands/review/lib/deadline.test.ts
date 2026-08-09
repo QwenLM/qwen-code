@@ -19,8 +19,10 @@ import {
   BUDGET_STOP_PHRASE,
   DEADLINE_ENV,
   RESERVE_ENV,
+  COMPOSE_FLOOR_ENV,
   DEFAULT_RESERVE_SECONDS,
   DEFAULT_ROUND_SECONDS,
+  DEFAULT_COMPOSE_FLOOR_SECONDS,
   budgetStopEntry,
   budgetStopEntryZh,
   expectedRoundSeconds,
@@ -29,6 +31,8 @@ import {
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
   stampRound,
+  verifyBudgetExhausted,
+  verifyBudgetMessage,
   writeBudgetStop,
 } from './deadline.js';
 
@@ -429,5 +433,75 @@ describe('reverseAuditBudgetMessage', () => {
     );
     expect(msg).toContain('0 minute(s) remain');
     expect(msg).toContain('stopped before the next round');
+  });
+});
+
+describe('verifyBudgetExhausted — the compose floor the verifier answers to', () => {
+  it('stays silent when no deadline is set — every local run', () => {
+    expect(verifyBudgetExhausted({}, NOW_MS)).toBeNull();
+    expect(verifyBudgetExhausted({ [DEADLINE_ENV]: '' }, NOW_MS)).toBeNull();
+  });
+
+  it('admits a verify build while the compose floor still fits', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS + 60),
+    };
+    expect(verifyBudgetExhausted(env, NOW_MS)).toBeNull();
+  });
+
+  it('admits at EXACT cover — remaining equal to the floor', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS),
+    };
+    expect(verifyBudgetExhausted(env, NOW_MS)).toBeNull();
+  });
+
+  it('refuses once remaining drops below the compose floor', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS - 60),
+    };
+    const spent = verifyBudgetExhausted(env, NOW_MS);
+    expect(spent).not.toBeNull();
+    expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+    expect(spent?.remainingSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS - 60);
+  });
+
+  it('honors the env override, including 0 as the disable hatch', () => {
+    const near = { [DEADLINE_ENV]: String(NOW_S + 300) };
+    // Floor lowered to 60s: 300s remaining now clears it.
+    expect(
+      verifyBudgetExhausted({ ...near, [COMPOSE_FLOOR_ENV]: '60' }, NOW_MS),
+    ).toBeNull();
+    // Floor 0 disables the gate entirely — the escape hatch.
+    expect(
+      verifyBudgetExhausted({ ...near, [COMPOSE_FLOOR_ENV]: '0' }, NOW_MS),
+    ).toBeNull();
+    // A garbled override falls back to the default, which 300s fails.
+    expect(
+      verifyBudgetExhausted(
+        { ...near, [COMPOSE_FLOOR_ENV]: 'nonsense' },
+        NOW_MS,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('the floor is strictly below the reserve — the verifier stops after the RA gate', () => {
+    // The reserve covers verification PLUS compose; the floor is compose
+    // alone. If the floor ever met or exceeded the reserve, the verify gate
+    // would fire before the reverse-audit gate and starve the very
+    // verification the reserve exists to protect.
+    expect(DEFAULT_COMPOSE_FLOOR_SECONDS).toBeLessThan(DEFAULT_RESERVE_SECONDS);
+  });
+
+  it('the refusal message says compose now and keeps unverified findings', () => {
+    const spent = verifyBudgetExhausted(
+      { [DEADLINE_ENV]: String(NOW_S + 300) },
+      NOW_MS,
+    );
+    const msg = verifyBudgetMessage(spent!);
+    expect(msg).toContain('VERIFY BUDGET:');
+    expect(msg).toContain('compose');
+    expect(msg).toContain('[unverified]');
+    expect(msg).toContain('5 minute(s) remain');
   });
 });
