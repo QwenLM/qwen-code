@@ -29,6 +29,7 @@ import {
   EVENT_CLI_CONFIG,
   EVENT_FLASH_FALLBACK,
   EVENT_TOOL_CALL,
+  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
@@ -49,6 +50,8 @@ import {
   logStartSession,
   logUserPrompt,
   logToolCall,
+  logLoopDetected,
+  logRepeatedToolFailureGuard,
   logFlashFallback,
   logChatCompression,
   logMalformedJsonResponse,
@@ -97,6 +100,9 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
+  LoopDetectedEvent,
+  LoopType,
+  RepeatedToolFailureGuardEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -344,6 +350,141 @@ describe('loggers', () => {
           subagents: undefined,
         },
       });
+    });
+  });
+
+  describe('logRepeatedToolFailureGuard', () => {
+    it('emits a data-minimized transition log and low-cardinality metric', () => {
+      vi.spyOn(
+        metrics,
+        'recordRepeatedToolFailureGuardMetrics',
+      ).mockImplementation(() => undefined);
+      const event = new RepeatedToolFailureGuardEvent({
+        prompt_id: 'prompt-id',
+        route: 'acp_foreground',
+        mode: 'shadow',
+        phase_before: 'tracking',
+        phase_after: 'warned',
+        decision: 'would_warn',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '2',
+        candidate_ordinal: 1,
+        terminal_status: 'error',
+        execution_status: 'error',
+        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
+        tool_type: 'mcp',
+      });
+
+      logRepeatedToolFailureGuard(event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Repeated tool failure guard decision: would_warn.',
+        attributes: {
+          ...event,
+          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
+        },
+      });
+      expect(
+        metrics.recordRepeatedToolFailureGuardMetrics,
+      ).toHaveBeenCalledWith({
+        route: 'acp_foreground',
+        mode: 'shadow',
+        phase_before: 'tracking',
+        phase_after: 'warned',
+        decision: 'would_warn',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '2',
+        terminal_status: 'error',
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+      const serialized = JSON.stringify(mockLogger.emit.mock.calls.at(-1));
+      expect(serialized).not.toMatch(
+        /session.id|user.id|policyToolName|function_args|result|error_message|server_name/,
+      );
+    });
+
+    it('isolates transition log and metric sink failures', () => {
+      const event = new RepeatedToolFailureGuardEvent({
+        prompt_id: 'prompt-id',
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        candidate_ordinal: 1,
+      });
+      vi.spyOn(
+        metrics,
+        'recordRepeatedToolFailureGuardMetrics',
+      ).mockImplementationOnce(() => {
+        throw new Error('metric unavailable');
+      });
+      mockLogger.emit.mockImplementationOnce(() => {
+        throw new Error('log unavailable');
+      });
+
+      expect(() => logRepeatedToolFailureGuard(event)).not.toThrow();
+      expect(event).not.toHaveProperty('reset_reason');
+      expect(event).not.toHaveProperty('terminal_status');
+      expect(event).not.toHaveProperty('execution_status');
+      expect(event).not.toHaveProperty('execution_error_type');
+      expect(event).not.toHaveProperty('tool_type');
+    });
+  });
+
+  describe('logLoopDetected', () => {
+    it('does not infer telemetry destinations from the loop type', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopDetectedEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({
+          logLoopDetectedEvent,
+        } as unknown as QwenLogger);
+      const event = new LoopDetectedEvent(
+        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        'prompt-id',
+      );
+
+      try {
+        logLoopDetected(config, event);
+
+        expect(logLoopDetectedEvent).toHaveBeenCalledWith(event);
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
+    });
+
+    it('supports explicitly keeping a loop event out of QwenLogger', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopDetectedEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({
+          logLoopDetectedEvent,
+        } as unknown as QwenLogger);
+      const event = new LoopDetectedEvent(
+        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        'prompt-id',
+      );
+
+      try {
+        logLoopDetected(config, event, { recordToQwenLogger: false });
+
+        expect(logLoopDetectedEvent).not.toHaveBeenCalled();
+        expect(mockLogger.emit).toHaveBeenCalledWith({
+          body: `Loop detected. Type: ${LoopType.REPEATED_TOOL_EXECUTION_FAILURE}.`,
+          attributes: {
+            'session.id': 'test-session-id',
+            ...event,
+          },
+        });
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
     });
   });
 
