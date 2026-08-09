@@ -5,14 +5,17 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+import { randomBytes } from 'node:crypto';
+import { networkInterfaces } from 'node:os';
 import type { ServeChannelSelection } from '../serve/types.js';
+import type { RunHandle } from '../serve/run-qwen-serve.js';
 import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // Type-only imports — no runtime cost. The serve module pulls in express +
 // body-parser + qs + the daemon transport stack; static-importing it from
 // here would tax every `qwen` invocation (interactive, mcp, channel, etc.)
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
@@ -31,6 +34,7 @@ import {
   MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
+  sleepInhibitor,
   shouldLaunchBrowser,
   type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
@@ -46,6 +50,54 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
+}
+
+const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
+
+export function localControlUrls(
+  baseUrl: string,
+  token: string,
+  interfaces = networkInterfaces(),
+): Array<{ interfaceName: string; url: string }> {
+  const urls: Array<{ interfaceName: string; url: string }> = [];
+  for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
+    for (const address of addresses ?? []) {
+      if (address.family !== 'IPv4' || address.internal) {
+        continue;
+      }
+      const target = new URL(baseUrl);
+      target.hostname = address.address;
+      target.hash = `token=${encodeURIComponent(token)}`;
+      urls.push({ interfaceName, url: target.toString() });
+    }
+  }
+  return urls;
+}
+
+async function showLocalControlPairing(
+  handle: RunHandle,
+  urls: Array<{ interfaceName: string; url: string }>,
+): Promise<void> {
+  await handle.runtimeReady;
+  if (!handle.webShellMounted || !handle.resolvedToken) {
+    throw new Error('Local Control requires the authenticated Web Shell.');
+  }
+  const { default: qrcode } = (await import('qrcode-terminal')) as {
+    default: typeof import('qrcode-terminal');
+  };
+  qrcode.setErrorLevel('Q');
+  writeStdoutLine(
+    '\nLocal Control is on. Scan a QR code from the same network:',
+  );
+  for (const entry of urls) {
+    writeStdoutLine(`\n${entry.interfaceName}: ${entry.url}`);
+    qrcode.generate(entry.url, { small: true }, (code) => {
+      writeStdoutLine(code.trimEnd());
+    });
+  }
+  writeStdoutLine(
+    '\nKeep this terminal open. Restart after changing networks. Sleep inhibition is best effort. Traffic is encrypted only when --tls-cert and --tls-key are set. Press Ctrl+C to turn Local Control off.',
+  );
 }
 
 /**
@@ -124,6 +176,7 @@ interface ServeArgs {
   'tls-key'?: string;
   web: boolean;
   open: boolean;
+  'local-control': boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -139,6 +192,7 @@ interface ServeArgs {
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
   'initialize-timeout-ms'?: number;
+  'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
@@ -174,7 +228,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('hostname', {
         type: 'string',
-        default: '127.0.0.1',
+        default: DEFAULT_SERVE_HOSTNAME,
         description:
           'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
       })
@@ -282,6 +336,41 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: false,
         description:
           'Open the Web Shell in a browser once the daemon is listening. With a token configured, the launch URL (token included) is handed to the browser launcher and is visible in the process list, so prefer opening the URL manually on multi-user hosts. No-op with --no-web, when the UI assets are absent, or in headless/CI/SSH environments.',
+      })
+      .option('local-control', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Share the Web Shell on the local IPv4 network with a fresh token, terminal QR code, and best-effort sleep inhibition. Press Ctrl+C to turn it off.',
+      })
+      .check((argv) => {
+        if (argv['local-control'] === true && argv.token !== undefined) {
+          throw new Error('Local Control generates its own token.');
+        }
+        if (
+          argv['local-control'] === true &&
+          argv['allow-origin'] !== undefined
+        ) {
+          throw new Error('Local Control manages its browser origins.');
+        }
+        if (argv['local-control'] === true && argv['web'] === false) {
+          throw new Error('Local Control requires the Web Shell.');
+        }
+        if (
+          argv['local-control'] === true &&
+          (!Number.isInteger(argv['port']) ||
+            argv['port'] < 1 ||
+            argv['port'] > 65535)
+        ) {
+          throw new Error('Local Control requires a fixed port.');
+        }
+        if (
+          argv['local-control'] === true &&
+          argv.hostname !== DEFAULT_SERVE_HOSTNAME
+        ) {
+          throw new Error('Local Control manages its hostname.');
+        }
+        return true;
       })
       .option('event-ring-size', {
         type: 'number',
@@ -425,6 +514,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'ACP child request timeout, including the initialize handshake (ms). ' +
           'Default: 10000 (10 s).',
+      })
+      .option('session-restore-timeout-ms', {
+        type: 'number',
+        description:
+          'ACP session load/resume timeout (ms). Default: 60000. An explicit ' +
+          '--initialize-timeout-ms can raise (but never lower) this default.',
       })
       .option('session-reap-interval-ms', {
         type: 'number',
@@ -671,10 +766,25 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     // the public serve barrel, which also exports REST/ACP runtime modules.
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
+      const localControlToken = argv['local-control']
+        ? randomBytes(32).toString('base64url')
+        : undefined;
+      const localControlPairing = localControlToken
+        ? localControlUrls(
+            `${argv['tls-cert'] ? 'https' : 'http'}://0.0.0.0:${argv.port}/`,
+            localControlToken,
+          )
+        : [];
+      if (argv['local-control'] && localControlPairing.length === 0) {
+        throw new Error(
+          'Local Control could not find a non-loopback IPv4 address.',
+        );
+      }
       const handle = await runQwenServe({
         port: argv.port,
-        hostname: argv.hostname,
-        token: argv.token,
+        strictPort: argv['local-control'],
+        hostname: argv['local-control'] ? '0.0.0.0' : argv.hostname,
+        token: localControlToken ?? argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         ...(argv['max-total-sessions'] !== undefined
@@ -703,9 +813,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         memoryPressureMode: argv['memory-pressure-mode'],
         childHeapMode: argv['child-heap-mode'],
-        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
-          ? { allowOrigins: argv['allow-origin'] }
-          : {}),
+        ...(argv['local-control']
+          ? {
+              allowOrigins: localControlPairing
+                .map(({ url }) => new URL(url).origin)
+                .concat(
+                  new URL(
+                    `${argv['tls-cert'] ? 'https' : 'http'}://127.0.0.1:${argv.port}`,
+                  ).origin,
+                ),
+            }
+          : argv['allow-origin'] && argv['allow-origin'].length > 0
+            ? { allowOrigins: argv['allow-origin'] }
+            : {}),
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
           : {}),
@@ -717,6 +837,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['initialize-timeout-ms'] !== undefined
           ? { initializeTimeoutMs: argv['initialize-timeout-ms'] }
+          : {}),
+        ...(argv['session-restore-timeout-ms'] !== undefined
+          ? {
+              sessionRestoreTimeoutMs: argv['session-restore-timeout-ms'],
+            }
           : {}),
         ...(argv['session-reap-interval-ms'] !== undefined
           ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }
@@ -754,6 +879,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
+      if (argv['local-control']) {
+        try {
+          await showLocalControlPairing(handle, localControlPairing);
+          sleepInhibitor.acquire('Qwen Code Local Control is active');
+        } catch (err) {
+          await handle.close().catch(() => undefined);
+          throw err;
+        }
+      }
       await maybeOpenWebShellBrowser(handle, argv.open);
     } catch (err) {
       writeStderrLine(
