@@ -1077,6 +1077,27 @@ jobs:
               DOCS_ONLY_MEDIUM=false
             fi
           fi
+          # A micro automatic review (churn below the review skill's sweep
+          # floor of 25 changed lines) keeps its full high-effort posting
+          # run — a medium downgrade would drop the inline comments a source
+          # fix deserves, and the pipeline itself is what shrinks on a micro
+          # diff (file-scoped suites, a one-round reverse audit). What a
+          # micro run must not keep is a multi-hour kill switch: halve the
+          # small-PR budget with the same 90-minute floor the docs downgrade
+          # uses, so a hung run dies at the scale of its work. Skipped when
+          # the size lookup failed (an unknown size must not tighten
+          # anything), on explicit runs (their timeout is the caller's), and
+          # for docs-only runs, which are already halved.
+          if [ "${AUTO_REVIEW:-false}" = "true" ] \
+            && [ "$DOCS_ONLY_MEDIUM" != "true" ] \
+            && [ -n "${PR_SIZE_LINES:-}" ] \
+            && [ "$PR_SIZE_LINES" -lt 25 ]; then
+            EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
+            if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
+              EFFECTIVE_TIMEOUT_MINUTES=90
+            fi
+            echo "PR #${PR_NUMBER} is a micro diff (${PR_SIZE_LINES} changed lines); the automatic review keeps --effort high and inline posting, with a tightened ${EFFECTIVE_TIMEOUT_MINUTES}-minute budget."
+          fi
           echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
 
           if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
@@ -1359,7 +1380,7 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           EXPECTED_HEAD_SHA: '${{ steps.review.outputs.expected_head_sha }}'
-          COMPLETION_LINE: "${{ steps.review.outputs.completion_line || '(no relayable \"Review complete:\" line in the run output — see the run log)' }}"
+          COMPLETION_LINE: '${{ steps.review.outputs.completion_line || ''(no relayable "Review complete:" line in the run output — see the run log)'' }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail

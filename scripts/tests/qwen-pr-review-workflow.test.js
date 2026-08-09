@@ -1641,7 +1641,7 @@ describe('docs-only gate and relay, executed', () => {
     return runStep.slice(start, end);
   }
 
-  function runGate({ autoReview, wrapper }) {
+  function runGate({ autoReview, wrapper, prSizeLines, timeoutMinutes }) {
     const dir = mkdtempSync(join(tmpdir(), 'docs-gate-'));
     try {
       const stub = join(dir, '.github/scripts/ci');
@@ -1655,7 +1655,8 @@ describe('docs-only gate and relay, executed', () => {
         `AUTO_REVIEW=${autoReview}`,
         'REPO=o/r',
         'PR_NUMBER=42',
-        'EFFECTIVE_TIMEOUT_MINUTES=360',
+        `EFFECTIVE_TIMEOUT_MINUTES=${timeoutMinutes ?? 360}`,
+        ...(prSizeLines === undefined ? [] : [`PR_SIZE_LINES=${prSizeLines}`]),
         `GITHUB_OUTPUT="${gho}"`,
         gateSource(),
         'printf "timeout=%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
@@ -1676,6 +1677,69 @@ describe('docs-only gate and relay, executed', () => {
       wrapper: '#!/bin/bash\necho docs_only\n',
     });
     expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it("tightens a micro diff's budget without touching its effort or posting", () => {
+    // Below the review skill's sweep floor (25 changed lines) the automatic
+    // run keeps --effort high and its inline comments — the pipeline itself
+    // shrinks on a micro diff — but its kill switch halves to the same
+    // 90-minute floor the docs downgrade uses.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 24,
+      timeoutMinutes: 180,
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('micro diff (24 changed lines)');
+    expect(r.stdout).toContain('keeps --effort high');
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('micro tightening floors at 90 minutes', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 10,
+      timeoutMinutes: 100,
+    });
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('twenty-five changed lines is not micro — the boundary is the sweep floor', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 25,
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('a docs-only micro diff is halved once, by the docs gate, not twice', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+      prSizeLines: 10,
+      timeoutMinutes: 360,
+    });
+    expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+    expect(r.stdout).not.toContain('micro diff');
+  });
+
+  it('an unknown size never tightens — and neither does an explicit run', () => {
+    // PR_SIZE_LINES is unset when the size lookup failed or when the caller
+    // passed --timeout (the size block is skipped); both must keep the
+    // budget they have.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
     expect(r.stdout).toContain('timeout=180');
   });
 
