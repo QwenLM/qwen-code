@@ -2441,8 +2441,9 @@ async function runQwenServeImpl(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
           ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
-            'token gates API routes; /health remains pre-auth ' +
-            'on loopback unless --require-auth is set)'
+            'token gates API routes; the Web Shell static assets stay ' +
+            'pre-auth in every mode unless --no-web, and /health stays ' +
+            'pre-auth on loopback unless --require-auth is set)'
           : ''),
     );
   }

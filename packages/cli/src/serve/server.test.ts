@@ -3347,6 +3347,48 @@ describe('createServeApp', () => {
       expect(res.text).toContain('<div id="root">');
     });
 
+    it('no longer serves a demo page: /demo is an ordinary unknown path', async () => {
+      // `/demo` used to be its own pre-auth route. Now it is nothing: a
+      // non-navigation request must 404 (never a debug console), while a
+      // browser navigation is indistinguishable from any other SPA deep link
+      // and gets the shell. Reintroducing the old handler flips the first
+      // assertion.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+
+      const api = await request(app)
+        .get('/demo')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(api.status).toBe(404);
+      expect(api.text).not.toContain('<div id="root">');
+
+      const nav = await request(app)
+        .get('/demo')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(nav.status).toBe(200);
+      expect(nav.text).toContain('<div id="root">');
+    });
+
+    it('gates a /demo navigation behind the bearer once a token is configured', async () => {
+      // The SPA fallback is mounted AFTER bearerAuth, so unlike `/` and
+      // `/session/:id` an unauthenticated navigation to a leftover `/demo`
+      // bookmark is refused rather than answered with the shell — the old
+      // route's loopback pre-auth exposure is gone in every launch mode.
+      for (const opts of [
+        { ...baseOpts, token: 'secret' },
+        { ...baseOpts, token: 'secret', requireAuth: true },
+      ]) {
+        const app = createServeApp(opts, undefined, { webShellDir });
+        const res = await request(app)
+          .get('/demo')
+          .set('Host', host)
+          .set('Accept', 'text/html');
+        expect(res.status).toBe(401);
+        expect(res.text).not.toContain('<div id="root">');
+      }
+    });
+
     it('does not shadow /health on a browser navigation (Critical #1)', async () => {
       // Non-loopback + requireAuth registers /health POST-auth. A browser
       // navigation (Accept text/html) must fall THROUGH the SPA fallback to
