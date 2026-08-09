@@ -1532,13 +1532,215 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
+  /**
+   * Returns true when the `${` whose `{` sits at `openIndex` is a
+   * `${parameter@P}` prompt expansion, i.e. one that bash expands like a
+   * prompt string (executing any command substitution embedded in the
+   * expanded value). The scan is quote- and nesting-aware: a subscript is
+   * matched with a bracket-depth counter that respects quoting and nested
+   * `${...}` expansions, so `}` or `]` characters inside a subscript key
+   * cannot terminate the scan early (`${a[}]@P}`, `${b["x]y"]@P}`,
+   * `${arr[${x}]@P}` — see #8582/#8590). When a subscript cannot be
+   * matched at all, the check fails closed if the remainder still contains
+   * the `@P}` terminator.
+   */
   const isPromptExpansion = (text: string, openIndex: number): boolean => {
-    const close = text.indexOf('}', openIndex + 1);
-    if (close < 0) return false;
-    const body = text.slice(openIndex + 1, close).replaceAll('\\\n', '');
-    return /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[-?@$*])(?:\[[^\]\n]*\])?@P$/.test(
-      body,
-    );
+    let i = openIndex + 1;
+
+    // Bash removes `\<newline>` line continuations before parameter
+    // expansion, so they cannot split any of the tokens matched here
+    // (#8582).
+    const skipLineContinuations = (): void => {
+      while (text[i] === '\\' && text[i + 1] === '\n') i += 2;
+    };
+
+    // Real payloads nest only a handful of levels; the cap bounds recursion
+    // and scan cost on adversarial input without affecting detection (over
+    // the cap the scan reports an unparseable expansion and fails closed).
+    const MAX_NESTED_EXPANSION_DEPTH = 64;
+
+    // Returns the index of the ']' that closes the subscript starting just
+    // after `from` (the character after '['), or -1 when it cannot be
+    // matched. Quoted ']' characters are subscript content, not the
+    // terminator, and nested `${...}` expansions are skipped whole so their
+    // own brackets and braces cannot end the subscript early. `depth` caps
+    // nested-expansion recursion so adversarial nesting cannot overflow the
+    // stack; exceeding the cap reports an unmatchable subscript, which the
+    // callers handle fail-closed.
+    const matchSubscript = (from: number, depth: number): number => {
+      let bracketDepth = 1;
+      let inSingleQuotes = false;
+      let inDoubleQuotes = false;
+      let j = from;
+      while (j < text.length && bracketDepth > 0) {
+        const char = text[j]!;
+        if (char === '\\' && text[j + 1] === '\n') {
+          j += 2;
+          continue;
+        }
+        if (inSingleQuotes) {
+          if (char === "'") inSingleQuotes = false;
+          j++;
+          continue;
+        }
+        if (inDoubleQuotes) {
+          if (char === '\\') {
+            j += 2;
+            continue;
+          }
+          if (char === '"') inDoubleQuotes = false;
+          j++;
+          continue;
+        }
+        if (char === "'") {
+          inSingleQuotes = true;
+        } else if (char === '"') {
+          inDoubleQuotes = true;
+        } else if (char === '\\') {
+          // Skip the escaped character — it is literal subscript content,
+          // even if it is a quote or a bracket.
+          j++;
+        } else if (char === '[') {
+          bracketDepth++;
+        } else if (char === ']') {
+          bracketDepth--;
+          if (bracketDepth === 0) return j;
+        } else if (char === '$' && text[j + 1] === '{') {
+          const nestedClose = closeOfExpansion(j + 1, depth + 1);
+          if (nestedClose < 0) return -1;
+          j = nestedClose; // The j++ below skips the closing '}'.
+        }
+        j++;
+      }
+      return -1;
+    };
+
+    // Returns the index of the '}' closing the `${` whose '{` sits at
+    // `openIdx`, or -1 when the expansion cannot be parsed. Used to skip
+    // nested expansions inside subscripts without mistaking their `}`/`]`
+    // for the outer terminator. `depth` is this expansion's nesting level;
+    // beyond the cap the expansion is reported unparseable, which callers
+    // handle fail-closed. Real payloads nest only a few levels deep.
+    const closeOfExpansion = (openIdx: number, depth: number): number => {
+      if (depth > MAX_NESTED_EXPANSION_DEPTH) return -1;
+      let j = openIdx + 1;
+      const skipCont = (): void => {
+        while (text[j] === '\\' && text[j + 1] === '\n') j += 2;
+      };
+
+      skipCont();
+      const first = text[j] ?? '';
+      if (/^[A-Za-z_]/.test(first)) {
+        do {
+          j++;
+          skipCont();
+        } while (/^[A-Za-z0-9_]/.test(text[j] ?? ''));
+      } else if (/^[0-9]/.test(first)) {
+        do {
+          j++;
+          skipCont();
+        } while (/^[0-9]/.test(text[j] ?? ''));
+      } else if ('-?@$*'.includes(first)) {
+        j++;
+        skipCont();
+      } else {
+        return -1;
+      }
+
+      if ((text[j] ?? '') === '[') {
+        const subscriptClose = matchSubscript(j + 1, depth);
+        if (subscriptClose < 0) return -1;
+        j = subscriptClose + 1;
+        skipCont();
+      }
+
+      // Operator remainder (e.g. `:-word`, `@P`) up to the closing '}',
+      // still quote-aware so a quoted '}' does not close the expansion.
+      let inSingleQuotes = false;
+      let inDoubleQuotes = false;
+      while (j < text.length) {
+        const char = text[j]!;
+        if (char === '\\' && text[j + 1] === '\n') {
+          j += 2;
+          continue;
+        }
+        if (inSingleQuotes) {
+          if (char === "'") inSingleQuotes = false;
+          j++;
+          continue;
+        }
+        if (inDoubleQuotes) {
+          if (char === '\\') {
+            j += 2;
+            continue;
+          }
+          if (char === '"') inDoubleQuotes = false;
+          j++;
+          continue;
+        }
+        if (char === "'") {
+          inSingleQuotes = true;
+        } else if (char === '"') {
+          inDoubleQuotes = true;
+        } else if (char === '\\') {
+          j++; // The escaped character cannot close the expansion.
+        } else if (char === '$' && text[j + 1] === '{') {
+          const nestedClose = closeOfExpansion(j + 1, depth + 1);
+          if (nestedClose < 0) return -1;
+          j = nestedClose; // The j++ below skips the closing '}'.
+        } else if (char === '}') {
+          return j;
+        }
+        j++;
+      }
+      return -1;
+    };
+
+    skipLineContinuations();
+
+    // Parameter: identifier, positional number, or special parameter.
+    const first = text[i] ?? '';
+    if (/^[A-Za-z_]/.test(first)) {
+      do {
+        i++;
+        skipLineContinuations();
+      } while (/^[A-Za-z0-9_]/.test(text[i] ?? ''));
+    } else if (/^[0-9]/.test(first)) {
+      do {
+        i++;
+        skipLineContinuations();
+      } while (/^[0-9]/.test(text[i] ?? ''));
+    } else if ('-?@$*'.includes(first)) {
+      i++;
+      skipLineContinuations();
+    } else {
+      return false;
+    }
+
+    // Optional array subscript.
+    if ((text[i] ?? '') === '[') {
+      const subscriptClose = matchSubscript(i + 1, 0);
+      if (subscriptClose < 0) {
+        // The subscript cannot be fully matched; fail closed when the
+        // remainder still contains a prompt-expansion terminator. This can
+        // over-flag a benign command whose later text merely contains the
+        // literal `@P}` — an accepted safe-direction cost, since any real
+        // `${...@P}` in that remainder is independently detected when the
+        // outer scan reaches it.
+        return text.includes('@P}', i);
+      }
+      i = subscriptClose + 1;
+      skipLineContinuations();
+    }
+
+    // The expansion must end exactly in `@P}`; line continuations between
+    // the tokens are removed by bash before expansion.
+    for (const expected of '@P}') {
+      skipLineContinuations();
+      if (text[i] !== expected) return false;
+      i++;
+    }
+    return true;
   };
 
   type PendingHeredoc = {
@@ -1928,9 +2130,10 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
- * Shared across the shell-tool and monitor-tool confirmation paths so
- * the wording can't drift between sites — see #4386 review (round 3).
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`). Shared across the shell-tool and monitor-tool
+ * confirmation paths so the wording can't drift between sites — see
+ * #4386 review (round 3).
  */
 export const COMMAND_SUBSTITUTION_WARNING =
   'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
