@@ -206,7 +206,8 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
           isBackgrounded: true,
           status: 'running',
           description: 'research the codebase',
-          startTime: now,
+          subagentType: 'Explore',
+          startTime: now - 75_600_000,
         },
         {
           agentId: 'fg_run',
@@ -227,7 +228,8 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     const summary = describeBlockingBackgroundWork(config);
     expect(summary?.lines).toHaveLength(1);
     expect(summary?.lines[0]).toContain('[bg_run]');
-    expect(summary?.lines[0]).toContain('research the codebase');
+    expect(summary?.lines[0]).toContain('Explore: research the codebase');
+    expect(summary?.lines[0]).toContain('(running 21h)');
     expect(summary?.hasTaskEntries).toBe(true);
     expect(summary?.hasWorkflowRuns).toBe(false);
   });
@@ -339,6 +341,22 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(summary?.lines[0]).not.toContain('\n');
   });
 
+  it('caps label width', () => {
+    const config = createEnumeratingMockConfig({
+      shells: [
+        {
+          shellId: 'shell_long',
+          status: 'running',
+          command: 'x'.repeat(100),
+          startTime: now,
+        },
+      ],
+    });
+    expect(describeBlockingBackgroundWork(config)?.lines[0]).toContain(
+      `${'x'.repeat(79)}…`,
+    );
+  });
+
   it('caps enumeration at 10 lines plus an overflow tail', () => {
     const shells = Array.from({ length: 12 }, (_, i) => ({
       shellId: `shell_${i}`,
@@ -379,9 +397,7 @@ describe('buildBackgroundWorkBlockedMessage (#8741)', () => {
     const message = buildBackgroundWorkBlockedMessage(config, base);
     expect(message.startsWith(base)).toBe(true);
     expect(message).toContain('[shell_1]');
-    expect(message).toContain(
-      'Use /tasks to inspect and stop them, then retry.',
-    );
+    expect(message).toContain('Use /tasks to inspect them, then retry.');
   });
 
   it('points at /workflows when only workflow runs block', () => {
@@ -391,9 +407,7 @@ describe('buildBackgroundWorkBlockedMessage (#8741)', () => {
       ],
     });
     const message = buildBackgroundWorkBlockedMessage(config, base);
-    expect(message).toContain(
-      'Use /workflows to inspect and stop them, then retry.',
-    );
+    expect(message).toContain('Use /workflows to inspect them, then retry.');
     expect(message).not.toContain('/tasks');
   });
 
@@ -413,7 +427,7 @@ describe('buildBackgroundWorkBlockedMessage (#8741)', () => {
     });
     const message = buildBackgroundWorkBlockedMessage(config, base);
     expect(message).toContain(
-      'Use /tasks and /workflows to inspect and stop them, then retry.',
+      'Use /tasks and /workflows to inspect them, then retry.',
     );
   });
 });

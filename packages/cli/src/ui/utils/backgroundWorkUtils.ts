@@ -11,7 +11,7 @@ import type {
   WorkflowStatus,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './formatters.js';
-import { stripUnsafeCharacters } from './textUtils.js';
+import { stripUnsafeCharacters, truncateToWidth } from './textUtils.js';
 
 export function hasBlockingBackgroundWork(config: Config): boolean {
   return (
@@ -52,6 +52,7 @@ export function resetBackgroundStateForSessionSwitch(config: Config): void {
 
 /** Cap on enumerated lines so a pathological registry can't produce a wall of text. */
 const MAX_LISTED_BLOCKING_ENTRIES = 10;
+const MAX_BLOCKING_LABEL_WIDTH = 80;
 
 export interface BlockingBackgroundWork {
   /**
@@ -134,17 +135,16 @@ export function describeBlockingBackgroundWork(
 
   entries.sort((a, b) => a.startTime - b.startTime);
   const listed = entries.slice(0, MAX_LISTED_BLOCKING_ENTRIES);
-  const lines = listed.map((entry) =>
-    stripUnsafeCharacters(
-      // Labels are user/process-supplied and may contain newlines
-      // (multi-line shell commands, workflow meta from files) — flatten
-      // them so one entry cannot forge extra lines in the message.
-      `  [${entry.id}] ${entry.label.replace(/[\r\n]+/g, ' ')} (${entry.status} ${formatDuration(
-        now - entry.startTime,
-        { hideTrailingZeros: true },
-      )})`,
-    ),
-  );
+  const lines = listed.map((entry) => {
+    const label = truncateToWidth(
+      stripUnsafeCharacters(entry.label).replace(/[\r\n]+/g, ' '),
+      MAX_BLOCKING_LABEL_WIDTH,
+    );
+    return `  [${entry.id}] ${label} (${entry.status} ${formatDuration(
+      now - entry.startTime,
+      { hideTrailingZeros: true },
+    )})`;
+  });
   const overflow = entries.length - listed.length;
   if (overflow > 0) {
     lines.push(`  …and ${overflow} more`);
@@ -158,7 +158,7 @@ export function describeBlockingBackgroundWork(
 
 /**
  * Builds the session-switch blocked error: the caller's base message plus
- * one line per blocking entry and a pointer to the command that can stop
+ * one line per blocking entry and a pointer to the command that lists
  * each kind (`/tasks` for agents/shells/monitors, `/workflows` for
  * workflow runs). Falls back to the bare base message when nothing is
  * enumerated (see `describeBlockingBackgroundWork`).
@@ -176,6 +176,6 @@ export function buildBackgroundWorkBlockedMessage(
   return [
     baseMessage,
     ...blocking.lines,
-    `Use ${surfaces} to inspect and stop them, then retry.`,
+    `Use ${surfaces} to inspect them, then retry.`,
   ].join('\n');
 }

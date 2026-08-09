@@ -461,9 +461,7 @@ describe('clearCommand', () => {
       );
       expect(content).toContain('[bg_ab12cd34]');
       expect(content).toContain('long-running research');
-      expect(content).toContain(
-        'Use /tasks to inspect and stop them, then retry.',
-      );
+      expect(content).toContain('Use /tasks to inspect them, then retry.');
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });
@@ -535,9 +533,7 @@ describe('clearCommand', () => {
         "Stop the current session's running background tasks before starting a new session.",
       );
       expect(content).toContain('[bg_ab12cd34]');
-      expect(content).toContain(
-        'Use /tasks to inspect and stop them, then retry.',
-      );
+      expect(content).toContain('Use /tasks to inspect them, then retry.');
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });
@@ -607,9 +603,7 @@ describe('clearCommand', () => {
       );
       expect(content).toContain('[mon_123]');
       expect(content).toContain('tail -f /var/log/app.log');
-      expect(content).toContain(
-        'Use /tasks to inspect and stop them, then retry.',
-      );
+      expect(content).toContain('Use /tasks to inspect them, then retry.');
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });
@@ -679,9 +673,7 @@ describe('clearCommand', () => {
       );
       expect(content).toContain('[shell_123]');
       expect(content).toContain('npm run dev');
-      expect(content).toContain(
-        'Use /tasks to inspect and stop them, then retry.',
-      );
+      expect(content).toContain('Use /tasks to inspect them, then retry.');
       expect(mockStartNewSession).not.toHaveBeenCalled();
       expect(mockResetChat).not.toHaveBeenCalled();
     });
