@@ -333,12 +333,13 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      const outputPath = join(makeTempDir(), 'out&err.log');
       reg.register(
         makeEntry({
           shellId: 'a&b',
           command: 'echo "<script>"',
           cwd: '/repo&work',
-          outputPath: join(makeTempDir(), 'out&err.log'),
+          outputPath,
         }),
       );
 
@@ -352,7 +353,11 @@ describe('BackgroundShellRegistry', () => {
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
       expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
-      expect(modelText).toContain('out&amp;err.log</output-file>');
+      // Assert the whole element, not just the tail: the temp prefix is
+      // random but the escaping is what this test is about.
+      expect(modelText).toContain(
+        `<output-file>${outputPath.replaceAll('&', '&amp;')}</output-file>`,
+      );
     });
 
     it('limits output-tail to the retained byte budget', () => {
@@ -404,11 +409,12 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      const dir = makeTempDir();
       reg.register(
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath: join(makeTempDir(), 'out\x03.log'),
+          outputPath: join(dir, 'out\x03.log'),
         }),
       );
 
@@ -416,7 +422,11 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
-      expect(modelText).toContain('out.log</output-file>');
+      // Whole element: pins that only the control byte is stripped and the
+      // rest of the path survives intact.
+      expect(modelText).toContain(
+        `<output-file>${join(dir, 'out.log')}</output-file>`,
+      );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
