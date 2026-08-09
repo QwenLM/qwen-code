@@ -9,7 +9,7 @@ S=$(command -v qwen || true)
 S2=$(command -v qwen2 || true)
 tmux kill-session -t $SESS 2>/dev/null || true
 tmux new-session -d -s $SESS -x 120 -y 40 \; \
-  split-window -h -x 120 -y 40 \; \
+  split-window -h \; \
   select-layout tiled >/dev/null
 tmux send-keys -t $SESS:0.0 "$S" Enter
 tmux send-keys -t $SESS:0.1 "$S2" Enter

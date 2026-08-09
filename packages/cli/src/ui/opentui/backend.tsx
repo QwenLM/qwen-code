@@ -408,8 +408,11 @@ function App({
     }, TOKEN_INTERVAL_MS);
   }, [applyEvent]);
 
-  // Real event source (P1d seam) if provided; otherwise the scripted demo.
+  // Real event source (P1d seam) if provided; scripted demo only when there is
+  // no live config (qwen2-demo). With a live config, start empty and wait for
+  // real input so qwen2 behaves like the real interactive CLI.
   useEffect(() => {
+    if (config && !events) return; // live mode: wait for user input
     setItems([
       {
         kind: 'user',
@@ -434,7 +437,7 @@ function App({
       clearTimeout(t);
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [events, startStream, applyEvent]);
+  }, [events, config, startStream, applyEvent]);
 
   useKeyboard((key) => {
     if (key.name === 'c' && key.ctrl) {
