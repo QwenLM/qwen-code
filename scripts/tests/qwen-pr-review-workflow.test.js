@@ -1707,11 +1707,12 @@ describe('docs-only gate and relay, executed', () => {
     expect(r.stdout).toContain('timeout=90');
   });
 
-  it('twenty-five changed lines is not micro — churn rides the sweep floor conservatively', () => {
-    // The gate measures TOTAL churn while the skill's SWEEP_FLOOR gates a
-    // source-weighted measure; churn < 25 implies the weighted measure is
-    // < 25, so the tightening only ever lands on diffs whose pipeline the
-    // skill has already shrunk. 25 itself must not tighten.
+  it('twenty-five changed lines is not micro — the boundary of the churn bound', () => {
+    // The 25 is an independent "small PR" churn bound (NOT the skill's
+    // SWEEP_FLOOR — the two measures differ, so a scattered micro diff may
+    // still run the sweep); the tightening is justified by "90 min is ample
+    // for churn < 25 work", not by the pipeline shrinking. 25 itself must
+    // not tighten.
     const r = runGate({
       autoReview: 'true',
       wrapper: '#!/bin/bash\necho full\n',
