@@ -646,6 +646,21 @@ export async function buildQwenExtensionFromPlugin(
       }
     }
 
+    // A hooks string path was confined earlier, but the resource collection
+    // above may have removed the file it points at (e.g. a hooks file inside
+    // a skills/ folder that was selectively re-collected). Drop it when the
+    // referenced file no longer ships, so the installed extension doesn't
+    // advertise hooks that can never load.
+    if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+      const hooksFilePath = path.join(tmpDir, mergedConfig.hooks);
+      if (!fs.existsSync(hooksFilePath)) {
+        debugLogger.warn(
+          `Dropping hooks path "${mergedConfig.hooks}" whose file was removed during resource collection; hooks will not load.`,
+        );
+        delete mergedConfig.hooks;
+      }
+    }
+
     const agentsDestDir = path.join(tmpDir, 'agents');
     await convertAgentFiles(agentsDestDir);
 

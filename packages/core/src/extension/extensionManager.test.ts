@@ -3582,7 +3582,7 @@ describe('extension tests', () => {
             hooks: [
               {
                 type: 'command',
-                command: 'echo "custom hooks path"',
+                command: '${extensionPath}/scripts/setup.sh ${workspacePath}',
               },
             ],
           },
@@ -3619,7 +3619,7 @@ describe('extension tests', () => {
             command: string;
           }
         ).command,
-      ).toBe('echo "custom hooks path"');
+      ).toBe(`${extensionDir}/scripts/setup.sh ${tempWorkspaceDir}`);
     });
 
     it('should prefer config.hooks string path over hooks/hooks.json', async () => {

@@ -33,7 +33,7 @@ import {
   recursivelyHydrateStrings,
   performVariableReplacement,
 } from './variables.js';
-import { readExtensionManifest } from './path-confinement.js';
+import { readExtensionManifest, realPathWithin } from './path-confinement.js';
 import type { JsonValue } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -1407,12 +1407,24 @@ export class ExtensionManager {
         const hooksDir = path.join(effectiveExtensionPath, 'hooks');
         const hooksJsonPath = path.join(hooksDir, 'hooks.json');
 
-        const configHooksPath =
+        let configHooksPath =
           typeof config.hooks === 'string'
             ? path.isAbsolute(config.hooks)
               ? config.hooks
               : path.join(effectiveExtensionPath, config.hooks)
             : null;
+
+        // A hooks path (string or absolute) must stay inside the extension;
+        // an escaping value would otherwise load an arbitrary host file.
+        if (
+          configHooksPath &&
+          !realPathWithin(configHooksPath, effectiveExtensionPath)
+        ) {
+          debugLogger.warn(
+            `Dropping hooks path "${config.hooks}" that escapes the extension; hooks will not load.`,
+          );
+          configHooksPath = null;
+        }
 
         if (
           fs.existsSync(hooksJsonPath) ||
