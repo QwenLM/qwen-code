@@ -2910,7 +2910,8 @@ async function runQwenServeImpl(
     daemonLog.raw(line, level);
 
   let actualPort = opts.port;
-  const webBridgeToken = process.env['QWEN_WEBBRIDGE_TOKEN'] || randomUUID();
+  const webBridgeToken =
+    daemonRuntimeBaseEnv['QWEN_WEBBRIDGE_TOKEN'] || randomUUID();
   let webBridgeUrl: string | undefined;
   const webBridgeChildEnvs = new Set<NodeJS.ProcessEnv>();
   const applyWebBridgeEnv = (env: NodeJS.ProcessEnv): void => {
