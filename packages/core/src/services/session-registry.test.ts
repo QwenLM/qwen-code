@@ -223,6 +223,112 @@ describe('registerSession', () => {
     });
   });
 
+  it('overwrites a same-origin record left at its own pid', async () => {
+    // The origin guard's other branch, and the only recovery path there
+    // is: a predecessor that died without unlinking leaves its record at
+    // this PID, registration happens once at startup, and the sole sweep
+    // trigger is `qwen sessions ps`. Widening the guard to refuse on any
+    // existing record leaves the rest of this suite green while making
+    // every session on a recycled PID invisible for its whole life.
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid: process.pid,
+      procStart: '1',
+      pidNamespace: readPidNamespaceId(),
+      machineId: readMachineId(),
+      sessionId: 's-predecessor',
+      cwd: '/w/before',
+      name: 'before-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      sessionId: 's-ours',
+      cwd: '/w/ours',
+    });
+  });
+
+  it('reports an origin conflict to the caller', async () => {
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid: process.pid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    // Nothing removes an ownerless foreign record and registration is
+    // startup-only, so this blackout never lifts on its own — a bare
+    // `false`, indistinguishable from a transient I/O failure, is not
+    // enough for the caller to say so.
+    const conflicts: Array<{ pid: number; filePath: string }> = [];
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+        onOriginConflict: (info) => conflicts.push(info),
+      }),
+    ).toBe(false);
+
+    expect(conflicts).toEqual([{ pid: process.pid, filePath }]);
+  });
+
+  it('does not report a conflict when registration succeeds', async () => {
+    const onOriginConflict = vi.fn();
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+        onOriginConflict,
+      }),
+    ).toBe(true);
+    expect(onOriginConflict).not.toHaveBeenCalled();
+  });
+
+  it('still reports failure when the conflict callback throws', async () => {
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid: process.pid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    // Reporting is a courtesy; it must not escalate a discovery miss into
+    // a failed startup.
+    await expect(
+      registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+        onOriginConflict: () => {
+          throw new Error('reporting blew up');
+        },
+      }),
+    ).resolves.toBe(false);
+  });
+
   // Symlinks are not creatable without elevation on stock Windows.
   it.skipIf(process.platform === 'win32')(
     'does not write through a symlink planted at its record path',
@@ -360,6 +466,29 @@ describe('patchSessionRecord', () => {
       cwd: '/w/theirs',
     });
   });
+
+  it.each([
+    ['unparseable', 'not json at all'],
+    [
+      'a future schema version',
+      {
+        schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION + 1,
+        pid: process.pid,
+        sessionId: 's-future',
+        cwd: '/w/future',
+      },
+    ],
+  ])('leaves %s record at its own pid untouched', async (_label, body) => {
+    const filePath = await writeRaw(`${process.pid}.json`, body);
+    const before = await fs.readFile(filePath, 'utf8');
+
+    // `readRecord` returns null for both, and a resurrect-on-null patch
+    // would overwrite a record this code did not write — a newer build's,
+    // once the schema bumps.
+    await patchSessionRecord({ sessionId: 'ours', cwd: '/w/ours' });
+
+    expect(await fs.readFile(filePath, 'utf8')).toBe(before);
+  });
 });
 
 describe('unregisterSession', () => {
@@ -396,6 +525,30 @@ describe('unregisterSession', () => {
     await unregisterSession();
 
     await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
+  it.each([
+    ['unparseable', 'not json at all'],
+    [
+      'a future schema version',
+      {
+        schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION + 1,
+        pid: process.pid,
+        sessionId: 's-future',
+        cwd: '/w/future',
+      },
+    ],
+  ])('leaves %s record at its own pid in place', async (_label, body) => {
+    const filePath = await writeRaw(`${process.pid}.json`, body);
+    const before = await fs.readFile(filePath, 'utf8');
+
+    // "Not a record this code wrote, so not this code's to delete." An
+    // exit-time cleanup that unlinked whenever `readRecord` returned null
+    // would swallow its own ENOENT and pass every other test here, while
+    // deleting a newer build's record at a recycled PID.
+    await unregisterSession();
+
+    await expect(fs.readFile(filePath, 'utf8')).resolves.toBe(before);
   });
 });
 
@@ -467,6 +620,33 @@ describe('listLiveSessions', () => {
     // selfPid is set elsewhere so this record goes through the liveness
     // path rather than the trust-our-own-record shortcut.
     expect(await listLiveSessions({ selfPid: DEAD_PID })).toEqual([]);
+  });
+
+  it('neither lists nor sweeps a same-origin record with no start token', async () => {
+    // Where a token is readable this build always records one, so a
+    // same-origin record without one did not come from this code. Trusting
+    // it collapses the check to bare liveness, and every field a reader
+    // shows — sessionId, cwd, name — is then whoever wrote the file's to
+    // choose; the origin fields it has to match are plaintext in every
+    // sibling record.
+    if (process.platform !== 'linux') return;
+    const filePath = await writeRaw(`${process.ppid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid: process.ppid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: readMachineId(),
+      sessionId: 's-forged',
+      cwd: '/w/forged',
+      name: 'forged-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    expect(await listLiveSessions()).toEqual([]);
+    // Not swept: it may be a future version's record, and registration is
+    // startup-only, so a wrong unlink hides that session permanently.
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
   });
 
   it('ignores files that are not <pid>.json', async () => {
@@ -694,6 +874,10 @@ describe('listLiveSessions', () => {
     await writeRaw(`${process.ppid}.json`, {
       schemaVersion: 1,
       pid: process.ppid,
+      // A real token: a live record without one is unprovable and is
+      // withheld from callers, which would empty this list before it
+      // could be sorted.
+      procStart: readProcStartToken(process.ppid),
       pidNamespace: readPidNamespaceId(),
       sessionId: 's-parent',
       cwd: '/w/other',

@@ -67,6 +67,7 @@ import {
   readMachineId,
   readPidNamespaceId,
   readProcStartToken,
+  supportsProcStartToken,
 } from '../utils/process-liveness.js';
 
 const debugLogger = createDebugLogger('SESSION_REGISTRY');
@@ -138,6 +139,20 @@ export interface RegisterSessionFields {
   pid?: number;
   /** Overrides the derived name. */
   name?: string;
+  /**
+   * Called when registration is refused because `<pid>.json` already
+   * holds another origin's record.
+   *
+   * A plain `false` cannot carry this: every other failure is an I/O
+   * error that is silent by design, whereas this one is indefinite.
+   * Nothing sweeps an ownerless foreign record — sweep, unregister and
+   * patch all skip foreign origins — and registration is startup-only, so
+   * this session stays invisible to discovery for its entire lifetime,
+   * and so does every later session that draws the same PID. Core has no
+   * business picking a presentation channel, so the caller is handed the
+   * fact and decides.
+   */
+  onOriginConflict?: (info: { pid: number; filePath: string }) => void;
 }
 
 export function getSessionRegistryDir(): string {
@@ -242,6 +257,13 @@ export async function registerSession(
       debugLogger.debug(
         `registerSession skipped: ${filePath} holds a record from another origin`,
       );
+      try {
+        fields.onOriginConflict?.({ pid, filePath });
+      } catch (error) {
+        // A reporting callback must not turn a discovery miss into a
+        // failed startup; registration is already best-effort.
+        debugLogger.debug(`onOriginConflict threw: ${describe(error)}`);
+      }
       return false;
     }
 
@@ -362,6 +384,7 @@ export async function listLiveSessions(
   // change PID namespace or machine under itself, and both are syscalls.
   const selfNamespace = readPidNamespaceId();
   const selfMachine = readMachineId();
+  const tokensAvailable = supportsProcStartToken();
 
   const live: SessionRegistryRecord[] = [];
   await Promise.all(
@@ -404,6 +427,17 @@ export async function listLiveSessions(
         }
 
         if (isSameProcess(record.pid, record.procStart)) {
+          // Alive — but on a platform that has start tokens, a record
+          // without one was not written by this build, which always
+          // records one. `isSameProcess` has just degraded to a bare
+          // liveness check, so all this record proves is that *some*
+          // process holds that PID; the session it describes —
+          // sessionId, cwd, name — is whoever wrote the file's to choose,
+          // and the origin fields needed to get this far are plaintext in
+          // every sibling record. Withhold it from callers, but do not
+          // sweep it: the PID is live, and it may equally be a future
+          // version's record, which an unlink would erase for good.
+          if (tokensAvailable && record.procStart == null) return;
           live.push(record);
           return;
         }

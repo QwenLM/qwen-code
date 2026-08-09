@@ -396,6 +396,70 @@ describe('atomicWriteFile', () => {
   );
 
   it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'should not let the ownership fallback write through a symlink under noFollow',
+    async () => {
+      // The ownership-preservation fallback runs before any rename, so it
+      // is reached even under noFollow. If the target stat followed the
+      // link, the fallback's writeFile+chmod would land the payload and
+      // the forced mode on the victim — defeating noFollow exactly as the
+      // naive EXDEV fallback once did. The victim's uid is what makes the
+      // existing same-uid symlink test blind to this branch.
+      const victim = path.join(tmpDir, 'victim.txt');
+      const planted = path.join(tmpDir, 'planted.json');
+      await fs.writeFile(victim, 'PRECIOUS', { mode: 0o644 });
+      await fs.symlink(victim, planted);
+
+      const realGeteuid = process.geteuid!;
+      const victimStat = await fs.stat(victim);
+      const inoBefore = victimStat.ino;
+      process.geteuid = () => victimStat.uid + 1;
+
+      try {
+        await atomicWriteFile(planted, 'payload', {
+          mode: 0o600,
+          forceMode: true,
+          noFollow: true,
+        });
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      // The victim is untouched — same content, same mode, same inode.
+      expect(await fs.readFile(victim, 'utf-8')).toBe('PRECIOUS');
+      expect((await fs.stat(victim)).mode & 0o7777).toBe(0o644);
+      expect((await fs.stat(victim)).ino).toBe(inoBefore);
+
+      // The symlink was replaced by a regular file holding the payload.
+      expect((await fs.lstat(planted)).isSymbolicLink()).toBe(false);
+      expect(await fs.readFile(planted, 'utf-8')).toBe('payload');
+      expect((await fs.stat(planted)).mode & 0o7777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'should not copy a symlink mode onto the replacement under noFollow (sync)',
+    () => {
+      // atomicWriteFileSync has no ownership fallback, so a link is only ever
+      // a mode-preservation source here — but statSync would read it through
+      // the link and stamp the target's mode onto the replacement file.
+      const victim = path.join(tmpDir, 'victim-sync.txt');
+      const planted = path.join(tmpDir, 'planted-sync.json');
+      fsSync.writeFileSync(victim, 'PRECIOUS', { mode: 0o666 });
+      fsSync.symlinkSync(victim, planted);
+
+      atomicWriteFileSync(planted, 'payload', { mode: 0o600, noFollow: true });
+
+      // Victim untouched; the replacement took the requested mode, not 0666.
+      expect(fsSync.readFileSync(victim, 'utf-8')).toBe('PRECIOUS');
+      expect(fsSync.lstatSync(planted).isSymbolicLink()).toBe(false);
+      expect(fsSync.readFileSync(planted, 'utf-8')).toBe('payload');
+      expect(fsSync.statSync(planted).mode & 0o7777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(
     process.platform === 'win32' ||
       typeof process.geteuid !== 'function' ||
       // chmod 0o000 against the file's real owner still succeeds via

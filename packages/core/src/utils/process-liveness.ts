@@ -130,6 +130,17 @@ const MACHINE_ID_FILES = ['/etc/machine-id', '/var/lib/dbus/machine-id'];
 const UNINITIALIZED_MACHINE_ID = 'uninitialized';
 
 /**
+ * The all-zero id, which `machine-id(5)` reserves as invalid ("This ID may
+ * not be all zeros"). It is the same "no machine id" state as the empty
+ * file and the {@link UNINITIALIZED_MACHINE_ID} sentinel — the legacy,
+ * pre-sentinel convention for template and OSTree-style images — and needs
+ * rejecting for the same reason: the file exists and reads cleanly, so
+ * nothing else falls through to the next source, and every host in this
+ * state would otherwise agree on one `machineId`.
+ */
+const ALL_ZERO_MACHINE_ID = '0'.repeat(32);
+
+/**
  * An opaque identifier for the machine this process is running on, or
  * `null` when none could be read.
  *
@@ -145,8 +156,11 @@ const UNINITIALIZED_MACHINE_ID = 'uninitialized';
  * every pre-reboot record, but it would also make a record written before
  * the last reboot permanently unattributable — unsweepable, and (for
  * writers that refuse to overwrite another origin's record) able to block
- * registration at that PID forever. Reboot-recycled PIDs are already the
- * job of {@link readProcStartToken}, whose token is boot-relative.
+ * registration at that PID forever. Reboot-recycled PIDs are bounded by
+ * {@link isPidAlive} sweeping dead PIDs and by same-origin re-registration
+ * overwriting the stale record; {@link readProcStartToken}'s token is
+ * boot-relative, which is what leaves a narrow same-tick collision window
+ * across a reboot rather than what closes it.
  *
  * Falls back to the hostname where no machine id file is readable, which
  * covers every non-Linux platform. A hostname is weaker — it can change
@@ -159,13 +173,35 @@ export function readMachineId(): string | null {
   for (const file of MACHINE_ID_FILES) {
     try {
       const id = fs.readFileSync(file, 'utf8').trim();
-      if (id !== '' && id !== UNINITIALIZED_MACHINE_ID) return id;
+      if (
+        id !== '' &&
+        id !== UNINITIALIZED_MACHINE_ID &&
+        id !== ALL_ZERO_MACHINE_ID
+      ) {
+        return id;
+      }
     } catch {
       // Not this one; try the next source.
     }
   }
   const hostname = os.hostname().trim();
   return hostname === '' ? null : hostname;
+}
+
+/**
+ * True when this platform can produce start tokens at all, probed against
+ * the calling process — the one PID guaranteed to exist and to be ours.
+ *
+ * This is what turns a missing `procStart` from "written by a platform
+ * that has no token" into "written by something that is not this build":
+ * where a token is available, every record this code writes carries one,
+ * so a same-origin record without one is unprovable rather than merely
+ * unproven. Callers use it to withhold trust, never to delete — the
+ * writer might be a future version, and a wrong unlink hides a live
+ * session permanently (registration is startup-only).
+ */
+export function supportsProcStartToken(): boolean {
+  return readProcStartToken(process.pid) !== null;
 }
 
 /**

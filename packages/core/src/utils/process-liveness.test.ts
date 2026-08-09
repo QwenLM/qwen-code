@@ -267,6 +267,21 @@ describe('readMachineId', () => {
     expect(readMachineId()).toBe('ab12cd34ef56ab78cd90ef12ab34cd56');
   });
 
+  it('does not accept the all-zero id as an identity', () => {
+    // `machine-id(5)`: "This ID may not be all zeros." It is the legacy,
+    // pre-sentinel form of the same uncommitted state — same consequence,
+    // one machineId shared by every host in it.
+    machineIdFiles.set(ETC, `${'0'.repeat(32)}\n`);
+    machineIdFiles.set(DBUS, null);
+    expect(readMachineId()).toBe(hostname().trim());
+  });
+
+  it('falls through the all-zero id to the dbus copy when that one is committed', () => {
+    machineIdFiles.set(ETC, `${'0'.repeat(32)}\n`);
+    machineIdFiles.set(DBUS, 'ab12cd34ef56ab78cd90ef12ab34cd56\n');
+    expect(readMachineId()).toBe('ab12cd34ef56ab78cd90ef12ab34cd56');
+  });
+
   it('falls back to the hostname when no source is readable', () => {
     machineIdFiles.set(ETC, null);
     machineIdFiles.set(DBUS, null);

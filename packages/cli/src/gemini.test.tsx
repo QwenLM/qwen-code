@@ -3147,6 +3147,7 @@ describe('startInteractiveUI', () => {
         cwd: '/root',
         kind: 'interactive',
         qwenVersion: '1.0.0',
+        onOriginConflict: expect.any(Function),
       });
 
       // Presence is what the registry sells, so the record must not
@@ -3176,6 +3177,35 @@ describe('startInteractiveUI', () => {
       // record a sibling tool wrote for the same PID.
       await runRegisteredCleanups();
       expect(unregisterSession).not.toHaveBeenCalled();
+    });
+
+    it('warns at startup when another origin holds this PID', async () => {
+      const { registerSession } = await import('@qwen-code/qwen-code-core');
+      // Not the shared fixture: this one gets written to.
+      const startupWarnings: string[] = [];
+      vi.mocked(registerSession).mockImplementationOnce(async (fields) => {
+        fields.onOriginConflict?.({
+          pid: 4242,
+          filePath: '/home/u/.qwen/sessions/4242.json',
+        });
+        return false;
+      });
+
+      await startInteractiveUI(
+        mockConfig,
+        mockSettings,
+        startupWarnings,
+        mockWorkspaceRoot,
+        mockInitializationResult,
+      );
+
+      // Every other registration failure is transient and stays quiet.
+      // This one never resolves itself — nothing sweeps the record in the
+      // way and registration only happens at startup — so the session is
+      // missing from `qwen sessions ps` for good unless someone is told.
+      expect(startupWarnings).toHaveLength(1);
+      expect(startupWarnings[0]).toContain('/home/u/.qwen/sessions/4242.json');
+      expect(startupWarnings[0]).toContain('qwen sessions ps');
     });
   });
 });

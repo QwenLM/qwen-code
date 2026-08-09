@@ -111,12 +111,26 @@ export async function startInteractiveUI(
   // registerSession swallows its own I/O errors, so a failure here is
   // silent by design: discovery is a convenience, not a precondition for
   // running Qwen Code.
+  //
+  // An origin conflict is the exception. It is not transient — nothing
+  // ever removes the record standing in the way, and registration only
+  // happens at startup — so this session, and every later one landing on
+  // the same PID, stays missing from `qwen sessions ps` for good. Silent
+  // is the wrong failure mode for a blackout that never lifts.
   if (
     await registerSession({
       sessionId: config.getSessionId(),
       cwd: config.getTargetDir(),
       kind: 'interactive',
       qwenVersion: version,
+      onOriginConflict: ({ filePath }) => {
+        startupWarnings.push(
+          `This session will not appear in \`qwen sessions ps\`: ${filePath} ` +
+            `holds a session record from another machine or PID namespace, ` +
+            `which Qwen Code will not overwrite. Remove that file if the ` +
+            `session it describes is gone.`,
+        );
+      },
     })
   ) {
     registerCleanup(() => unregisterSession());

@@ -183,14 +183,27 @@ export async function atomicWriteFile(
   // Stat the target to preserve existing permissions and detect
   // ownership-changing renames (see the ownership-preservation note in
   // the function doc).
+  //
+  // Under noFollow this must not traverse the final component: `fs.stat`
+  // follows a planted symlink, and the ownership-preservation fallback
+  // below would then writeFile+chmod straight through it, landing the
+  // payload and the forced mode on the link's target — the exact clobber
+  // noFollow exists to prevent, and the one the EXDEV fallback already
+  // guards with unlink + O_EXCL. `lstat` describes the link itself; a link
+  // is then discarded outright so it is neither a mode-preservation source
+  // (a symlink's 0777 would be copied onto the replacement) nor an
+  // ownership-fallback trigger, leaving the replacing rename to take it.
   let existingStat: Stats | undefined;
   try {
-    existingStat = await fs.stat(targetPath);
+    existingStat = options?.noFollow
+      ? await fs.lstat(targetPath)
+      : await fs.stat(targetPath);
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
     }
   }
+  if (existingStat?.isSymbolicLink()) existingStat = undefined;
 
   // forceMode skips permission preservation only when an explicit mode is
   // supplied — otherwise we'd silently downgrade an existing file's perms
@@ -536,8 +549,14 @@ export function atomicWriteFileSync(
   let existingMode: number | undefined;
   if (!options?.forceMode || options?.mode === undefined) {
     try {
-      const stat = fsSync.statSync(targetPath);
-      existingMode = stat.mode & 0o7777;
+      // lstat under noFollow for the same reason as atomicWriteFile: statSync
+      // follows a planted symlink, which would copy the link target's mode
+      // onto the replacement file. This path has no ownership fallback, so a
+      // link is only a mode-preservation source here, never a write target.
+      const stat = options?.noFollow
+        ? fsSync.lstatSync(targetPath)
+        : fsSync.statSync(targetPath);
+      if (!stat.isSymbolicLink()) existingMode = stat.mode & 0o7777;
     } catch (err) {
       if (!isNodeError(err) || err.code !== 'ENOENT') {
         throw err;
