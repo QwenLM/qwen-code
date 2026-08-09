@@ -940,10 +940,6 @@ describe('createWorkflowSandbox security', () => {
       /exceeded 100 ms of active time/,
     );
     expect(abortOnTimeout.signal.aborted).toBe(true);
-    // The reason must be TimeoutError-shaped: this signal reaches dispatched
-    // subagents' model requests, and a bare abort reads downstream as a user
-    // cancel — suppressing the api_error for a wall-clock kill.
-    expect((abortOnTimeout.signal.reason as Error).name).toBe('TimeoutError');
   });
 
   // T40 sibling: a normal completion must NOT abort the controller — the

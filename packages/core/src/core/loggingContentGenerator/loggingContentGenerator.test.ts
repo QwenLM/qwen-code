@@ -883,43 +883,6 @@ describe('LoggingContentGenerator', () => {
     expect(logApiError).toHaveBeenCalledTimes(1);
   });
 
-  it('still emits an api_error event when an internal timeout budget fires', async () => {
-    // Not every aborted signal is a user cancel. Internal side queries compose
-    // `AbortSignal.timeout(...)` into the same `config.abortSignal` — memory
-    // recall (30s), forget (8s), arena summary — via baseLlmClient. When such a
-    // budget runs out the SDK still rejects abort-shaped, but this is a genuine
-    // failure: suppressing it would hide background LLM work failing behind a
-    // clean model-health chart. The signal's reason is what separates the two.
-    const timeoutSignal = AbortSignal.timeout(1);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(timeoutSignal.aborted).toBe(true);
-
-    const wrapped = createWrappedGenerator(
-      vi
-        .fn()
-        .mockRejectedValue(
-          new APIUserAbortError({ message: 'Request was aborted.' }),
-        ),
-      vi.fn(),
-    );
-    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
-      model: 'test-model',
-      authType: AuthType.USE_OPENAI,
-      enableOpenAILogging: false,
-    });
-    const request = {
-      model: 'test-model',
-      contents: 'Hello',
-      config: { abortSignal: timeoutSignal },
-    } as unknown as GenerateContentParameters;
-
-    await expect(
-      generator.generateContent(request, 'prompt-timeout-abort'),
-    ).rejects.toBeInstanceOf(APIUserAbortError);
-
-    expect(logApiError).toHaveBeenCalledTimes(1);
-  });
-
   it('still emits an api_error event for an abort-shaped error when the request has no signal', async () => {
     // The remaining truth-table cell: no `config.abortSignal` at all. Nobody
     // could have cancelled, so an abort-shaped rejection here is a real
@@ -1033,9 +996,9 @@ describe('LoggingContentGenerator', () => {
     // The shape a mid-stream cancel really takes on the @google/genai path: its
     // SSE reader (`processStreamResponse`) has no abort special-case, so an
     // abort during a read rejects with the fetch DOMException named
-    // 'AbortError' and propagates. This pins the AbortError-name branch of
-    // isAbortError at the stream call site — narrowing the gate to the openai
-    // APIUserAbortError alone has to fail here.
+    // 'AbortError' and propagates. This pins that the gate's `isAbortError`
+    // check covers the AbortError-name branch at the stream call site, not
+    // only the openai `APIUserAbortError`.
     const controller = new AbortController();
     const streamFn = vi.fn().mockResolvedValue(
       (async function* () {

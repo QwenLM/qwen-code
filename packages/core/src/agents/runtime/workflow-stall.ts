@@ -24,8 +24,7 @@
  * `AbortController` and `AgentEventEmitter`. It chains the caller's parent
  * signal into the per-attempt controller (so parent cancellation still
  * propagates) and passes BOTH the per-attempt signal and emitter into the
- * single-attempt dispatch. A stall fires `controller.abort(timeoutAbortReason(STALL_ABORT_REASON))` — a TimeoutError-shaped
- * reason, so downstream telemetry does not read it as a user cancel —
+ * single-attempt dispatch. A stall fires `controller.abort('stalled')`,
  * which makes the subagent return `CANCELLED`; the single-attempt dispatch
  * then throws its "did not complete" terminal, which the wrapper catches.
  * The wrapper distinguishes a stall-abort (retry) from a parent-abort
@@ -39,15 +38,7 @@
 
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import { timeoutAbortReason } from '../../utils/errors.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
-
-/**
- * Message carried by the watchdog's abort reason. The reason is a
- * `TimeoutError`-named DOMException rather than this bare string so downstream
- * consumers can tell a watchdog abort from a user cancel.
- */
-export const STALL_ABORT_REASON = 'stalled';
 
 /** Default stall timeout: 60s of no progress (with no tool in flight). */
 export const DEFAULT_STALL_MS = 60_000;
@@ -86,7 +77,7 @@ export function resolveStallMs(
 const debugLogger = createDebugLogger('WORKFLOW_STALL');
 
 export interface StallWatchdogHandle {
-  /** True once the watchdog has fired its TimeoutError-shaped abort. */
+  /** True once the watchdog has fired `controller.abort('stalled')`. */
   stalled(): boolean;
   /** Clear the timer + detach listeners. Idempotent; call in a `finally`. */
   dispose(): void;
@@ -96,7 +87,7 @@ export interface StallWatchdogHandle {
  * Attach a stall watchdog to a subagent's event emitter. The watchdog arms
  * a `stallMs` timer that any progress event resets; while a tool is in
  * flight the timer is held (a long tool call is not a stall). When the
- * timer elapses with no in-flight tool, it fires `controller.abort(timeoutAbortReason(STALL_ABORT_REASON))`.
+ * timer elapses with no in-flight tool, it fires `controller.abort('stalled')`.
  *
  * The watchdog arms on the FIRST progress event, not at attach time. The
  * time-to-first-response window — connection setup, server-side queueing, and
@@ -142,11 +133,7 @@ export function attachStallWatchdog(
         `[Workflow] agent dispatch stalled — no progress for ${stallMs}ms; aborting.`,
       );
       try {
-        // Reason keeps the 'stalled' text but is TimeoutError-shaped: the
-        // attempt signal reaches model requests, and a bare string reason
-        // reads downstream as a user cancel, suppressing the api_error for
-        // what is actually a watchdog abort.
-        controller.abort(timeoutAbortReason(STALL_ABORT_REASON));
+        controller.abort('stalled');
       } catch (e) {
         debugLogger.warn('stall watchdog abort threw:', e);
       }

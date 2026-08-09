@@ -7,7 +7,6 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import { timeoutAbortReason } from '../utils/errors.js';
 import type { ValidatedGoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
 
@@ -183,11 +182,8 @@ export function createGoalVerifier(
     const contents = verifierContents(input);
     const timeoutController = new AbortController();
     const timer = setTimeout(() => {
-      // TimeoutError-shaped, not a plain Error: downstream distinguishes an
-      // internal deadline from a user cancel by the abort reason's name, and
-      // a 'Error'-named reason reads as a cancel and loses the api_error.
       timeoutController.abort(
-        timeoutAbortReason(`Goal verifier timed out after ${timeoutMs}ms`),
+        new Error(`Goal verifier timed out after ${timeoutMs}ms`),
       );
     }, timeoutMs);
     const abortSignal = attemptSignal

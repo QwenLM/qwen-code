@@ -71,22 +71,14 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
   }
 
   /**
-   * Extend error logging suppression: auth errors handled by token refresh,
-   * plus everything the base class suppresses (user cancels).
+   * Override error logging behavior to suppress auth errors during token refresh
    */
   protected override shouldSuppressErrorLogging(
     error: unknown,
-    request: GenerateContentParameters,
+    _request: GenerateContentParameters,
   ): boolean {
-    // Compose rather than replace: returning only isAuthError would bypass
-    // the shared user-cancel predicate on this family's debug-log path, so a
-    // cancel under qwen OAuth would log as an API error while the identical
-    // cancel under openai auth is suppressed — the same logging-path
-    // divergence #8398 fixes, one auth family over.
-    return (
-      this.isAuthError(error) ||
-      super.shouldSuppressErrorLogging(error, request)
-    );
+    // Suppress logging for authentication errors that we handle with token refresh
+    return this.isAuthError(error);
   }
 
   /**

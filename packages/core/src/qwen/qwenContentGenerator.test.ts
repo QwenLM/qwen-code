@@ -20,7 +20,6 @@ import { QwenContentGenerator } from './qwenContentGenerator.js';
 import { SharedTokenManager } from './sharedTokenManager.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
-import { isUserCancel } from '../utils/errors.js';
 
 // Mock OpenAI client to avoid real network calls
 vi.mock('openai', () => ({
@@ -265,13 +264,10 @@ vi.mock('../core/openaiContentGenerator/index.js', () => ({
     }
 
     protected shouldSuppressErrorLogging(
-      error: unknown,
-      request: GenerateContentParameters,
+      _error: unknown,
+      _request: GenerateContentParameters,
     ): boolean {
-      // Mirror the real base class, which delegates to the shared
-      // isUserCancel predicate — the composition tests below assert the
-      // subclass extends this rather than replacing it.
-      return isUserCancel(error, request.config?.abortSignal);
+      return false;
     }
   },
 }));
@@ -1048,56 +1044,6 @@ describe('QwenContentGenerator', () => {
         ).shouldSuppressErrorLogging(error, {} as GenerateContentParameters);
         expect(shouldSuppress).toBe(false);
       });
-    });
-
-    it('should suppress logging for a user cancel, like the base class', () => {
-      // The override composes with super rather than replacing it. Returning
-      // only isAuthError would log a cancel under qwen OAuth as an API error
-      // while the identical cancel under openai auth is suppressed — the
-      // #8356 divergence, cross-family.
-      const controller = new AbortController();
-      controller.abort();
-      const abortError = new Error('The operation was aborted');
-      abortError.name = 'AbortError';
-
-      const shouldSuppress = (
-        qwenContentGenerator as unknown as {
-          shouldSuppressErrorLogging: (
-            error: unknown,
-            request: GenerateContentParameters,
-          ) => boolean;
-        }
-      ).shouldSuppressErrorLogging(abortError, {
-        model: 'qwen-max',
-        contents: 'Hello',
-        config: { abortSignal: controller.signal },
-      } as unknown as GenerateContentParameters);
-      expect(shouldSuppress).toBe(true);
-    });
-
-    it('should not suppress logging when an internal timeout budget fired', async () => {
-      // The composed base predicate keeps its timeout discrimination on this
-      // family too: an abort-shaped failure on an expired budget is a real
-      // failure, not a cancel.
-      const signal = AbortSignal.timeout(1);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(signal.aborted).toBe(true);
-      const abortError = new Error('The operation was aborted');
-      abortError.name = 'AbortError';
-
-      const shouldSuppress = (
-        qwenContentGenerator as unknown as {
-          shouldSuppressErrorLogging: (
-            error: unknown,
-            request: GenerateContentParameters,
-          ) => boolean;
-        }
-      ).shouldSuppressErrorLogging(abortError, {
-        model: 'qwen-max',
-        contents: 'Hello',
-        config: { abortSignal: signal },
-      } as unknown as GenerateContentParameters);
-      expect(shouldSuppress).toBe(false);
     });
   });
 

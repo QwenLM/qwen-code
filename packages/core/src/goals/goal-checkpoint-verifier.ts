@@ -7,7 +7,6 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import { timeoutAbortReason } from '../utils/errors.js';
 import type {
   GoalCheckpointVerificationResult,
   GoalCheckpointVerifier,
@@ -156,12 +155,8 @@ export function createGoalCheckpointVerifier(
     const contents = verifierContents(input);
     const timeoutController = new AbortController();
     const timer = setTimeout(() => {
-      // TimeoutError-shaped so downstream reports this deadline as a failure
-      // instead of suppressing it as a user cancel (see utils/errors.ts).
       timeoutController.abort(
-        timeoutAbortReason(
-          `Goal checkpoint verifier timed out after ${timeoutMs}ms`,
-        ),
+        new Error(`Goal checkpoint verifier timed out after ${timeoutMs}ms`),
       );
     }, timeoutMs);
     const abortSignal = attemptSignal

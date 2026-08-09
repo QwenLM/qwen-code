@@ -17,11 +17,9 @@ export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /**
- * Check if the error is abort-shaped — a user cancel OR an internal deadline
- * firing; the pinned SDKs reject abort-shaped for ANY aborted signal, so this
- * alone cannot tell who aborted. For "the user cancelled", gate on
- * `isUserCancel()` instead. Handles DOMException-style AbortError, Node.js
- * abort errors, and the provider SDKs' `APIUserAbortError` (by class name).
+ * Check if the error is an abort error (user cancellation). Handles
+ * DOMException-style AbortError, Node.js abort errors, and the provider SDKs'
+ * `APIUserAbortError` (matched by class name).
  */
 export function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
@@ -57,53 +55,6 @@ export function isAbortError(error: unknown): boolean {
   }
 
   return false;
-}
-
-/**
- * Whether an error represents a cancel the *user* initiated, as opposed to any
- * other abort. Callers that suppress reporting for user cancels should gate on
- * this rather than on `signal.aborted && isAbortError(error)`, so the
- * definition of "user cancel" lives in one place.
- *
- * An aborted signal alone is not enough. Internal side queries compose a
- * deadline into the same `config.abortSignal` a user cancel travels on:
- * `memory/relevanceSelector.ts` (30s), `memory/forget.ts` (8s) and
- * `agents/arena/ArenaManager.ts` all route `AbortSignal.timeout(...)` — alone
- * or via `AbortSignal.any([...])` — through `baseLlmClient` into the request.
- * When such a budget runs out the provider SDK still rejects abort-shaped
- * (`openai` throws `APIUserAbortError` for any aborted signal, `@google/genai`
- * surfaces a DOMException `AbortError`), but nobody cancelled anything. That is
- * a genuine failure and it must stay reported.
- *
- * Node sets `signal.reason` to a DOMException named 'TimeoutError' for
- * `AbortSignal.timeout()`, and `AbortSignal.any()` adopts the firing source's
- * reason, so the reason separates the two cases.
- */
-export function isUserCancel(error: unknown, signal?: AbortSignal): boolean {
-  if (!signal?.aborted) {
-    return false;
-  }
-
-  const reason: unknown = signal.reason;
-  if (reason instanceof Error && reason.name === 'TimeoutError') {
-    return false;
-  }
-
-  return isAbortError(error);
-}
-
-/**
- * The abort reason an internal deadline must signal so `isUserCancel` can tell
- * it apart from a user cancel. This is the producer half of that contract:
- * budgets on model-request paths abort with this (`AbortSignal.timeout()`
- * produces the same shape natively, and `combineAbortSignals(signals,
- * { timeoutMs })` in `utils/abortController.ts` is the composed spelling
- * when a parent signal is also involved). A bare `abort()`
- * or an `Error`-reason abort reads downstream as a user cancel, and the
- * timed-out request's api_error is silently suppressed.
- */
-export function timeoutAbortReason(message: string): DOMException {
-  return new DOMException(message, 'TimeoutError');
 }
 
 /**

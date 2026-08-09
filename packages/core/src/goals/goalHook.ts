@@ -25,7 +25,6 @@ import {
 } from './activeGoalStore.js';
 import { judgeGoal } from './goalJudge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { timeoutAbortReason } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('GOAL_HOOK');
 
@@ -88,10 +87,7 @@ async function judgeGoalWithTimeout(
           debugLogger.debug(
             `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; pausing goal loop`,
           );
-          // TimeoutError-shaped so downstream can tell this deadline apart
-          // from a user cancel; a bare abort() reasons as 'AbortError', which
-          // is indistinguishable from Esc and gets its api_error suppressed.
-          judgeController.abort(timeoutAbortReason(GOAL_JUDGE_TIMEOUT_MESSAGE));
+          judgeController.abort();
           resolve({
             kind: 'error',
             ok: false,
