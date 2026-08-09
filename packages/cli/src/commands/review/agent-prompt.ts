@@ -42,7 +42,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { launchToolBudget } from './lib/budget.js';
+import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   expectedRoundSeconds,
   readRoundStamps,
@@ -1849,6 +1849,18 @@ function requireAuditableChunks(report: PlanReport): DiffChunk[] {
   return chunks;
 }
 
+/** The plan's reverse-audit round cap; unreadable reads as the full cap. */
+function reverseAuditCapOfPlan(planPath: string): number {
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      budget?: unknown;
+    };
+    return reverseAuditRoundCap(plan.budget);
+  } catch {
+    return REVERSE_AUDIT_MAX_ROUNDS;
+  }
+}
+
 /**
  * Gate one reverse-audit admission. Every part of the refusal — the marker
  * `compose-review` synthesizes the verdict-capping disclosure from, the
@@ -1864,6 +1876,29 @@ function admitReverseAuditRound(
   planPath: string,
   round: number | undefined,
 ): boolean {
+  // The plan's round cap first: deterministic, and cheaper than the
+  // deadline arithmetic. 5 normally; 1 below the sweep floor, where a
+  // convergence loop re-reads the same few hunks round after round
+  // (measured: a 23-line PR spent three rounds and eleven minutes to
+  // produce one verifier-rejected finding). The refusal mirrors the budget
+  // stop's contract — a termination rule, not an error — and names the
+  // entry the orchestrator owes only when scope is actually outstanding,
+  // which the converged path has already ruled out by reaching here.
+  const cap = reverseAuditCapOfPlan(planPath);
+  if (typeof round === 'number' && round > cap) {
+    writeStderrLine(
+      `ROUND CAP: the plan's reverse-audit round cap is ${cap}` +
+        (cap === 1 ? ' (a micro diff below the sweep floor)' : '') +
+        `, and round ${round} is past it. This is a termination rule, not ` +
+        `an error — do not rebuild or retry. If any chunk is still under ` +
+        `audit (round ${cap}'s findings were confirmed, or an auditor ` +
+        `whiffed twice), add \`reverse audit — stopped at the plan's ` +
+        `${cap}-round cap\` to unreviewedDimensions; a converged loop owes ` +
+        `no entry. Proceed to Step 6 with the findings already confirmed.`,
+    );
+    process.exitCode = 4;
+    return false;
+  }
   const spent = reverseAuditBudgetExhausted(
     process.env,
     expectedRoundSeconds(planPath, round),
@@ -1883,9 +1918,14 @@ function admitReverseAuditRound(
  * already answered. Not an error and not a gap — no record, no stamp, no
  * disclosure owed; a round that builds nothing was never admitted.
  */
-function refuseConverged(): void {
+function refuseConverged(planPath: string): void {
+  const certificate =
+    reverseAuditCapOfPlan(planPath) === 1
+      ? 'every chunk holds a substantive dry audit — the certificate the ' +
+        "plan's one-round micro cap asks for"
+      : 'every chunk holds two consecutive substantive dry audits';
   writeStderrLine(
-    'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
+    `CONVERGED: ${certificate}; ` +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
       'unreviewedDimensions entry is owed.',
@@ -1913,7 +1953,12 @@ function runAllChunks(
   // three yielded in most: the loop earns its keep in the hot territories,
   // and the cold ones were a third of its bill.
   let schedule: RoundSchedule | null = null;
-  if (role === 'reverse-audit' && round !== undefined && round >= 3) {
+  const retirementReadsFrom = reverseAuditCapOfPlan(planPath) === 1 ? 2 : 3;
+  if (
+    role === 'reverse-audit' &&
+    round !== undefined &&
+    round >= retirementReadsFrom
+  ) {
     try {
       schedule = scheduleReverseAuditRound(
         planPath,
@@ -1934,7 +1979,7 @@ function runAllChunks(
   }
 
   if (schedule !== null && schedule.converged) {
-    refuseConverged();
+    refuseConverged(planPath);
     return;
   }
 
@@ -1997,22 +2042,28 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
+  const planRoundCap = reverseAuditCapOfPlan(planPath);
   const retirementNote =
     skipped.length === 0
       ? []
       : [
-          `retirement: a chunk whose two most recent audits are substantive ` +
-            `dry receipts is cold-checked on alternating rounds instead of ` +
-            `audited on every one; a cold check that yields returns it to ` +
-            `every-round auditing. Skipped this round:\n` +
+          (planRoundCap === 1
+            ? `retirement: under the plan's one-round micro cap a single ` +
+              `substantive dry audit is the certificate — final, with no ` +
+              `round for a cold check. Skipped this round:\n`
+            : `retirement: a chunk whose two most recent audits are substantive ` +
+              `dry receipts is cold-checked on alternating rounds instead of ` +
+              `audited on every one; a cold check that yields returns it to ` +
+              `every-round auditing. Skipped this round:\n`) +
             skipped
               .map(
                 (s) =>
-                  `chunk ${s.chunkId} — retired: dry in rounds ` +
-                  `${s.dryRounds[0]} and ${s.dryRounds[1]}, ` +
-                  (s.nextColdCheck > REVERSE_AUDIT_MAX_ROUNDS
+                  `chunk ${s.chunkId} — retired: dry in ` +
+                  `round${s.dryRounds.length > 1 ? 's' : ''} ` +
+                  `${s.dryRounds.join(' and ')}, ` +
+                  (s.nextColdCheck > planRoundCap
                     ? `certificate final — the ` +
-                      `${REVERSE_AUDIT_MAX_ROUNDS}-round hard cap leaves ` +
+                      `${planRoundCap}-round cap leaves ` +
                       `the loop no round for a cold check`
                     : `next cold check round ${s.nextColdCheck}`),
               )
@@ -2404,7 +2455,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         schedule = null;
       }
       if (schedule !== null && schedule.converged) {
-        refuseConverged();
+        refuseConverged(args.plan);
         return;
       }
     }

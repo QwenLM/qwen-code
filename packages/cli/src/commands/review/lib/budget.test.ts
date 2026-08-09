@@ -12,6 +12,7 @@ import {
   budgetGapDisclosures,
   stripBudgetGapLines,
   launchToolBudget,
+  reverseAuditRoundCap,
   reviewBudget,
 } from './budget.js';
 
@@ -370,6 +371,45 @@ describe('stripBudgetGapLines — the receipt judged without its disclosures', (
   });
 });
 
+describe('reviewBudget — the reverse-audit round cap', () => {
+  it('caps at one round below the sweep floor, five at it and above', () => {
+    // The sweep's rationale extended to the high tier's second pass: below
+    // the floor a convergence loop re-reads the same few hunks (measured:
+    // a 23-line PR spent three rounds and eleven minutes to produce one
+    // verifier-rejected finding).
+    expect(
+      reviewBudget({ srcDiffLines: 24, diffLines: 24 }).reverseAuditRounds,
+    ).toBe(1);
+    expect(
+      reviewBudget({ srcDiffLines: 25, diffLines: 25 }).reverseAuditRounds,
+    ).toBe(5);
+    expect(
+      reviewBudget({ srcDiffLines: 400, diffLines: 500 }).reverseAuditRounds,
+    ).toBe(5);
+  });
+
+  it('never reaches zero — one round IS the second look', () => {
+    expect(
+      reviewBudget({ srcDiffLines: 0, diffLines: 0 }).reverseAuditRounds,
+    ).toBe(1);
+  });
+});
+
+describe('reverseAuditRoundCap — the one reader of the plan field', () => {
+  it('passes a valid cap through and defaults everything else to the max', () => {
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 1 })).toBe(1);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 3 })).toBe(3);
+    // Absent, out-of-band and garbled all read as the full cap: an old or
+    // hand-edited plan errs toward more auditing, never less.
+    expect(reverseAuditRoundCap(undefined)).toBe(5);
+    expect(reverseAuditRoundCap({})).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 0 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 6 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 2.5 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: '1' })).toBe(5);
+  });
+});
+
 describe('reviewBudget — the budget survives the trip through the plan', () => {
   it('agentToolBudget is an enumerable field of the returned object', () => {
     // The plan is written with JSON.stringify(report); a field that were a
@@ -378,6 +418,7 @@ describe('reviewBudget — the budget survives the trip through the plan', () =>
     // not just the type.
     const b = reviewBudget({ srcDiffLines: 10, diffLines: 10 });
     expect(Object.keys(b)).toContain('agentToolBudget');
+    expect(Object.keys(b)).toContain('reverseAuditRounds');
     expect(
       (JSON.parse(JSON.stringify(b)) as Record<string, unknown>)[
         'agentToolBudget'

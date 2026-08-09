@@ -3417,6 +3417,58 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('retirement:');
   });
 
+  it('micro cap: one dry round converges at the round-2 build (exit 5)', () => {
+    // Below the sweep floor the plan's cap is 1: a single substantive dry
+    // audit is the certificate. The round-2 --all-chunks build must read
+    // that as CONVERGED — not refuse it at the cap with an entry owed, and
+    // not schedule cold checks the cap leaves no round for.
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...PLAN,
+        budget: { reverseAuditRounds: 1 },
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    runRound(2);
+
+    expect(process.exitCode).toBe(5);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('one-round micro cap');
+  });
+
+  it('micro cap: a hot chunk at round 2 is refused at the cap (exit 4)', () => {
+    // Round 1 yielded, so the loop is not converged — but the plan's cap
+    // forbids a second round. The refusal is a termination rule naming the
+    // unreviewedDimensions entry, mirroring the deadline gate's contract.
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...PLAN,
+        budget: { reverseAuditRounds: 1 },
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: YIELD, 15: DRY });
+    const out = runRound(2);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain("stopped at the plan's 1-round cap");
+    // Round 2 built nothing: no record, no stamp.
+    expect(keysOf(2)).toHaveLength(0);
+  });
+
   it('all retired and none due: exit 5, CONVERGED, nothing built, nothing stamped', () => {
     answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
     answerRound(2, { 13: DRY, 14: DRY, 15: DRY });

@@ -97,6 +97,27 @@ export interface ReviewBudget {
    * crawl only feeds the wall clock.
    */
   agentToolBudget: number;
+  /**
+   * The reverse-audit loop's round cap: 5 — today's hard cap — or 1 below
+   * the sweep floor.
+   *
+   * The sweep's own rationale, extended to the high tier's second pass:
+   * below ~25 effective lines a diff fits in one view, and a second reader
+   * of the same few hunks is the same reader. The reverse audit is that
+   * second reader run as a LOOP — to convergence, two consecutive dry
+   * audits per chunk — and on a diff below the floor the loop re-reads the
+   * same lines round after round. Measured on a 23-line one-file PR: three
+   * rounds, eleven minutes, and the single finding round 2 produced was
+   * verifier-rejected — the loop's entire yield was the certificate that
+   * there was nothing to find, which round 1 had already said. At the cap
+   * of 1 a single substantive dry audit (or a round whose findings all
+   * fail verification — the retroactive-dry rule) retires the chunk.
+   *
+   * Never 0: the reverse audit is a dimension of the high-effort contract,
+   * and the budget must not scale a dimension away — one round IS the
+   * second look, just not a convergence loop.
+   */
+  reverseAuditRounds: number;
 }
 
 /**
@@ -104,6 +125,14 @@ export interface ReviewBudget {
  * it is the first pass again.
  */
 const SWEEP_FLOOR = 25;
+
+/**
+ * The reverse-audit loop's hard cap (SKILL.md Step 5's "stop after 5
+ * rounds"). Lives here beside the floor that lowers it, so the two ends of
+ * `reverseAuditRounds` share one home; `retirement.ts` re-exports it for
+ * its own callers.
+ */
+export const MAX_REVERSE_AUDIT_ROUNDS = 5;
 
 /** Below this, "one domain dominates the diff" is not a finding about the diff. */
 const SPECIALIST_FLOOR = 80;
@@ -165,7 +194,26 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
       MIN_AGENT_TOOL_BUDGET,
       MAX_AGENT_TOOL_BUDGET,
     ),
+    reverseAuditRounds: effective < SWEEP_FLOOR ? 1 : MAX_REVERSE_AUDIT_ROUNDS,
   };
+}
+
+/**
+ * The reverse-audit round cap a plan's budget carries, for every reader
+ * that enforces or narrates it (the admission gate, the retirement
+ * scheduler, the cold-check note). A plan without the field — an older
+ * CLI — or a garbled value reads as the full cap: an old plan errs toward
+ * more auditing, never less, exactly like every other budget fallback.
+ */
+export function reverseAuditRoundCap(budget: unknown): number {
+  const v = (budget as { reverseAuditRounds?: unknown } | undefined)
+    ?.reverseAuditRounds;
+  return typeof v === 'number' &&
+    Number.isInteger(v) &&
+    v >= 1 &&
+    v <= MAX_REVERSE_AUDIT_ROUNDS
+    ? v
+    : MAX_REVERSE_AUDIT_ROUNDS;
 }
 
 /**
