@@ -105,6 +105,7 @@ import {
   type ExtensionActivationResult,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
+  type WorkspaceActivation,
 } from './extension-store.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
@@ -710,6 +711,69 @@ export class ExtensionManager {
     }
   }
 
+  async setExtensionsEnabled(
+    names: readonly string[],
+    enabled: boolean,
+    scope: SettingScope,
+    cwd?: string,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const currentDir = cwd ?? this.workspaceDir;
+    if (
+      scope === SettingScope.System ||
+      scope === SettingScope.SystemDefaults
+    ) {
+      throw new Error('System and SystemDefaults scopes are not supported.');
+    }
+    const loadedExtensions = this.getLoadedExtensions();
+    const extensions = names.map((name) => {
+      const extension = loadedExtensions.find((item) => item.name === name);
+      if (!extension) {
+        throw new Error(`Extension with name ${name} does not exist.`);
+      }
+      return extension;
+    });
+    const activation = enabled ? 'enabled' : 'disabled';
+    const identities = extensions.map(({ id, name }) => ({ id, name }));
+    const endMutation = this.beginMutation('setExtensionsEnabled');
+    try {
+      const snapshot =
+        scope === SettingScope.Workspace
+          ? await this.extensionStore.setWorkspaceActivations(
+              identities,
+              currentDir,
+              activation,
+            )
+          : await this.extensionStore.setLegacyPathActivations(
+              identities,
+              os.homedir(),
+              activation,
+            );
+      onCommitted?.(snapshot.generation);
+      const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+      for (const extension of extensions) {
+        if (enabled) {
+          logExtensionEnable(
+            config,
+            new ExtensionEnableEvent(extension.name, scope),
+          );
+        } else {
+          logExtensionDisable(
+            config,
+            new ExtensionDisableEvent(extension.name, scope),
+          );
+        }
+      }
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${extensions.length} extensions`,
+      );
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
   async getExtensionStoreSnapshot(): Promise<ExtensionStoreSnapshot> {
     return await this.extensionStore.readSnapshot();
   }
@@ -769,6 +833,31 @@ export class ExtensionManager {
     }
   }
 
+  async setExtensionDefaultActivations(
+    extensionIds: readonly string[],
+    activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extensions = extensionIds.map((extensionId) =>
+      this.findExtensionById(extensionId),
+    );
+    const endMutation = this.beginMutation('setExtensionDefaultActivations');
+    try {
+      const snapshot = await this.extensionStore.setDefaultActivations(
+        extensions.map(({ id, name }) => ({ id, name })),
+        activation,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${extensions.length} extensions`,
+      );
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
   async setExtensionActivationScope(
     extensionId: string,
     activation: InitialExtensionActivation,
@@ -807,6 +896,40 @@ export class ExtensionManager {
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async setExtensionWorkspaceActivations(
+    extensionIds: readonly string[],
+    workspacePath: string,
+    activation: WorkspaceActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extensions = extensionIds.map((extensionId) =>
+      this.findExtensionById(extensionId),
+    );
+    const identities = extensions.map(({ id, name }) => ({ id, name }));
+    const endMutation = this.beginMutation('setExtensionWorkspaceActivations');
+    try {
+      const snapshot =
+        activation === 'inherit'
+          ? await this.extensionStore.clearWorkspaceActivations(
+              identities,
+              workspacePath,
+            )
+          : await this.extensionStore.setWorkspaceActivations(
+              identities,
+              workspacePath,
+              activation,
+            );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${extensions.length} extensions`,
+      );
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();

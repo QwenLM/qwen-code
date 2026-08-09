@@ -4992,6 +4992,33 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
+    it('POSTs one batch extension toggle operation', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(202, { accepted: true, operationId: 'op-batch' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setExtensionsEnabled(
+          ['first-extension', 'second-extension'],
+          false,
+          { scope: 'workspace' },
+          'client-1',
+        ),
+      ).resolves.toEqual({ accepted: true, operationId: 'op-batch' });
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/extensions/enable',
+        method: 'POST',
+        body: JSON.stringify({
+          extensionNames: ['first-extension', 'second-extension'],
+          enabled: false,
+          scope: 'workspace',
+        }),
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('POSTs an extension archive as a binary body', async () => {
       let capturedUrl = '';
       let capturedInit: RequestInit | undefined;
@@ -5479,6 +5506,11 @@ describe('DaemonClient', () => {
         'disabled',
         'client-1',
       );
+      await client.setExtensionDefaultActivations(
+        ['a'.repeat(64), 'b'.repeat(64)],
+        'enabled',
+        'client-1',
+      );
       await client.extensionOperation('op-1');
 
       expect(calls.map((c) => [c.method, c.url])).toEqual([
@@ -5488,8 +5520,15 @@ describe('DaemonClient', () => {
         ['POST', `http://daemon/extensions/${'a'.repeat(64)}/update`],
         ['DELETE', `http://daemon/extensions/${'a'.repeat(64)}`],
         ['PUT', `http://daemon/extensions/${'a'.repeat(64)}/activation`],
+        ['PUT', 'http://daemon/extensions/activation'],
         ['GET', 'http://daemon/extensions/operations/op-1'],
       ]);
+      expect(calls[6]?.body).toBe(
+        JSON.stringify({
+          extensionIds: ['a'.repeat(64), 'b'.repeat(64)],
+          state: 'enabled',
+        }),
+      );
       expect(transportFetch).not.toHaveBeenCalled();
     });
 
@@ -5538,6 +5577,11 @@ describe('DaemonClient', () => {
 
       await expect(ws.workspaceExtensions()).resolves.toEqual(status);
       await ws.setExtensionActivation('a'.repeat(64), 'enabled', 'client-1');
+      await ws.setExtensionActivations(
+        ['a'.repeat(64), 'b'.repeat(64)],
+        'inherit',
+        'client-1',
+      );
       await ws.clearExtensionActivation('a'.repeat(64), 'client-1');
       await ws.refreshExtensionRuntime('client-1');
 
@@ -5547,12 +5591,19 @@ describe('DaemonClient', () => {
           'PUT',
           `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
+        ['PUT', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/activation'],
         [
           'DELETE',
           `http://daemon/workspaces/%2Fwork%2Fa/extensions/${'a'.repeat(64)}/activation`,
         ],
         ['POST', 'http://daemon/workspaces/%2Fwork%2Fa/extensions/refresh'],
       ]);
+      expect(calls[2]?.body).toBe(
+        JSON.stringify({
+          extensionIds: ['a'.repeat(64), 'b'.repeat(64)],
+          state: 'inherit',
+        }),
+      );
       expect(transportFetch).not.toHaveBeenCalled();
     });
   });

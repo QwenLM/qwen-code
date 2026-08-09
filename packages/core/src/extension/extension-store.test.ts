@@ -107,6 +107,142 @@ describe('ExtensionStore', () => {
     ).toMatchObject({ effective: 'enabled', source: 'workspace_override' });
   });
 
+  it('changes multiple workspace activations in one generation', async () => {
+    const store = makeStore();
+    const identities = [
+      { id: 'b1'.repeat(32), name: 'first' },
+      { id: 'b2'.repeat(32), name: 'second' },
+    ];
+    const initial = await store.ensureInitialized(identities);
+
+    const snapshot = await store.setWorkspaceActivations(
+      identities,
+      workspacePath('batch'),
+      'disabled',
+    );
+
+    expect(snapshot.generation).toBe(initial.generation + 1);
+    for (const identity of identities) {
+      expect(
+        store.getActivation(
+          snapshot,
+          identity.id,
+          identity.name,
+          workspacePath('batch'),
+        ),
+      ).toMatchObject({
+        effective: 'disabled',
+        source: 'workspace_override',
+      });
+    }
+  });
+
+  it('changes multiple default activations in one generation', async () => {
+    const store = makeStore();
+    const identities = [
+      { id: 'b7'.repeat(32), name: 'first' },
+      { id: 'b8'.repeat(32), name: 'second' },
+    ];
+    const initial = await store.ensureInitialized(identities);
+
+    const snapshot = await store.setDefaultActivations(identities, 'disabled');
+
+    expect(snapshot.generation).toBe(initial.generation + 1);
+    for (const identity of identities) {
+      expect(snapshot.extensions[identity.id]?.defaultActivation).toBe(
+        'disabled',
+      );
+    }
+  });
+
+  it('clears multiple workspace activations in one generation', async () => {
+    const store = makeStore();
+    const identities = [
+      { id: 'b9'.repeat(32), name: 'first' },
+      { id: 'ba'.repeat(32), name: 'second' },
+    ];
+    await store.ensureInitialized(identities);
+    await store.setLegacyPathActivations(
+      identities,
+      workspacePath('batch'),
+      'disabled',
+    );
+    const before = await store.setWorkspaceActivations(
+      identities,
+      workspacePath('batch'),
+      'enabled',
+    );
+
+    const snapshot = await store.clearWorkspaceActivations(
+      identities,
+      workspacePath('batch'),
+    );
+
+    expect(snapshot.generation).toBe(before.generation + 1);
+    for (const identity of identities) {
+      expect(
+        store.getActivation(
+          snapshot,
+          identity.id,
+          identity.name,
+          workspacePath('batch'),
+        ),
+      ).toMatchObject({
+        workspace: 'inherit',
+        effective: 'enabled',
+        source: 'default',
+      });
+    }
+  });
+
+  it('changes multiple legacy path activations in one generation', async () => {
+    const store = makeStore();
+    const identities = [
+      { id: 'b5'.repeat(32), name: 'first' },
+      { id: 'b6'.repeat(32), name: 'second' },
+    ];
+    const initial = await store.ensureInitialized(identities);
+
+    const snapshot = await store.setLegacyPathActivations(
+      identities,
+      workspacePath(),
+      'disabled',
+    );
+
+    expect(snapshot.generation).toBe(initial.generation + 1);
+    for (const identity of identities) {
+      expect(
+        store.getActivation(
+          snapshot,
+          identity.id,
+          identity.name,
+          workspacePath('child'),
+        ),
+      ).toMatchObject({
+        effective: 'disabled',
+        source: 'legacy_path_rule',
+      });
+    }
+  });
+
+  it('does not commit a partial batch when an identity is missing', async () => {
+    const store = makeStore();
+    const installed = { id: 'b3'.repeat(32), name: 'installed' };
+    const initial = await store.ensureInitialized([installed]);
+
+    await expect(
+      store.setWorkspaceActivations(
+        [installed, { id: 'b4'.repeat(32), name: 'missing' }],
+        workspacePath('batch'),
+        'disabled',
+      ),
+    ).rejects.toMatchObject({ code: 'extension_conflict' });
+
+    const snapshot = await store.readSnapshot();
+    expect(snapshot.generation).toBe(initial.generation);
+    expect(snapshot.extensions[installed.id]?.workspaceOverrides).toEqual({});
+  });
+
   it('re-keys a policy to a new id for the same name after an id-formula change', async () => {
     const store = makeStore();
     const oldId = 'a'.repeat(64);

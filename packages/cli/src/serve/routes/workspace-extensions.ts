@@ -47,6 +47,7 @@ import {
   redactExtensionDisplaySource,
   type ExtensionPendingInteraction,
   type ExtensionOperationContext,
+  type ExtensionMutationEvent,
   type ExtensionsController,
   type RuntimeReconciliationReservation,
 } from './workspace-extensions-controller.js';
@@ -59,6 +60,8 @@ const EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS =
   EXTENSION_PREPARE_DEADLINE_MS + EXTENSION_INTERACTION_DEADLINE_MS;
 const EXTENSION_UPDATE_CHECK_DEADLINE_MS = 2 * 60_000;
 const EXTENSION_ARCHIVE_UPLOAD_LIMIT = '10mb';
+const MAX_EXTENSION_BATCH_SIZE = 100;
+const MAX_WORKSPACE_EXTENSION_NAME_LENGTH = 256;
 
 const extensionArchiveBodyParser = express.raw({
   type: 'application/octet-stream',
@@ -120,6 +123,101 @@ const parseExtensionScope = (
     return null;
   }
   return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
+};
+
+const parseExtensionBatchToggleRequest = (
+  req: Request,
+  res: Response,
+  safeBody: SafeBody,
+):
+  | {
+      extensionNames: string[];
+      enabled: boolean;
+      scope: SettingScope;
+    }
+  | undefined => {
+  const body = safeBody(req);
+  const rawExtensionNames = body['extensionNames'];
+  if (
+    !Array.isArray(rawExtensionNames) ||
+    rawExtensionNames.length === 0 ||
+    rawExtensionNames.length > MAX_EXTENSION_BATCH_SIZE ||
+    !rawExtensionNames.every((name) => typeof name === 'string')
+  ) {
+    res.status(400).json({
+      error: `\`extensionNames\` must be a non-empty string array (max ${MAX_EXTENSION_BATCH_SIZE})`,
+      code: 'invalid_extension_names',
+    });
+    return undefined;
+  }
+  const extensionNames: string[] = [];
+  const seen = new Set<string>();
+  for (const rawExtensionName of rawExtensionNames as string[]) {
+    const extensionName = rawExtensionName.trim();
+    if (!extensionName) {
+      res.status(400).json({
+        error: 'Extension names must not be empty',
+        code: 'invalid_extension_name',
+      });
+      return undefined;
+    }
+    if (extensionName.length > MAX_WORKSPACE_EXTENSION_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Extension name exceeds ${MAX_WORKSPACE_EXTENSION_NAME_LENGTH}-character limit`,
+        code: 'invalid_extension_name',
+      });
+      return undefined;
+    }
+    const normalizedName = extensionName.toLowerCase();
+    if (seen.has(normalizedName)) continue;
+    seen.add(normalizedName);
+    extensionNames.push(extensionName);
+  }
+  const enabled = body['enabled'];
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({
+      error: '`enabled` is required and must be a boolean',
+      code: 'invalid_enabled_flag',
+    });
+    return undefined;
+  }
+  const scope = parseExtensionScope(body, res);
+  return scope === null ? undefined : { extensionNames, enabled, scope };
+};
+
+const parseExtensionBatchIds = (
+  req: Request,
+  res: Response,
+  safeBody: SafeBody,
+): string[] | undefined => {
+  const rawExtensionIds = safeBody(req)['extensionIds'];
+  if (
+    !Array.isArray(rawExtensionIds) ||
+    rawExtensionIds.length === 0 ||
+    rawExtensionIds.length > MAX_EXTENSION_BATCH_SIZE ||
+    !rawExtensionIds.every((id) => typeof id === 'string')
+  ) {
+    res.status(400).json({
+      error: `\`extensionIds\` must be a non-empty string array (max ${MAX_EXTENSION_BATCH_SIZE})`,
+      code: 'invalid_extension_ids',
+    });
+    return undefined;
+  }
+  const extensionIds: string[] = [];
+  const seen = new Set<string>();
+  for (const extensionId of rawExtensionIds as string[]) {
+    if (!/^[a-f0-9]{64}$/.test(extensionId)) {
+      res.status(400).json({
+        error: `Invalid extension id "${extensionId}"`,
+        code: 'invalid_extension_id',
+      });
+      return undefined;
+    }
+    if (seen.has(extensionId)) continue;
+    seen.add(extensionId);
+    extensionIds.push(extensionId);
+  }
+  return extensionIds;
 };
 
 const parseExtensionRegistryUrl = (
@@ -1173,6 +1271,81 @@ export function registerWorkspaceExtensionRoutes(
       }
     });
 
+    app.post(`${base}/enable`, mutate({ strict: true }), async (req, res) => {
+      const ctrl = resolve(req, res, true);
+      if (!ctrl) return;
+      try {
+        if (
+          !ctrl.validateExtensionMutationClient(req, res, {
+            requireClientId: false,
+          })
+        ) {
+          return;
+        }
+        const input = parseExtensionBatchToggleRequest(req, res, safeBody);
+        if (!input) return;
+        const { extensionNames, enabled, scope } = input;
+        ctrl.runQueuedExtensionMutation(
+          enabled ? 'enable_batch' : 'disable_batch',
+          {},
+          res,
+          async (extensionManager, _signal, context) => {
+            const names: string[] = [];
+            const results: Array<{
+              extensionName: string;
+              enabled: boolean;
+            }> = [];
+            const errors: Array<{
+              extensionName: string;
+              code: 'extension_not_found';
+              error: string;
+            }> = [];
+            for (const requestedName of extensionNames) {
+              const extension = findLoadedExtension(
+                extensionManager,
+                requestedName,
+              );
+              if (!extension) {
+                errors.push({
+                  extensionName: requestedName,
+                  code: 'extension_not_found',
+                  error: `Extension "${requestedName}" not found`,
+                });
+                continue;
+              }
+              names.push(extension.name);
+              results.push({ extensionName: extension.name, enabled });
+            }
+            if (names.length > 0) {
+              await context!.commit(
+                async (onCommitted) =>
+                  await extensionManager.setExtensionsEnabled(
+                    names,
+                    enabled,
+                    scope,
+                    ctrl.boundWorkspace,
+                    onCommitted,
+                  ),
+              );
+            }
+            return {
+              status: enabled ? 'enabled' : 'disabled',
+              ...(names.length === 0 ? { updated: false } : {}),
+              results,
+              errors,
+            };
+          },
+          {
+            ...(scope === SettingScope.User
+              ? globalReconciliationOptions()
+              : workspaceReconciliationOptions()),
+          },
+        );
+      } catch (err) {
+        sendBridgeError(res, err, { route: `POST ${base}/enable` });
+      }
+    });
+
     app.post(
       `${base}/:name/enable`,
       mutate({ strict: true }),
@@ -1475,6 +1648,21 @@ export function registerWorkspaceExtensionRoutes(
     return state;
   };
 
+  const parseWorkspaceBatchActivationState = (
+    req: Request,
+    res: Response,
+  ): 'enabled' | 'disabled' | 'inherit' | null => {
+    const state = safeBody(req)['state'];
+    if (state !== 'enabled' && state !== 'disabled' && state !== 'inherit') {
+      res.status(400).json({
+        error: '`state` must be "enabled", "disabled", or "inherit"',
+        code: 'invalid_extension_activation',
+      });
+      return null;
+    }
+    return state;
+  };
+
   const sendOperation = (
     req: Request,
     res: Response,
@@ -1486,22 +1674,7 @@ export function registerWorkspaceExtensionRoutes(
       extensionManager: ExtensionManager,
       signal?: AbortSignal,
       context?: ExtensionOperationContext,
-    ) => Promise<{
-      status:
-        | 'installed'
-        | 'enabled'
-        | 'disabled'
-        | 'updated'
-        | 'uninstalled'
-        | 'checked'
-        | 'refreshed';
-      source?: string;
-      name?: string;
-      version?: string;
-      updated?: boolean;
-      reason?: string;
-      states?: Record<string, string>;
-    }>,
+    ) => Promise<ExtensionMutationEvent>,
     options: {
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -1580,6 +1753,70 @@ export function registerWorkspaceExtensionRoutes(
       return;
     }
     res.status(200).json(operation);
+  });
+
+  app.put('/extensions/activation', mutate({ strict: true }), (req, res) => {
+    const extensionIds = parseExtensionBatchIds(req, res, safeBody);
+    if (!extensionIds) return;
+    const state = parseActivationState(req, res);
+    if (!state) return;
+    const manager = primaryController.createExtensionManager(
+      boundWorkspace,
+      true,
+    );
+    sendOperation(
+      req,
+      res,
+      'PUT /extensions/activation',
+      manager,
+      'set_default_activation_batch',
+      {},
+      async (extensionManager, _signal, context) => {
+        const extensions: Extension[] = [];
+        const errors: Array<{
+          extensionId: string;
+          code: 'extension_not_found';
+          error: string;
+        }> = [];
+        for (const extensionId of extensionIds) {
+          const extension = extensionById(extensionManager, extensionId);
+          if (extension) {
+            extensions.push(extension);
+          } else {
+            errors.push({
+              extensionId,
+              code: 'extension_not_found',
+              error: `Extension "${extensionId}" not found`,
+            });
+          }
+        }
+        if (extensions.length === 0) {
+          return { status: 'updated', updated: false, results: [], errors };
+        }
+        await context!.commit(
+          async (onCommitted) =>
+            await extensionManager.setExtensionDefaultActivations(
+              extensions.map((extension) => extension.id),
+              state,
+              onCommitted,
+            ),
+        );
+        return {
+          status: 'updated',
+          results: extensions.map((extension) => ({
+            extensionId: extension.id,
+            name: extension.name,
+            defaultActivation: state,
+          })),
+          errors,
+        };
+      },
+      {
+        ...(workspaceRegistry
+          ? { refreshRuntimes: () => workspaceRegistry.list() }
+          : {}),
+      },
+    );
   });
 
   app.put(
@@ -1998,6 +2235,82 @@ export function registerWorkspaceExtensionRoutes(
         });
       }
     });
+
+    app.put(
+      '/workspaces/:workspace/extensions/activation',
+      mutate({ strict: true }),
+      (req, res) => {
+        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const extensionIds = parseExtensionBatchIds(req, res, safeBody);
+        if (!extensionIds) return;
+        const state = parseWorkspaceBatchActivationState(req, res);
+        if (!state) return;
+        const manager = primaryController.createExtensionManager(
+          runtime.workspaceCwd,
+          true,
+        );
+        sendOperation(
+          req,
+          res,
+          'PUT /workspaces/:workspace/extensions/activation',
+          manager,
+          'set_workspace_activation_batch',
+          {},
+          async (extensionManager, _signal, context) => {
+            const extensions: Extension[] = [];
+            const errors: Array<{
+              extensionId: string;
+              code: 'extension_not_found';
+              error: string;
+            }> = [];
+            for (const extensionId of extensionIds) {
+              const extension = extensionById(extensionManager, extensionId);
+              if (extension) {
+                extensions.push(extension);
+              } else {
+                errors.push({
+                  extensionId,
+                  code: 'extension_not_found',
+                  error: `Extension "${extensionId}" not found`,
+                });
+              }
+            }
+            if (extensions.length === 0) {
+              return { status: 'updated', updated: false, results: [], errors };
+            }
+            const snapshot = await context!.commit(
+              async (onCommitted) =>
+                await extensionManager.setExtensionWorkspaceActivations(
+                  extensions.map((extension) => extension.id),
+                  runtime.workspaceCwd,
+                  state,
+                  onCommitted,
+                ),
+            );
+            return {
+              status: 'updated',
+              results: extensions.map((extension) => ({
+                extensionId: extension.id,
+                name: extension.name,
+                workspaceActivation: state === 'inherit' ? null : state,
+                effectiveActivation:
+                  extensionManager.getExtensionActivationFromSnapshot(
+                    extension.id,
+                    snapshot,
+                    runtime.workspaceCwd,
+                  ).effective,
+              })),
+              errors,
+            };
+          },
+          {
+            refreshRuntimes: [runtime],
+            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+          },
+        );
+      },
+    );
 
     app.put(
       '/workspaces/:workspace/extensions/:extensionId/activation',

@@ -102,6 +102,32 @@ export type ExtensionMutationEvent = {
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
+  results?: Array<
+    | { extensionName: string; enabled: boolean }
+    | {
+        extensionId: string;
+        name: string;
+        defaultActivation: 'enabled' | 'disabled';
+      }
+    | {
+        extensionId: string;
+        name: string;
+        workspaceActivation: 'enabled' | 'disabled' | null;
+        effectiveActivation: 'enabled' | 'disabled';
+      }
+  >;
+  errors?: Array<
+    | {
+        extensionName: string;
+        code: 'extension_not_found';
+        error: string;
+      }
+    | {
+        extensionId: string;
+        code: 'extension_not_found';
+        error: string;
+      }
+  >;
 };
 
 export type ExtensionPendingInteraction =

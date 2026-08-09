@@ -156,6 +156,56 @@ function assertIdentity(identity: ExtensionIdentity): void {
   }
 }
 
+function setLegacyPathActivation(
+  policy: ExtensionPolicy,
+  scopePath: string,
+  activation: ExtensionActivation,
+): void {
+  const canonicalScope = canonicalizeWorkspacePath(scopePath);
+  const scope = Override.fromInput(canonicalScope, true);
+  for (const workspacePath of Object.keys(policy.workspaceOverrides)) {
+    if (scope.matchesPath(normalizeRulePath(workspacePath))) {
+      delete policy.workspaceOverrides[workspacePath];
+    }
+  }
+  const nextRule = Override.fromInput(
+    activation === 'disabled' ? `!${canonicalScope}` : canonicalScope,
+    true,
+  );
+  const rules = (policy.legacyPathRules ?? []).filter((rule) => {
+    const existing = Override.fromFileRule(rule);
+    return (
+      !existing.conflictsWith(nextRule) &&
+      !existing.isEqualTo(nextRule) &&
+      !existing.isChildOf(nextRule)
+    );
+  });
+  rules.push(nextRule.output());
+  policy.legacyPathRules = rules;
+}
+
+function clearWorkspaceActivation(
+  policy: ExtensionPolicy,
+  workspacePath: string,
+): void {
+  const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
+  const legacyCandidates = [
+    normalizeRulePath(workspacePath),
+    normalizeRulePath(canonicalWorkspace),
+  ];
+  const legacyMatches = (policy.legacyPathRules ?? []).some((rule) => {
+    const override = Override.fromFileRule(rule);
+    return legacyCandidates.some((candidate) =>
+      override.matchesPath(candidate),
+    );
+  });
+  if (legacyMatches) {
+    policy.workspaceOverrides[canonicalWorkspace] = 'inherit';
+  } else {
+    delete policy.workspaceOverrides[canonicalWorkspace];
+  }
+}
+
 function parseState(
   content: string,
   statePath: string,
@@ -676,6 +726,15 @@ export class ExtensionStore {
     });
   }
 
+  async setDefaultActivations(
+    identities: readonly ExtensionIdentity[],
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutateMany(identities, (policy) => {
+      policy.defaultActivation = activation;
+    });
+  }
+
   async setActivationScope(
     identity: ExtensionIdentity,
     activation: InitialExtensionActivation,
@@ -704,27 +763,32 @@ export class ExtensionStore {
     });
   }
 
+  async setWorkspaceActivations(
+    identities: readonly ExtensionIdentity[],
+    workspacePath: string,
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
+    return await this.mutateMany(identities, (policy) => {
+      policy.workspaceOverrides[canonicalWorkspace] = activation;
+    });
+  }
+
   async clearWorkspaceActivation(
     identity: ExtensionIdentity,
     workspacePath: string,
   ): Promise<ExtensionStoreSnapshot> {
     return await this.mutate(identity, (policy) => {
-      const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
-      const legacyCandidates = [
-        normalizeRulePath(workspacePath),
-        normalizeRulePath(canonicalWorkspace),
-      ];
-      const legacyMatches = (policy.legacyPathRules ?? []).some((rule) => {
-        const override = Override.fromFileRule(rule);
-        return legacyCandidates.some((candidate) =>
-          override.matchesPath(candidate),
-        );
-      });
-      if (legacyMatches) {
-        policy.workspaceOverrides[canonicalWorkspace] = 'inherit';
-      } else {
-        delete policy.workspaceOverrides[canonicalWorkspace];
-      }
+      clearWorkspaceActivation(policy, workspacePath);
+    });
+  }
+
+  async clearWorkspaceActivations(
+    identities: readonly ExtensionIdentity[],
+    workspacePath: string,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutateMany(identities, (policy) => {
+      clearWorkspaceActivation(policy, workspacePath);
     });
   }
 
@@ -733,28 +797,18 @@ export class ExtensionStore {
     scopePath: string,
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
-    const canonicalScope = canonicalizeWorkspacePath(scopePath);
     return await this.mutate(identity, (policy) => {
-      const scope = Override.fromInput(canonicalScope, true);
-      for (const workspacePath of Object.keys(policy.workspaceOverrides)) {
-        if (scope.matchesPath(normalizeRulePath(workspacePath))) {
-          delete policy.workspaceOverrides[workspacePath];
-        }
-      }
-      const nextRule = Override.fromInput(
-        activation === 'disabled' ? `!${canonicalScope}` : canonicalScope,
-        true,
-      );
-      const rules = (policy.legacyPathRules ?? []).filter((rule) => {
-        const existing = Override.fromFileRule(rule);
-        return (
-          !existing.conflictsWith(nextRule) &&
-          !existing.isEqualTo(nextRule) &&
-          !existing.isChildOf(nextRule)
-        );
-      });
-      rules.push(nextRule.output());
-      policy.legacyPathRules = rules;
+      setLegacyPathActivation(policy, scopePath, activation);
+    });
+  }
+
+  async setLegacyPathActivations(
+    identities: readonly ExtensionIdentity[],
+    scopePath: string,
+    activation: ExtensionActivation,
+  ): Promise<ExtensionStoreSnapshot> {
+    return await this.mutateMany(identities, (policy) => {
+      setLegacyPathActivation(policy, scopePath, activation);
     });
   }
 
@@ -779,6 +833,35 @@ export class ExtensionStore {
       }
       update(policy);
       snapshot.extensions[identity.id] = policy;
+      snapshot.generation += 1;
+      await this.writeSnapshotUnlocked(snapshot);
+      return snapshot;
+    });
+  }
+
+  private async mutateMany(
+    identities: readonly ExtensionIdentity[],
+    update: (policy: ExtensionPolicy) => void,
+  ): Promise<ExtensionStoreSnapshot> {
+    identities.forEach(assertIdentity);
+    return await this.withLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const policies = identities.map((identity) => {
+        const policy = snapshot.extensions[identity.id];
+        if (!policy) {
+          throw new ExtensionConflictError(
+            `Extension "${identity.name}" is not installed.`,
+          );
+        }
+        if (policy.name !== identity.name) {
+          throw new Error(
+            `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
+          );
+        }
+        return policy;
+      });
+      for (const policy of policies) update(policy);
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
       return snapshot;

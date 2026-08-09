@@ -4006,6 +4006,9 @@ export interface ExtensionManagementInstallRequest
 
 export type ExtensionActivationState = 'enabled' | 'disabled';
 export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+export type ExtensionWorkspaceBatchActivationState =
+  | ExtensionActivationState
+  | 'inherit';
 
 export interface ExtensionCatalogEntry {
   id: string;
@@ -4080,6 +4083,42 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  results?: Array<
+    | ExtensionBatchToggleItem
+    | ExtensionDefaultActivationBatchItem
+    | ExtensionWorkspaceActivationBatchItem
+  >;
+  errors?: Array<ExtensionBatchToggleError | ExtensionBatchActivationError>;
+}
+
+export interface ExtensionBatchToggleItem {
+  extensionName: string;
+  enabled: boolean;
+}
+
+export interface ExtensionBatchToggleError {
+  extensionName: string;
+  code: 'extension_not_found';
+  error: string;
+}
+
+export interface ExtensionDefaultActivationBatchItem {
+  extensionId: string;
+  name: string;
+  defaultActivation: ExtensionActivationState;
+}
+
+export interface ExtensionWorkspaceActivationBatchItem {
+  extensionId: string;
+  name: string;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
+}
+
+export interface ExtensionBatchActivationError {
+  extensionId: string;
+  code: 'extension_not_found';
+  error: string;
 }
 
 export interface ExtensionOperationStatus {

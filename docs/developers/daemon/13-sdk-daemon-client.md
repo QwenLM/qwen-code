@@ -167,6 +167,28 @@ await client
 
 `DaemonSkillBatchToggleResult` contains ordered successful `results`, per-target `errors`, and batch-level activation/session-refresh counts. The daemon persists valid targets together and refreshes active sessions once; one expected target error does not block other valid targets. The method throws only on a non-200 response; a 200 does not mean every target was applied, so always inspect `errors` before treating the batch as successful.
 
+V2 Extension batch activation retains the asynchronous Extension operation model. Pre-flight `extension_batch_activation_v2`, submit a global default batch or a selected-workspace override batch, then poll it with the existing operation helper:
+
+```ts
+const globalHandle = await client.setExtensionDefaultActivations(
+  [formatterId, reviewToolsId],
+  'disabled',
+  'dashboard-1',
+);
+const workspaceHandle = await client
+  .workspaceByCwd('/work/secondary')
+  .setExtensionActivations(
+    [formatterId, reviewToolsId],
+    'inherit',
+    'dashboard-1',
+  );
+const operation = await client.waitForExtensionOperation(workspaceHandle);
+```
+
+The terminal operation result contains ordered `results` and per-target `extension_not_found` `errors`. Valid targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override and reports the resulting effective activation.
+
+Name-and-scope compatibility clients may instead pre-flight `workspace_extension_batch_toggle` and call `client.setExtensionsEnabled(...)`. Its user scope remains a home-level legacy path rule and its workspace scope remains bound to the primary workspace; it is not equivalent to either V2 helper.
+
 Workspace display names are optional presentation metadata. Pre-flight `capabilities.features.includes('workspace_display_name')`; workspace ids and canonical paths remain the only selectors, and duplicate display names are valid.
 
 ```ts
