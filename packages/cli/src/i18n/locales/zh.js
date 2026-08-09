@@ -215,6 +215,14 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.DownsampleImage': '降采样图像',
+  'toolDisplayName.DownscaleVideo': '降清视频',
+  'toolDisplayName.DownsampleAudio': '降采样音频',
+  'toolDisplayName.ExtractKeyframes': '提取关键帧',
+  'toolDisplayName.ExtractAudio': '提取音轨',
+  'toolDisplayName.ClipVideo': '剪辑视频',
+  'toolDisplayName.ConvertImage': '转换图像',
+  'toolDisplayName.TranscribeAudio': '转写音频',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
