@@ -24,6 +24,8 @@ export interface DaemonCapabilitiesLimits {
   maxPendingPromptsPerSession?: number | null;
   maxSessionsPerWorkspace?: number | null;
   maxTotalSessions?: number | null;
+  /** Server-side deadline for ACP session load/resume. */
+  sessionRestoreTimeoutMs?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -1420,6 +1422,7 @@ export const DAEMON_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',

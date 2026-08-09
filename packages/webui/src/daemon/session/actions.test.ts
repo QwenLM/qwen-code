@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
+  type DaemonCapabilities,
   type DaemonSessionClient,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
+  resolveSessionRestoreTimeouts,
 } from './actions';
 import type {
   ActivePrompt,
@@ -125,6 +127,47 @@ describe('getConnectionAfterSessionClear', () => {
       catchingUp: undefined,
       error: undefined,
     });
+  });
+});
+
+/**
+ * A capabilities payload advertising a restore budget. Typed rather than cast
+ * so renaming or moving `limits.sessionRestoreTimeoutMs` fails typecheck here
+ * instead of silently falling back to the client defaults.
+ */
+function advertisingRestoreBudget(
+  sessionRestoreTimeoutMs: number,
+): DaemonCapabilities {
+  return {
+    v: 1,
+    mode: 'http-bridge',
+    features: [],
+    modelServices: [],
+    limits: { sessionRestoreTimeoutMs },
+  };
+}
+
+describe('resolveSessionRestoreTimeouts', () => {
+  it('uses 70s request and 75s watchdog defaults for old daemons', () => {
+    expect(resolveSessionRestoreTimeouts(undefined)).toEqual({
+      requestTimeoutMs: 70_000,
+      watchdogTimeoutMs: 75_000,
+    });
+  });
+
+  it('derives both client budgets from the advertised server timeout', () => {
+    expect(
+      resolveSessionRestoreTimeouts(advertisingRestoreBudget(90_000)),
+    ).toEqual({
+      requestTimeoutMs: 100_000,
+      watchdogTimeoutMs: 105_000,
+    });
+  });
+
+  it('disables derived timers that exceed the JavaScript timer ceiling', () => {
+    expect(
+      resolveSessionRestoreTimeouts(advertisingRestoreBudget(2_147_483_647)),
+    ).toEqual({ requestTimeoutMs: 0, watchdogTimeoutMs: undefined });
   });
 });
 
@@ -307,7 +350,34 @@ describe('createDaemonSessionActions', () => {
       loadingTranscript: true,
       catchingUp: undefined,
     });
-    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      requestTimeoutMs: 70_000,
+    });
+  });
+
+  it('carries the daemon-advertised restore budget into the load request', async () => {
+    // Live path for the whole chain: advertised capability -> connection ->
+    // resolveSessionRestoreTimeouts -> pending load. Dropping the capabilities
+    // argument at the real call site leaves every default-budget assertion
+    // green, so this is the only test that fails when the advertised budget
+    // stops reaching the SDK.
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        capabilities: advertisingRestoreBudget(90_000),
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      requestTimeoutMs: 100_000,
+    });
   });
 
   it('drops session-scoped snapshots while switching to a different session', () => {
@@ -491,7 +561,18 @@ describe('createDaemonSessionActions', () => {
         loadingTranscript: true,
       });
 
-      vi.advanceTimersByTime(30_000);
+      // Split the boundary, and observe pendingness rather than connection
+      // status — the status stays 'connecting' after a rejection, so asserting
+      // it would stay green for any watchdog ≤ 75s, including the 30s attach
+      // value. A 30s load watchdog abandons a load the daemon's 60s budget
+      // still completes, recreating the #8678 symptom in the browser.
+      let settledEarly = false;
+      void loadPromise.catch(() => {
+        settledEarly = true;
+      });
+      await vi.advanceTimersByTimeAsync(74_999);
+      expect(settledEarly).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
 
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
@@ -535,6 +616,7 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-a',
       mode: 'attach',
     });
+    expect(pendingSessionLoadRef.current?.requestTimeoutMs).toBeUndefined();
     expect(setAttachSessionNonce).toHaveBeenCalledOnce();
     const nonceUpdater = setAttachSessionNonce.mock.calls[0]?.[0];
     expect(typeof nonceUpdater).toBe('function');

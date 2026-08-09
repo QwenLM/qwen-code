@@ -88,11 +88,21 @@ vi.mock('node:stream', async (importOriginal) => {
 });
 
 // Core mock — includes restoreWorktreeContext controllable per-test.
-const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
-  mockRestoreWorktreeContext: vi
-    .fn()
-    .mockResolvedValue({ contextMessage: null, session: null }),
-}));
+const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
+  const daemonSpan = { setAttribute: vi.fn() };
+  return {
+    mockRestoreWorktreeContext: vi
+      .fn()
+      .mockResolvedValue({ contextMessage: null, session: null }),
+    mockWithDaemonSpan: vi.fn(
+      async (
+        _name: string,
+        _attributes: Record<string, unknown>,
+        fn: (span: typeof daemonSpan | undefined) => Promise<unknown>,
+      ) => await fn(daemonSpan),
+    ),
+  };
+});
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createDebugLogger: () => ({
@@ -101,6 +111,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  extractDaemonTraceContext: vi.fn(),
+  withDaemonSpan: mockWithDaemonSpan,
   registerAcpEventLoopLagGauge: vi.fn(),
   getModelReasoningControls: vi.fn(() => undefined),
   startEventLoopLagMonitor: vi.fn(() => ({
