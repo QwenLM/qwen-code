@@ -19,6 +19,7 @@ import {
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
+import { readProcStartToken } from '../utils/process-liveness.js';
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/session-registry-test';
@@ -443,6 +444,11 @@ describe('listLiveSessions', () => {
     await writeRaw(`${process.ppid}.json`, {
       schemaVersion: 1,
       pid: process.ppid,
+      // A real token, not an omitted one: a token-less record is not a
+      // record this code could have written on a platform that has
+      // tokens, so leaving it out would make this test pass through the
+      // gap rather than through the ordering it is named for.
+      procStart: readProcStartToken(process.ppid),
       sessionId: 's-parent',
       cwd: '/w/other',
       name: 'other-bb',
@@ -499,4 +505,77 @@ describe('readOwnSessionRecord', () => {
       await expect(fs.stat(filePath)).resolves.toBeDefined();
     },
   );
+
+  // The token check above is not reachable when the contents name a
+  // different PID: the attacker picks a PID they can read a real token
+  // for, so the token agrees and only the filename disagrees.
+  it('refuses a record whose contents name a different pid', async () => {
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.ppid,
+      procStart: readProcStartToken(process.ppid),
+      sessionId: 's-planted',
+      cwd: '/w/attacker',
+      name: 'ops-admin',
+      kind: 'interactive',
+      startedAt: Date.now(),
+      ipcPath: '/tmp/attacker.sock',
+    });
+
+    expect(await readOwnSessionRecord()).toBeNull();
+  });
+});
+
+describe('readRecord name validation', () => {
+  // `name` is half of the `name [ref]` address grammar, and a record is a
+  // file any same-uid process can write. A name allowed to contain the
+  // grammar's own terminals can spell another session's disambiguated
+  // address, and a caller sending to the address it was shown reaches the
+  // wrong session.
+  // A live PID, so the record is rejected for its name and not because
+  // liveness already disqualified it.
+  async function plantNamed(name: string): Promise<void> {
+    await writeRaw(`${process.ppid}.json`, {
+      schemaVersion: 1,
+      pid: process.ppid,
+      procStart: readProcStartToken(process.ppid),
+      sessionId: 's-planted',
+      cwd: '/w/attacker',
+      name,
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+  }
+
+  it('lists a planted record whose name is well-formed', async () => {
+    // The control: everything about this record except the name is what
+    // the cases below carry, so a green assertion there means the name
+    // was the reason.
+    await plantNamed('docs-aa');
+    expect(
+      (await listLiveSessions({ includeSelf: true })).map((r) => r.sessionId),
+    ).toEqual(['s-planted']);
+  });
+
+  it.each([
+    ['docs [aaaaaa]', 'the address grammar itself'],
+    ['has space', 'a space'],
+    ['bracket]', 'a stray bracket'],
+    ['', 'the empty string'],
+  ])('rejects a record named %j (%s)', async (name) => {
+    await plantNamed(name);
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+  });
+
+  it('accepts every name deriveSessionName can produce', async () => {
+    const name = deriveSessionName('/w/my project (v2)', 's1');
+    await registerSession({
+      sessionId: 's-live',
+      cwd: '/w/app',
+      name,
+      kind: 'interactive',
+    });
+
+    expect(await readOwnSessionRecord()).toMatchObject({ name });
+  });
 });

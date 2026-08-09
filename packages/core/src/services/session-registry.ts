@@ -80,6 +80,22 @@ const MAX_DATE_EPOCH_MS = 8.64e15;
  */
 const RECORD_FILENAME = /^\d+\.json$/;
 
+/**
+ * The charset a session name is allowed to use — exactly what
+ * {@link deriveSessionName} can emit, which is where every legitimate
+ * name comes from.
+ *
+ * A name is not just a label: it is half of the `name [ref]` address
+ * grammar that `list_agents` prints and `send_message` parses back. A
+ * record is a file another same-uid process can write, so a name free to
+ * contain spaces and brackets can spell out another session's
+ * disambiguated address; the address then round-trips to the wrong
+ * session, and "use the `to` value verbatim" stops being true. Pinning
+ * the charset at the parse boundary keeps the grammar's terminals out of
+ * its own operands, which no amount of care at the printing site can do.
+ */
+const RECORD_NAME = /^[\w.-]+$/;
+
 export type SessionKind = 'interactive' | 'headless';
 
 /** One live session, as recorded on disk. */
@@ -250,6 +266,14 @@ export async function readOwnSessionRecord(
 ): Promise<SessionRegistryRecord | null> {
   const record = await readRecord(getSessionRecordPath(pid));
   if (record === null) return null;
+  // The filename is the only part of a record this process chose. A
+  // record whose contents name a different PID was not written by this
+  // code, so nothing inside it — including the token the check below
+  // would otherwise verify against that foreign PID — is evidence about
+  // us. `listLiveSessions` already refuses such records during
+  // enumeration; without the same guard here, a planted record carrying
+  // any live PID plus that PID's real token is adopted as our identity.
+  if (record.pid !== pid) return null;
   return isSameProcess(record.pid, record.procStart) ? record : null;
 }
 
@@ -398,6 +422,7 @@ async function readRecord(
     typeof sessionId !== 'string' ||
     typeof cwd !== 'string' ||
     typeof name !== 'string' ||
+    !RECORD_NAME.test(name) ||
     (kind !== 'interactive' && kind !== 'headless') ||
     typeof startedAt !== 'number' ||
     !Number.isFinite(startedAt) ||

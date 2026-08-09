@@ -81,17 +81,24 @@ export function readProcStartToken(pid: number): string | null {
  * True when `pid` is alive AND is the same process that recorded
  * `procStart`.
  *
- * A `null` recorded token (written on a platform without one) or a `null`
- * current token (the process died between the two reads, or `/proc` is not
- * readable) degrades to a plain liveness check rather than declaring the
- * record stale — deleting a live session's record is the worse failure.
+ * A `null` recorded token is trusted only where the platform genuinely
+ * has none. Reading it as "written somewhere without tokens" everywhere
+ * would hand any record that simply omits the field a free pass, which
+ * makes the token defence opt-out for exactly the party it defends
+ * against; on a platform that does produce tokens, a token-less record
+ * is provably not one this code wrote, because the writer reads its own
+ * `/proc/<pid>/stat` and that read cannot fail for a live self.
+ *
+ * A `null` *current* token still degrades to a plain liveness check: the
+ * process may have died between the two reads, or `/proc` may have gone
+ * unreadable, and deleting a live session's record is the worse failure.
  */
 export function isSameProcess(
   pid: number,
   procStart: string | null | undefined,
 ): boolean {
   if (!isPidAlive(pid)) return false;
-  if (procStart == null) return true;
+  if (procStart == null) return readProcStartToken(pid) === null;
   const current = readProcStartToken(pid);
   if (current === null) return true;
   return current === procStart;
