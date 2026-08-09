@@ -104,6 +104,7 @@ import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -21140,6 +21141,198 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         clientId: 'not-bound-to-this-session',
       }),
     ).toThrow(InvalidClientIdError);
+    await bridge.shutdown();
+  });
+
+  it('answers a retry from the promoted ring after the promoted prompt completes', async () => {
+    // An ambiguous HTTP retry of a stable id that was already promoted and has
+    // since completed (id no longer pending, only in the promoted ring) must
+    // be answered from the ring — falling through to the idle promote branch
+    // would run the message a second time.
+    const prompts: string[] = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(
+          (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
+        );
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'promote once',
+        { clientId: session.clientId },
+        'stable-promoted',
+      ),
+    ).toEqual({ accepted: true, messageId: 'stable-promoted' });
+    await vi.waitFor(() => expect(prompts).toEqual(['promote once']));
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'promote once',
+        { clientId: session.clientId },
+        'stable-promoted',
+      ),
+    ).toEqual({ accepted: true, messageId: 'stable-promoted' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(prompts).toEqual(['promote once']);
+    await bridge.shutdown();
+  });
+
+  it('promotes multiple undrained messages at settle in FIFO order', async () => {
+    const prompts: string[] = [];
+    const releases: Array<() => void> = [];
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        prompts.push(
+          (req.prompt[0] as { text?: string } | undefined)?.text ?? '',
+        );
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const anchor = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await vi.waitFor(() => expect(prompts).toEqual(['go']));
+
+    const m1 = bridge.enqueueMidTurnMessage(session.sessionId, 'leftover one');
+    const m2 = bridge.enqueueMidTurnMessage(session.sessionId, 'leftover two');
+    const m3 = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'leftover three',
+    );
+
+    releases[0]!();
+    await anchor;
+    for (const expected of [
+      ['go', 'leftover one'],
+      ['go', 'leftover one', 'leftover two'],
+      ['go', 'leftover one', 'leftover two', 'leftover three'],
+    ]) {
+      await vi.waitFor(() => expect(prompts).toEqual(expected));
+      const release = releases[prompts.length - 1];
+      if (release) release();
+    }
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
+    expect(bridge.getMidTurnMessages(session.sessionId)).toEqual({
+      messages: [],
+      settledMessageIds: [],
+      promotedMessageIds: [m1.messageId, m2.messageId, m3.messageId],
+    });
+    await bridge.shutdown();
+  });
+
+  it('bounds the settled ring across many removals', async () => {
+    // rememberMidTurnId (shared by remove and promote) must evict the oldest
+    // ids; a long session's many deletions must not grow the ring unboundedly.
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+
+    const total = MID_TURN_RECONCILIATION_RING_SIZE + 1;
+    for (let i = 0; i < total; i++) {
+      expect(
+        bridge.enqueueMidTurnMessage(
+          session.sessionId,
+          `m${i}`,
+          { clientId: session.clientId },
+          `ring-${i}`,
+        ).accepted,
+      ).toBe(true);
+      expect(
+        bridge.removeMidTurnMessage(session.sessionId, `ring-${i}`, {
+          clientId: session.clientId,
+        }),
+      ).toEqual({ removed: true });
+    }
+
+    const snapshot = bridge.getMidTurnMessages(session.sessionId, {
+      clientId: session.clientId,
+    });
+    expect(snapshot.settledMessageIds).toHaveLength(
+      MID_TURN_RECONCILIATION_RING_SIZE,
+    );
+    expect(snapshot.settledMessageIds).not.toContain('ring-0');
+    expect(snapshot.settledMessageIds).toContain(`ring-${total - 1}`);
+
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
+  it('bounds the promoted ring across many idle promotions', async () => {
+    const handle = makeChannel({
+      promptImpl: async () => ({ stopReason: 'end_turn' }),
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const burstSize = 20;
+    const bursts = Math.ceil(
+      (MID_TURN_RECONCILIATION_RING_SIZE + 1) / burstSize,
+    );
+    for (let burst = 0; burst < bursts; burst++) {
+      for (let i = 0; i < burstSize; i++) {
+        expect(
+          bridge.enqueueMidTurnMessage(
+            session.sessionId,
+            `p-${burst}-${i}`,
+            { clientId: session.clientId },
+            `p-${burst}-${i}`,
+          ).accepted,
+        ).toBe(true);
+      }
+      await vi.waitFor(() => {
+        expect(bridge.getMidTurnMessages(session.sessionId).messages).toEqual(
+          [],
+        );
+        expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+      });
+    }
+
+    const snapshot = bridge.getMidTurnMessages(session.sessionId);
+    expect(snapshot.promotedMessageIds).toHaveLength(
+      MID_TURN_RECONCILIATION_RING_SIZE,
+    );
+    expect(snapshot.promotedMessageIds).not.toContain('p-0-0');
+    expect(snapshot.promotedMessageIds).toContain(
+      `p-${bursts - 1}-${burstSize - 1}`,
+    );
     await bridge.shutdown();
   });
 });

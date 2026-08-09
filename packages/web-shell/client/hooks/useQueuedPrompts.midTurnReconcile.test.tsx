@@ -16,32 +16,66 @@ import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const sdkMock = vi.hoisted(() => ({
-  actions: {
-    enqueueMidTurnMessage: vi.fn(),
-    getMidTurnMessages: vi.fn(),
-    submitPrompt: vi.fn(),
-    removePendingPrompt: vi.fn(),
-    getPendingPrompts: vi.fn(),
-    removeMidTurnMessage: vi.fn(),
-  },
-}));
+const sdkMock = vi.hoisted(() => {
+  const pendingEventListeners = new Set<() => void>();
+  const mock = {
+    actions: {
+      enqueueMidTurnMessage: vi.fn(),
+      getMidTurnMessages: vi.fn(),
+      submitPrompt: vi.fn(),
+      removePendingPrompt: vi.fn(),
+      getPendingPrompts: vi.fn(),
+      removeMidTurnMessage: vi.fn(),
+    },
+    injectedBatches: [] as Array<{
+      sessionId: string;
+      messages: readonly string[];
+      messageIds?: readonly string[];
+      originatorClientId?: string;
+    }>,
+    consumeInjected: vi.fn(),
+    pendingEvents: [] as Array<Record<string, unknown>>,
+    pendingEventListeners,
+    publishPendingEvents: (events: Array<Record<string, unknown>>) => {
+      mock.pendingEvents = events;
+      for (const listener of [...pendingEventListeners]) listener();
+    },
+  };
+  return mock;
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
   const actual = await vi.importActual<
     typeof import('@qwen-code/webui/daemon-react-sdk')
   >('@qwen-code/webui/daemon-react-sdk');
   // useSyncExternalStore needs reference-stable snapshots; a fresh [] per
-  // call loops the store into "Maximum update depth exceeded".
-  const EMPTY_EVENTS: readonly unknown[] = Object.freeze([]);
+  // call loops the store into "Maximum update depth exceeded". The mutable
+  // sdkMock arrays are only swapped wholesale, so their identity is stable
+  // between publishes.
   return {
     ...actual,
-    useDaemonMidTurnInjected: () => ({ batches: [], consume: vi.fn() }),
-    subscribePendingPromptEvents: () => () => {},
-    getPendingPromptEvents: () => EMPTY_EVENTS,
+    useDaemonMidTurnInjected: () => ({
+      batches: sdkMock.injectedBatches,
+      consume: sdkMock.consumeInjected,
+    }),
+    subscribePendingPromptEvents: (listener: () => void) => {
+      sdkMock.pendingEventListeners.add(listener);
+      return () => {
+        sdkMock.pendingEventListeners.delete(listener);
+      };
+    },
+    getPendingPromptEvents: () => sdkMock.pendingEvents,
     subscribePendingPromptVersion: () => () => {},
     getPendingPromptVersion: () => 0,
-    consumePendingPromptEvents: vi.fn(),
+    consumePendingPromptEvents: (handled: readonly unknown[]) => {
+      if (handled.length === 0) return;
+      const handledSet = new Set(handled);
+      const next = sdkMock.pendingEvents.filter(
+        (event) => !handledSet.has(event),
+      );
+      if (next.length === sdkMock.pendingEvents.length) return;
+      sdkMock.publishPendingEvents(next);
+    },
   };
 });
 
@@ -148,6 +182,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
 
   afterEach(() => {
     vi.restoreAllMocks();
+    sdkMock.injectedBatches = [];
+    sdkMock.pendingEvents = [];
   });
 
   it('restores queued rows lost to a page refresh from the daemon snapshot', async () => {
@@ -464,6 +500,10 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       });
       expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      // The accepted-but-lost admission must recover silently: restoring the
+      // text or raising 'queue failed' would duplicate a committed message.
+      expect(harness.reportError).not.toHaveBeenCalled();
+      expect(harness.editor.setText).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
@@ -843,6 +883,367 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
 
       expect(harness.result().queuedPrompts).toEqual([]);
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('materializes the queued row mid-turn after an accepted admission', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { messageId?: string }) => {
+        sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+          messages: [
+            {
+              messageId: opts?.messageId,
+              text: 'mid-turn note',
+            },
+          ],
+          settledMessageIds: [],
+          promotedMessageIds: [],
+        });
+        return Promise.resolve({ accepted: true, messageId: opts?.messageId });
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('mid-turn note');
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      // The post-admission reconciliation must project the daemon-owned row
+      // while the turn is still active, not only at the next boundary.
+      expect(harness.result().queuedPrompts).toHaveLength(1);
+      expect(harness.result().queuedPrompts[0]).toMatchObject({
+        text: 'mid-turn note',
+        midTurnState: 'queued',
+        midTurnMessageId:
+          sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId,
+      });
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('settles a callback from the settled ring exactly once', async () => {
+    const onComplete = vi.fn();
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { messageId?: string }) => {
+        sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+          messages: [],
+          settledMessageIds: [opts?.messageId],
+          promotedMessageIds: [],
+        });
+        return Promise.resolve({ accepted: true, messageId: opts?.messageId });
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('note', undefined, onComplete);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(onComplete).toHaveBeenCalledTimes(1);
+
+      // A later snapshot repeating the settled id must not re-invoke the
+      // callback: settle deregisters it the first time.
+      await harness.render({ streamingState: 'responding', connected: false });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('leaves no callback registered after the daemon rejects admission', async () => {
+    const onComplete = vi.fn();
+    let rejectedId: string | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { messageId?: string }) => {
+        rejectedId = opts?.messageId;
+        return Promise.resolve({ accepted: false });
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('rejected', undefined, onComplete);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.editor.setText).toHaveBeenCalledWith('rejected');
+      expect(harness.reportError).toHaveBeenCalledTimes(1);
+      expect(onComplete).not.toHaveBeenCalled();
+
+      // If a later snapshot reports the rejected id as settled, the callback
+      // must stay silent: rejection deregistered it.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: [rejectedId],
+        promotedMessageIds: [],
+      });
+      await harness.render({ streamingState: 'responding', connected: false });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(onComplete).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores text when a failed enqueue is absent from the reconciliation snapshot', async () => {
+    const onComplete = vi.fn();
+    let failedId: string | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { messageId?: string }) => {
+        failedId = opts?.messageId;
+        return Promise.reject(new Error('transport failed'));
+      },
+    );
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('lost in transit', undefined, onComplete);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      // The daemon never saw the message: hand the text back for a retry.
+      expect(harness.editor.setText).toHaveBeenCalledWith('lost in transit');
+      expect(harness.reportError).toHaveBeenCalledTimes(1);
+      expect(onComplete).not.toHaveBeenCalled();
+
+      // The catch path also deregistered the callback: a later snapshot
+      // settling the id must not fire it.
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: [failedId],
+        promotedMessageIds: [],
+      });
+      await harness.render({ streamingState: 'responding', connected: false });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(onComplete).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps a committed-but-lost admission quiet when the snapshot still queues it', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    sdkMock.actions.getMidTurnMessages.mockImplementation(async () => {
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      return {
+        messages: [
+          {
+            messageId,
+            text: 'committed anyway',
+          },
+        ],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      };
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('committed anyway');
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.reportError).not.toHaveBeenCalled();
+      expect(harness.editor.setText).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts[0]).toMatchObject({
+        text: 'committed anyway',
+        midTurnState: 'queued',
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('settles the callback on the injection echo and never on a repeated echo', async () => {
+    const onComplete = vi.fn();
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('echoed', undefined, onComplete);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      expect(messageId).toEqual(expect.any(String));
+
+      sdkMock.injectedBatches = [
+        {
+          sessionId: 'session-a',
+          messages: ['echoed'],
+          messageIds: [messageId],
+        },
+      ];
+      await harness.render({ streamingState: 'responding' });
+      expect(onComplete).toHaveBeenCalledTimes(1);
+
+      // A redelivered echo repeating the same id must not fire the callback
+      // a second time.
+      sdkMock.injectedBatches = [
+        {
+          sessionId: 'session-a',
+          messages: ['echoed'],
+          messageIds: [messageId],
+        },
+      ];
+      await harness.render({ streamingState: 'responding' });
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('aborts a pending legacy enqueue at the idle transition', async () => {
+    let admissionSignal: AbortSignal | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (
+        _message: string,
+        opts?: { signal?: AbortSignal; messageId?: string },
+      ) => {
+        admissionSignal = opts?.signal;
+        return new Promise(() => {});
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        canQueryMidTurn: false,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('still in flight');
+      });
+      expect(admissionSignal).toBeDefined();
+      expect(admissionSignal?.aborted).toBe(false);
+
+      await harness.render({ streamingState: 'idle', canQueryMidTurn: false });
+      // Without the abort the in-flight admission would land in the next turn.
+      expect(admissionSignal?.aborted).toBe(true);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('aborts an in-flight reconcile when the session changes', async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    sdkMock.actions.getMidTurnMessages.mockImplementation(
+      (opts?: { signal?: AbortSignal }) => {
+        signals.push(opts?.signal);
+        return new Promise(() => {});
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ sessionId: 'session-a', streamingState: 'idle' });
+      const firstSignal = [...signals].reverse().find((s) => s !== undefined);
+      expect(firstSignal).toBeDefined();
+      expect(firstSignal?.aborted).toBe(false);
+
+      await harness.render({ sessionId: 'session-b', streamingState: 'idle' });
+      expect(firstSignal?.aborted).toBe(true);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('settles the promoted callback when the pending-prompt turn completes', async () => {
+    const onComplete = vi.fn();
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { messageId?: string }) => {
+        sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+          messages: [],
+          settledMessageIds: [],
+          promotedMessageIds: [opts?.messageId],
+        });
+        return Promise.resolve({ accepted: true, messageId: opts?.messageId });
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('promote me', undefined, onComplete);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      await harness.render({ streamingState: 'idle' });
+      expect(onComplete).not.toHaveBeenCalled();
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+
+      // The promoted message runs as a pending prompt under the same id; its
+      // turn_complete settles the callback registered at enqueue time.
+      await act(async () => {
+        sdkMock.publishPendingEvents([
+          {
+            type: 'turn_complete',
+            data: { sessionId: 'session-a', promptId: messageId },
+          },
+        ]);
+      });
+      expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
       await harness.dispose();
     }

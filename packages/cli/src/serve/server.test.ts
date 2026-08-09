@@ -9225,6 +9225,28 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(bridge.getMidTurnMessagesCalls).toEqual([]);
     });
+
+    it('maps a bridge InvalidClientIdError to 400 invalid_client_id', async () => {
+      // Well-formed but unbound client id: the bridge's ownership check
+      // throws, and `sendBridgeError` maps it like the sibling routes, so a
+      // token-holding client bound to another session never reads this
+      // session's queue texts or terminal-id rings.
+      const bridge = fakeBridge({
+        getMidTurnMessagesImpl: (sessionId) => {
+          throw new InvalidClientIdError(sessionId, 'rogue');
+        },
+      });
+      const res = await request(queryApp(bridge))
+        .get('/session/s-1/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'rogue');
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(bridge.getMidTurnMessagesCalls).toEqual([
+        { sessionId: 's-1', context: { clientId: 'rogue' } },
+      ]);
+    });
   });
 
   describe('GET /session/:id/pending-prompts', () => {

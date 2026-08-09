@@ -783,6 +783,12 @@ describe('createDaemonSessionActions', () => {
     await expect(
       actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
     ).rejects.toThrow('response lost');
+    // The stable id must reach the session client verbatim: the daemon's
+    // messageId-keyed idempotency and the reconciliation rings never match
+    // if this hop drops the option.
+    expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
+      messageId: 'stable-id',
+    });
   });
 
   it('keeps legacy mid-turn admission failures best-effort', async () => {
