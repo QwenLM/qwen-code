@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  BARE_URL_PATTERN,
   HYPERLINK_ENV_KEYS,
   isSafeOscScheme,
   labelMayDeceive,
@@ -266,19 +267,8 @@ describe('osc8 helpers', () => {
       ['https://example.com?q=1)', 'https://example.com?q=1'],
       ['https://example.com:::', 'https://example.com'],
       ['https://example.com).', 'https://example.com'],
-      // Full-width CJK punctuation glues onto URLs in Chinese prose.
-      ['https://example.com。', 'https://example.com'],
-      ['https://example.com，', 'https://example.com'],
-      ['https://example.com（', 'https://example.com'],
-      ['https://example.com）', 'https://example.com'],
-      ['https://example.com、', 'https://example.com'],
     ])('trims sentence punctuation: %s -> %s', (input, expected) => {
       expect(trimTrailingUrlPunctuation(input)).toBe(expected);
-    });
-
-    it('preserves a trailing full-width close-paren when balanced inside the URL', () => {
-      const url = 'https://example.com/wiki/Foo（bar）';
-      expect(trimTrailingUrlPunctuation(url)).toBe(url);
     });
 
     it('preserves a trailing close-paren when balanced inside the URL', () => {
@@ -302,6 +292,16 @@ describe('osc8 helpers', () => {
       expect(trimTrailingUrlPunctuation('https://example.com/x')).toBe(
         'https://example.com/x',
       );
+    });
+  });
+
+  describe('BARE_URL_PATTERN', () => {
+    it.each([
+      'https://ja.wikipedia.org/wiki/人々',
+      'https://example.com/二〇二六年報',
+      'https://zh.wikipedia.org/wiki/北京',
+    ])('keeps word-forming CJK characters in %s', (url) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
     });
   });
 

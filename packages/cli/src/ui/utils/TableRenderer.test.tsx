@@ -649,6 +649,16 @@ describe('<TableRenderer />', () => {
       expectAllLinesToHaveSameVisibleWidth(output);
     });
 
+    it('stops a bare URL before glued-on CJK punctuation', () => {
+      enableHyperlinks();
+      const url = 'https://github.com/QwenLM/qwen-code/pull/8742';
+      const suffix = '（2 commits，等 CI）';
+      const output = renderTable(['PR'], [[`PR：${url}${suffix}`]], 100);
+      expect(output).toContain(`\x1b]8;;${url}\x07`);
+      expect(output).not.toContain(`\x1b]8;;${url}（`);
+      expect(stripAnsi(output)).toContain(suffix);
+    });
+
     it('falls back to legacy `label (url)` in cells on unsupported terminals', () => {
       // isTTY=false from the suite-wide beforeEach disables hyperlinks.
       const url = 'https://example.com/page';
