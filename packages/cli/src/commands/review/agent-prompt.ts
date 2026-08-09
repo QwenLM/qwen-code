@@ -2048,8 +2048,7 @@ function runAllChunks(
             skipped
               .map(
                 (s) =>
-                  `chunk ${s.chunkId} — retired: dry in ` +
-                  `round${s.dryRounds.length > 1 ? 's' : ''} ` +
+                  `chunk ${s.chunkId} — retired: dry in rounds ` +
                   `${s.dryRounds.join(' and ')}, ` +
                   (s.nextColdCheck > planRoundCap
                     ? `certificate final — the ` +
