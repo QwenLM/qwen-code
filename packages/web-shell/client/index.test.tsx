@@ -23,6 +23,7 @@ let workspaceCapabilities: {
 };
 const addWorkspace = vi.fn();
 const refreshCapabilities = vi.fn();
+let sessionConnection: Record<string, unknown> = { status: 'connected' };
 vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
   const React = await import('react');
   return {
@@ -33,12 +34,17 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async () => {
     DaemonSessionProvider: ({
       children,
       ...props
-    }: {
-      children: React.ReactNode;
-    }) => {
+    }: { children: React.ReactNode } & Record<string, unknown>) => {
       sessionProviderProps.push(props);
+      sessionConnection = {
+        status: 'connected',
+        sessionId: props['sessionId'],
+        workspaceCwd: props['workspaceCwd'],
+        clientId: props['clientId'],
+      };
       return React.createElement(React.Fragment, null, children);
     },
+    useConnection: () => sessionConnection,
     useWorkspace: () => ({
       capabilities: workspaceCapabilities,
       refreshCapabilities,
@@ -97,6 +103,7 @@ afterEach(() => {
   };
   addWorkspace.mockReset();
   refreshCapabilities.mockReset();
+  sessionConnection = { status: 'connected' };
   vi.restoreAllMocks();
 });
 

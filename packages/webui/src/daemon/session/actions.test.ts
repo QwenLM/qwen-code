@@ -35,6 +35,12 @@ describe('getConnectionAfterSessionClear', () => {
         error: 'old error',
         errorStatus: 404,
         missingSession: true,
+        sessionTransition: {
+          phase: 'preparing',
+          operation: 'load',
+          origin: 'action',
+          targetSessionId: 'session-b',
+        },
       } as DaemonConnectionState,
       'session-a',
     );
@@ -54,6 +60,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
+    expect(next).not.toHaveProperty('sessionTransition');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
     // commands (e.g. /review) keep autocompleting in the fresh deferred session
     // before its first prompt creates a session (mirrors #6153 / #6066).
@@ -851,6 +858,51 @@ describe('createDaemonSessionActions', () => {
 
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     expect(restartEventStream).not.toHaveBeenCalled();
+  });
+
+  it('drops a session-scoped action result after the owner changes', async () => {
+    const source = createMockSession('session-a');
+    const tasks = createDeferred<{
+      v: 1;
+      sessionId: string;
+      tasks: never[];
+    }>();
+    source.tasks.mockReturnValueOnce(tasks.promise);
+    const addNotice = vi.fn();
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: source,
+    });
+
+    const pending = actions.getTasks();
+    sessionRef.current = createMockSession(
+      'session-b',
+    ) as unknown as DaemonSessionClient;
+    tasks.resolve({ v: 1, sessionId: 'session-a', tasks: [] });
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('finishes source cancellation remotely without updating a newer owner', async () => {
+    const source = createMockSession('session-a');
+    const cancelled = createDeferred<undefined>();
+    source.cancel.mockReturnValueOnce(cancelled.promise);
+    const addNotice = vi.fn();
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: source,
+    });
+
+    const pending = actions.cancel();
+    sessionRef.current = createMockSession(
+      'session-b',
+    ) as unknown as DaemonSessionClient;
+    cancelled.resolve(undefined);
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(source.cancel).toHaveBeenCalledOnce();
+    expect(addNotice).not.toHaveBeenCalled();
   });
 });
 

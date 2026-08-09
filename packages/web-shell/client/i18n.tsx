@@ -1406,7 +1406,7 @@ const EN: Messages = {
   'system.taskCancelled': 'Background task cancelled',
   'branch.failed': 'Failed to branch session.',
   'branch.success': (v) =>
-    `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
+    `Copied session. New session name: "${v?.name ?? ''}".`,
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
@@ -4152,8 +4152,7 @@ const ZH: Messages = {
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
   'branch.failed': '分支会话失败。',
-  'branch.success': (v) =>
-    `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
+  'branch.success': (v) => `已复制会话，新会话名称为： "${v?.name ?? ''}"。`,
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',

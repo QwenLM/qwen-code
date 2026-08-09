@@ -50,6 +50,28 @@ export type DaemonConnectionStatus =
   | 'disconnected'
   | 'error';
 
+export type DaemonSessionTransitionPhase = 'queued' | 'preparing' | 'failed';
+
+export type DaemonSessionTransitionOperation = 'load' | 'resume' | 'reload';
+
+export type DaemonSessionTransitionOrigin =
+  | 'action'
+  | 'controlled'
+  | 'resync'
+  | 'repair';
+
+export interface DaemonSessionTransitionState {
+  phase: DaemonSessionTransitionPhase;
+  operation: DaemonSessionTransitionOperation;
+  origin: DaemonSessionTransitionOrigin;
+  targetSessionId?: string;
+  targetWorkspaceCwd?: string;
+  targetClientId?: string;
+  error?: {
+    message: string;
+  };
+}
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
@@ -94,6 +116,8 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+  /** A target session being prepared while the committed session stays live. */
+  sessionTransition?: DaemonSessionTransitionState;
 }
 
 export interface DaemonTokenUsage {

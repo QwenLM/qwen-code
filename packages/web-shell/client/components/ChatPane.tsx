@@ -298,6 +298,9 @@ export function ChatPane({
   }, [artifacts, connection.sessionId, onPaneArtifactsChange]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
+  const sessionTransitionPending =
+    connection.sessionTransition?.phase === 'queued' ||
+    connection.sessionTransition?.phase === 'preparing';
   const firstPromptAdmittedRef = useRef(false);
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
@@ -454,6 +457,7 @@ export function ChatPane({
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed) return false;
+      if (sessionTransitionPending) return false;
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -501,6 +505,7 @@ export function ChatPane({
       onFirstPromptAdmitted,
       reportError,
       restartSseOnPrompt,
+      sessionTransitionPending,
     ],
   );
 
@@ -568,6 +573,7 @@ export function ChatPane({
   );
   const handleSelectMode = useCallback(
     (modeId: string) => {
+      if (sessionTransitionPending) return;
       // Modes always arrive from the toolbar's own picker, but narrow anyway so
       // the daemon action gets a well-typed value (mirrors App's handleSetMode).
       if (!isDaemonApprovalMode(modeId)) {
@@ -604,17 +610,18 @@ export function ChatPane({
           reportError(error, 'Failed to set approval mode'),
         );
     },
-    [actions, reportError],
+    [actions, reportError, sessionTransitionPending],
   );
   const handleSelectModel = useCallback(
     (modelId: string) => {
+      if (sessionTransitionPending) return;
       actions
         .setModel(modelId)
         .catch((error: unknown) =>
           reportError(error, 'Failed to switch model'),
         );
     },
-    [actions, reportError],
+    [actions, reportError, sessionTransitionPending],
   );
 
   const headerLabel =
@@ -856,6 +863,7 @@ export function ChatPane({
           onSubmit={handleSubmit}
           onCancel={handleCancel}
           isRunning={isResponding}
+          isPreparing={sessionTransitionPending}
           commands={commands}
           queuedMessages={queuedTexts}
           onPopQueuedMessages={editLastQueuedPrompt}
@@ -871,7 +879,7 @@ export function ChatPane({
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
-          disabled={approvalActive}
+          disabled={approvalActive || sessionTransitionPending}
           voiceTarget={hidden ? undefined : voiceTarget}
           voiceStatusRevision={voiceStatusRevision}
           followupState={followupState}
@@ -884,7 +892,7 @@ export function ChatPane({
         />
         {CustomComposerFooter && (
           <CustomComposerFooter
-            disabled={approvalActive}
+            disabled={approvalActive || sessionTransitionPending}
             isRunning={isResponding}
             currentMode={connection.currentMode ?? 'default'}
             currentModel={connection.currentModel ?? ''}

@@ -787,6 +787,36 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
+  it('gates new pane writes before UI side effects during a session transition', () => {
+    connectionState.sessionTransition = {
+      phase: 'preparing',
+      operation: 'load',
+      origin: 'action',
+      targetSessionId: 'session-b',
+    };
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/deploy production');
+      testid('pane-pick-mode')?.click();
+      testid('pane-pick-model')?.click();
+      testid('pane-cancel')?.click();
+    });
+
+    expect(returned).toBe(false);
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(setModel).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps).toMatchObject({
+      disabled: true,
+      isPreparing: true,
+    });
+  });
+
   it('forwards a slash command the host does not handle', () => {
     const onSlashCommand = vi.fn();
     render({ onSlashCommand });

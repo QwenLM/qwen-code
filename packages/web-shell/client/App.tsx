@@ -433,10 +433,9 @@ interface ArtifactPanelSessionState {
 interface PaneArtifactSnapshot {
   artifacts: readonly DaemonSessionArtifact[];
 }
-// Cap on how long a manual "run now" waits for its bound session to become
-// active before giving up, so the scheduled-tasks UI can't stay stuck disabled
-// if the switch never completes.
-const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
+// Cap on post-restore catch-up for a manual "run now". The restore itself uses
+// the provider's session-restore deadline.
+const BOUND_RUN_CATCH_UP_TIMEOUT_MS = 30_000;
 
 function availableSkillInfos(status: {
   skills?: Array<{
@@ -801,6 +800,7 @@ interface AppProps extends WebShellProps {
   initialSelectedWorkspaceCwd?: string;
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
+  desiredTargetPending?: boolean;
   restartSseOnPrompt?: boolean;
   historyPageSize?: number;
 }
@@ -1616,6 +1616,7 @@ export function App({
   initialSelectedWorkspaceCwd,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
+  desiredTargetPending = false,
 }: AppProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -1659,9 +1660,12 @@ export function App({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readSidebarCollapsed(sidebarOptions.defaultCollapsed),
   );
-  const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
-    string | null
-  >(null);
+  const [sidebarSwitchTarget, setSidebarSwitchTarget] = useState<{
+    sessionId: string;
+    workspaceCwd?: string;
+    invocation: number;
+    restoreCommitted: boolean;
+  } | null>(null);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [forceMobileDrawer, setForceMobileDrawer] = useState(false);
   const closeMobileDrawer = useCallback(() => {
@@ -1997,22 +2001,38 @@ export function App({
   // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
   const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
   /** Worktree metadata for the current session (set after creation). */
-  const [sessionWorktree, setSessionWorktree] = useState<
+  const [storedSessionWorktree, setSessionWorktree] = useState<
     { slug: string; path: string; branch: string } | undefined
   >(undefined);
   /** Branch metadata for the current session (set after creation with branch mode). */
-  const [sessionBranch, setSessionBranch] = useState<
+  const [storedSessionBranch, setSessionBranch] = useState<
     { name: string; baseBranch: string } | undefined
   >(undefined);
-  const [sessionStatusDisplayName, setSessionStatusDisplayName] = useState<
-    string | undefined
-  >(undefined);
-  // Tracks the session id from the latest effect run. In-flight fetches
-  // compare their captured sid against this ref on resolve: a match means
+  const [storedSessionStatusDisplayName, setSessionStatusDisplayName] =
+    useState<string | undefined>(undefined);
+  // Tracks the committed owner from the latest effect run. In-flight fetches
+  // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
-  // a mismatch means connection.sessionId moved on (reconnect cycling or a
-  // user-initiated switch) and the stale response is dropped.
-  const worktreeSessionIdRef = useRef<string | undefined>(undefined);
+  // a mismatch means the session, workspace, or client attachment moved on.
+  const metadataOwnerKey = connection.sessionId
+    ? JSON.stringify([
+        connection.sessionId,
+        connection.workspaceCwd,
+        connection.clientId,
+      ])
+    : undefined;
+  const worktreeOwnerKeyRef = useRef<string | undefined>(undefined);
+  const metadataBelongsToCurrentSession =
+    worktreeOwnerKeyRef.current === metadataOwnerKey;
+  const sessionWorktree = metadataBelongsToCurrentSession
+    ? storedSessionWorktree
+    : undefined;
+  const sessionBranch = metadataBelongsToCurrentSession
+    ? storedSessionBranch
+    : undefined;
+  const sessionStatusDisplayName = metadataBelongsToCurrentSession
+    ? storedSessionStatusDisplayName
+    : undefined;
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
   // cleanup: connection.sessionId can cycle through several sessions during
@@ -2020,15 +2040,16 @@ export function App({
   // discard the one response we actually need.
   useEffect(() => {
     const sid = connection.sessionId;
-    const previousSid = worktreeSessionIdRef.current;
-    worktreeSessionIdRef.current = sid;
+    const ownerKey = metadataOwnerKey;
+    const previousOwnerKey = worktreeOwnerKeyRef.current;
+    worktreeOwnerKeyRef.current = ownerKey;
     if (!sid) {
       setSessionWorktree(undefined);
       setSessionBranch(undefined);
       setSessionStatusDisplayName(undefined);
       return;
     }
-    if (previousSid !== sid) {
+    if (previousOwnerKey !== ownerKey) {
       setSessionWorktree(undefined);
       setSessionBranch(undefined);
       setSessionStatusDisplayName(undefined);
@@ -2043,7 +2064,7 @@ export function App({
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
-        if (worktreeSessionIdRef.current === sid) {
+        if (worktreeOwnerKeyRef.current === ownerKey) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
           setSessionStatusDisplayName(summary.displayName);
@@ -2051,7 +2072,7 @@ export function App({
         return workspace.client
           .listWorkspaceSessions(summary.workspaceCwd, { pageSize: 200 })
           .then((sessions) => {
-            if (worktreeSessionIdRef.current !== sid) return;
+            if (worktreeOwnerKeyRef.current !== ownerKey) return;
             const listedSession = sessions.find(
               (session) => session.sessionId === sid,
             );
@@ -2062,7 +2083,7 @@ export function App({
           .catch(() => undefined);
       })
       .catch(() => {
-        if (worktreeSessionIdRef.current === sid) {
+        if (worktreeOwnerKeyRef.current === ownerKey) {
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
           setSessionStatusDisplayName(undefined);
@@ -2071,8 +2092,11 @@ export function App({
   }, [
     connection.catchingUp,
     connection.loadingTranscript,
+    connection.clientId,
     connection.sessionId,
     connection.status,
+    connection.workspaceCwd,
+    metadataOwnerKey,
     workspace.client,
   ]);
   // Active workspace: the connected session's workspace, else the workspace
@@ -3315,7 +3339,7 @@ export function App({
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
   const canActOnPendingApproval = !(
-    connection.catchingUp && sidebarSwitchingSessionId !== null
+    connection.catchingUp && sidebarSwitchTarget !== null
   );
   const pendingAskUserApproval = isAskUserPermission(pendingApproval)
     ? canActOnPendingApproval
@@ -4447,15 +4471,32 @@ export function App({
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
-  const [currentModel, setCurrentModel] = useState('');
+  const [storedCurrentModel, setStoredCurrentModel] = useState('');
+  const currentModelOwnerKeyRef = useRef(metadataOwnerKey);
+  const currentModel =
+    currentModelOwnerKeyRef.current === metadataOwnerKey
+      ? storedCurrentModel
+      : '';
   const currentModelRef = useRef(currentModel);
   currentModelRef.current = currentModel;
-  const setPendingModel = useCallback((modelId: string) => {
-    currentModelRef.current = modelId;
-    setCurrentModel(modelId);
-  }, []);
+  const setCurrentModel = useCallback(
+    (modelId: string) => {
+      currentModelOwnerKeyRef.current = metadataOwnerKey;
+      currentModelRef.current = modelId;
+      setStoredCurrentModel(modelId);
+    },
+    [metadataOwnerKey],
+  );
+  const setPendingModel = setCurrentModel;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const isSessionTargetPending = useCallback(
+    () =>
+      desiredTargetPending ||
+      connectionRef.current.sessionTransition?.phase === 'queued' ||
+      connectionRef.current.sessionTransition?.phase === 'preparing',
+    [desiredTargetPending],
+  );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
     if (!activeConnection.sessionId || !activeConnection.workspaceCwd) return;
@@ -4466,6 +4507,8 @@ export function App({
       );
       if (
         connectionRef.current.sessionId !== activeConnection.sessionId ||
+        connectionRef.current.workspaceCwd !== activeConnection.workspaceCwd ||
+        connectionRef.current.clientId !== activeConnection.clientId ||
         connectionRef.current.displayName
       ) {
         return;
@@ -4488,13 +4531,22 @@ export function App({
     return false;
   }, [pushToast, t]);
   const sessionDisplayName = connection.displayName ?? sessionStatusDisplayName;
-  const [currentMode, setCurrentMode] = useState('default');
+  const [storedCurrentMode, setStoredCurrentMode] = useState('default');
+  const currentModeOwnerKeyRef = useRef(metadataOwnerKey);
+  const currentMode =
+    currentModeOwnerKeyRef.current === metadataOwnerKey
+      ? storedCurrentMode
+      : 'default';
   const currentModeRef = useRef(currentMode);
   currentModeRef.current = currentMode;
-  const setPendingMode = useCallback((modeId: string) => {
-    currentModeRef.current = modeId;
-    setCurrentMode(modeId);
-  }, []);
+  const setPendingMode = useCallback(
+    (modeId: string) => {
+      currentModeOwnerKeyRef.current = metadataOwnerKey;
+      currentModeRef.current = modeId;
+      setStoredCurrentMode(modeId);
+    },
+    [metadataOwnerKey],
+  );
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
     null,
@@ -4504,10 +4556,26 @@ export function App({
   const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
     mode: 'current',
   });
-  const gitModeIntentRef = useRef(gitModeIntent);
+  const gitModeIntentOwnerKeyRef = useRef(metadataOwnerKey);
+  const visibleGitModeIntent: SessionGitIntent =
+    gitModeIntentOwnerKeyRef.current === metadataOwnerKey
+      ? gitModeIntent
+      : { mode: 'current' };
+  const gitModeIntentRef = useRef(visibleGitModeIntent);
+  gitModeIntentRef.current = visibleGitModeIntent;
+  const updateGitModeIntent = useCallback(
+    (intent: SessionGitIntent) => {
+      gitModeIntentOwnerKeyRef.current = metadataOwnerKey;
+      gitModeIntentRef.current = intent;
+      setGitModeIntent(intent);
+    },
+    [metadataOwnerKey],
+  );
   useEffect(() => {
-    gitModeIntentRef.current = gitModeIntent;
-  }, [gitModeIntent]);
+    if (gitModeIntentOwnerKeyRef.current === metadataOwnerKey) return;
+    gitModeIntentOwnerKeyRef.current = metadataOwnerKey;
+    setGitModeIntent({ mode: 'current' });
+  }, [metadataOwnerKey]);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -4600,7 +4668,7 @@ export function App({
         // Clear the pending intent only on success. On failure the
         // composer chip stays in the selected mode so the user knows
         // the intent was not fulfilled and can retry.
-        setGitModeIntent({ mode: 'current' });
+        updateGitModeIntent({ mode: 'current' });
       });
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
@@ -4617,7 +4685,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [lockedWorkspaceCwd, sessionActions, workspaces]);
+  }, [lockedWorkspaceCwd, sessionActions, updateGitModeIntent, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const onSlashCommandRef = useRef(onSlashCommand);
@@ -4685,6 +4753,12 @@ export function App({
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
       },
     ) => {
+      if (isSessionTargetPending()) {
+        throw new DOMException(
+          'A session switch is still preparing',
+          'InvalidStateError',
+        );
+      }
       const isUserPrompt = !text.trimStart().startsWith('/');
       const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
@@ -4801,6 +4875,7 @@ export function App({
       clearFollowup,
       ensureSessionForPrompt,
       getComposerWorkspaceCwd,
+      isSessionTargetPending,
       scheduleDelayedSessionListReload,
       sessionActions,
       store,
@@ -4862,9 +4937,9 @@ export function App({
   );
   useEffect(() => {
     if (!gitModeEligible) {
-      setGitModeIntent({ mode: 'current' });
+      updateGitModeIntent({ mode: 'current' });
     }
-  }, [gitModeEligible]);
+  }, [gitModeEligible, updateGitModeIntent]);
   const handleOpenGitDiff = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -5806,6 +5881,10 @@ export function App({
 
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (isSessionTargetPending()) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return;
+      }
       if (!isDaemonApprovalMode(modeId)) {
         reportError(
           new Error(`Unsupported approval mode: ${modeId}`),
@@ -5821,7 +5900,7 @@ export function App({
         .setApprovalMode(modeId)
         .then((result) => {
           const effectiveMode = result.mode || modeId;
-          setCurrentMode(effectiveMode);
+          setPendingMode(effectiveMode);
           const approval = pendingApprovalRef.current;
           if (!approval) return;
           const shouldAutoApprove =
@@ -5851,7 +5930,15 @@ export function App({
           reportError(error, t('local.approvalMode'));
         });
     },
-    [sessionActions, reportError, store, t, setPendingMode],
+    [
+      isSessionTargetPending,
+      pushToast,
+      sessionActions,
+      reportError,
+      store,
+      t,
+      setPendingMode,
+    ],
   );
 
   useEffect(() => {
@@ -6019,11 +6106,11 @@ export function App({
 
   useEffect(() => {
     setCurrentModel(connection.currentModel ?? '');
-  }, [connection.currentModel, connection.sessionId]);
+  }, [connection.currentModel, metadataOwnerKey, setCurrentModel]);
 
   useEffect(() => {
-    setCurrentMode(connection.currentMode ?? 'default');
-  }, [connection.currentMode, connection.sessionId]);
+    setPendingMode(connection.currentMode ?? 'default');
+  }, [connection.currentMode, metadataOwnerKey, setPendingMode]);
 
   useEffect(() => {
     const previousGoalSessionId = lastGoalSessionIdRef.current;
@@ -6081,14 +6168,14 @@ export function App({
     workspaces,
   ]);
 
-  const lastRenameSessionRef = useRef<string | undefined>(undefined);
+  const lastRenameOwnerRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const sessionId = connection.sessionId;
     const displayName = connection.displayName;
     if (!sessionId || !displayName) return;
-    if (sessionId !== lastRenameSessionRef.current) {
-      lastRenameSessionRef.current = sessionId;
+    if (metadataOwnerKey !== lastRenameOwnerRef.current) {
+      lastRenameOwnerRef.current = metadataOwnerKey;
       lastRenameNameRef.current = displayName;
       return;
     }
@@ -6099,7 +6186,7 @@ export function App({
       sessionId,
       newName: displayName,
     });
-  }, [connection.sessionId, connection.displayName]);
+  }, [connection.displayName, connection.sessionId, metadataOwnerKey]);
 
   useEffect(() => {
     const nextGoal = getLatestActiveGoalFromBlocks(blocks);
@@ -6147,7 +6234,7 @@ export function App({
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
     autoRecapVersionRef.current += 1;
-  }, [connection.sessionId]);
+  }, [metadataOwnerKey]);
   useEffect(() => {
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
@@ -6162,7 +6249,8 @@ export function App({
       if (Date.now() - hiddenAt < AWAY_THRESHOLD_MS) return;
       if (streamingStateRef.current !== 'idle') return;
       if (!connection.sessionId) return;
-      const currentCount = store.getSnapshot().blocks.length;
+      const transcriptBlocks = store.getSnapshot().blocks;
+      const currentCount = transcriptBlocks.length;
       if (currentCount - lastRecapBlockCountRef.current < MIN_NEW_BLOCKS)
         return;
       lastRecapBlockCountRef.current = currentCount;
@@ -6183,6 +6271,7 @@ export function App({
             autoRecapVersionRef.current !== version ||
             connectionRef.current.sessionId !== sessionId ||
             result.sessionId !== sessionId ||
+            store.getSnapshot().blocks !== transcriptBlocks ||
             currentUserBlockId !== userBlockId ||
             streamingStateRef.current !== 'idle'
           ) {
@@ -6264,18 +6353,15 @@ export function App({
 
   const branchCurrentSession = useCallback(
     (name?: string) => {
+      if (isSessionTargetPending()) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return;
+      }
       if (!requireActiveSessionForLocalCommand()) return;
       sessionActions
         .branchSession(name || undefined)
         .then((result) => {
-          store.dispatch([
-            {
-              type: 'status',
-              text: t('branch.success', {
-                name: result.displayName,
-              }),
-            },
-          ]);
+          pushToast('info', t('branch.success', { name: result.displayName }));
         })
         .catch((error: unknown) => {
           reportError(error, t('branch.failed'));
@@ -6283,9 +6369,10 @@ export function App({
     },
     [
       reportError,
+      pushToast,
+      isSessionTargetPending,
       requireActiveSessionForLocalCommand,
       sessionActions,
-      store,
       t,
     ],
   );
@@ -6326,7 +6413,7 @@ export function App({
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending git mode intent so it never
       // leaks into the next created session.
-      setGitModeIntent({ mode: 'current' });
+      updateGitModeIntent({ mode: 'current' });
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -6366,6 +6453,7 @@ export function App({
       reloadLoadedSkills,
       scheduleComposerFocus,
       sessionActions,
+      updateGitModeIntent,
     ],
   );
   /**
@@ -6775,26 +6863,37 @@ export function App({
     }
   }, [createNewSession, onSessionIdChange]);
 
+  const sessionOpenInvocationRef = useRef(0);
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
+      const invocation = ++sessionOpenInvocationRef.current;
       composerFocusRequestRef.current += 1;
-      setSidebarSwitchingSessionId(sessionId);
-      setGitModeIntent({ mode: 'current' });
-      setSessionWorktree(undefined);
-      setSessionBranch(undefined);
-      // Close the drawer before awaiting the load; the transcript clears
-      // immediately and shows its loading skeleton for the selected session.
+      setSidebarSwitchTarget({
+        sessionId,
+        ...(workspaceCwd !== undefined ? { workspaceCwd } : {}),
+        invocation,
+        restoreCommitted: false,
+      });
+      // Navigation chrome can close immediately, but session-owned metadata,
+      // recap generation, and transcript remain attached to the current owner
+      // until the provider commits the target.
       closeMobileDrawer();
       // Loading another session should reveal its chat, not stay on the
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
-        autoRecapVersionRef.current += 1;
         await sessionActions.loadSession(sessionId, { workspaceCwd });
+        if (sessionOpenInvocationRef.current === invocation) {
+          setSidebarSwitchTarget((current) =>
+            current?.invocation === invocation
+              ? { ...current, restoreCommitted: true }
+              : current,
+          );
+        }
       } catch (error) {
-        setSidebarSwitchingSessionId((current) =>
-          current === sessionId ? null : current,
-        );
+        if (sessionOpenInvocationRef.current === invocation) {
+          setSidebarSwitchTarget(null);
+        }
         throw error;
       }
     },
@@ -6842,20 +6941,26 @@ export function App({
 
   useEffect(() => {
     if (
-      sidebarSwitchingSessionId !== null &&
-      connection.sessionId === sidebarSwitchingSessionId &&
+      sidebarSwitchTarget?.restoreCommitted === true &&
+      connection.sessionId === sidebarSwitchTarget.sessionId &&
+      (sidebarSwitchTarget.workspaceCwd === undefined ||
+        connection.workspaceCwd === sidebarSwitchTarget.workspaceCwd) &&
       !connection.loadingTranscript &&
-      !connection.catchingUp
+      !connection.catchingUp &&
+      connection.sessionTransition?.phase !== 'queued' &&
+      connection.sessionTransition?.phase !== 'preparing'
     ) {
-      setSidebarSwitchingSessionId(null);
-      scheduleComposerFocus(sidebarSwitchingSessionId);
+      setSidebarSwitchTarget(null);
+      scheduleComposerFocus(sidebarSwitchTarget.sessionId);
     }
   }, [
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
+    connection.sessionTransition?.phase,
+    connection.workspaceCwd,
     scheduleComposerFocus,
-    sidebarSwitchingSessionId,
+    sidebarSwitchTarget,
   ]);
 
   // Manual "run now" from the scheduled-tasks page. A bound task runs in its
@@ -6872,15 +6977,37 @@ export function App({
     prompt: string;
     resolve: () => void;
     reject: (err: unknown) => void;
-    timer: ReturnType<typeof setTimeout>;
+    timer?: ReturnType<typeof setTimeout>;
   } | null>(null);
-  const clearPendingBoundRun = useCallback((sessionId: string) => {
-    const cur = pendingBoundRunRef.current;
-    if (cur && cur.sessionId === sessionId) {
-      clearTimeout(cur.timer);
+  const clearPendingBoundRun = useCallback(
+    (
+      sessionId: string,
+      expected?: NonNullable<typeof pendingBoundRunRef.current>,
+    ) => {
+      const cur = pendingBoundRunRef.current;
+      if (
+        cur &&
+        cur.sessionId === sessionId &&
+        (expected === undefined || cur === expected)
+      ) {
+        if (cur.timer !== undefined) clearTimeout(cur.timer);
+        pendingBoundRunRef.current = null;
+      }
+    },
+    [],
+  );
+  useEffect(
+    () => () => {
+      const pending = pendingBoundRunRef.current;
+      if (!pending) return;
+      if (pending.timer !== undefined) clearTimeout(pending.timer);
       pendingBoundRunRef.current = null;
-    }
-  }, []);
+      pending.reject(
+        new DOMException('Scheduled run interrupted by unmount', 'AbortError'),
+      );
+    },
+    [],
+  );
   // Enqueue a manual-run prompt in the CURRENT session, resolving as soon as the
   // daemon ADMITS it — not when the whole turn finishes. sendPrompt resolves via
   // waitForAcceptedPromptCompletion (turn end), which is too late: a long or
@@ -6893,11 +7020,11 @@ export function App({
   // handled the rejection and skipped recording — an unrecorded run the user
   // could retry into a duplicate. Staying tied to admission guarantees any
   // accepted prompt is recorded, and the run controls stay busy (not free to
-  // re-fire) until the send admits or settles. The earlier "session never becomes
-  // active" phase is still bounded by the switch timeout in runTaskManually. If
-  // the send settles WITHOUT admitting (onSubmitBefore cancel) or throws before
-  // admission, reject so the caller skips recording a run that never reached the
-  // session.
+  // re-fire) until the send admits or settles. If the send settles WITHOUT
+  // admitting (onSubmitBefore cancel) or throws before admission, reject so the
+  // caller skips recording a run that never reached the session. Restore uses
+  // the provider's deadline; the 30-second timer starts only after commit and
+  // bounds the remaining catch-up phase.
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
@@ -6937,7 +7064,7 @@ export function App({
     ) {
       return;
     }
-    clearTimeout(pending.timer);
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
     pendingBoundRunRef.current = null;
     // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
     // cleared above, so a long turn can't trip it. Recording happens in the
@@ -6958,29 +7085,35 @@ export function App({
       // reject the old promise so its caller doesn't record a dropped run.
       const prev = pendingBoundRunRef.current;
       if (prev) {
-        clearTimeout(prev.timer);
+        if (prev.timer !== undefined) clearTimeout(prev.timer);
         pendingBoundRunRef.current = null;
         prev.reject(new Error('superseded by another run'));
       }
       return new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          clearPendingBoundRun(sessionId);
-          reject(new Error('Timed out switching to the task session'));
-        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
-        pendingBoundRunRef.current = {
+        const pending: NonNullable<typeof pendingBoundRunRef.current> = {
           sessionId,
           prompt,
           resolve,
           reject,
-          timer,
         };
+        pendingBoundRunRef.current = pending;
         loadSidebarSession(sessionId)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
-          .then(() => tryFireBoundRun())
+          .then(() => {
+            if (pendingBoundRunRef.current !== pending) return;
+            tryFireBoundRun();
+            if (pendingBoundRunRef.current !== pending) return;
+            pending.timer = setTimeout(() => {
+              if (pendingBoundRunRef.current !== pending) return;
+              clearPendingBoundRun(sessionId, pending);
+              reject(new Error('Timed out catching up the task session'));
+            }, BOUND_RUN_CATCH_UP_TIMEOUT_MS);
+          })
           .catch((error: unknown) => {
-            clearPendingBoundRun(sessionId);
+            if (pendingBoundRunRef.current !== pending) return;
+            clearPendingBoundRun(sessionId, pending);
             reject(error);
           });
       });
@@ -7089,11 +7222,20 @@ export function App({
   );
 
   const rewindConversationOnly = useCallback(
-    (promptId: string) =>
-      sessionActions
+    (promptId: string) => {
+      if (isSessionTargetPending()) {
+        return Promise.reject(
+          new DOMException(
+            'A session switch is still preparing',
+            'InvalidStateError',
+          ),
+        );
+      }
+      return sessionActions
         .rewindSession(promptId, { rewindFiles: false })
-        .then(() => undefined),
-    [sessionActions],
+        .then(() => undefined);
+    },
+    [isSessionTargetPending, sessionActions],
   );
 
   const handleRewindError = useCallback(
@@ -7181,6 +7323,10 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (isSessionTargetPending()) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return false;
+      }
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -7894,13 +8040,7 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
-              closeMobileDrawer();
-              // Resuming a session means the user wants to see that chat, so
-              // close any open Settings/Status panel (no-op when already closed),
-              // consistent with createNewSession / loadSidebarSession.
-              closePanel();
-              autoRecapVersionRef.current += 1;
-              sessionActions.loadSession(sessionId).catch((error: unknown) => {
+              loadSidebarSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
@@ -8159,7 +8299,6 @@ export function App({
       dispatchReadOnlyStatus,
       branchCurrentSession,
       closeMobileDrawer,
-      closePanel,
       openPanel,
       openScheduledTasks,
       openGoals,
@@ -8178,6 +8317,7 @@ export function App({
       createSideTask,
       sideTasksAvailable,
       openEnvironmentTasksPanel,
+      loadSidebarSession,
       hiddenCommands,
       pushToast,
       reportError,
@@ -8196,6 +8336,7 @@ export function App({
       t,
       workspaceActions,
       updateFailedPrompt,
+      isSessionTargetPending,
     ],
   );
 
@@ -8497,11 +8638,14 @@ export function App({
     };
   }, [resetEscapeState]);
 
-  const isDisabled = shouldDisableComposerInput({
-    catchingUp: Boolean(connection.catchingUp),
-    pendingApproval: pendingApproval !== null,
-    isPreparingPrompt,
-  });
+  const isSessionTransitionPending = isSessionTargetPending();
+  const isDisabled =
+    isSessionTransitionPending ||
+    shouldDisableComposerInput({
+      catchingUp: Boolean(connection.catchingUp),
+      pendingApproval: pendingApproval !== null,
+      isPreparingPrompt,
+    });
   const composerPlaceholderInputState = {
     catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
@@ -8518,6 +8662,10 @@ export function App({
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
+      if (isSessionTargetPending()) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return;
+      }
       if (!connectionRef.current.sessionId) {
         setPendingModel(modelId);
         return;
@@ -8546,7 +8694,15 @@ export function App({
         })
         .finally(() => setModelActionBusy(false));
     },
-    [sessionActions, store, reportError, t, setPendingModel],
+    [
+      isSessionTargetPending,
+      pushToast,
+      sessionActions,
+      store,
+      reportError,
+      t,
+      setPendingModel,
+    ],
   );
 
   const handleDeleteModel = useCallback(
@@ -9168,14 +9324,9 @@ export function App({
               <ResumeDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onSelect={(sessionId) => {
-                  closeMobileDrawer();
-                  closePanel();
-                  autoRecapVersionRef.current += 1;
-                  sessionActions
-                    .loadSession(sessionId)
-                    .catch((error: unknown) => {
-                      reportError(error, 'Failed to load session');
-                    });
+                  void loadSidebarSession(sessionId).catch((error: unknown) => {
+                    reportError(error, 'Failed to load session');
+                  });
                 }}
                 onClose={() => setShowResumeDialog(false)}
               />
@@ -10574,7 +10725,9 @@ export function App({
                           onCancel={handleCancel}
                           isRunning={streamingState !== 'idle'}
                           isPreparing={
-                            isPreparingPrompt || isStartingNewSessionSuggestion
+                            isPreparingPrompt ||
+                            isStartingNewSessionSuggestion ||
+                            isSessionTransitionPending
                           }
                           cancelArmed={cancelArmed}
                           disabled={
@@ -10605,8 +10758,12 @@ export function App({
                           gitBranch={activeGitBranch}
                           gitWorktree={Boolean(sessionWorktree)}
                           gitCwd={sessionWorktree?.path}
-                          gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                          gitModeIntent={
+                            gitModeEligible ? visibleGitModeIntent : undefined
+                          }
+                          onGitModeIntentChange={
+                            gitModeEligible ? updateGitModeIntent : undefined
+                          }
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd

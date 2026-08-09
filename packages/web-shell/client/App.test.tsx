@@ -8746,6 +8746,81 @@ describe('App session callbacks', () => {
     expect(arg?.['branch']).toBeUndefined();
   });
 
+  it('preserves the git mode intent when an existing-session switch fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('restore failed'),
+    );
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'branch',
+        name: 'feat/test',
+      });
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', { detail: 'session-2' }),
+      );
+      await flush();
+    });
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'branch',
+      name: 'feat/test',
+    });
+  });
+
+  it('clears the git mode intent after the committed owner changes', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { rerender } = renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'branch',
+        name: 'feat/test',
+      });
+      mockConnection.sessionId = 'session-2';
+      mockConnection.clientId = 'client-2';
+    });
+    rerender();
+    await flush();
+
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.clientId = undefined;
+    });
+    rerender();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
   it('hides the git mode chip when the workspace is not trusted', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
@@ -9226,6 +9301,20 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('discards an automatic recap after the transcript owner is replaced', async () => {
+    const { recap } = await triggerAutoRecap();
+    testState.blocks = [];
+
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Previous owner recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ source: 'recap' }),
+    ]);
+  });
+
   it('discards an automatic recap after starting a new session', async () => {
     const { recap, container } = await triggerAutoRecap();
     await act(async () => {
@@ -9257,7 +9346,7 @@ describe('App session callbacks', () => {
     ]);
   });
 
-  it('discards an automatic recap after switching to an existing session', async () => {
+  it('keeps an automatic recap while an existing-session switch is only preparing', async () => {
     const { recap, container } = await triggerAutoRecap();
     await act(async () => {
       container
@@ -9273,12 +9362,12 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
       workspaceCwd: undefined,
     });
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
       expect.objectContaining({ source: 'recap' }),
     ]);
   });
 
-  it('discards an automatic recap after resuming a session by command', async () => {
+  it('keeps an automatic recap while a command resume is only preparing', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('/resume session-3');
@@ -9289,8 +9378,10 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3');
-    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
+      workspaceCwd: undefined,
+    });
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
       expect.objectContaining({ source: 'recap' }),
     ]);
   });
@@ -9414,6 +9505,35 @@ describe('App session callbacks', () => {
         workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
       },
     );
+  });
+
+  it('does not finish a same-id switch before its target workspace commits', async () => {
+    const { rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'session-1',
+            workspaceCwd: '/target-workspace',
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(editorFocus).not.toHaveBeenCalled();
+
+    mockConnection.workspaceCwd = '/target-workspace';
+    rerender();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(editorFocus).toHaveBeenCalledOnce();
   });
 
   it('does not steal focus when an approval appears before deferred session focus', async () => {
@@ -10955,6 +11075,22 @@ describe('App session callbacks', () => {
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke host slash commands while a target is unresolved', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({
+      desiredTargetPending: true,
+      onSlashCommand,
+    });
+    await flush();
+
+    testState.prompt = '/deploy production';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('reports a host slash command error and continues default handling', async () => {
@@ -13875,7 +14011,9 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2');
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      workspaceCwd: undefined,
+    });
   });
 
   it('dispatches rename only after the current session name changes', async () => {
@@ -14709,6 +14847,23 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     });
   });
 
+  it('blocks a programmatic run while the desired target is unresolved', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    await openRunHandler(container);
+    rerender({ desiredTargetPending: true });
+    await flush();
+    const run = testState.latestScheduledTasksProps?.onRunPrompt;
+    if (!run) throw new Error('onRunPrompt was not recaptured');
+
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toMatchObject({
+        name: 'InvalidStateError',
+      });
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('rejects an unbound run that settles without admitting (cancel path)', async () => {
     // Default sendPrompt resolves WITHOUT onAdmitted → onSubmitBefore cancel /
     // never reached the session: the caller must skip recording a run.
@@ -14768,7 +14923,7 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     void second;
   });
 
-  it('rejects a bound run when the session switch times out', async () => {
+  it('rejects a bound run when post-commit catch-up times out', async () => {
     const { container } = renderApp();
     await flush();
     const run = await openRunHandler(container);
@@ -14783,7 +14938,86 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await act(async () => {
       vi.advanceTimersByTime(30_000);
     });
-    expect((err as Error | undefined)?.message).toMatch(/Timed out switching/);
+    expect((err as Error | undefined)?.message).toMatch(
+      /Timed out catching up/,
+    );
+  });
+
+  it('starts the bound-run catch-up deadline only after restore commits', async () => {
+    admitOnSend();
+    let resolveRestore: (() => void) | undefined;
+    mockSessionActions.loadSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRestore = resolve;
+        }),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    let err: unknown;
+    let runPromise: Promise<void> | undefined;
+    await act(async () => {
+      runPromise = run('do the thing', 'slow-session');
+      void runPromise.catch((error: unknown) => {
+        err = error;
+      });
+      await Promise.resolve();
+      vi.advanceTimersByTime(74_000);
+    });
+    expect(err).toBeUndefined();
+
+    mockConnection.sessionId = 'slow-session';
+    mockConnection.catchingUp = true;
+    await act(async () => {
+      resolveRestore?.();
+      rerender();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(29_000);
+    });
+    expect(err).toBeUndefined();
+
+    await act(async () => {
+      mockConnection.catchingUp = false;
+      rerender();
+      await Promise.resolve();
+    });
+    await expect(runPromise).resolves.toBeUndefined();
+    expect(err).toBeUndefined();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'do the thing',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('clears a pending bound-run catch-up deadline on unmount', async () => {
+    const { container, unmount } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    let error: unknown;
+    await act(async () => {
+      void run('do the thing', 'never-active').catch((cause: unknown) => {
+        error = cause;
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      unmount();
+      await Promise.resolve();
+    });
+    expect(error).toMatchObject({
+      name: 'AbortError',
+      message: 'Scheduled run interrupted by unmount',
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(error).toMatchObject({ name: 'AbortError' });
   });
 
   it('"create via chat" starts a fresh session and primes the composer', async () => {
