@@ -477,7 +477,9 @@ fn random_token() -> String {
 
 fn start_sleep_inhibitor() -> Option<Child> {
     #[cfg(target_os = "macos")]
-    let command = ("caffeinate", vec!["-is"]);
+    let parent_pid = std::process::id().to_string();
+    #[cfg(target_os = "macos")]
+    let command = ("caffeinate", vec!["-is", "-w", parent_pid.as_str()]);
     #[cfg(target_os = "linux")]
     let command = (
         "systemd-inhibit",
