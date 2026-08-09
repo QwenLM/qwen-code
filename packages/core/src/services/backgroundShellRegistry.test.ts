@@ -361,8 +361,11 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      // ALL NINE codepoints of both stripped ranges: pinning one per
+      // range let a one-character bound typo (0x202a→0x202b,
+      // 0x2066→0x2067) ship green (probe-verified).
       const outputPath = makeOutputFile(
-        'line one\nharmless\u202Eevil\u2069 two\n',
+        'line one\nharmless\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069 two\n',
       );
       reg.register(makeEntry({ shellId: 'tail-bidi', outputPath }));
 
@@ -370,10 +373,14 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<output-tail');
-      expect(modelText).not.toContain('\u202E');
-      expect(modelText).not.toContain('\u2069');
-      // The tail keeps its line structure — the strip must not eat \n.
-      expect(modelText).toContain('line one\nharmless');
+      const bidi = '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069';
+      for (const ch of bidi) {
+        expect(modelText).not.toContain(ch);
+      }
+      // The tail keeps its line structure AND the text after the stripped
+      // characters survives — the strip must not eat \n or truncate at
+      // the first bidi marker.
+      expect(modelText).toContain('line one\nharmlessevil two</output-tail>');
     });
 
     it('strips BIDI OVERRIDES from the notification, not just C0/C1', () => {
@@ -387,7 +394,16 @@ describe('BackgroundShellRegistry', () => {
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
       const outputPath = join(makeTempDir(), 'a\u202Eevil\u2069.log');
-      reg.register(makeEntry({ shellId: 'bidi', outputPath }));
+      reg.register(
+        makeEntry({
+          shellId: 'bidi',
+          // command and cwd render through the same shared helper — pin
+          // them too, so a field-local bidi-blind sanitizer fails here.
+          command: 'cat \u202Efd\u2069.txt',
+          cwd: '/repo/\u202Efd\u2069',
+          outputPath,
+        }),
+      );
 
       reg.complete('bidi', 0, 2000);
 

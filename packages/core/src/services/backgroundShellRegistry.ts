@@ -24,7 +24,10 @@ import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
-import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+import {
+  isBidiControlChar,
+  stripDisplayControlChars,
+} from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
@@ -42,15 +45,9 @@ function stripOutputControlChars(text: string): string {
     }
     if (code < 0x20) continue;
     if (code >= 0x80 && code <= 0x9f) continue;
-    // The bidi overrides the shared display helper removes, removed here
-    // too — this is the LARGEST attacker-controllable field in the envelope
-    // (up to 8 KiB of a background shell's own output), and these
-    // characters reorder how the text around them reads without changing a
-    // byte: the Trojan-Source class. Kept as its own loop rather than
-    // swapped for the shared helper because the tail must preserve
-    // newlines and carriage returns, which that helper strips.
-    if (code >= 0x202a && code <= 0x202e) continue;
-    if (code >= 0x2066 && code <= 0x2069) continue;
+    // Same bidi set as the shared display helper, in its own loop only
+    // because the tail must keep \n and \r, which that helper strips.
+    if (isBidiControlChar(code)) continue;
     out += text[i];
   }
   return out;
