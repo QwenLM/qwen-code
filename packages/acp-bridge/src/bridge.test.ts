@@ -61,7 +61,10 @@ import {
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
 } from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
-import type { BridgeTelemetry } from './bridgeOptions.js';
+import type {
+  BridgeFreshSessionAdmissionContext,
+  BridgeTelemetry,
+} from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import { EventBus, type BridgeEvent } from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
@@ -2109,23 +2112,57 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.killed).toBe(true);
   });
 
-  it('injects REQUESTED_SESSION_ID_META_KEY into newSession _meta when sessionId is set', async () => {
+  it('forces caller-supplied session ids into fresh thread admission and ACP meta', async () => {
     const handles: ChannelHandle[] = [];
+    const admissionContexts: BridgeFreshSessionAdmissionContext[] = [];
     const factory: ChannelFactory = async () => {
-      const h = makeChannel();
+      const h = makeChannel({
+        newSessionImpl: async (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+      });
       handles.push(h);
       return h.channel;
     };
-    const bridge = makeBridge({ channelFactory: factory });
-
-    await bridge.spawnOrAttach({
-      workspaceCwd: WS_A,
-      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    const bridge = makeBridge({
+      channelFactory: factory,
+      sessionScope: 'single',
+      freshSessionAdmission: (context) => {
+        admissionContexts.push(context);
+        return { release: vi.fn() };
+      },
     });
 
+    const first = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      sessionScope: 'single',
+    });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      sessionScope: 'single',
+    });
+
+    expect(first.attached).toBe(false);
+    expect(second.attached).toBe(false);
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(2);
     expect(handles[0]?.agent.newSessionCalls[0]!._meta).toMatchObject({
       [REQUESTED_SESSION_ID_META_KEY]: '550e8400-e29b-41d4-a716-446655440000',
     });
+    expect(admissionContexts).toEqual([
+      {
+        operation: 'spawn',
+        workspaceCwd: WS_A,
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      },
+      {
+        operation: 'spawn',
+        workspaceCwd: WS_A,
+        sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      },
+    ]);
 
     await bridge.shutdown();
   });

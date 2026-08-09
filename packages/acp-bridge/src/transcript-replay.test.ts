@@ -132,6 +132,205 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('skips checkpoint bookkeeping goal_state records during replay', () => {
+    const machine = createTranscriptReplayMachine();
+
+    expect(
+      updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
+    ).toHaveLength(1);
+
+    const turned: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      updatedAt: 300,
+    };
+    expect(
+      updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
+    ).toHaveLength(1);
+
+    const checkpointed: GoalRecord = {
+      ...turned,
+      evidenceCursor: { recordId: 'checkpoint-1' },
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 350,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'delivered_output',
+            claim: 'The result was delivered.',
+            sourceRefs: ['assistant-1'],
+          },
+        ],
+      },
+      activeTimeMs: 2500,
+      updatedAt: 400,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-checkpoint', 'checkpoint', checkpointed),
+      ),
+    ).toEqual([]);
+
+    const rejected: GoalRecord = {
+      ...checkpointed,
+      lastReason: 'More work remains',
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject', 'verifier_reject', rejected),
+      ),
+    ).toHaveLength(1);
+
+    const recommitted: GoalRecord = {
+      ...rejected,
+      activeTimeMs: 2900,
+      updatedAt: 500,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord(
+          'goal-reject-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+
+    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
+  it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
+    const first = createTranscriptReplayMachine();
+    updates(first, goalStateRecord('goal-create', 'create', GOAL));
+    const turned: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      updatedAt: 300,
+    };
+    updates(first, goalStateRecord('goal-turn', 'turn_finished', turned));
+    const rejected: GoalRecord = {
+      ...turned,
+      lastReason: 'More work remains',
+      activeTimeMs: 2200,
+      updatedAt: 310,
+    };
+    expect(
+      updates(
+        first,
+        goalStateRecord('goal-reject', 'verifier_reject', rejected),
+      ),
+    ).toHaveLength(1);
+
+    const state = first.snapshot();
+    expect(state.goalCause).toBe('verifier_reject');
+
+    // A page boundary falls between the genuine rejection and the
+    // shape-equal bookkeeping re-commit; the second machine must still
+    // recognize the re-commit as bookkeeping.
+    const second = createTranscriptReplayMachine({ initialState: state });
+    const recommitted: GoalRecord = {
+      ...rejected,
+      activeTimeMs: 2300,
+      updatedAt: 320,
+    };
+    expect(
+      updates(
+        second,
+        goalStateRecord(
+          'goal-reject-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+    expect(second.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
+  it('emits a repeated verifier rejection that follows an empty turn', () => {
+    const machine = createTranscriptReplayMachine();
+
+    expect(
+      updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
+    ).toHaveLength(1);
+
+    const turnedOnce: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      updatedAt: 300,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-turn-1', 'turn_finished', turnedOnce),
+      ),
+    ).toHaveLength(1);
+
+    const rejectedOnce: GoalRecord = {
+      ...turnedOnce,
+      lastReason: 'More work remains',
+      activeTimeMs: 2200,
+      updatedAt: 310,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject-1', 'verifier_reject', rejectedOnce),
+      ),
+    ).toHaveLength(1);
+
+    const turnedTwice: GoalRecord = {
+      ...rejectedOnce,
+      turnCount: GOAL.turnCount + 2,
+      activeTimeMs: 2300,
+      updatedAt: 320,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-turn-2', 'turn_finished', turnedTwice),
+      ),
+    ).toHaveLength(1);
+
+    // Shape-equal to the preceding turn_finished record, but its cause is a
+    // genuine rejection, not checkpoint bookkeeping — it must stay visible.
+    const rejectedTwice: GoalRecord = {
+      ...turnedTwice,
+      activeTimeMs: 2400,
+      updatedAt: 330,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject-2', 'verifier_reject', rejectedTwice),
+      ),
+    ).toHaveLength(1);
+
+    const recommitted: GoalRecord = {
+      ...rejectedTwice,
+      activeTimeMs: 2500,
+      updatedAt: 340,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord(
+          'goal-reject-2-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+
+    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
   it('reports and skips a malformed goal_state record', () => {
     const onDiagnostic = vi.fn();
     const machine = createTranscriptReplayMachine({ onDiagnostic });
@@ -812,6 +1011,33 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     expect(machine.snapshot().goalState).toBeUndefined();
+  });
+
+  it('drops a malformed goalCause from initialState and reports it', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({
+      onDiagnostic,
+      initialState: {
+        v: 1,
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          promptTokens: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          apiTimeMs: 0,
+        },
+        goalCause: 'bogus',
+      } as unknown as TranscriptReplayStateV1,
+    });
+
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'invalid_replay_state',
+        message: 'Dropped a malformed Goal cause from replay state.',
+        affectsCompleteness: true,
+      }),
+    );
+    expect(machine.snapshot().goalCause).toBeUndefined();
   });
 
   it('emits gaps, todo plans, and cumulative usage deterministically', () => {

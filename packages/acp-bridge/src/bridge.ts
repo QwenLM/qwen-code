@@ -6164,7 +6164,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ) {
         throw new InvalidSessionScopeError(req.sessionScope);
       }
-      const effectiveScope = req.sessionScope ?? defaultSessionScope;
+      const effectiveScope =
+        req.sessionId !== undefined
+          ? 'thread'
+          : (req.sessionScope ?? defaultSessionScope);
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
@@ -6381,6 +6384,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         admission = reserveFreshSession({
           operation: 'spawn',
           workspaceCwd: workspaceKey,
+          ...(req.sessionId !== undefined ? { sessionId: req.sessionId } : {}),
         });
       } catch (error) {
         releaseRequestedSessionRegistration();

@@ -26,6 +26,10 @@ const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
   'utf8',
 );
+const workflowsDir = '.github/workflows';
+const workflowFiles = readdirSync(workflowsDir).filter((f) =>
+  /\.ya?ml$/.test(f),
+);
 
 function runReviewStep() {
   const doc = parse(workflow);
@@ -2175,14 +2179,12 @@ describe('workflow expression length', () => {
   // length 21000` (e.g. run 31239579253). CI stayed green the whole time — no
   // test covered this, which is why it is covered here.
   const LIMIT = 21000;
-  const dir = '.github/workflows';
-  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 
   it('keeps every templated run block under the limit', () => {
-    expect(files.length).toBeGreaterThan(0);
+    expect(workflowFiles.length).toBeGreaterThan(0);
     const over = [];
-    for (const file of files) {
-      const doc = parse(readFileSync(join(dir, file), 'utf8'));
+    for (const file of workflowFiles) {
+      const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
       for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
         for (const step of job?.steps ?? []) {
           const body = step?.run;
@@ -2205,5 +2207,198 @@ describe('workflow expression length', () => {
     // here takes the entire workflow down, which the test above would also
     // catch; this asserts the actual invariant a contributor has to preserve.
     expect(runReviewStep()).not.toContain('${{');
+  });
+});
+
+describe('command shape matching', () => {
+  // A comment may be `@qwen-code /review` followed by a newline and a body.
+  // The `if`s tried to accept that with format('…{0}', '\n'), but expression
+  // string literals are NOT escape-processed: that '\n' is a literal
+  // backslash + n, so the branch matched nothing and every multi-line command
+  // was silently ignored — no run, no feedback. Measured on a live runner:
+  //   startsWith(<LF body>, format('…{0}', '\n'))            => false
+  //   startsWith(<LF body>, format('…{0}', fromJSON('"\n"'))) => true
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\n"'))) => false
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\r"'))) => true
+  // Hence fromJSON (JSON *is* escape-processed) and both line endings: the
+  // REST API sends LF, the web UI sends CRLF.
+  const doc = parse(workflow);
+  const ifs = Object.entries(doc.jobs)
+    .filter(([, job]) => typeof job?.if === 'string')
+    .map(([id, job]) => [id, job.if]);
+
+  it('never matches a command shape with a non-escaped literal newline', () => {
+    const broken = ifs.filter(([, cond]) => /'\\[nr]'/.test(cond));
+    expect(broken.map(([id]) => id)).toEqual([]);
+  });
+
+  it('accepts both LF and CRLF after the command in every shape match', () => {
+    // `authorize` deliberately matches only a loose prefix — it is a filter to
+    // avoid spawning a job per comment, and delegates the exact shape to the
+    // downstream jobs. Jobs that do the shape match are the ones that use
+    // format('@qwen-code /<cmd>{0}', …), so key off that.
+    const withShape = ifs.filter(([, cond]) =>
+      cond.includes("format('@qwen-code /"),
+    );
+    expect(withShape.length).toBeGreaterThan(0);
+    const missing = [];
+    for (const [id, cond] of withShape) {
+      for (const cmd of ['review', 'resolve']) {
+        // Only check commands this job actually matches on.
+        if (!cond.includes(`format('@qwen-code /${cmd}{0}'`)) continue;
+        const lf = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\n"'))`,
+        );
+        const cr = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\r"'))`,
+        );
+        if (!lf || !cr) missing.push(`${id}/${cmd} (LF:${lf} CR:${cr})`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('strips a trailing CR before parsing command tokens', () => {
+    // Word splitting uses IFS, which has no CR, so a CRLF comment would carry
+    // `\r` into tokens like `--timeout=300` and fail the numeric check.
+    // The command is parsed in "Resolve PR context", not in "Run review".
+    const run = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    ).run;
+    const firstLine = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_BODY%%$\'\\n\'*}"',
+    );
+    const stripCr = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_COMMAND%$\'\\r\'}"',
+    );
+    expect(firstLine).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(firstLine);
+  });
+});
+
+describe('bot comment markers', () => {
+  // A line that opens with `<!--` starts an HTML block, and that block runs to
+  // the line holding the closing delimiter INCLUSIVE — the rest of that line
+  // stays inside it and is never parsed as Markdown. The queued-ack comment
+  // glued its prose straight onto the marker and reached every PR as raw
+  // source with a dead link. Measured through GitHub's own renderer
+  // (POST /markdown, mode=gfm): marker+text -> 0 <a>/0 <em>; marker+"\n"+text
+  // and marker+"\n\n"+text -> 1 <a>/1 <em>.
+  //
+  // The rule keys off ONE thing: a marker that opens a string literal, and
+  // what remains inside that literal after it. That is what distinguishes
+  // BUILDING a comment body from merely REFERENCING a marker — `jq
+  // contains("<!-- m -->")` and `printf '<!-- m -->' "$VAR"` leave nothing
+  // after the marker and are fine, while `="<!-- m -->prose"` does not. The
+  // scan is bounded to the marker's physical line: a glued body is by
+  // definition on that line, and searching past it would couple the guard to
+  // unrelated quotes elsewhere in the file — a doc example quoting an unclosed
+  // `--body "<!-- m -->` would break the moment any later line gained a `"`.
+  //
+  // Known gaps, stated rather than papered over: bodies split across printf
+  // arguments (`printf '%s%s' '<!-- m -->' 'prose'`) — detecting them means
+  // modelling which literal is the format string, and every cheap
+  // approximation flagged the legitimate `printf '<!-- m -->' "$VAR"` form;
+  // bodies assembled across statements or files (one `echo` per line into a
+  // `--body-file`); markers at physical line start (heredocs, YAML block
+  // scalars); markers mid-literal that only land at a rendered line start
+  // after `\n` expansion (`printf 'x\n<!-- m -->prose'`); multi-line literals
+  // whose closing quote sits on a later line; a line-wrapped printf whose
+  // format opens with the marker (the `\n` exemption reads one physical
+  // line); continuations after a marker-ending literal other than an
+  // adjacent quoted literal or bare `$(…)` — `$VAR` expansion, unquoted
+  // words, `$'…'` literals, backtick substitution, backslash-newline, and
+  // text after the closing `)` of a wrapping subshell assignment
+  // (`BODY="$(printf '<!-- m -->')prose"`); closing that shape needs a
+  // subshell discriminator that false-positives on legitimate jq
+  // `contains("<!-- … -->"))` references inside `$(…)` assignments;
+  // trailing end-of-line comments — the `#` skip only fires when the
+  // comment OPENS the physical line, so a glued marker quoted in a
+  // trailing comment is still flagged; YAML double-quoted scalars
+  // (`body: "<!-- m -->\nprose"`) — YAML expands `\n`, but the scanner
+  // cannot cheaply tell a YAML scalar from a shell literal where `\n`
+  // stays literal; and marker-headed bodies built outside
+  // `.github/workflows` — the `.github/scripts/*.mjs` comment builders
+  // (template literals and pushed marker lines) are not scanned. All are
+  // latent — nothing glues a marker today.
+
+  it('never glues prose onto a comment marker, in any workflow', () => {
+    expect(workflowFiles.length).toBeGreaterThan(0);
+    const offenders = [];
+    for (const file of workflowFiles) {
+      const text = readFileSync(join(workflowsDir, file), 'utf8');
+      // The class excludes `\n` so a `<!--` inside a nearby comment cannot
+      // let one match span lines, swallow the real marker, and get discarded
+      // by the comment skip below — the guard would then pass with the very
+      // regression present. `>` stays allowed inside a marker (lazy match to
+      // the first `-->` on the line) so arrow-style markers are covered too.
+      const re = /<!--[^\n]*?-->/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const lineStart = text.lastIndexOf('\n', m.index) + 1;
+        const prefix = text.slice(lineStart, m.index);
+        // Prose in a YAML or shell comment never reaches a comment body.
+        if (/^\s*#/.test(prefix)) continue;
+        const quote = m.index === lineStart ? null : text[m.index - 1];
+        // Only a marker that OPENS a string literal can be building a body.
+        if (quote !== "'" && quote !== '"') continue;
+        const rest = text.slice(m.index + m[0].length);
+        const lineEnd = rest.indexOf('\n');
+        const line = lineEnd === -1 ? rest : rest.slice(0, lineEnd);
+        const end = line.indexOf(quote);
+        // No closing quote on this line means either the marker ends the line
+        // inside a multi-line literal (a real newline separates the body,
+        // which renders) or the quote is prose in a doc example — neither
+        // glues anything ON the marker's line.
+        if (end === -1) continue;
+        let glued = line.slice(0, end);
+        if (glued === '') {
+          // The literal ended at the marker — but an adjacent literal on the
+          // same line concatenates onto it at runtime, and so does an
+          // unquoted `$(…)` (its output is invisible to this scan).
+          const after = line.slice(end + 1);
+          if (after[0] === "'" || after[0] === '"') {
+            const q2 = after[0];
+            const e2 = after.slice(1).indexOf(q2);
+            glued = e2 === -1 ? '' : after.slice(1, 1 + e2);
+          } else if (after[0] === '$' && after[1] === '(') {
+            glued = after;
+          }
+        }
+        if (glued === '') continue;
+        // The two-character `\n` escape separates only where the shell
+        // expands it: a printf format string or ANSI-C `$'…'` opened at the
+        // END of the prefix — an unrelated printf earlier on the same line
+        // must not bless a plain double-quoted assignment, where `\n` stays
+        // a literal backslash-n and the prose stays on the marker's line.
+        if (
+          glued.startsWith('\\n') &&
+          /printf\s+(?:-\S+\s+(?:\S+\s+)?|--\s+)?['"]$|\$'$/.test(prefix)
+        ) {
+          continue;
+        }
+        offenders.push(
+          `${file}: ${text.slice(m.index, m.index + 56).split('\n')[0]}`,
+        );
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('pins the workflow-run URL into the ack printf', () => {
+    // bash printf with a leftover argument and no conversion spec exits 0
+    // under `set -euo pipefail` and emits `[workflow run]()`, so nothing
+    // else catches a dropped `%s` or `"$RUN_URL"` on the ack line. Assert
+    // the link shape, not bare co-existence: a `%s` displaced out of the
+    // parens keeps both pieces on the line and re-ships the dead link.
+    const ackLine = workflow
+      .split('\n')
+      .find(
+        (l) => l.includes('printf') && l.includes('<!-- qwen-review-ack -->'),
+      );
+    expect(ackLine).toBeDefined();
+    expect(ackLine).toContain('[workflow run](%s)');
+    expect(ackLine).toContain('"$RUN_URL"');
   });
 });
