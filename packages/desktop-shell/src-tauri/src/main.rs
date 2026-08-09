@@ -143,10 +143,12 @@ fn main() {
         RunEvent::Reopen {
             has_visible_windows,
             ..
-        } if !has_visible_windows
-            || app_handle.get_webview_window("main").is_some_and(|window| {
+        } if should_restore_main_window(
+            has_visible_windows,
+            app_handle.get_webview_window("main").is_some_and(|window| {
                 !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false)
-            }) =>
+            }),
+        ) =>
         {
             focus_main_window(app_handle)
         }
@@ -562,6 +564,11 @@ fn focus_main_window(app: &AppHandle) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn should_restore_main_window(has_visible_windows: bool, main_needs_restore: bool) -> bool {
+    !has_visible_windows || main_needs_restore || FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed)
+}
+
 fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("local-control") {
         window.show().map_err(|error| error.to_string())?;
@@ -697,8 +704,20 @@ mod tests {
         is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
         BOOTSTRAP_URL,
     };
+    #[cfg(target_os = "macos")]
+    use super::{should_restore_main_window, FULLSCREEN_HIDE_PENDING};
+    #[cfg(target_os = "macos")]
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use url::Url;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_fullscreen_hide_forces_reopen_restore() {
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Relaxed);
+        assert!(should_restore_main_window(true, false));
+        FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+    }
 
     #[test]
     fn allows_only_the_daemon_origin_in_the_main_window() {
