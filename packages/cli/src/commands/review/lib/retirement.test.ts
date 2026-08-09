@@ -196,41 +196,6 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(schedule(2).due).toEqual([13, 14, 15]);
   });
 
-  it('a one-round micro cap retires on a single dry audit and converges', () => {
-    // Below the sweep floor the plan's reverseAuditRounds is 1: one
-    // substantive dry audit IS the certificate — final, no cold check —
-    // and an all-dry round 1 must read as convergence at the round-2
-    // build, not as chunks still owed a second reading.
-    writeFileSync(plan, JSON.stringify({ budget: { reverseAuditRounds: 1 } }));
-    const old = new Date(2020, 0, 1);
-    utimesSync(plan, old, old);
-    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
-    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), DRY);
-    transcript(record(1, 15, 'chunk 15 round 1 territory walk'), DRY);
-
-    const r2 = schedule(2);
-    expect(r2.due).toEqual([]);
-    expect(r2.converged).toBe(true);
-    expect(r2.coldChecks).toEqual([]);
-    expect(r2.skipped.map((sk) => sk.chunkId)).toEqual([13, 14, 15]);
-    expect(r2.skipped[0].dryRounds).toEqual([1]);
-  });
-
-  it('a one-round cap keeps a yielding chunk hot — the cap is not a verdict', () => {
-    writeFileSync(plan, JSON.stringify({ budget: { reverseAuditRounds: 1 } }));
-    const old = new Date(2020, 0, 1);
-    utimesSync(plan, old, old);
-    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
-    transcript(record(1, 14, 'chunk 14 round 1 territory walk'), YIELD);
-    record(1, 15, 'chunk 15 round 1 territory walk');
-
-    const r2 = schedule(2);
-    // 14 yielded and 15 never proved anything — both stay due; the
-    // admission gate (not this schedule) is what stops the loop at the cap.
-    expect(r2.due).toEqual([14, 15]);
-    expect(r2.converged).toBe(false);
-  });
-
   it('a disclosure cannot BE the receipt — but cannot BLOCK a real one either', () => {
     // Two directions, one rule: the receipt is judged with its
     // `Budget gap:` lines stripped. A return whose only substance is its

@@ -3417,56 +3417,53 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('retirement:');
   });
 
-  it('micro cap: one dry round converges at the round-2 build (exit 5)', () => {
-    // Below the sweep floor the plan's cap is 1: a single substantive dry
-    // audit is the certificate. The round-2 --all-chunks build must read
-    // that as CONVERGED — not refuse it at the cap with an entry owed, and
-    // not schedule cold checks the cap leaves no round for.
+  it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {
+    // A huge diff caps at 3 rounds. Rounds 1-3 never converge (every chunk
+    // keeps yielding), so round 4 is refused at the cap: exit 4, nothing
+    // built, and — the robustness half — a marker compose-review caps on,
+    // so the verdict is capped whether or not the orchestrator relays.
     writeFileSync(
       plan,
-      JSON.stringify({
-        ...PLAN,
-        budget: { reverseAuditRounds: 1 },
-      }),
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
     );
     const old = new Date(2020, 0, 1);
     utimesSync(plan, old, old);
-    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
-    runRound(2);
-
-    expect(process.exitCode).toBe(5);
-    const msg = (writeStderrLine as unknown as Mock).mock.calls
-      .map((c) => c[0])
-      .join('\n');
-    expect(msg).toContain('CONVERGED');
-    expect(msg).toContain('one-round micro cap');
-  });
-
-  it('micro cap: a hot chunk at round 2 is refused at the cap (exit 4)', () => {
-    // Round 1 yielded, so the loop is not converged — but the plan's cap
-    // forbids a second round. The refusal is a termination rule naming the
-    // unreviewedDimensions entry, mirroring the deadline gate's contract.
-    writeFileSync(
-      plan,
-      JSON.stringify({
-        ...PLAN,
-        budget: { reverseAuditRounds: 1 },
-      }),
-    );
-    const old = new Date(2020, 0, 1);
-    utimesSync(plan, old, old);
-    answerRound(1, { 13: DRY, 14: YIELD, 15: DRY });
-    const out = runRound(2);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    const out = runRound(4);
 
     expect(process.exitCode).toBe(4);
     expect(out).toBe('');
+    expect(keysOf(4)).toHaveLength(0);
     const msg = (writeStderrLine as unknown as Mock).mock.calls
       .map((c) => c[0])
       .join('\n');
     expect(msg).toContain('ROUND CAP');
-    expect(msg).toContain("stopped at the plan's 1-round cap");
-    // Round 2 built nothing: no record, no stamp.
-    expect(keysOf(2)).toHaveLength(0);
+    expect(msg).toContain('round cap is 3');
+    // The marker is on disk so compose-review caps without the relay.
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+    expect(readBudgetStop(plan)?.cap).toBe(3);
+  });
+
+  it('the default 5-round cap is enforced by the builder, not just prose', () => {
+    // Pins the general ROUND CAP enforcement: the mutation `round > cap`
+    // → `round > cap && cap === 1` (a sixth round builds) fails here.
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(4, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(5, { 13: YIELD, 14: YIELD, 15: YIELD });
+    const out = runRound(6);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(6)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 5');
   });
 
   it('all retired and none due: exit 5, CONVERGED, nothing built, nothing stamped', () => {

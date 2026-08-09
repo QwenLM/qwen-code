@@ -9,7 +9,7 @@
 // The iterative reverse audit (Step 5) is the one stage of a review whose cost
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
-// two consecutive dry rounds or the 5-round cap. On a PR where every round
+// two consecutive dry rounds or the plan's round cap (5, or 3 for a huge diff). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -270,6 +270,16 @@ export function reverseAuditBudgetExhausted(
 }
 
 export interface BudgetStop {
+  /**
+   * Which termination wrote this marker: the time budget (the reverse-audit
+   * loop ran out of clock) or the round cap (it ran its full allotted
+   * rounds without converging). `compose-review` picks the disclosure text
+   * by this; an absent value reads as `time-budget` for back-compat.
+   */
+  cause?: 'time-budget' | 'round-cap';
+  /** The round cap, when `cause` is `round-cap` — what `compose-review`
+   * re-derives the disclosure from, the way it uses `round` for a time stop. */
+  cap?: number;
   /** The exact `unreviewedDimensions` entry, composed here so the text that
    * caps the verdict is this module's in both channels. */
   entry: string;
@@ -320,6 +330,77 @@ export function budgetStopEntry(round: number | undefined): string {
 export function budgetStopEntryZh(round: number | undefined): string {
   const d = budgetStopDisclosure(round);
   return `${d.subjectZh}——${d.reasonZh}`;
+}
+
+/**
+ * The phrase identifying a ROUND-CAP disclosure wherever it is relayed —
+ * the cap analogue of `BUDGET_STOP_PHRASE`, so `compose-review` dedups the
+ * orchestrator's relayed copy against the marker's by shared text.
+ */
+export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+
+/**
+ * The round-cap disclosure as structural parts, both languages — the
+ * analogue of `budgetStopDisclosure` for a loop that ran its full allotted
+ * rounds without converging.
+ */
+export function roundCapStopDisclosure(cap: number): {
+  subject: string;
+  reason: string;
+  subjectZh: string;
+  reasonZh: string;
+} {
+  return {
+    subject: 'reverse audit',
+    reason: `did not converge within the ${ROUND_CAP_PHRASE} of ${cap}`,
+    subjectZh: '反向审计',
+    reasonZh: `在 ${cap} 轮的反审轮数上限内未收敛`,
+  };
+}
+
+/** The round-cap entry, spelled once for the marker AND the stderr message. */
+export function roundCapStopEntry(cap: number): string {
+  const d = roundCapStopDisclosure(cap);
+  return `${d.subject} — ${d.reason}`;
+}
+
+/** The Chinese pair of `roundCapStopEntry`. */
+export function roundCapStopEntryZh(cap: number): string {
+  const d = roundCapStopDisclosure(cap);
+  return `${d.subjectZh}——${d.reasonZh}`;
+}
+
+/**
+ * Persist a round-cap refusal beside the prompt records, so
+ * `compose-review` caps the verdict on a loop that ran its full rounds
+ * without converging — without depending on the orchestrator to relay the
+ * entry. Same marker file and same swallow-on-write-error discipline as
+ * `writeBudgetStop`; only one stop fires per run, whichever refusal comes
+ * first.
+ */
+export function writeRoundCapStop(
+  planPath: string,
+  cap: number,
+  round: number | undefined,
+  nowMs: number = Date.now(),
+): void {
+  try {
+    const dir = promptRecordDir(planPath);
+    mkdirSync(dir, { recursive: true });
+    const stop: BudgetStop = {
+      cause: 'round-cap',
+      cap,
+      entry: roundCapStopEntry(cap),
+      entryZh: roundCapStopEntryZh(cap),
+      round: round ?? null,
+      remainingSeconds: 0,
+      reserveSeconds: 0,
+      atMs: nowMs,
+    };
+    writeFileSync(join(dir, STOP_FILE), JSON.stringify(stop, null, 2));
+  } catch {
+    // Refusing is the load-bearing half; the stderr entry still carries it.
+  }
 }
 
 /**

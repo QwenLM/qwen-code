@@ -52,7 +52,6 @@ import {
   stripBudgetGapLines,
   INLINE_BUDGET_GAP_RE,
   MAX_REVERSE_AUDIT_ROUNDS,
-  reverseAuditRoundCap,
 } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
@@ -62,9 +61,7 @@ export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
 export interface RetiredChunk {
   chunkId: number;
   /** The two most recent audit rounds — both substantive dry receipts. */
-  /** The rounds whose dry audits form the certificate — two normally, one
-   * under a micro diff's round cap of 1. */
-  dryRounds: number[];
+  dryRounds: [number, number];
   /** The next round whose parity puts the chunk back under audit. */
   nextColdCheck: number;
 }
@@ -81,11 +78,11 @@ export interface RoundSchedule {
 }
 
 /**
- * The loop's hard cap, mirroring SKILL.md's Step 5 ("Stop after 5 rounds
- * regardless"). The number lives in `budget.ts` beside the sweep floor that
- * lowers a micro diff's cap to 1 (`reverseAuditRounds`); the admission gate
- * in `agent-prompt` enforces the PLAN's cap, and the retirement note here
- * must not promise a cold check the cap has already forbidden.
+ * The loop's full round cap (SKILL.md Step 5: "stop at the plan's
+ * `reverseAuditRounds` cap"). The number lives in `budget.ts` beside the
+ * huge-diff tier that lowers it to 3 (`reverseAuditRounds`); the admission
+ * gate in `agent-prompt` enforces the PLAN's cap, and the retirement note
+ * here must not promise a cold check the cap has already forbidden.
  */
 export const REVERSE_AUDIT_MAX_ROUNDS = MAX_REVERSE_AUDIT_ROUNDS;
 
@@ -95,21 +92,6 @@ export const REVERSE_AUDIT_MAX_ROUNDS = MAX_REVERSE_AUDIT_ROUNDS;
  * loosely on purpose: its width is the digest function's business, and a key
  * this regex misses is merely history this module cannot see — fail-open.
  */
-/**
- * The plan's reverse-audit round cap. An unreadable or capless plan reads
- * as the full cap — the schedule must degrade toward more auditing.
- */
-function reverseAuditCapOf(planPath: string): number {
-  try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      budget?: unknown;
-    };
-    return reverseAuditRoundCap(plan.budget);
-  } catch {
-    return REVERSE_AUDIT_MAX_ROUNDS;
-  }
-}
-
 const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]+$/;
 
 /**
@@ -437,14 +419,9 @@ export function scheduleReverseAuditRound(
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
 ): RoundSchedule {
-  // A micro diff's certificate is ONE substantive dry audit, not two — the
-  // plan's round cap of 1 leaves no round for a second, and below the sweep
-  // floor a second reading of the same few hunks is the first reading
-  // again. The cap comes from the plan so every reader (this schedule, the
-  // admission gate, the note) answers to the same number.
-  const dryBar = reverseAuditCapOf(planPath) === 1 ? 1 : 2;
-  // The establishing rounds carry no history to retire on.
-  if (round <= dryBar) {
+  // Rounds 1 and 2 establish each chunk's record; retirement needs two
+  // consecutive dry audits, so nothing can retire before round 3.
+  if (round < 3) {
     return {
       due: [...chunkIds],
       coldChecks: [],
@@ -568,25 +545,13 @@ export function scheduleReverseAuditRound(
     const audits = [...(history.get(chunkId)?.entries() ?? [])]
       .map(([r, outcomes]) => ({ round: r, outcome: mergeOutcomes(outcomes) }))
       .sort((a, b) => a.round - b.round);
-    const lastTwo = audits.slice(-dryBar);
+    const lastTwo = audits.slice(-2);
     const retired =
-      lastTwo.length === dryBar && lastTwo.every((a) => a.outcome === 'dry');
+      lastTwo.length === 2 && lastTwo.every((a) => a.outcome === 'dry');
     if (!retired) {
       // Hot — including a chunk with no history at all, one whose latest
       // receipt was a whiff, and one whose cold check yielded.
       due.push(chunkId);
-      continue;
-    }
-    // Under a one-round cap there is no round for a cold check — the
-    // certificate is final the moment it exists, and a retired chunk that
-    // re-entered `due` for a cold check would block the CONVERGED exit
-    // forever on exactly the micro diffs the cap exists for.
-    if (dryBar === 1) {
-      skipped.push({
-        chunkId,
-        dryRounds: lastTwo.map((a) => a.round),
-        nextColdCheck: round + 1,
-      });
       continue;
     }
     // Cold checks land on ONE global parity — the even rounds — not on the
@@ -604,7 +569,7 @@ export function scheduleReverseAuditRound(
     } else {
       skipped.push({
         chunkId,
-        dryRounds: lastTwo.map((a) => a.round),
+        dryRounds: [lastTwo[0].round, lastTwo[1].round],
         // The next even round — this branch only runs on odd rounds, so
         // that is always round + 1. Whether the cap allows it is the note
         // composer's question, not the schedule's (see

@@ -84,7 +84,14 @@ describe('reviewBudget — domain specialists', () => {
 
   it('are capped at two once the diff is big enough for dominance to mean something', () => {
     expect(budget(80).specialistCap).toBe(2);
-    expect(budget(10_000).specialistCap).toBe(2);
+    expect(budget(2999).specialistCap).toBe(2);
+  });
+
+  it('shed to zero on a huge diff — the marginal pass that tips it into a timeout', () => {
+    // At/above the huge floor an Agent 8 whole-diff pass on top of the base
+    // fan-out is what a too-big-to-finish review can least afford.
+    expect(budget(3000).specialistCap).toBe(0);
+    expect(budget(10_000).specialistCap).toBe(0);
   });
 
   it('read source lines only — a test-heavy diff does not unlock them', () => {
@@ -372,26 +379,45 @@ describe('stripBudgetGapLines — the receipt judged without its disclosures', (
 });
 
 describe('reviewBudget — the reverse-audit round cap', () => {
-  it('caps at one round below the sweep floor, five at it and above', () => {
-    // The sweep's rationale extended to the high tier's second pass: below
-    // the floor a convergence loop re-reads the same few hunks (measured:
-    // a 23-line PR spent three rounds and eleven minutes to produce one
-    // verifier-rejected finding).
+  it('runs the full five rounds below the huge floor, three at it and above', () => {
+    // A reverse-audit round re-reads the whole diff against a growing
+    // findings list (~90 min on a 4,000-line PR); five rounds cannot finish
+    // the huge PRs that timed out to zero, so a huge diff caps at three —
+    // the smallest loop the two-consecutive-dry rule still converges.
     expect(
-      reviewBudget({ srcDiffLines: 24, diffLines: 24 }).reverseAuditRounds,
-    ).toBe(1);
-    expect(
-      reviewBudget({ srcDiffLines: 25, diffLines: 25 }).reverseAuditRounds,
+      reviewBudget({ srcDiffLines: 100, diffLines: 100 }).reverseAuditRounds,
     ).toBe(5);
     expect(
-      reviewBudget({ srcDiffLines: 400, diffLines: 500 }).reverseAuditRounds,
+      reviewBudget({ srcDiffLines: 2999, diffLines: 2999 }).reverseAuditRounds,
     ).toBe(5);
+    expect(
+      reviewBudget({ srcDiffLines: 3000, diffLines: 3000 }).reverseAuditRounds,
+    ).toBe(3);
+    expect(
+      reviewBudget({ srcDiffLines: 10_000, diffLines: 12_000 })
+        .reverseAuditRounds,
+    ).toBe(3);
   });
 
-  it('never reaches zero — one round IS the second look', () => {
+  it('keys on effective lines, not raw source — a huge lockfile diff caps too', () => {
+    // effective = max(src, floor(total/8)); a mostly-generated 30,000-line
+    // diff with little source still costs a huge reverse audit to re-read.
+    // Pins the `effective`-vs-`src` dependence the mutation `effective` →
+    // `src` would otherwise survive.
     expect(
-      reviewBudget({ srcDiffLines: 0, diffLines: 0 }).reverseAuditRounds,
-    ).toBe(1);
+      reviewBudget({ srcDiffLines: 100, diffLines: 30_000 }).reverseAuditRounds,
+    ).toBe(3);
+    expect(reviewBudget({ srcDiffLines: 100, diffLines: 30_000 }).sweep).toBe(
+      true,
+    );
+  });
+
+  it('never drops below the convergence minimum', () => {
+    for (const n of [0, 1, 50, 3000, 100_000]) {
+      expect(
+        reviewBudget({ srcDiffLines: n, diffLines: n }).reverseAuditRounds,
+      ).toBeGreaterThanOrEqual(3);
+    }
   });
 });
 

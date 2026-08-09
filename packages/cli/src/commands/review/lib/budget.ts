@@ -98,24 +98,23 @@ export interface ReviewBudget {
    */
   agentToolBudget: number;
   /**
-   * The reverse-audit loop's round cap: 5 — today's hard cap — or 1 below
-   * the sweep floor.
+   * The reverse-audit loop's round cap: the full `MAX_REVERSE_AUDIT_ROUNDS`
+   * normally, or a reduced `HUGE_REVERSE_AUDIT_ROUNDS` for a diff large
+   * enough that the full loop cannot finish inside any budget.
    *
-   * The sweep's own rationale, extended to the high tier's second pass:
-   * below ~25 effective lines a diff fits in one view, and a second reader
-   * of the same few hunks is the same reader. The reverse audit is that
-   * second reader run as a LOOP — to convergence, two consecutive dry
-   * audits per chunk — and on a diff below the floor the loop re-reads the
-   * same lines round after round. Measured on a 23-line one-file PR: three
-   * rounds, eleven minutes, and the single finding round 2 produced was
-   * verifier-rejected — the loop's entire yield was the certificate that
-   * there was nothing to find, which round 1 had already said. At the cap
-   * of 1 a single substantive dry audit (or a round whose findings all
-   * fail verification — the retroactive-dry rule) retires the chunk.
+   * A reverse-audit round re-reads the whole diff against a growing
+   * findings list, so its cost scales with the diff — measured at ~90
+   * minutes a round on a 4,000-line PR, where the full five rounds alone
+   * (450 min) exceed the six-hour CI ceiling before the fan-out and tail
+   * are even counted. In a time-budgeted CI run the deadline gate already
+   * refuses a round that will not fit; this static cap is the belt it works
+   * under and the ONLY bound a local run (no deadline) has. Reduced to
+   * three, not two: two forces the convergence pair, three is the smallest
+   * loop that still lets the two-consecutive-dry rule converge.
    *
-   * Never 0: the reverse audit is a dimension of the high-effort contract,
-   * and the budget must not scale a dimension away — one round IS the
-   * second look, just not a convergence loop.
+   * Never below the convergence minimum: the reverse audit is a dimension
+   * of the high-effort contract, and the budget tunes how many rounds it
+   * runs, never whether it runs.
    */
   reverseAuditRounds: number;
 }
@@ -127,12 +126,31 @@ export interface ReviewBudget {
 const SWEEP_FLOOR = 25;
 
 /**
- * The reverse-audit loop's hard cap (SKILL.md Step 5's "stop after 5
- * rounds"). Lives here beside the floor that lowers it, so the two ends of
- * `reverseAuditRounds` share one home; `retirement.ts` re-exports it for
- * its own callers.
+ * The reverse-audit loop's full round cap (SKILL.md Step 5's "stop at the
+ * plan's `reverseAuditRounds` cap"). The normal value; a huge diff gets
+ * `HUGE_REVERSE_AUDIT_ROUNDS` instead. `retirement.ts` re-exports it.
  */
 export const MAX_REVERSE_AUDIT_ROUNDS = 5;
+
+/**
+ * The reduced cap for a huge diff — three, the smallest loop the
+ * two-consecutive-dry convergence rule can still satisfy (a chunk dry in
+ * rounds 2 and 3 retires).
+ */
+export const HUGE_REVERSE_AUDIT_ROUNDS = 3;
+
+/**
+ * The effective-line threshold above which a diff is "huge": its reverse
+ * audit is capped and its Agent 8 specialists are shed. Set from the
+ * timeout survey — the 6-hour CI reviews that ran to zero posted output
+ * were 4,000-5,300 line PRs (a single reverse-audit round already ~90 min);
+ * 3,000 triggers with margin below that band while leaving the full loop
+ * for the common case. `effective` (the plan's source-weighted line-span
+ * measure) slightly over-counts against source body lines, which only ever
+ * makes this fire a little EARLIER — the safe direction for a
+ * finishability gate.
+ */
+const HUGE_DIFF_FLOOR = 3000;
 
 /** Below this, "one domain dominates the diff" is not a finding about the diff. */
 const SPECIALIST_FLOOR = 80;
@@ -187,14 +205,24 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
   return {
     inlineAngles,
     sweep: effective >= SWEEP_FLOOR,
-    specialistCap: src >= SPECIALIST_FLOOR ? 2 : 0,
+    // Agent 8 sheds in the huge zone. A specialist is a whole-diff pass on
+    // top of the base fan-out, and on a diff too big to finish that extra
+    // pass is the marginal cost that guarantees zero posted output — while
+    // the per-chunk fan-out already covers the ground. Finishability over
+    // an added depth pass, in exactly the band where the review otherwise
+    // posts nothing.
+    specialistCap:
+      src >= SPECIALIST_FLOOR && effective < HUGE_DIFF_FLOOR ? 2 : 0,
     verifyShard: VERIFY_SHARD,
     agentToolBudget: clamp(
       MIN_AGENT_TOOL_BUDGET + Math.floor(effective / LINES_PER_TOOL_CALL),
       MIN_AGENT_TOOL_BUDGET,
       MAX_AGENT_TOOL_BUDGET,
     ),
-    reverseAuditRounds: effective < SWEEP_FLOOR ? 1 : MAX_REVERSE_AUDIT_ROUNDS,
+    reverseAuditRounds:
+      effective >= HUGE_DIFF_FLOOR
+        ? HUGE_REVERSE_AUDIT_ROUNDS
+        : MAX_REVERSE_AUDIT_ROUNDS,
   };
 }
 
