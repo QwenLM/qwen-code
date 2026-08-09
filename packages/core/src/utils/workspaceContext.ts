@@ -273,25 +273,7 @@ export class WorkspaceContext {
     if (cached !== undefined) {
       return cached;
     }
-    let resolved: string;
-    try {
-      resolved = fs.realpathSync(pathToCheck);
-    } catch (e: unknown) {
-      if (
-        isNodeError(e) &&
-        e.code === 'ENOENT' &&
-        e.path &&
-        // realpathSync does not set e.path correctly for symlinks to
-        // non-existent files.
-        !this.isFileSymlink(e.path)
-      ) {
-        // If it doesn't exist, e.path contains the fully resolved path.
-        resolved = e.path;
-      } else {
-        // Don't cache exceptions — the path may exist on retry.
-        throw e;
-      }
-    }
+    const resolved = resolveWorkspacePath(pathToCheck);
     if (
       this.resolvedPathCache.size >= WorkspaceContext.RESOLVED_PATH_CACHE_MAX
     ) {
@@ -302,16 +284,41 @@ export class WorkspaceContext {
     this.resolvedPathCache.set(pathToCheck, resolved);
     return resolved;
   }
+}
 
-  /**
-   * Checks if a file path is a symbolic link that points to a file.
-   */
-  private isFileSymlink(filePath: string): boolean {
-    try {
-      return !fs.readlinkSync(filePath).endsWith('/');
-    } catch (_error) {
-      return false;
+/**
+ * Resolves a workspace path using the same missing-path and symlink semantics
+ * used by WorkspaceContext containment checks.
+ */
+export function resolveWorkspacePath(pathToCheck: string): string {
+  try {
+    const resolved = fs.realpathSync(pathToCheck);
+    return typeof resolved === 'string' ? resolved : pathToCheck;
+  } catch (error: unknown) {
+    if (
+      isNodeError(error) &&
+      error.code === 'ENOENT' &&
+      error.path &&
+      !isFileSymlink(error.path)
+    ) {
+      if (
+        error.path !== pathToCheck &&
+        pathToCheck.startsWith(`${error.path}${path.sep}`)
+      ) {
+        return pathToCheck;
+      }
+      return error.path;
     }
+
+    throw error;
+  }
+}
+
+function isFileSymlink(filePath: string): boolean {
+  try {
+    return !fs.readlinkSync(filePath).endsWith('/');
+  } catch (_error) {
+    return false;
   }
 }
 

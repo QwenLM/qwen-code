@@ -6,9 +6,11 @@
 
 import { vi } from 'vitest';
 import { isNodeError } from '../utils/errors.js';
-import { isPathWithinRoot } from '../utils/workspaceContext.js';
+import {
+  isPathWithinRoot,
+  resolveWorkspacePath,
+} from '../utils/workspaceContext.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
-import * as fs from 'node:fs';
 
 /**
  * Creates a mock WorkspaceContext for testing
@@ -28,9 +30,16 @@ export function createMockWorkspaceContext(
     isPathWithinWorkspace: vi.fn().mockImplementation((path: string) => {
       try {
         const canonicalPath = canonicalizeForContainment(path);
-        return allDirs
-          .map(canonicalizeForContainment)
-          .some((dir) => isPathWithinRoot(canonicalPath, dir));
+        return allDirs.some((dir) => {
+          try {
+            return isPathWithinRoot(
+              canonicalPath,
+              canonicalizeForContainment(dir),
+            );
+          } catch {
+            return false;
+          }
+        });
       } catch {
         return false;
       }
@@ -42,30 +51,17 @@ export function createMockWorkspaceContext(
 
 function canonicalizeForContainment(inputPath: string): string {
   try {
-    const resolved = fs.realpathSync(inputPath);
-    return typeof resolved === 'string' ? resolved : inputPath;
+    return resolveWorkspacePath(inputPath);
   } catch (error: unknown) {
-    if (isNodeError(error) && error.code === 'ENOENT') {
-      if (error.path && isFileSymlink(error.path)) {
-        throw error;
-      }
-      return error.path ?? inputPath;
-    }
-
     if (isNodeError(error)) {
+      if (error.code === 'ENOENT' && !error.path) {
+        return inputPath;
+      }
       throw error;
     }
 
     // Some tests stub filesystem calls; retain lexical behavior for those
     // mocked environments.
     return inputPath;
-  }
-}
-
-function isFileSymlink(filePath: string): boolean {
-  try {
-    return !fs.readlinkSync(filePath).endsWith('/');
-  } catch {
-    return false;
   }
 }

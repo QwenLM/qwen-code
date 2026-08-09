@@ -6,27 +6,35 @@
 
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createMockWorkspaceContext } from './mockWorkspaceContext.js';
 
 describe('createMockWorkspaceContext', () => {
   it('accepts missing descendants under a workspace root', () => {
     const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
-    const workspace = createMockWorkspaceContext(rootDir);
+    try {
+      const workspace = createMockWorkspaceContext(rootDir);
 
-    expect(
-      workspace.isPathWithinWorkspace(path.join(rootDir, 'missing.txt')),
-    ).toBe(true);
+      expect(
+        workspace.isPathWithinWorkspace(path.join(rootDir, 'missing.txt')),
+      ).toBe(true);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 
   it('does not treat a similarly prefixed sibling as inside the workspace', () => {
     const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
-    const workspace = createMockWorkspaceContext(rootDir);
+    try {
+      const workspace = createMockWorkspaceContext(rootDir);
 
-    expect(workspace.isPathWithinWorkspace(`${rootDir}-sibling/file.txt`)).toBe(
-      false,
-    );
+      expect(
+        workspace.isPathWithinWorkspace(`${rootDir}-sibling/file.txt`),
+      ).toBe(false);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 
   it('checks additional workspace directories', () => {
@@ -34,11 +42,18 @@ describe('createMockWorkspaceContext', () => {
     const additionalDir = mkdtempSync(
       path.join(os.tmpdir(), 'qwen-workspace-'),
     );
-    const workspace = createMockWorkspaceContext(rootDir, [additionalDir]);
+    try {
+      const workspace = createMockWorkspaceContext(rootDir, [additionalDir]);
 
-    expect(
-      workspace.isPathWithinWorkspace(path.join(additionalDir, 'missing.txt')),
-    ).toBe(true);
+      expect(
+        workspace.isPathWithinWorkspace(
+          path.join(additionalDir, 'missing.txt'),
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(additionalDir, { recursive: true, force: true });
+      rmSync(rootDir, { recursive: true, force: true });
+    }
   });
 
   it('canonicalizes workspace aliases for containment checks', () => {
@@ -71,6 +86,27 @@ describe('createMockWorkspaceContext', () => {
 
       expect(workspace.isPathWithinWorkspace(danglingPath)).toBe(false);
     } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves existing candidate paths before checking containment', () => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    const outsideDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-outside-'));
+    const insidePath = path.join(rootDir, 'inside.txt');
+    const outsidePath = path.join(outsideDir, 'outside.txt');
+    const escapePath = path.join(rootDir, 'escape');
+    writeFileSync(insidePath, 'inside');
+    writeFileSync(outsidePath, 'outside');
+    symlinkSync(outsidePath, escapePath);
+
+    try {
+      const workspace = createMockWorkspaceContext(rootDir);
+
+      expect(workspace.isPathWithinWorkspace(insidePath)).toBe(true);
+      expect(workspace.isPathWithinWorkspace(escapePath)).toBe(false);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
       rmSync(rootDir, { recursive: true, force: true });
     }
   });
