@@ -48,11 +48,18 @@ The reason discrimination is deliberately negative-only — it excludes
 real cancel shapes (a bare `AbortError`, a string reason like the daemon/ACP
 `'qwen:user-cancel'`) all continue to read as cancels without enumeration.
 
+The negative-only choice has a known cost: any reason a producer fails to tag
+as `TimeoutError` reads as a cancel. The daemon prompt deadline below is exactly
+that case — it launders through the `'qwen:user-cancel'` string — so this
+invariant is not self-enforcing across the ACP boundary. See the exclusions.
+
 ## Producers and deliberate exclusions
 
 Converted deadline producers, all reaching a model request: goal judge, goal
 verifier, goal checkpoint verifier, prompt hook, stall watchdog, workflow
-wall-clock cap, and the CLI voice-transcript refinement.
+wall-clock cap, and the CLI voice-transcript refinement. This list covers the
+in-process producers; the ACP daemon boundary is discussed below and is not
+yet resolved.
 
 Two timer-driven aborts stay bare on purpose:
 
@@ -62,6 +69,30 @@ Two timer-driven aborts stay bare on purpose:
   healthy request, recorded separately as `BudgetExceeded`. Suppressing its
   `api_error` is the correct outcome — reporting it would count an intentional
   stop as a model failure.
+
+One boundary case is open and awaiting a maintainer's call: the **daemon prompt
+deadline** (`qwen serve` with a deadline, or an SDK client sending `deadlineMs`).
+When it fires mid-request, `onDeadline` (`acp-bridge/src/bridge.ts`) reuses the
+generic cancel-forward, which carries only `{ sessionId }` — the deadline cause
+is dropped at the ACP wire. The agent aborts the in-flight call, and the
+model-facing signal is re-stamped `'qwen:user-cancel'` at
+`Session.ts` (the admission→`pendingSend` listener), so `isUserCancel` reads it
+as a cancel and suppresses the `api_error` / `apiActivityTracker` /
+`llmApiErrors` for that attempt. The deadline itself is **not** lost — it is
+published authoritatively as the `prompt_deadline_exceeded` terminal and the
+LLM span still ends errored; only the provider-health error count is affected.
+
+Whether that is correct is a semantic question, not a settled exclusion:
+`llmApiErrors` is documented as "the provider-side failures"
+(`daemon-metrics-ring.ts`), and a caller-configured deadline is a local
+interruption — which would make suppressing it correct, like `runBudget`. The
+opposite reading is that a deadline-killed attempt is still a failed model
+attempt an operator would want counted. If it is ruled a real regression, the
+fix is to carry deadline attribution across the ACP boundary via
+`CancelNotification._meta` and map it to `timeoutAbortReason(...)` at the
+`Session.ts` stamp, preserving the controlled-cancellation guards that
+recognise only `'qwen:user-cancel'` / `'qwen:session-dispose'`. Until then this
+one producer is unconverted and its provider-health error is suppressed.
 
 ## Limits
 
