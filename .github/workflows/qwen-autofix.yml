@@ -1740,6 +1740,14 @@ jobs:
               # ECS pool — see pr-self-report-label.yml). This job runs on
               # ubuntu-latest, where the command still worked; REST behaves
               # the same on every runner image.
+              # Idempotent create first, with the label's real color: the
+              # REST add would silently create a missing label with a RANDOM
+              # color (gh pr edit failed loud there), and this was the one
+              # POST site without the guard its siblings carry
+              # (pr-self-report-label.yml creates; repo-hygiene.yml probes).
+              gh label create "${TAKEOVER_LABEL}" --repo "${REPO}" --color '1D76DB' \
+                --description 'Summon the autofix loop to manage this PR (remove to release; needs triage+)' \
+                2> /dev/null || true
               gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${TAKEOVER_LABEL}" > /dev/null
               echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
               # Ack HERE, not via the pull_request:labeled round-trip: that

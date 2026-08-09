@@ -54,12 +54,14 @@ const GH_STUB = [
 // instead of riding the stub's unconditional percent-encoding.
 const JQ_STUB = [
   '#!/usr/bin/env bash',
-  'value=""',
-  'prog=""',
-  'while [[ $# -gt 0 ]]; do',
-  '  if [[ "$1" == "--arg" ]]; then value="$3"; shift 3; else prog="$1"; shift; fi',
-  'done',
-  '[[ "$prog" == \'$l|@uri\' ]] || exit 1',
+  // The FULL argv is enforced, not just the program: `-rn` is what makes jq
+  // ignore the empty stdin of a run step (with `-r` alone it evaluates zero
+  // inputs and prints nothing), and the binding NAME must be `l` or real jq
+  // exits 3 on `$l is not defined`. Either mutation expands the command
+  // substitution to an empty string, the DELETE hits …/labels/ with no name
+  // segment, and the 404 race-tolerance swallows it — silent green.
+  '[[ $# -eq 5 && "$1" == "-rn" && "$2" == "--arg" && "$3" == "l" && "$5" == \'$l|@uri\' ]] || exit 1',
+  'value="$4"',
   'out=""',
   'for ((i = 0; i < ${#value}; i++)); do',
   '  c="${value:i:1}"',
@@ -212,27 +214,48 @@ describe('pr-self-report-label', () => {
   });
 });
 
-// Scans one workflow file for `gh pr edit` label mutations. Comments are
-// stripped before matching — a comment QUOTING the banned pattern documents
-// the ban, it does not run it. Backslash continuations are joined so a
-// wrapped flag still counts, and the reported line is the PHYSICAL line
-// where the command starts: indices into the joined text no longer
-// correspond to file lines (every benign join above an offender shifts
-// them).
+// Scans the DECODED `run:` scripts of one parsed workflow for `gh pr edit`
+// label mutations — what bash will actually execute, not the YAML surface.
+// Scanning raw lines was evaded three ways (all reproduced): a `#` inside a
+// quoted string ate the trailing backslash, a wrap INSIDE the command
+// prefix (`gh \` / `pr edit`, or `--add-\` / `label`) never re-joined into
+// the literal the regex wanted, and a folded scalar (`run: >`) has no
+// backslashes at all. Parsing the YAML resolves folding; joining
+// continuations the way bash does (backslash-newline removed, nothing
+// inserted) resolves the wraps; the whitespace-tolerant regex resolves the
+// prefix splits. Only WHOLE-line comments are stripped — a `#` mid-line may
+// sit inside a quoted string, and a comment quoting the ban documents it.
+// Offenders are reported as file » job » step (never a line number: those
+// stop corresponding to the file after joining).
 function ghPrEditLabelOffenders(file, raw) {
-  const banned = /gh pr edit .*(--add-label|--remove-label)/;
+  const banned = /gh\s+pr\s+edit[\s\S]*?(--add-label|--remove-label)/;
   const offenders = [];
-  let joined = '';
-  let start = 0;
-  for (const [i, line] of raw.split('\n').entries()) {
-    if (joined === '') start = i + 1;
-    const text = line.replace(/#.*$/, '');
-    joined += ` ${text}`;
-    if (text.endsWith('\\')) continue;
-    if (banned.test(joined)) offenders.push(`${file}:${start}`);
-    joined = '';
+  const doc = parse(raw);
+  for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+    (job?.steps ?? []).forEach((step, i) => {
+      if (typeof step?.run !== 'string') return;
+      const script = step.run
+        .split('\n')
+        .filter((l) => !/^\s*#/.test(l))
+        .join('\n')
+        .replace(/\\\n/g, '');
+      if (banned.test(script)) {
+        offenders.push(`${file} » ${jobId} » ${step.name ?? `step ${i}`}`);
+      }
+    });
   }
   return offenders;
+}
+
+// The argv form (`execFileSync('gh', ['pr', 'edit', …, '--add-label'])`) is
+// how scripts under .github/scripts spell the same broken command — the
+// release path shipped it silently for months behind continue-on-error.
+function ghPrEditLabelArgvOffenders(file, raw) {
+  return /['"]pr['"],\s*['"]edit['"][\s\S]{0,400}?(--add-label|--remove-label)/.test(
+    raw,
+  )
+    ? [file]
+    : [];
 }
 
 describe('gh pr edit label mutations are banned in workflow files', () => {
@@ -246,47 +269,109 @@ describe('gh pr edit label mutations are banned in workflow files', () => {
   // Scope is workflow YAML: .github/scripts/classify-release-notes.mjs still
   // toggles skip-changelog-auto through `gh pr edit` on the release path and
   // needs its own conversion.
-  it('ignores comments and reports the command start line', () => {
-    // A comment quoting the banned pattern documents the ban — it must not
-    // fail CI (the house style is dense why-comments; two of the guarded
-    // workflows name `gh pr edit` in comments already).
+  it('catches every executable shape and ignores documentation', () => {
+    const wf = (run) =>
+      `jobs:\n  j:\n    steps:\n      - name: s\n        run: |\n${run
+        .split('\n')
+        .map((l) => `          ${l}`)
+        .join('\n')}\n`;
+    // A comment quoting the banned pattern documents the ban — no offence.
     expect(
       ghPrEditLabelOffenders(
         'w.yml',
-        '# do not revert to gh pr edit --add-label here\n',
+        wf('# do not revert to gh pr edit --add-label here\necho ok'),
       ),
     ).toEqual([]);
-    // An executable violation is still caught…
+    // Plain violation.
+    expect(
+      ghPrEditLabelOffenders('w.yml', wf('gh pr edit 1 --add-label x')),
+    ).toEqual(['w.yml » j » s']);
+    // Evasion 1 (reproduced by review): a `#` inside a quoted string on the
+    // first line of a continuation — per-line comment stripping ate the
+    // trailing backslash and never joined the halves.
     expect(
       ghPrEditLabelOffenders(
         'w.yml',
-        'gh pr edit "${PR}" --add-label "${LABEL}"\n',
+        wf(
+          'echo "🏷️ #${PR}: applying" && gh pr edit "${PR}" \\\n  --add-label "${LABEL}"',
+        ),
       ),
-    ).toEqual(['w.yml:1']);
-    // …even wrapped across continuations, and at the PHYSICAL line where
-    // the command starts: line 5 here, where the two benign joins above
-    // would shift any index computed from the joined text.
-    const wrapped = [
-      'gh label create x \\',
-      '  --color BFD4F2',
-      'echo hi \\',
-      '  there',
-      'gh pr edit "${PR}" \\',
-      '  --add-label "${LABEL}"',
-    ].join('\n');
-    expect(ghPrEditLabelOffenders('w.yml', wrapped)).toEqual(['w.yml:5']);
+    ).toEqual(['w.yml » j » s']);
+    // Evasion 2: a wrap INSIDE the command prefix and inside a flag token —
+    // bash joins backslash-newline with nothing inserted.
+    expect(
+      ghPrEditLabelOffenders('w.yml', wf('gh \\\n  pr edit 1 --add-label x')),
+    ).toEqual(['w.yml » j » s']);
+    expect(
+      ghPrEditLabelOffenders('w.yml', wf('gh pr edit 1 --add-\\\nlabel x')),
+    ).toEqual(['w.yml » j » s']);
+    // Evasion 3: a folded scalar has no backslashes on any physical line.
+    expect(
+      ghPrEditLabelOffenders(
+        'w.yml',
+        'jobs:\n  j:\n    steps:\n      - name: s\n        run: >\n          gh pr edit 1\n          --add-label x\n',
+      ),
+    ).toEqual(['w.yml » j » s']);
+    // The argv form used by .mjs scripts.
+    expect(
+      ghPrEditLabelArgvOffenders(
+        's.mjs',
+        "execFileSync('gh', ['pr', 'edit', n, '--repo', r, '--add-label', L]);",
+      ),
+    ).toEqual(['s.mjs']);
+    expect(
+      ghPrEditLabelArgvOffenders(
+        's.mjs',
+        "execFileSync('gh', ['api', '-X', 'POST', `repos/x/issues/1/labels`]);",
+      ),
+    ).toEqual([]);
   });
 
-  it('no workflow mutates labels through gh pr edit', () => {
-    const dir = '.github/workflows';
-    const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
-    expect(files.length).toBeGreaterThan(0);
+  it('no workflow or script mutates labels through gh pr edit', () => {
     const offenders = [];
-    for (const file of files) {
+    for (const file of readdirSync('.github/workflows').filter((f) =>
+      /\.ya?ml$/.test(f),
+    )) {
       offenders.push(
-        ...ghPrEditLabelOffenders(file, readFileSync(join(dir, file), 'utf8')),
+        ...ghPrEditLabelOffenders(
+          file,
+          readFileSync(join('.github/workflows', file), 'utf8'),
+        ),
+      );
+    }
+    for (const file of readdirSync('.github/scripts').filter((f) =>
+      /\.mjs$/.test(f),
+    )) {
+      offenders.push(
+        ...ghPrEditLabelArgvOffenders(
+          file,
+          readFileSync(join('.github/scripts', file), 'utf8'),
+        ),
       );
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('REST DELETE idiom stays in sync across workflows', () => {
+  // The one non-obvious line — URI-encoding a slash-containing label as a
+  // DELETE path segment, plus the 404 race tolerance — exists in two
+  // workflows and cannot be shared (workflow run blocks have no include).
+  // This pin makes them drift-proof: normalize the label variable and the
+  // two must be byte-identical.
+  it('pr-self-report-label and qwen-autofix delete labels identically', () => {
+    const idiom = (file, labelVar) => {
+      const raw = readFileSync(join('.github/workflows', file), 'utf8');
+      const m = raw.match(
+        /if ! REMOVE_ERR="\$\(gh api -X DELETE[^\n]*\n[^\n]*404[^\n]*\n/,
+      );
+      expect(m, `${file}: DELETE idiom not found`).toBeTruthy();
+      return m[0]
+        .replace(new RegExp(labelVar, 'g'), 'LBL')
+        .replace(/^\s+/gm, '');
+    };
+    expect(idiom('pr-self-report-label.yml', 'LABEL')).toEqual(
+      idiom('qwen-autofix.yml', 'TAKEOVER_LABEL'),
+    );
   });
 });

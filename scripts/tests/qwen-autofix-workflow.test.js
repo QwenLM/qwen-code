@@ -3313,6 +3313,7 @@ describe('qwen-autofix workflow', () => {
             // the knob value on stderr (like a real gh HTTP error), pinning
             // the block's two failure policies instead of the stub
             // universally exiting 0.
+            `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
             `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
@@ -3355,6 +3356,14 @@ describe('qwen-autofix workflow', () => {
           log: stdout,
           writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
         };
+      } catch (error) {
+        // A throwing replay must stay INSPECTABLE: the engage arm's whole
+        // ordering claim (no public ack for an unlabeled PR) lives in what
+        // was written BEFORE the failure, and the finally below deletes it.
+        error.writes = existsSync(join(dir, 'writes.log'))
+          ? readFileSync(join(dir, 'writes.log'), 'utf8')
+          : '';
+        throw error;
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -3366,6 +3375,12 @@ describe('qwen-autofix workflow', () => {
     const addAbsent = runToggle({ cmd: 'add' });
     expect(addAbsent.writes).toContain(
       'API api -X POST repos/QwenLM/qwen-code/issues/7165/labels',
+    );
+    // Idempotent create precedes the POST: the REST add would otherwise
+    // silently create a missing label with a random color.
+    expect(addAbsent.writes).toContain('LABEL-CREATE label create');
+    expect(addAbsent.writes.indexOf('LABEL-CREATE')).toBeLessThan(
+      addAbsent.writes.indexOf('API api -X POST'),
     );
     expect(addAbsent.writes).toContain('labels[]=autofix/takeover');
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
@@ -3484,8 +3499,17 @@ describe('qwen-autofix workflow', () => {
     // Failure policies, pinned like the pr-self-report-label suite: the
     // engage POST is deliberately LOUD — under the runner's -e a failing
     // apply aborts the step BEFORE the engage ack, so no comment can claim
-    // "engaged" for an unlabeled PR.
-    expect(() => runToggle({ cmd: 'add', postFails: 'HTTP 500' })).toThrow();
+    // "engaged" for an unlabeled PR. The throw alone does not pin the
+    // ORDER (an ack posted before a failing POST also throws) — the
+    // captured writes must show no engage ack ever landed.
+    let engageFailure;
+    try {
+      runToggle({ cmd: 'add', postFails: 'HTTP 500' });
+    } catch (error) {
+      engageFailure = error;
+    }
+    expect(engageFailure).toBeTruthy();
+    expect(engageFailure.writes).not.toContain('takeover-ack engaged');
     // The release DELETE tolerates the 404 race (a concurrent removal
     // already reached the end state): the release ack still posts, no
     // warning.
