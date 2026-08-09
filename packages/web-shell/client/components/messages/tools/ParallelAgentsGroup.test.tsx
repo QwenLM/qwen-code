@@ -140,10 +140,24 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(
       container.querySelector('[class*="rowActivity"]')?.textContent,
     ).toContain('MessageList.tsx');
-    expect(container.querySelector('[class*="rowDuration"]')?.textContent).toBe(
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
       '8s',
     );
     expect(container.querySelector('[class*="rowAction"]')).not.toBeNull();
+  });
+
+  it('omits the default agent type while keeping its task description', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'default-type',
+        args: { description: 'Inspect the message list' },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Inspect the message list',
+    );
   });
 
   it('keeps completed duration and tokens separate from the task text', () => {
@@ -160,14 +174,28 @@ describe('ParallelAgentsGroup activity rendering', () => {
       }),
     ]);
 
-    expect(container.querySelector('[class*="rowDuration"]')?.textContent).toBe(
-      '8s',
-    );
-    expect(container.querySelector('[class*="rowTokens"]')?.textContent).toBe(
-      '214 tokens',
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+      '8s · 214 tokens',
     );
     expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
       'Audit the session route',
+    );
+  });
+
+  it('shows tokens when completed output has no duration', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'tokens-only',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          tokenCount: 214,
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+      '214 tokens',
     );
   });
 
@@ -190,8 +218,8 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.querySelector('[class*="rowActivity"]')?.textContent).toBe(
       '(Cancelled by user)',
     );
-    expect(container.querySelector('[class*="rowTokens"]')?.textContent).toBe(
-      '214 tokens',
+    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+      '8s · 214 tokens',
     );
   });
 

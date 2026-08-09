@@ -517,19 +517,11 @@ export function ParallelAgentsGroup({
                         </span>
                         {(stats.duration || stats.tokens) && (
                           <span className={styles.rowStats}>
-                            {stats.duration && (
-                              <span className={styles.rowDuration}>
-                                {stats.duration}
-                              </span>
-                            )}
+                            {stats.duration && <span>{stats.duration}</span>}
                             {stats.duration && stats.tokens && (
                               <span aria-hidden="true"> · </span>
                             )}
-                            {stats.tokens && (
-                              <span className={styles.rowTokens}>
-                                {stats.tokens}
-                              </span>
-                            )}
+                            {stats.tokens && <span>{stats.tokens}</span>}
                           </span>
                         )}
                         <ChevronRightIcon
