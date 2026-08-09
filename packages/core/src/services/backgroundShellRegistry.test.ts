@@ -672,10 +672,13 @@ describe('BackgroundShellRegistry', () => {
   describe('terminal-entry retention cap', () => {
     it('retains only a bounded number of terminal entries (oldest by endTime evicted)', () => {
       const reg = new BackgroundShellRegistry();
+      const outputPath = join(makeTempDir(), 'shell.output');
       // Register and complete one more entry than the cap allows. Use
       // strictly increasing endTimes so eviction order is deterministic.
       for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
-        reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
+        reg.register(
+          makeEntry({ shellId: `s-${i}`, startTime: i * 10, outputPath }),
+        );
         reg.complete(`s-${i}`, 0, i * 10 + 5);
       }
       expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
@@ -687,14 +690,19 @@ describe('BackgroundShellRegistry', () => {
 
     it('never evicts running entries even when the cap is exceeded', () => {
       const reg = new BackgroundShellRegistry();
+      const outputPath = join(makeTempDir(), 'shell.output');
       // Register one extra terminal entry beyond the cap, then a single
       // running entry. The running entry must be retained regardless of
       // its launch order — pruning a still-running shell would lose the
       // user's only handle on a live process.
-      reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
+      reg.register(makeEntry({ shellId: 'live', startTime: 1, outputPath }));
       for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
         reg.register(
-          makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
+          makeEntry({
+            shellId: `done-${i}`,
+            startTime: 100 + i * 10,
+            outputPath,
+          }),
         );
         reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
       }
@@ -707,13 +715,20 @@ describe('BackgroundShellRegistry', () => {
 
     it('prunes after fail() too, not just complete()', () => {
       const reg = new BackgroundShellRegistry();
+      const outputPath = join(makeTempDir(), 'shell.output');
       for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.register(
+          makeEntry({ shellId: `done-${i}`, startTime: i * 10, outputPath }),
+        );
         reg.complete(`done-${i}`, 0, i * 10 + 5);
       }
       const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
       reg.register(
-        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+        makeEntry({
+          shellId: 'overflow',
+          startTime: overflowStart,
+          outputPath,
+        }),
       );
       reg.fail('overflow', 'boom', overflowStart + 5);
       expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
@@ -723,13 +738,20 @@ describe('BackgroundShellRegistry', () => {
 
     it('prunes after cancel() too, not just complete()', () => {
       const reg = new BackgroundShellRegistry();
+      const outputPath = join(makeTempDir(), 'shell.output');
       for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.register(
+          makeEntry({ shellId: `done-${i}`, startTime: i * 10, outputPath }),
+        );
         reg.complete(`done-${i}`, 0, i * 10 + 5);
       }
       const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
       reg.register(
-        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+        makeEntry({
+          shellId: 'overflow',
+          startTime: overflowStart,
+          outputPath,
+        }),
       );
       reg.cancel('overflow', overflowStart + 5);
       expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
