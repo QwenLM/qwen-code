@@ -42,6 +42,15 @@ function stripOutputControlChars(text: string): string {
     }
     if (code < 0x20) continue;
     if (code >= 0x80 && code <= 0x9f) continue;
+    // The bidi overrides the shared display helper removes, removed here
+    // too — this is the LARGEST attacker-controllable field in the envelope
+    // (up to 8 KiB of a background shell's own output), and these
+    // characters reorder how the text around them reads without changing a
+    // byte: the Trojan-Source class. Kept as its own loop rather than
+    // swapped for the shared helper because the tail must preserve
+    // newlines and carriage returns, which that helper strips.
+    if (code >= 0x202a && code <= 0x202e) continue;
+    if (code >= 0x2066 && code <= 0x2069) continue;
     out += text[i];
   }
   return out;

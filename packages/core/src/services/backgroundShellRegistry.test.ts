@@ -349,6 +349,33 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain(command);
     });
 
+    it('strips BIDI OVERRIDES from the OUTPUT TAIL — the biggest field', () => {
+      // The sibling test below asserts modelText-wide absence, which reads
+      // as whole-envelope coverage but is not: its fixture shell has no
+      // output file, so <output-tail> renders the canned unreadable form
+      // and is never exercised. The tail is the LARGEST
+      // attacker-controllable field — up to 8 KiB of a background shell's
+      // own output — and it renders through a different helper, which
+      // stripped C0/C1 but passed bidi overrides through verbatim
+      // (probe-verified). Newlines must survive the fix.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      const outputPath = makeOutputFile(
+        'line one\nharmless\u202Eevil\u2069 two\n',
+      );
+      reg.register(makeEntry({ shellId: 'tail-bidi', outputPath }));
+
+      reg.complete('tail-bidi', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<output-tail');
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
+      // The tail keeps its line structure — the strip must not eat \n.
+      expect(modelText).toContain('line one\nharmless');
+    });
+
     it('strips BIDI OVERRIDES from the notification, not just C0/C1', () => {
       // The shared helper this renders through removes U+202A-202E and
       // U+2066-2069 as well as C0/C1 — the registry's own former copy did
