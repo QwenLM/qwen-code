@@ -86,6 +86,12 @@ export interface ExternalToolGuardPrepareRequest {
   readonly arguments: Readonly<Record<string, unknown>>;
   /** Daemon-owned current session working directory. */
   readonly effectiveCwd?: string;
+  /**
+   * Directory the child will actually run the tool in, when it differs from
+   * the session's own. Untrusted: the host validates it against state it
+   * owns before using it as a containment basis.
+   */
+  readonly invocationCwd?: string;
 }
 
 export type ExternalToolGuardPrepareResult =

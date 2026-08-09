@@ -1250,6 +1250,7 @@ export class BridgeClient implements Client {
         'External tool guard prompt is not the active prompt',
       );
     }
+    const invocationCwd = params['invocationCwd'];
     const decision: unknown = await this.externalToolGuard({
       sessionId: entry.sessionId,
       ...(promptScoped ? { promptId } : {}),
@@ -1257,6 +1258,11 @@ export class BridgeClient implements Client {
       toolName,
       arguments: args,
       effectiveCwd: entry.effectiveCwd,
+      // Forwarded verbatim and explicitly untrusted: the host policy decides
+      // whether it can establish this scope from state it owns.
+      ...(typeof invocationCwd === 'string' && invocationCwd.length > 0
+        ? { invocationCwd }
+        : {}),
     });
     const currentEntry = this.resolveEntry(sessionId);
     if (

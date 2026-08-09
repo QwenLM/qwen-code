@@ -8,6 +8,7 @@ import { realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'shell-quote';
 import {
+  GitWorktreeService,
   isWithinRoot,
   realpathNearestExistingAsync,
   splitCommands,
@@ -199,6 +200,9 @@ interface TrustedDaemonToolGuardRequest
   readonly effectiveCwd: string;
 }
 
+const UNVERIFIABLE_SCOPE_DENIAL_PREFIX =
+  'Daemon shell guard could not establish the execution directory of this call: ';
+
 interface GuardToken {
   readonly text: string;
   readonly dynamic: boolean;
@@ -280,6 +284,15 @@ function executableBaseName(token: GuardToken): string {
   const base = token.text.split(/[\\/]/).pop() ?? token.text;
   return base.toLowerCase().replace(/\.exe$/i, '');
 }
+
+// `(` opens a subshell; `<(`/`>(` open a process substitution. All three are
+// closed by a `)` that arrives on its own, so all three must raise the depth
+// or that `)` pops a scope that was never opened.
+const SUBSHELL_OPENING_OPERATORS: ReadonlySet<string> = new Set([
+  '(',
+  '<(',
+  '>(',
+]);
 
 const REDIRECT_OPERATORS = new Set([
   '<',
@@ -379,7 +392,7 @@ function tokenizeSegment(
       runs.at(-1)!.tokens.push({ text: pattern, dynamic: true });
       continue;
     }
-    if (op === '(' || op === '<(' || op === '>(') {
+    if (SUBSHELL_OPENING_OPERATORS.has(op)) {
       depth++;
       runs.push({ tokens: [], depth });
       continue;
@@ -1784,7 +1797,6 @@ async function evaluateCommandWithCwd(
             trackedCwd,
             entryCwd,
             activeContext(),
-            scope.relink,
           );
           if (denial) return { denial, cwdAfter: trackedCwd };
           break;
@@ -1967,9 +1979,32 @@ async function evaluateBuiltInGuard(
   const command = request.arguments['command'];
   if (typeof command !== 'string') return { allowed: true };
 
-  const canonicalEffectiveCwd = await realpathNearestExistingAsync(
-    request.effectiveCwd,
-  );
+  const sessionCwd = await realpathNearestExistingAsync(request.effectiveCwd);
+
+  // A sub-agent pinned to a worktree (`working_dir`, or `isolation`, which
+  // rebinds the child Config's cwd surfaces) executes there while reporting
+  // the parent session id, so the session's own directory is not where the
+  // command runs. The child reports that directory; it is untrusted, so it is
+  // only accepted where the daemon can verify it from state it owns: inside
+  // the session's effective working directory, or inside the worktree tree
+  // this very session owns (`GitWorktreeService.getWorktreesDir(sessionId)`).
+  // Anywhere else the scope cannot be established and the call fails closed —
+  // and the accepted directory becomes the boundary, so an isolated sub-agent
+  // is contained to its own worktree rather than to its parent's checkout.
+  let canonicalEffectiveCwd = sessionCwd;
+  const reportedCwd = request.invocationCwd;
+  if (typeof reportedCwd === 'string' && reportedCwd.length > 0) {
+    const canonicalReported = await realpathNearestExistingAsync(reportedCwd);
+    if (!isWithinRoot(canonicalReported, sessionCwd)) {
+      const ownedWorktrees = await realpathNearestExistingAsync(
+        GitWorktreeService.getWorktreesDir(request.sessionId),
+      );
+      if (!isWithinRoot(canonicalReported, ownedWorktrees)) {
+        return denyTarget(UNVERIFIABLE_SCOPE_DENIAL_PREFIX, canonicalReported);
+      }
+      canonicalEffectiveCwd = canonicalReported;
+    }
+  }
 
   // A model-supplied `directory` becomes the containment basis, so it must
   // itself stay inside the effective working directory before it is trusted.
@@ -1977,7 +2012,7 @@ async function evaluateBuiltInGuard(
   const startDirectoryValue = request.arguments['directory'];
   if (typeof startDirectoryValue === 'string') {
     startDirectory = await realpathNearestExistingAsync(
-      path.resolve(request.effectiveCwd, startDirectoryValue),
+      path.resolve(canonicalEffectiveCwd, startDirectoryValue),
     );
     if (!isWithinRoot(startDirectory, canonicalEffectiveCwd)) {
       return denyTarget(OUTSIDE_TARGET_DENIAL_PREFIX, startDirectory);

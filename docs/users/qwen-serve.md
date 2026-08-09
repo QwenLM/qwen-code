@@ -457,6 +457,10 @@ directory-shifting wrapper flags (`env -C`, `sudo -D`), and `cd`, `pushd`, or
 unwrapped so the same policy applies to the inner Git invocation, and `$(…)`
 or backtick substitution bodies are analyzed as commands of their own.
 
+A sub-agent pinned to its own worktree is contained to that worktree rather
+than to the session's directory; a shell call whose execution directory the
+daemon cannot place is denied.
+
 Relative targets resolve from the command's effective starting directory
 (`arguments.directory` when present, otherwise the session's current effective
 working directory) after canonical path resolution, including `.git` gitfile

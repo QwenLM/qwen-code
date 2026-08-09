@@ -84,6 +84,18 @@ analyzed as nested commands against the current tracked directory; their own
 stepped over, though a substitution nested inside it is still analyzed. An
 unterminated substitution is denied as unparseable.
 
+A sub-agent pinned to a worktree (`working_dir`, or `isolation`, which
+rebinds the child Config's cwd surfaces) executes there while still reporting
+the parent session id, so the session's own directory is not where the
+command runs. The child reports that directory alongside the request; it is
+untrusted, so the daemon accepts it only where it can verify it from state it
+owns — inside the session's effective working directory, or inside the
+worktree tree that session owns (`GitWorktreeService.getWorktreesDir(<session
+id>)`). Anywhere else the scope cannot be established and the call fails
+closed. When an owned worktree is accepted it becomes the boundary, so an
+isolated sub-agent is contained to its own worktree instead of to its
+parent's checkout.
+
 Relative targets resolve from the command's effective starting directory:
 `arguments.directory` when present, otherwise the session's current effective
 working directory. A model-supplied `directory` is itself canonicalized and

@@ -24,6 +24,14 @@ export interface ToolInvocationGuardContext {
    * session scope may fall back to it instead of failing closed.
    */
   sessionId?: string;
+  /**
+   * The directory the invocation will actually execute in — the scheduler's
+   * `config.getTargetDir()`. A sub-agent pinned to a worktree (`working_dir`,
+   * or `isolation`, which rebinds the child Config's cwd surfaces) runs there
+   * while still reporting the parent's {@link sessionId}, so a host that
+   * reasons about paths cannot assume the session's own directory.
+   */
+  cwd?: string;
 }
 
 export type ToolInvocationGuardDecision =

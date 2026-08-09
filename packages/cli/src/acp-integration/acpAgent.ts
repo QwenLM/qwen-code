@@ -2856,6 +2856,11 @@ export function createManagedExternalToolGuard(
             toolCallId: context.callId,
             toolName: context.toolName,
             arguments: context.args,
+            // A sub-agent pinned to a worktree executes here, not in the
+            // session's own directory; the host validates this before use.
+            ...(typeof context.cwd === 'string' && context.cwd.length > 0
+              ? { invocationCwd: context.cwd }
+              : {}),
           },
         ),
         aborted,

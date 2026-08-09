@@ -9,7 +9,7 @@ import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { ToolNames } from '@qwen-code/qwen-code-core';
+import { GitWorktreeService, ToolNames } from '@qwen-code/qwen-code-core';
 import type { ExternalToolGuardPrepareRequest } from '@qwen-code/acp-bridge/bridgeOptions';
 import { SHELL_EXECUTING_TOOL_NAMES } from '@qwen-code/acp-bridge/externalToolGuard';
 import { createDaemonToolGuard } from './daemon-git-worktree-guard.js';
@@ -1407,6 +1407,56 @@ it -C ${outsideRepo} reset --hard`,
 
     await expect(guard(request(build()))).resolves.toMatchObject({
       allowed: false,
+    });
+  });
+
+  // A sub-agent pinned to a worktree executes there while reporting the
+  // parent session id, so the session's own directory is not the boundary.
+  describe('reported execution directory', () => {
+    const call = (
+      command: string,
+      invocationCwd?: string,
+    ): ExternalToolGuardPrepareRequest =>
+      ({
+        ...request(command),
+        ...(invocationCwd === undefined ? {} : { invocationCwd }),
+      }) as ExternalToolGuardPrepareRequest;
+
+    it('accepts a directory inside the session', async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(call('git commit -m x', insideNested)),
+      ).resolves.toEqual({ allowed: true });
+    });
+
+    it('fails closed on a directory the daemon cannot place', async () => {
+      const guard = createDaemonToolGuard();
+
+      // The session id owns no worktree here, so this scope is unverifiable.
+      await expect(
+        guard(call('git commit -m x', outsideRepo)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('execution directory'),
+      });
+    });
+
+    it('contains a sub-agent to the worktree it reports', async () => {
+      const owned = GitWorktreeService.getWorktreesDir('session-1');
+      const agentWorktree = path.join(owned, 'agent-a');
+      await mkdir(path.join(agentWorktree, 'src'), { recursive: true });
+
+      const guard = createDaemonToolGuard();
+      // Its own worktree is the boundary: work inside it is allowed...
+      await expect(
+        guard(call('cd src && git commit -m x', agentWorktree)),
+      ).resolves.toEqual({ allowed: true });
+      // ...while reaching back into the parent checkout is not.
+      await expect(
+        guard(call(`git -C ${effectiveCwd} reset --hard`, agentWorktree)),
+      ).resolves.toMatchObject({ allowed: false });
+      await rm(owned, { recursive: true, force: true });
     });
   });
 
