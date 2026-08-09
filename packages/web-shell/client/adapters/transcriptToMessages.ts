@@ -116,11 +116,14 @@ function isIgnoredWebShellStatus(text: string): boolean {
 }
 
 /**
- * Text marker the normalizer stamps on every top-level unrecognized-event
- * projection (`<type> (unrecognized daemon event): <json>`). Only used for
- * blocks that predate {@link DaemonUiDebugReason} — see below.
+ * Whole shape of the legacy top-level projection — `<event-type>
+ * (unrecognized daemon event): <json>` — anchored at the start. Matching the
+ * marker anywhere in the text would hide any block that merely quotes it,
+ * such as a malformed payload carrying an upstream peer's message. Event
+ * types are snake_case identifiers and the payload is a JSON document.
  */
-const LEGACY_UNRECOGNIZED_EVENT_MARKER = ' (unrecognized daemon event): ';
+const LEGACY_UNRECOGNIZED_EVENT_PATTERN =
+  /^[A-Za-z0-9_.-]+ \(unrecognized daemon event\): [[{"]/;
 
 /**
  * The legacy `session_update` projection is `<kind>: <json>` — no marker to
@@ -128,8 +131,8 @@ const LEGACY_UNRECOGNIZED_EVENT_MARKER = ' (unrecognized daemon event): ';
  * scoped to the kinds known to have leaked into transcripts before the
  * normalizer suppressed them at the source: `usage_update` (#8790, the
  * original spam report) and `a2ui`, whose command JSON the bridge splits out
- * of the tool frame precisely to keep it out of transcripts. Requiring the
- * `: {` shape keeps this from matching prose that merely starts with the word.
+ * of the tool frame precisely to keep it out of transcripts. Anchored, and
+ * requiring the `: {` shape, so prose starting with the word still renders.
  */
 const LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES = [
   'usage_update: {',
@@ -150,11 +153,13 @@ const LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES = [
  *
  * `WebShellTranscript` is a public entry point that takes already-projected
  * blocks from its caller, so blocks projected — or persisted — by an SDK older
- * than `debugReason` still arrive here with no reason at all. For those, fall
- * back to the stable text marker the top-level projection has always carried,
- * which covers every unrecognized event type rather than the two that happened
- * to be suppressed by name before. Client-dispatched debug blocks have neither
- * a reason nor the marker, so they keep rendering either way.
+ * than `debugReason` still arrive here with no reason at all. Those are
+ * matched by shape instead, and only ever by shape: text matching is a
+ * compatibility shim, so it is scoped to `debug` blocks (this helper is also
+ * called for `status`, which never carried these projections) and anchored to
+ * the whole projection, never a substring. A block that merely quotes a
+ * marker — a malformed payload relaying an upstream message, a
+ * client-dispatched summary, an ordinary status line — keeps rendering.
  *
  * Legacy `session_update` blocks have no marker, so they are matched by kind
  * name instead — see the prefix list above. That list is closed on purpose: a
@@ -171,8 +176,11 @@ function isUnrecognizedDaemonDebug(
       block.debugReason === 'unrecognized_session_update'
     );
   }
+  // Only `debug` blocks ever carried an unrecognized projection; a `status`
+  // block matching one of these shapes is real content.
+  if (block.kind !== 'debug') return false;
   return (
-    block.text.includes(LEGACY_UNRECOGNIZED_EVENT_MARKER) ||
+    LEGACY_UNRECOGNIZED_EVENT_PATTERN.test(block.text) ||
     LEGACY_SUPPRESSED_SESSION_UPDATE_PREFIXES.some((prefix) =>
       block.text.startsWith(prefix),
     )

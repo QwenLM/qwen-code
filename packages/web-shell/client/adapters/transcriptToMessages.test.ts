@@ -1386,6 +1386,58 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
+  it('only matches the legacy shape, never a quoted marker or a status block', () => {
+    // The text match is a compatibility shim, so it must be scoped to `debug`
+    // blocks and anchored to the whole projection. Matching the marker as a
+    // substring would hide any block that merely relays it.
+    const block = (
+      id: string,
+      kind: string,
+      text: string,
+      extra: Record<string, unknown> = {},
+    ) =>
+      ({
+        id,
+        kind,
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        ...extra,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      // A status line is real content even when it quotes the marker.
+      block(
+        'status-1',
+        'status',
+        'peer reported (unrecognized daemon event): malformed frame',
+      ),
+      // A legacy malformed payload relaying an upstream message.
+      block(
+        'legacy-malformed',
+        'debug',
+        'permission_request: {"message":"peer said (unrecognized daemon event): x"}',
+      ),
+      // A client-dispatched summary that happens to quote it.
+      block(
+        'client-1',
+        'debug',
+        'Model switch failed: upstream said (unrecognized daemon event): x',
+        { source: 'model_switch_summary' },
+      ),
+      // A status block whose text starts with a suppressed session-update kind.
+      block('status-2', 'status', 'usage_update: {"used":1}'),
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual([
+      'status-1',
+      'legacy-malformed',
+      'client-1',
+      'status-2',
+    ]);
+  });
+
   it('does not let the legacy prefixes swallow prose or classified blocks', () => {
     // The prefix list is a compatibility shim for a specific projection
     // shape, not a content filter: it must not hide a block the normalizer
