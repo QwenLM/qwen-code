@@ -115,6 +115,13 @@ export interface GoalPendingProposal {
 export interface GoalRuntime {
   getSnapshot(): GoalSnapshotV2;
   getSnapshotForPermit?(permit: GoalTurnPermit): GoalSnapshotV2;
+  /**
+   * The cause the last successful {@link restore} broadcast, or undefined if
+   * nothing was recovered. Lets a subscriber that attached after restore —
+   * the ACP resume path always does — republish the recovered state with the
+   * cause the broadcast carried.
+   */
+  getRecoveryCause?(): GoalStateCause | undefined;
   subscribe(
     listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
   ): () => void;
@@ -209,6 +216,14 @@ export function createGoalRuntime(
   let restored = false;
   let disposed = false;
   let recoveryError: Error | undefined;
+  /**
+   * The cause `restore()` broadcast. Retained because that broadcast can fire
+   * before anything has subscribed — the ACP resume path constructs its
+   * Session well after the Config constructor kicks restore off — and the
+   * `migrated -> paused` projection is only correct if the client sees the
+   * cause, not just the snapshot.
+   */
+  let recoveryCause: GoalStateCause | undefined;
   type VerificationAttempt = NonNullable<typeof verificationAttempt>;
   type CheckpointAttempt = NonNullable<typeof checkpointAttempt>;
 
@@ -876,6 +891,9 @@ export function createGoalRuntime(
   return {
     getSnapshot,
     getSnapshotForPermit,
+    getRecoveryCause(): GoalStateCause | undefined {
+      return recoveryCause;
+    },
     subscribe(
       listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
     ): () => void {
@@ -946,7 +964,10 @@ export function createGoalRuntime(
             if (recoveredSnapshot) snapshot = recoveredSnapshot;
             recoveryError = undefined;
             restored = true;
-            if (recoveredSnapshot) broadcast(recoveredCause);
+            if (recoveredSnapshot) {
+              recoveryCause = recoveredCause;
+              broadcast(recoveredCause);
+            }
             if (!checkpointAttempt) queueContinuation();
             return checkpointAttempt;
           } catch (error) {

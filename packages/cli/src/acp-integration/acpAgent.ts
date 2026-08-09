@@ -5192,7 +5192,7 @@ class QwenAgent implements Agent {
                   config,
                   createdSession,
                 );
-                },
+              },
             },
           ),
         );
@@ -12094,6 +12094,23 @@ class QwenAgent implements Agent {
           sessionData.conversation.messages,
           sessionData.historyGaps,
         );
+        // Strictly after replay: Goal recovery ran in the Config constructor,
+        // before this Session existed to subscribe, and replay streams the
+        // pre-migration records. Without this the client's newest goal card
+        // is the legacy `set` one and it shows a phantom running goal until
+        // the next reload. Never fatal — a session that cannot publish its
+        // goal state must still open.
+        try {
+          await session.publishRecoveredGoalState(
+            sessionData.conversation.messages,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Failed to publish recovered Goal state: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
 
       await options.beforeStartPostReplayServices?.(session);

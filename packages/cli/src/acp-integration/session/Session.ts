@@ -254,6 +254,10 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import {
+  collectGoalStatusItemsFromRecords,
+  findGoalToRestore,
+} from '../../ui/utils/restoreGoal.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
@@ -1793,6 +1797,70 @@ export class Session implements SessionContext {
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
     this.#bindGoalRuntime();
+  }
+
+  /**
+   * Publish the recovered Goal state once, after history replay.
+   *
+   * Goal recovery runs from the `Config` constructor, long before this
+   * Session exists, so `restore()`'s correction broadcast reaches zero
+   * listeners — and replay streams the pre-migration records, emitting the
+   * legacy `set` card. Clients that derive the live goal from goal cards
+   * (both web-shell and the daemon provider do) are therefore left showing a
+   * goal as running when the migrated goal is `paused` and nothing drives
+   * it; only a second reload self-corrected. Republishing here puts the
+   * authoritative state *after* the replayed card, which is the ordering
+   * that matters. `#publishGoalState` de-duplicates on `(cause, snapshot)`,
+   * so this is a no-op when the subscription already delivered it.
+   *
+   * When recovery failed outright — a malformed or future-schema
+   * `goal_state` record makes `recoverGoalFromRecords` return `unsupported`
+   * — there is no state to publish and no in-session command can correct the
+   * stream, because a degraded `/goal` answers without a cause. That case
+   * gets the same trailing `cleared` card the replay-time
+   * `supersedeUnrestorableGoal` used to emit.
+   */
+  async publishRecoveredGoalState(
+    replayedRecords?: readonly ChatRecord[],
+  ): Promise<void> {
+    if (this.disposed || this.closing) return;
+    let runtime;
+    try {
+      runtime = await this.config.getGoalRuntimeReady();
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      await this.#supersedeUnrestorableGoal(replayedRecords);
+      return;
+    }
+    const cause = runtime.getRecoveryCause?.();
+    // Nothing was recovered, so the replay already told the whole story.
+    if (!cause) return;
+    await this.#queueGoalState(runtime.getSnapshot(), cause);
+  }
+
+  /**
+   * Emit a trailing `cleared` card for an active legacy goal the runtime
+   * refused to recover.
+   *
+   * Emitted, not recorded: the transcript keeps its `set` card, so a later
+   * resume that can recover the goal still finds it.
+   */
+  async #supersedeUnrestorableGoal(
+    replayedRecords?: readonly ChatRecord[],
+  ): Promise<void> {
+    if (!replayedRecords?.length) return;
+    const active = findGoalToRestore(
+      collectGoalStatusItemsFromRecords(replayedRecords),
+    );
+    if (!active) return;
+    await this.messageEmitter.emitGoalStatus({
+      kind: 'cleared',
+      condition: active.condition,
+      iterations: active.iterations,
+      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+      lastReason:
+        'Goal not restored: its saved state could not be read, so this session is not driving it.',
+    });
   }
 
   async #publishGoalState(
