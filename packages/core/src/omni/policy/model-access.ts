@@ -7,9 +7,10 @@
 import type { FunctionDeclaration } from '@google/genai';
 import type { ToolExecutionOrigin } from '../../core/turn.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
+import { isPlainRecord } from './types.js';
 import type {
+  MediaPolicyToolConfigView,
   OmniPolicyToolModelAccessSettings,
-  OmniPolicyToolsSettings,
 } from './types.js';
 
 /**
@@ -24,11 +25,9 @@ import type {
  * so all of them call into this module rather than re-deriving the rule.
  */
 
-/** Minimal structural view of Config used by this module. All calls are
- * optional so partial/stub configs (tests, embedders) fail closed. */
-export interface MediaPolicyConfigView {
-  getOmniPolicyToolsSettings?: () => OmniPolicyToolsSettings | undefined;
-}
+/** Historical name this module exported for its config view; kept as an
+ * alias of the shared type so existing importers stay valid. */
+export type MediaPolicyConfigView = MediaPolicyToolConfigView;
 
 /** Resolved modelAccess for one tool: always concrete (defaults applied). */
 export interface ResolvedMediaPolicyModelAccess {
@@ -41,9 +40,6 @@ export interface ResolvedMediaPolicyModelAccess {
   /** Narrowing-only projection over the native parameter schema. */
   parameterSchema?: Record<string, unknown>;
 }
-
-const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
  * Read `omni.processing.policyTools.<toolName>.modelAccess` leniently:
@@ -100,6 +96,10 @@ export function projectMediaPolicyToolDeclaration(
     name: string;
     description: string;
     parametersJsonSchema: unknown;
+    /** Descriptor-declared operator-only keys — hidden from the model
+     * exactly like lockedArguments (the model must not see arguments the
+     * gate forbids it to pass). */
+    operatorOnlyParams?: readonly string[];
   },
 ): FunctionDeclaration {
   const access = resolveMediaPolicyModelAccess(config, native.name);
@@ -118,7 +118,10 @@ export function projectMediaPolicyToolDeclaration(
       parametersJsonSchema: native.parametersJsonSchema,
     };
   }
-  const lockedKeys = new Set(Object.keys(access.lockedArguments));
+  const lockedKeys = new Set([
+    ...Object.keys(access.lockedArguments),
+    ...(native.operatorOnlyParams ?? []),
+  ]);
   const narrowProps =
     access.parameterSchema &&
     isPlainRecord(access.parameterSchema['properties'])
@@ -250,6 +253,30 @@ export function evaluateMediaPolicyToolCall(params: {
         `${violations.length === 1 ? 'is' : 'are'} locked by configuration ` +
         `and must not be provided. Remove ${
           violations.length === 1 ? 'it' : 'them'
+        } and retry.`,
+    };
+  }
+
+  // Operator-only parameters (descriptor-declared, e.g. endpoint base URL
+  // + credential env-var name): a gated caller must never set them — a
+  // model-controlled endpoint/credential pair would let injected content
+  // exfiltrate arbitrary environment secrets to an attacker host. They
+  // remain settable through settings / defaultArguments / lockedArguments
+  // (operator-controlled surfaces only).
+  const operatorViolations = (
+    tool.mediaPolicyDescriptor.operatorOnlyParams ?? []
+  ).filter((key) => Object.prototype.hasOwnProperty.call(args, key));
+  if (operatorViolations.length > 0) {
+    return {
+      outcome: 'reject',
+      reason: 'invalid_params',
+      message:
+        `Invalid parameters for tool "${tool.name}": ` +
+        `${operatorViolations.map((k) => `"${k}"`).join(', ')} ` +
+        `${operatorViolations.length === 1 ? 'is' : 'are'} operator-only ` +
+        `(set via omni.processing.policyTools.${tool.name} configuration) ` +
+        `and must not be provided by the caller. Remove ${
+          operatorViolations.length === 1 ? 'it' : 'them'
         } and retry.`,
     };
   }

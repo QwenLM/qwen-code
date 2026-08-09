@@ -12,23 +12,25 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   describeChannels,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
   resolvePolicyToolTimeoutMs,
-  validateMediaPolicyIoParams,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
-export const OMNI_EXTRACT_AUDIO_TOOL_NAME = 'omni_extract_audio';
+export const OMNI_EXTRACT_AUDIO_TOOL_NAME = ToolNames.OMNI_EXTRACT_AUDIO;
 
 /** Fixed-call default parameters (mapping doc §6.1): 16 kHz mono WAV is
  * the ASR-recommended input shape, chaining into omni_transcribe_audio. */
@@ -178,7 +180,11 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
-          `ffmpeg failed (exit ${run.code}) extracting audio from ${path.basename(this.params.inputPath)}: ${run.stderr.slice(-500)}`,
+          ffmpegFailureMessage(
+            run,
+            'extracting audio from',
+            this.params.inputPath,
+          ),
         );
       }
 
@@ -199,9 +205,7 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -214,7 +218,7 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
  * even to the technically-lossless WAV output.
  */
 export class OmniExtractAudioTool extends BaseMediaPolicyTool<ExtractAudioParams> {
-  constructor(private readonly config: MediaPolicyToolConfigView) {
+  constructor(config: MediaPolicyToolConfigView) {
     super(
       OMNI_EXTRACT_AUDIO_TOOL_NAME,
       'ExtractAudio',
@@ -237,18 +241,12 @@ export class OmniExtractAudioTool extends BaseMediaPolicyTool<ExtractAudioParams
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: ExtractAudioParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: ExtractAudioParams,
   ): ToolInvocation<ExtractAudioParams, ToolResult> {
     return new ExtractAudioInvocation(
       params,
-      resolvePolicyToolTimeoutMs(this.config, this.name),
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }
 }

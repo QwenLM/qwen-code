@@ -12,21 +12,23 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
   resolvePolicyToolTimeoutMs,
-  validateMediaPolicyIoParams,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
-export const OMNI_CLIP_VIDEO_TOOL_NAME = 'omni_clip_video';
+export const OMNI_CLIP_VIDEO_TOOL_NAME = ToolNames.OMNI_CLIP_VIDEO;
 
 /** Fixed-call default encode parameters (mapping doc §6.1): clip is a
  * time-axis cut, NOT a degradation — crf 23 preserves quality; lowering
@@ -155,7 +157,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
-          `ffmpeg failed (exit ${run.code}) clipping ${path.basename(this.params.inputPath)}: ${run.stderr.slice(-500)}`,
+          ffmpegFailureMessage(run, 'clipping', this.params.inputPath),
         );
       }
 
@@ -183,9 +185,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -197,7 +197,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
  * the span disclosed.
  */
 export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
-  constructor(private readonly config: MediaPolicyToolConfigView) {
+  constructor(config: MediaPolicyToolConfigView) {
     super(
       OMNI_CLIP_VIDEO_TOOL_NAME,
       'ClipVideo',
@@ -223,7 +223,7 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
   protected override validateToolParamValues(
     params: ClipVideoParams,
   ): string | null {
-    const ioError = validateMediaPolicyIoParams(params);
+    const ioError = super.validateToolParamValues(params);
     if (ioError) return ioError;
     // Both absent = a no-op invocation (full-length "clip"); reject at
     // the parameter layer instead of burning a transcode on it.
@@ -238,7 +238,7 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
   ): ToolInvocation<ClipVideoParams, ToolResult> {
     return new ClipVideoInvocation(
       params,
-      resolvePolicyToolTimeoutMs(this.config, this.name),
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }
 }

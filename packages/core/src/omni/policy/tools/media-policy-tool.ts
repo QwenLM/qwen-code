@@ -20,9 +20,15 @@ import {
 } from '../../../tools/tools.js';
 import type { PermissionDecision } from '../../../permissions/types.js';
 import { ToolErrorType } from '../../../tools/tool-error.js';
+import { getErrorMessage } from '../../../utils/errors.js';
 import { SchemaValidator } from '../../../utils/schemaValidator.js';
 import { projectMediaPolicyToolDeclaration } from '../model-access.js';
-import type { OmniPolicyToolsSettings } from '../types.js';
+import { isPlainRecord } from '../types.js';
+import type { MediaPolicyToolConfigView } from '../types.js';
+
+/** Re-exported for the many tool modules that already import the config
+ * view from here; the definition lives in types.ts. */
+export type { MediaPolicyToolConfigView };
 
 /** Default transcode timeout when `policyTools.<tool>.runtime.timeoutMs`
  * is not configured (mapping doc §6). */
@@ -51,15 +57,6 @@ export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
   },
 } as const;
 
-/** Minimal structural view of Config used by policy tools. Optional so
- * partial/stub configs (tests, embedders) fall back to defaults. */
-export interface MediaPolicyToolConfigView {
-  getOmniPolicyToolsSettings?: () => OmniPolicyToolsSettings | undefined;
-}
-
-const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
 /** Read `omni.processing.policyTools.<toolName>.runtime.timeoutMs`
  * leniently; anything absent or malformed resolves to the default. */
 export function resolvePolicyToolTimeoutMs(
@@ -77,6 +74,51 @@ export function resolvePolicyToolTimeoutMs(
     timeoutMs > 0
     ? timeoutMs
     : DEFAULT_POLICY_TOOL_TIMEOUT_MS;
+}
+
+/**
+ * Read `omni.processing.policyTools.<toolName>.settings` leniently. The
+ * map is raw settings input (values may be null tombstones or malformed),
+ * so anything non-conforming reads as "no defaults" rather than throwing
+ * mid-run.
+ */
+export function resolvePolicyToolSettings(
+  config: MediaPolicyToolConfigView,
+  toolName: string,
+): Record<string, unknown> {
+  const entry = config.getOmniPolicyToolsSettings?.()?.[toolName];
+  const settings = isPlainRecord(entry) ? entry['settings'] : undefined;
+  return isPlainRecord(settings) ? settings : {};
+}
+
+/**
+ * Shared wall-clock budget for tools that may run MORE than one ffmpeg
+ * pass (copy→aac audio fallback, scene→uniform sampling fallback): each
+ * pass receives the time REMAINING, so the invocation's total transcode
+ * time stays within the configured `runtime.timeoutMs` instead of
+ * timeoutMs × passes. The first call returns the full budget
+ * (deterministic — the clock starts at that call, not at construction);
+ * later calls return what is left, floored at 1ms so runFfmpeg still
+ * receives a positive timeout and the exhausted pass fails fast.
+ */
+export function createPolicyToolTimeoutBudget(totalMs: number): () => number {
+  let deadline: number | undefined;
+  return () => {
+    const now = Date.now();
+    deadline ??= now + totalMs;
+    return Math.max(1, deadline - now);
+  };
+}
+
+/**
+ * Convert a runtime.timeoutMs into sharp's whole-second `timeout()` unit,
+ * rounding up and flooring at 1s so a small-but-positive budget still
+ * bounds libvips instead of disabling the timeout (sharp treats 0 as
+ * "no limit"). The ffmpeg tools get the same bound via runFfmpeg's
+ * process timeout.
+ */
+export function sharpTimeoutSeconds(timeoutMs: number): number {
+  return Math.max(1, Math.ceil(timeoutMs / 1000));
 }
 
 /**
@@ -106,7 +148,7 @@ export abstract class BaseMediaPolicyToolInvocation<
  * orchestrator key off.
  */
 export abstract class BaseMediaPolicyTool<
-  TParams extends object,
+  TParams extends MediaPolicyIoParams,
 > extends BaseDeclarativeTool<TParams, ToolResult> {
   constructor(
     name: string,
@@ -114,15 +156,23 @@ export abstract class BaseMediaPolicyTool<
     description: string,
     kind: Kind,
     parameterSchema: unknown,
-    /** Config view feeding the modelAccess declaration projection; tools
-     * constructed without one (tests, embedders) declare their native
-     * schema unchanged. */
-    private readonly modelAccessView: MediaPolicyToolConfigView = {},
+    /** Config view feeding the modelAccess declaration projection and the
+     * subclasses' timeout/settings resolution; tools constructed without
+     * one (tests, embedders) declare their native schema unchanged and use
+     * built-in defaults. */
+    protected readonly configView: MediaPolicyToolConfigView = {},
   ) {
     super(name, displayName, description, kind, parameterSchema);
   }
 
   abstract override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor;
+
+  /** Memoized projection result, keyed on the settings-object identity it
+   * was computed from ({@link schema}). */
+  private projectedSchema?: {
+    settings: unknown;
+    declaration: FunctionDeclaration;
+  };
 
   /**
    * Model-visible declaration (decision D6): the single projection point
@@ -131,13 +181,26 @@ export abstract class BaseMediaPolicyTool<
    * `modelAccess.parameterSchema` when configured, with the optional
    * description override applied. Validation deliberately does NOT use
    * this projection (see {@link validateToolParams}).
+   *
+   * The projection is pure over (native schema, settings object), and the
+   * config stores one normalized settings object per initialize() — so the
+   * result is memoized on that object's identity, and a re-initialize
+   * (which swaps the object) recomputes naturally.
    */
   override get schema(): FunctionDeclaration {
-    return projectMediaPolicyToolDeclaration(this.modelAccessView, {
-      name: this.name,
-      description: this.description,
-      parametersJsonSchema: this.parameterSchema,
-    });
+    const settings = this.configView.getOmniPolicyToolsSettings?.();
+    if (!this.projectedSchema || this.projectedSchema.settings !== settings) {
+      this.projectedSchema = {
+        settings,
+        declaration: projectMediaPolicyToolDeclaration(this.configView, {
+          name: this.name,
+          description: this.description,
+          parametersJsonSchema: this.parameterSchema,
+          operatorOnlyParams: this.mediaPolicyDescriptor.operatorOnlyParams,
+        }),
+      };
+    }
+    return this.projectedSchema.declaration;
   }
 
   /**
@@ -153,6 +216,12 @@ export abstract class BaseMediaPolicyTool<
       return errors;
     }
     return this.validateToolParamValues(params);
+  }
+
+  /** Every media-policy tool shares the io params; tools with extra
+   * value-level rules override this and layer them on top. */
+  protected override validateToolParamValues(params: TParams): string | null {
+    return validateMediaPolicyIoParams(params);
   }
 }
 
@@ -228,6 +297,22 @@ export function mediaPolicyToolError(message: string): ToolResult {
     returnDisplay: message,
     error: { message, type: ToolErrorType.EXECUTION_FAILED },
   };
+}
+
+/** Shared catch-tail: turn whatever a policy tool threw into the uniform
+ * error ToolResult. */
+export function mediaPolicyToolFailure(error: unknown): ToolResult {
+  return mediaPolicyToolError(getErrorMessage(error));
+}
+
+/** Uniform "ffmpeg failed" message: exit code, the action underway, the
+ * input's basename (never its full path), and the stderr tail. */
+export function ffmpegFailureMessage(
+  run: { code: number | null; stderr: string },
+  action: string,
+  inputPath: string,
+): string {
+  return `ffmpeg failed (exit ${run.code}) ${action} ${path.basename(inputPath)}: ${run.stderr.slice(-500)}`;
 }
 
 /**

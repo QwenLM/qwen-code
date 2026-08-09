@@ -183,6 +183,37 @@ describe('OmniDownscaleVideoTool', () => {
     expect(secondArgs.join(' ')).toContain('-c:a aac -b:a 64k');
   });
 
+  it('charges the AAC fallback against the SAME wall-clock budget (no timeout doubling)', async () => {
+    probe({ height: 720, frameRate: 25 });
+    mocks.runFfmpeg
+      .mockImplementationOnce(async () => {
+        // Burn measurable wall-clock time in the failing copy pass.
+        await new Promise((r) => setTimeout(r, 50));
+        return { code: 1, stderr: 'pcm in mp4 unsupported' };
+      })
+      .mockImplementationOnce(async (args: string[]) => {
+        await fs.writeFile(args[args.length - 1], Buffer.alloc(OUTPUT_SIZE));
+        return { code: 0, stderr: '' };
+      });
+
+    const { result } = await run();
+    expect(result.error).toBeUndefined();
+    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
+    const firstTimeout = (
+      mocks.runFfmpeg.mock.calls[0][1] as { timeoutMs: number }
+    ).timeoutMs;
+    const secondTimeout = (
+      mocks.runFfmpeg.mock.calls[1][1] as { timeoutMs: number }
+    ).timeoutMs;
+    expect(firstTimeout).toBe(DEFAULT_POLICY_TOOL_TIMEOUT_MS);
+    // The fallback gets only what the copy pass left, never a fresh
+    // full budget (timers never fire early, so ≥40ms must be gone).
+    expect(secondTimeout).toBeLessThanOrEqual(
+      DEFAULT_POLICY_TOOL_TIMEOUT_MS - 40,
+    );
+    expect(secondTimeout).toBeGreaterThan(0);
+  });
+
   it('reports the ffmpeg error when both attempts fail', async () => {
     probe({ height: 720, frameRate: 25 });
     mocks.runFfmpeg.mockResolvedValue({

@@ -12,22 +12,25 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
   resolvePolicyToolTimeoutMs,
-  validateMediaPolicyIoParams,
+  createPolicyToolTimeoutBudget,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
-export const OMNI_DOWNSCALE_VIDEO_TOOL_NAME = 'omni_downscale_video';
+export const OMNI_DOWNSCALE_VIDEO_TOOL_NAME = ToolNames.OMNI_DOWNSCALE_VIDEO;
 
 /** Fixed-call default parameters (mapping doc §6). */
 export const DOWNSCALE_VIDEO_DEFAULTS = {
@@ -171,9 +174,13 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
       // Audio: try stream copy first (free); if the source codec cannot be
       // muxed into mp4 (e.g. pcm, vorbis) ffmpeg fails fast, and the
       // fallback re-encodes to AAC 64k (mapping doc §6: copy→aac 兜底).
+      // Both passes share ONE wall-clock budget: the fallback gets only
+      // what the failed copy pass left, keeping the invocation within the
+      // configured timeout instead of doubling it.
+      const remainingTimeoutMs = createPolicyToolTimeoutBudget(this.timeoutMs);
       let run = await runFfmpeg(argsFor(['-c:a', 'copy']), {
         signal,
-        timeoutMs: this.timeoutMs,
+        timeoutMs: remainingTimeoutMs(),
       });
       if (signal.aborted) {
         return mediaPolicyToolError('video downscaling aborted');
@@ -181,14 +188,14 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
       if (run.code !== 0) {
         run = await runFfmpeg(argsFor(['-c:a', 'aac', '-b:a', '64k']), {
           signal,
-          timeoutMs: this.timeoutMs,
+          timeoutMs: remainingTimeoutMs(),
         });
         if (signal.aborted) {
           return mediaPolicyToolError('video downscaling aborted');
         }
         if (run.code !== 0) {
           return mediaPolicyToolError(
-            `ffmpeg failed (exit ${run.code}) downscaling ${path.basename(this.params.inputPath)}: ${run.stderr.slice(-500)}`,
+            ffmpegFailureMessage(run, 'downscaling', this.params.inputPath),
           );
         }
       }
@@ -208,9 +215,7 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -221,7 +226,7 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
  * audio is stream-copied with an AAC 64k fallback (mapping doc §6).
  */
 export class OmniDownscaleVideoTool extends BaseMediaPolicyTool<DownscaleVideoParams> {
-  constructor(private readonly config: MediaPolicyToolConfigView) {
+  constructor(config: MediaPolicyToolConfigView) {
     super(
       OMNI_DOWNSCALE_VIDEO_TOOL_NAME,
       'DownscaleVideo',
@@ -244,18 +249,12 @@ export class OmniDownscaleVideoTool extends BaseMediaPolicyTool<DownscaleVideoPa
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: DownscaleVideoParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: DownscaleVideoParams,
   ): ToolInvocation<DownscaleVideoParams, ToolResult> {
     return new DownscaleVideoInvocation(
       params,
-      resolvePolicyToolTimeoutMs(this.config, this.name),
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }
 }

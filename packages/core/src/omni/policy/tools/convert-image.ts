@@ -11,6 +11,7 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
@@ -19,14 +20,16 @@ import {
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
-  validateMediaPolicyIoParams,
+  resolvePolicyToolTimeoutMs,
+  sharpTimeoutSeconds,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 import { loadSharp, type SharpPipeline } from './sharp-module.js';
 
-export const OMNI_CONVERT_IMAGE_TOOL_NAME = 'omni_convert_image';
+export const OMNI_CONVERT_IMAGE_TOOL_NAME = ToolNames.OMNI_CONVERT_IMAGE;
 
 /** Fixed-call default parameters (mapping doc §6.1). */
 export const CONVERT_IMAGE_DEFAULTS = {
@@ -124,6 +127,13 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
 };
 
 class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageParams> {
+  constructor(
+    params: ConvertImageParams,
+    private readonly timeoutMs: number,
+  ) {
+    super(params);
+  }
+
   getDescription(): string {
     const format = this.params.format ?? CONVERT_IMAGE_DEFAULTS.format;
     return `Convert ${path.basename(this.params.inputPath)} to ${format.toUpperCase()}`;
@@ -170,7 +180,9 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
       const pipeline = sharp(this.params.inputPath, {
         failOn: 'error',
         limitInputPixels: true,
-      }).rotate();
+      })
+        .timeout({ seconds: sharpTimeoutSeconds(this.timeoutMs) })
+        .rotate();
       const info = await output.encode(pipeline, quality).toFile(outputPath);
       if (signal.aborted) {
         return mediaPolicyToolError('image conversion aborted');
@@ -193,9 +205,7 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -229,15 +239,12 @@ export class OmniConvertImageTool extends BaseMediaPolicyTool<ConvertImageParams
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: ConvertImageParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: ConvertImageParams,
   ): ToolInvocation<ConvertImageParams, ToolResult> {
-    return new ConvertImageInvocation(params);
+    return new ConvertImageInvocation(
+      params,
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
+    );
   }
 }

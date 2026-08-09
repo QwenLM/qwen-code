@@ -179,6 +179,35 @@ describe('OmniExtractKeyframesTool', () => {
     );
   });
 
+  it('charges the uniform fallback against the SAME wall-clock budget (no timeout doubling)', async () => {
+    probe({ durationMs: 10_000, width: 640, height: 360 });
+    mocks.runFfmpeg
+      .mockImplementationOnce(async (args: string[]) => {
+        // Burn measurable wall-clock time in the scene pass before it
+        // yields a single frame (which triggers the uniform fallback).
+        await new Promise((r) => setTimeout(r, 50));
+        return framesRun(1, [0])(args);
+      })
+      .mockImplementationOnce(framesRun(4, [0, 2.5, 5, 7.5]));
+    const { result } = await run({ maxFrames: 4 });
+
+    expect(result.error).toBeUndefined();
+    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
+    const firstTimeout = (
+      mocks.runFfmpeg.mock.calls[0][1] as { timeoutMs: number }
+    ).timeoutMs;
+    const secondTimeout = (
+      mocks.runFfmpeg.mock.calls[1][1] as { timeoutMs: number }
+    ).timeoutMs;
+    expect(firstTimeout).toBe(DEFAULT_POLICY_TOOL_TIMEOUT_MS);
+    // The fallback gets only what the scene pass left, never a fresh
+    // full budget (timers never fire early, so ≥40ms must be gone).
+    expect(secondTimeout).toBeLessThanOrEqual(
+      DEFAULT_POLICY_TOOL_TIMEOUT_MS - 40,
+    );
+    expect(secondTimeout).toBeGreaterThan(0);
+  });
+
   it('does not fall back when a single frame was all that was asked for', async () => {
     probe({ durationMs: 10_000 });
     mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));

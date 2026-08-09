@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaProbeResult } from '../../ffmpeg.js';
 import type { ToolResult } from '../../../tools/tools.js';
+import { DEFAULT_POLICY_TOOL_TIMEOUT_MS } from './media-policy-tool.js';
 import {
   DOWNSAMPLE_IMAGE_DEFAULTS,
   OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME,
@@ -42,6 +43,7 @@ describe('OmniDownsampleImageTool', () => {
   let jpeg: ReturnType<typeof vi.fn>;
   let resize: ReturnType<typeof vi.fn>;
   let rotate: ReturnType<typeof vi.fn>;
+  let timeout: ReturnType<typeof vi.fn>;
 
   const tool = new OmniDownsampleImageTool();
 
@@ -75,7 +77,8 @@ describe('OmniDownsampleImageTool', () => {
     jpeg = vi.fn(() => ({ toFile }));
     resize = vi.fn(() => ({ jpeg }));
     rotate = vi.fn(() => ({ resize }));
-    mocks.sharpCreate.mockReturnValue({ rotate });
+    timeout = vi.fn(() => ({ rotate }));
+    mocks.sharpCreate.mockReturnValue({ timeout });
   });
 
   afterEach(async () => {
@@ -160,6 +163,28 @@ describe('OmniDownsampleImageTool', () => {
       expect.objectContaining({ width: 800, height: 800 }),
     );
     expect(jpeg).toHaveBeenCalledWith({ quality: 50 });
+  });
+
+  it('bounds sharp processing with the default timeout (whole seconds)', async () => {
+    probe({ width: 4096, height: 3072, frameCount: 1 });
+    await run();
+    expect(timeout).toHaveBeenCalledWith({
+      seconds: DEFAULT_POLICY_TOOL_TIMEOUT_MS / 1000,
+    });
+  });
+
+  it('threads policyTools.<tool>.runtime.timeoutMs into sharp, rounded up to seconds', async () => {
+    probe({ width: 4096, height: 3072, frameCount: 1 });
+    const configured = new OmniDownsampleImageTool({
+      getOmniPolicyToolsSettings: () => ({
+        [OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME]: {
+          runtime: { timeoutMs: 90_500 },
+        },
+      }),
+    });
+    const invocation = configured.build({ inputPath, outputDir } as never);
+    await invocation.execute(new AbortController().signal);
+    expect(timeout).toHaveBeenCalledWith({ seconds: 91 });
   });
 
   it('omits original dimensions from the disclosure when the probe lacks them', async () => {

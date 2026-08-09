@@ -166,3 +166,18 @@ export type OmniPolicyToolsSettings = Record<
   string,
   OmniPolicyToolSettings | null
 >;
+
+/** Structural "is a plain JSON object" check shared by every omni policy
+ * reader of raw settings input (which may be null tombstones, arrays, or
+ * scalars — all of which must read as "absent", never throw). */
+export const isPlainRecord = (
+  value: unknown,
+): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Minimal structural view of Config used by omni policy tools and the
+ * modelAccess projection. Optional so partial/stub configs (tests,
+ * embedders) fall back to defaults / fail closed. */
+export interface MediaPolicyToolConfigView {
+  getOmniPolicyToolsSettings?: () => OmniPolicyToolsSettings | undefined;
+}

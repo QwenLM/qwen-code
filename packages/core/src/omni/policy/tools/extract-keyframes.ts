@@ -13,21 +13,25 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   resolvePolicyToolTimeoutMs,
-  validateMediaPolicyIoParams,
+  createPolicyToolTimeoutBudget,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
-export const OMNI_EXTRACT_KEYFRAMES_TOOL_NAME = 'omni_extract_keyframes';
+export const OMNI_EXTRACT_KEYFRAMES_TOOL_NAME =
+  ToolNames.OMNI_EXTRACT_KEYFRAMES;
 
 /** Fixed-call default parameters (mapping doc §6.1). */
 export const EXTRACT_KEYFRAMES_DEFAULTS = {
@@ -160,6 +164,10 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       // whose scene score exceeds the threshold, capped at maxFrames.
       // showinfo (after select) logs one stderr line per KEPT frame with
       // its pts_time — the timestamps feed the per-frame disclosures.
+      // Both passes share ONE wall-clock budget: the uniform-sampling
+      // fallback gets only what the scene pass left, keeping the
+      // invocation within the configured timeout instead of doubling it.
+      const remainingTimeoutMs = createPolicyToolTimeoutBudget(this.timeoutMs);
       const scenePass = await runFfmpeg(
         [
           '-y',
@@ -175,14 +183,18 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
           '4',
           outputPattern,
         ],
-        { signal, timeoutMs: this.timeoutMs },
+        { signal, timeoutMs: remainingTimeoutMs() },
       );
       if (signal.aborted) {
         return mediaPolicyToolError('keyframe extraction aborted');
       }
       if (scenePass.code !== 0) {
         return mediaPolicyToolError(
-          `ffmpeg failed (exit ${scenePass.code}) extracting keyframes from ${path.basename(this.params.inputPath)}: ${scenePass.stderr.slice(-500)}`,
+          ffmpegFailureMessage(
+            scenePass,
+            'extracting keyframes from',
+            this.params.inputPath,
+          ),
         );
       }
 
@@ -221,14 +233,18 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
             '4',
             outputPattern,
           ],
-          { signal, timeoutMs: this.timeoutMs },
+          { signal, timeoutMs: remainingTimeoutMs() },
         );
         if (signal.aborted) {
           return mediaPolicyToolError('keyframe extraction aborted');
         }
         if (uniformPass.code !== 0) {
           return mediaPolicyToolError(
-            `ffmpeg failed (exit ${uniformPass.code}) uniformly sampling ${path.basename(this.params.inputPath)}: ${uniformPass.stderr.slice(-500)}`,
+            ffmpegFailureMessage(
+              uniformPass,
+              'uniformly sampling',
+              this.params.inputPath,
+            ),
           );
         }
         frameFiles = await listFrameFiles(this.params.outputDir);
@@ -274,15 +290,16 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       }
 
       const summary = `Extracted ${frameFiles.length} keyframe(s) from ${path.basename(this.params.inputPath)} (${originalDuration}${originalResolution})`;
+      // Not mediaPolicyToolSuccess: that helper encodes the common
+      // one-artifact contract, while this is the multi-artifact tool —
+      // every frame is its own artifact with its own disclosure.
       return {
         llmContent: summary,
         returnDisplay: summary,
         artifacts,
       };
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -296,7 +313,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
  * frame is promoted in one atomic invocation transaction.
  */
 export class OmniExtractKeyframesTool extends BaseMediaPolicyTool<ExtractKeyframesParams> {
-  constructor(private readonly config: MediaPolicyToolConfigView) {
+  constructor(config: MediaPolicyToolConfigView) {
     super(
       OMNI_EXTRACT_KEYFRAMES_TOOL_NAME,
       'ExtractKeyframes',
@@ -319,18 +336,12 @@ export class OmniExtractKeyframesTool extends BaseMediaPolicyTool<ExtractKeyfram
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: ExtractKeyframesParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: ExtractKeyframesParams,
   ): ToolInvocation<ExtractKeyframesParams, ToolResult> {
     return new ExtractKeyframesInvocation(
       params,
-      resolvePolicyToolTimeoutMs(this.config, this.name),
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }
 }

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaProbeResult } from '../../ffmpeg.js';
 import type { ToolResult } from '../../../tools/tools.js';
+import { DEFAULT_POLICY_TOOL_TIMEOUT_MS } from './media-policy-tool.js';
 import {
   CONVERT_IMAGE_DEFAULTS,
   OMNI_CONVERT_IMAGE_TOOL_NAME,
@@ -43,6 +44,7 @@ describe('OmniConvertImageTool', () => {
   let png: ReturnType<typeof vi.fn>;
   let webp: ReturnType<typeof vi.fn>;
   let rotate: ReturnType<typeof vi.fn>;
+  let timeout: ReturnType<typeof vi.fn>;
 
   const tool = new OmniConvertImageTool();
 
@@ -77,7 +79,8 @@ describe('OmniConvertImageTool', () => {
     png = vi.fn(() => ({ toFile }));
     webp = vi.fn(() => ({ toFile }));
     rotate = vi.fn(() => ({ jpeg, png, webp }));
-    mocks.sharpCreate.mockReturnValue({ rotate });
+    timeout = vi.fn(() => ({ rotate }));
+    mocks.sharpCreate.mockReturnValue({ timeout });
   });
 
   afterEach(async () => {
@@ -164,6 +167,28 @@ describe('OmniConvertImageTool', () => {
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
       '原 PNG/2MB → WEBP 质量 60/300KB，元数据丢弃',
     );
+  });
+
+  it('bounds sharp processing with the default timeout (whole seconds)', async () => {
+    probe({ codec: 'png', frameCount: 1 });
+    await run();
+    expect(timeout).toHaveBeenCalledWith({
+      seconds: DEFAULT_POLICY_TOOL_TIMEOUT_MS / 1000,
+    });
+  });
+
+  it('threads policyTools.<tool>.runtime.timeoutMs into sharp, rounded up to seconds', async () => {
+    probe({ codec: 'png', frameCount: 1 });
+    const configured = new OmniConvertImageTool({
+      getOmniPolicyToolsSettings: () => ({
+        [OMNI_CONVERT_IMAGE_TOOL_NAME]: {
+          runtime: { timeoutMs: 90_500 },
+        },
+      }),
+    });
+    const invocation = configured.build({ inputPath, outputDir } as never);
+    await invocation.execute(new AbortController().signal);
+    expect(timeout).toHaveBeenCalledWith({ seconds: 91 });
   });
 
   it('falls back to the upper-cased codec, then 未知格式, for unmapped codecs', async () => {

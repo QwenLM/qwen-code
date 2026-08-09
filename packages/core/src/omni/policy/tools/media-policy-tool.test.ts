@@ -7,12 +7,13 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaPolicyToolDescriptor } from '../../../tools/tools.js';
 import { Kind, type ToolResult } from '../../../tools/tools.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  createPolicyToolTimeoutBudget,
   DEFAULT_POLICY_TOOL_TIMEOUT_MS,
   formatBytesShort,
   resolvePolicyToolTimeoutMs,
@@ -68,6 +69,36 @@ describe('resolvePolicyToolTimeoutMs', () => {
     expect(resolvePolicyToolTimeoutMs(config, 'omni_downscale_video')).toBe(
       DEFAULT_POLICY_TOOL_TIMEOUT_MS,
     );
+  });
+});
+
+describe('createPolicyToolTimeoutBudget', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('gives the first pass the full budget and later passes only the remainder', () => {
+    const remaining = createPolicyToolTimeoutBudget(10_000);
+    expect(remaining()).toBe(10_000);
+    vi.advanceTimersByTime(4_000);
+    expect(remaining()).toBe(6_000);
+  });
+
+  it('starts the clock at the first call, not at creation', () => {
+    const remaining = createPolicyToolTimeoutBudget(10_000);
+    vi.advanceTimersByTime(5_000); // setup time before the first pass
+    expect(remaining()).toBe(10_000);
+  });
+
+  it('floors an exhausted budget at 1ms so a follow-up pass fails fast', () => {
+    const remaining = createPolicyToolTimeoutBudget(10_000);
+    expect(remaining()).toBe(10_000);
+    vi.advanceTimersByTime(60_000);
+    expect(remaining()).toBe(1);
   });
 });
 

@@ -133,6 +133,10 @@ describe('OmniTranscribeAudioTool', () => {
         { kind: 'text', role: 'disclosure', required: true },
       ],
       settingsSchema: expect.objectContaining({ type: 'object' }),
+      // Endpoint + credential selection is operator-only: a gated caller
+      // choosing both would let injected content exfiltrate arbitrary env
+      // secrets to an attacker host.
+      operatorOnlyParams: ['baseUrl', 'apiKeyEnv'],
     });
     expect(TRANSCRIBE_AUDIO_DEFAULTS).toEqual({
       model: 'qwen3.5-omni-plus',

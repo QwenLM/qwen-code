@@ -12,23 +12,25 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
+  ffmpegFailureMessage,
   BaseMediaPolicyToolInvocation,
   describeChannels,
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
   resolvePolicyToolTimeoutMs,
-  validateMediaPolicyIoParams,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
-export const OMNI_DOWNSAMPLE_AUDIO_TOOL_NAME = 'omni_downsample_audio';
+export const OMNI_DOWNSAMPLE_AUDIO_TOOL_NAME = ToolNames.OMNI_DOWNSAMPLE_AUDIO;
 
 /** Fixed-call default parameters (mapping doc §6). */
 export const DOWNSAMPLE_AUDIO_DEFAULTS = {
@@ -141,7 +143,7 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
       }
       if (run.code !== 0) {
         return mediaPolicyToolError(
-          `ffmpeg failed (exit ${run.code}) downsampling ${path.basename(this.params.inputPath)}: ${run.stderr.slice(-500)}`,
+          ffmpegFailureMessage(run, 'downsampling', this.params.inputPath),
         );
       }
 
@@ -166,9 +168,7 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -179,7 +179,7 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
  * §6).
  */
 export class OmniDownsampleAudioTool extends BaseMediaPolicyTool<DownsampleAudioParams> {
-  constructor(private readonly config: MediaPolicyToolConfigView) {
+  constructor(config: MediaPolicyToolConfigView) {
     super(
       OMNI_DOWNSAMPLE_AUDIO_TOOL_NAME,
       'DownsampleAudio',
@@ -202,18 +202,12 @@ export class OmniDownsampleAudioTool extends BaseMediaPolicyTool<DownsampleAudio
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: DownsampleAudioParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: DownsampleAudioParams,
   ): ToolInvocation<DownsampleAudioParams, ToolResult> {
     return new DownsampleAudioInvocation(
       params,
-      resolvePolicyToolTimeoutMs(this.config, this.name),
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }
 }

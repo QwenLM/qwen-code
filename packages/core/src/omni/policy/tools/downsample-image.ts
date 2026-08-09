@@ -11,6 +11,7 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { probeMediaMetadata } from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
@@ -19,14 +20,16 @@ import {
   formatBytesShort,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
-  validateMediaPolicyIoParams,
+  resolvePolicyToolTimeoutMs,
+  sharpTimeoutSeconds,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 import { loadSharp, type SharpModule } from './sharp-module.js';
 
-export const OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME = 'omni_downsample_image';
+export const OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME = ToolNames.OMNI_DOWNSAMPLE_IMAGE;
 
 /** Fixed-call default parameters (mapping doc §6). */
 export const DOWNSAMPLE_IMAGE_DEFAULTS = {
@@ -79,6 +82,13 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
 };
 
 class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<DownsampleImageParams> {
+  constructor(
+    params: DownsampleImageParams,
+    private readonly timeoutMs: number,
+  ) {
+    super(params);
+  }
+
   getDescription(): string {
     const maxDimension =
       this.params.maxDimension ?? DOWNSAMPLE_IMAGE_DEFAULTS.maxDimension;
@@ -130,6 +140,7 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
         failOn: 'error',
         limitInputPixels: true,
       })
+        .timeout({ seconds: sharpTimeoutSeconds(this.timeoutMs) })
         .rotate()
         .resize({
           width: maxDimension,
@@ -162,9 +173,7 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
         disclosure,
       });
     } catch (error) {
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -199,15 +208,12 @@ export class OmniDownsampleImageTool extends BaseMediaPolicyTool<DownsampleImage
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: DownsampleImageParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: DownsampleImageParams,
   ): ToolInvocation<DownsampleImageParams, ToolResult> {
-    return new DownsampleImageInvocation(params);
+    return new DownsampleImageInvocation(
+      params,
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
+    );
   }
 }

@@ -12,6 +12,7 @@ import type {
   ToolResult,
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
+import { ToolNames } from '../../../tools/tool-names.js';
 import { recognizeMediaFile } from '../../recognition.js';
 import {
   assertMediaPolicyIo,
@@ -19,14 +20,15 @@ import {
   BaseMediaPolicyToolInvocation,
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
+  mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  resolvePolicyToolSettings,
   resolvePolicyToolTimeoutMs,
-  validateMediaPolicyIoParams,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
 
-export const OMNI_TRANSCRIBE_AUDIO_TOOL_NAME = 'omni_transcribe_audio';
+export const OMNI_TRANSCRIBE_AUDIO_TOOL_NAME = ToolNames.OMNI_TRANSCRIBE_AUDIO;
 
 /**
  * Backend defaults (mapping doc §6.1): the qwen3.5-omni ASR backend over
@@ -50,6 +52,7 @@ const OUTPUT_FILE_NAME = 'transcript.txt';
 const INPUT_AUDIO_FORMATS: Record<string, string> = {
   'audio/wav': 'wav',
   'audio/mpeg': 'mp3',
+  'audio/aac': 'aac',
   'audio/flac': 'flac',
   'audio/ogg': 'ogg',
   'audio/mp4': 'm4a',
@@ -119,6 +122,15 @@ const DESCRIPTOR: MediaPolicyToolDescriptor = {
     properties: TUNABLE_SCHEMA_PROPERTIES,
     additionalProperties: false,
   },
+  // Endpoint + credential selection must stay operator-controlled: a
+  // gated caller choosing both `apiKeyEnv` and `baseUrl` could point any
+  // environment secret (e.g. OPENAI_API_KEY) at an attacker-controlled
+  // host. They remain configurable via policyTools settings and
+  // modelAccess default/lockedArguments (operator surfaces), and stay in
+  // the params schema because fixed-policy `arguments` and settings
+  // defaults are merged into tool args under
+  // `additionalProperties: false`.
+  operatorOnlyParams: ['baseUrl', 'apiKeyEnv'],
 };
 
 const readString = (
@@ -138,19 +150,6 @@ const readNumber = (
     ? value
     : undefined;
 };
-
-/** Read `policyTools.omni_transcribe_audio.settings` leniently — anything
- * absent or malformed resolves to undefined (the code default applies). */
-function resolveTranscribeSettings(
-  config: MediaPolicyToolConfigView,
-): Record<string, unknown> {
-  const entry =
-    config.getOmniPolicyToolsSettings?.()?.[OMNI_TRANSCRIBE_AUDIO_TOOL_NAME];
-  const settings = entry?.settings;
-  return settings && typeof settings === 'object' && !Array.isArray(settings)
-    ? settings
-    : {};
-}
 
 /** One SSE `data:` chunk of an OpenAI-compatible streaming response. */
 interface StreamChunk {
@@ -322,9 +321,7 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
           `transcription timed out after ${this.timeoutMs}ms`,
         );
       }
-      return mediaPolicyToolError(
-        error instanceof Error ? error.message : String(error),
-      );
+      return mediaPolicyToolFailure(error);
     }
   }
 }
@@ -337,7 +334,7 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
  * the mandatory disclosure.
  */
 export class OmniTranscribeAudioTool extends BaseMediaPolicyTool<TranscribeAudioParams> {
-  constructor(private readonly config: MediaPolicyToolConfigView = {}) {
+  constructor(config: MediaPolicyToolConfigView = {}) {
     super(
       OMNI_TRANSCRIBE_AUDIO_TOOL_NAME,
       'TranscribeAudio',
@@ -360,19 +357,13 @@ export class OmniTranscribeAudioTool extends BaseMediaPolicyTool<TranscribeAudio
     return DESCRIPTOR;
   }
 
-  protected override validateToolParamValues(
-    params: TranscribeAudioParams,
-  ): string | null {
-    return validateMediaPolicyIoParams(params);
-  }
-
   protected createInvocation(
     params: TranscribeAudioParams,
   ): ToolInvocation<TranscribeAudioParams, ToolResult> {
     return new TranscribeAudioInvocation(
       params,
-      resolveTranscribeSettings(this.config),
-      resolvePolicyToolTimeoutMs(this.config, this.name),
+      resolvePolicyToolSettings(this.configView, this.name),
+      resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }
 }

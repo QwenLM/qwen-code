@@ -12,6 +12,7 @@ export type SharpModule = (input: string, options?: object) => SharpPipeline;
 
 export interface SharpPipeline {
   rotate(): SharpPipeline;
+  timeout(options: { seconds: number }): SharpPipeline;
   resize(options: {
     width: number;
     height: number;
