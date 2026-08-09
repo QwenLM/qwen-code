@@ -6,7 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
-import { BuiltinAgentRegistry } from './builtin-agents.js';
+import {
+  BuiltinAgentRegistry,
+  COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+} from './builtin-agents.js';
 
 describe('BuiltinAgentRegistry', () => {
   describe('getBuiltinAgents', () => {
@@ -58,6 +61,28 @@ describe('BuiltinAgentRegistry', () => {
 
       expect(exploreAgent).toBeDefined();
       expect(exploreAgent?.model).toBeUndefined();
+    });
+
+    it('keeps the coordinator investigator mechanically read-only', () => {
+      const agent = BuiltinAgentRegistry.getBuiltinAgent(
+        COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+      );
+
+      expect(agent?.model).toBeUndefined();
+      expect(agent?.tools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.LS,
+      ]);
+      expect(agent?.tools).not.toContain(ToolNames.SHELL);
+      expect(agent?.tools).not.toContain(ToolNames.EDIT);
+      expect(agent?.tools).not.toContain(ToolNames.AGENT);
+      expect(
+        BuiltinAgentRegistry.isReservedBuiltinAgent(
+          COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+        ),
+      ).toBe(true);
     });
 
     it('keeps the Explore agent read-only without banning shell pipelines', () => {

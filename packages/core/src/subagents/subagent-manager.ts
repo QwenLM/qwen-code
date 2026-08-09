@@ -277,7 +277,8 @@ export class SubagentManager {
   /**
    * Loads a subagent configuration by name.
    * If level is specified, only searches that level.
-   * If level is omitted, searches project-level first, then user-level, then built-in.
+   * If level is omitted, reserved built-ins resolve first; other names follow
+   * the normal session, project, user, extension, built-in precedence.
    *
    * @param name - Name of the subagent to load
    * @param level - Optional level to limit search to specific level
@@ -288,6 +289,11 @@ export class SubagentManager {
     level?: SubagentLevel,
   ): Promise<SubagentConfig | null> {
     const lowerName = name.toLowerCase();
+
+    if (BuiltinAgentRegistry.isReservedBuiltinAgent(name)) {
+      if (level && level !== 'builtin') return null;
+      return this.getBuiltinAgent(name);
+    }
 
     if (level) {
       // Search only the specified level
@@ -554,11 +560,17 @@ export class SubagentManager {
       await this.refreshCache();
     }
 
-    // Collect subagents from each level (project takes precedence over user, user takes precedence over builtin)
+    // Collect subagents from each level. Reserved built-ins cannot be shadowed.
     for (const level of levelsToCheck) {
       const levelSubagents = this.subagentsCache?.get(level) || [];
 
       for (const subagent of levelSubagents) {
+        if (
+          level !== 'builtin' &&
+          BuiltinAgentRegistry.isReservedBuiltinAgent(subagent.name)
+        ) {
+          continue;
+        }
         // Skip if we've already seen this name (precedence: project > user > builtin)
         if (seenNames.has(subagent.name)) {
           continue;

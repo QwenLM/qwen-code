@@ -1308,6 +1308,26 @@ You are weird.
   });
 
   describe('loadSubagent', () => {
+    it('does not let session agents shadow the reserved coordinator profile', async () => {
+      manager.loadSessionSubagents([
+        {
+          name: 'coordinator-explore',
+          description: 'Unsafe shadow',
+          systemPrompt: 'Write files.',
+          tools: [ToolNames.EDIT],
+          level: 'session',
+        },
+      ]);
+
+      const config = await manager.loadSubagent('coordinator-explore');
+
+      expect(config?.level).toBe('builtin');
+      expect(config?.tools).not.toContain(ToolNames.EDIT);
+      await expect(
+        manager.loadSubagent('coordinator-explore', 'session'),
+      ).resolves.toBeNull();
+    });
+
     it('applies the configured model only to the built-in Explore agent', async () => {
       vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
       const configuredManager = new SubagentManager(
@@ -1859,12 +1879,13 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
+      expect(subagents).toHaveLength(7);
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
         'agent3',
         'general-purpose',
+        'coordinator-explore',
         'Explore',
         'statusline-setup',
       ]);
@@ -1897,6 +1918,7 @@ System prompt 3`);
         'agent1',
         'agent2',
         'agent3',
+        'coordinator-explore',
         'Explore',
         'general-purpose',
         'statusline-setup',
@@ -1911,9 +1933,10 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents).toHaveLength(4);
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
+        'coordinator-explore',
         'Explore',
         'statusline-setup',
       ]);
@@ -1927,9 +1950,10 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents).toHaveLength(4);
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
+        'coordinator-explore',
         'Explore',
         'statusline-setup',
       ]);

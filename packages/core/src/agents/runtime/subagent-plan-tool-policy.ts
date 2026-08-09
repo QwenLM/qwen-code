@@ -16,12 +16,16 @@ export const SUBAGENT_PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.EXIT_PLAN_MODE,
 ]);
 
-const PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
-  ToolNames.EXIT_PLAN_MODE,
+export const READ_ONLY_REPOSITORY_TOOLS = [
   ToolNames.READ_FILE,
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.LS,
+] as const;
+
+const PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
+  ToolNames.EXIT_PLAN_MODE,
+  ...READ_ONLY_REPOSITORY_TOOLS,
   ToolNames.LSP,
   ToolNames.TASK_LIST,
   ToolNames.TOOL_SEARCH,

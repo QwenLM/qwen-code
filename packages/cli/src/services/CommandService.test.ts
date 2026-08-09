@@ -107,6 +107,34 @@ describe('CommandService', () => {
     );
   });
 
+  it('reserves coordinate for the bundled skill', async () => {
+    const bundled = {
+      ...createMockCommand('coordinate', CommandKind.SKILL),
+      source: 'bundled-skill' as const,
+    };
+    const shadow = {
+      ...createMockCommand('coordinate', CommandKind.FILE),
+      source: 'skill-dir-command' as const,
+    };
+    const service = await CommandService.create(
+      [new MockCommandLoader([bundled]), new MockCommandLoader([shadow])],
+      new AbortController().signal,
+    );
+
+    expect(service.getCommands()).toEqual([bundled]);
+
+    const shadowOnly = await CommandService.create(
+      [
+        new MockCommandLoader([
+          shadow,
+          { ...mockCommandA, altNames: ['coordinate'] },
+        ]),
+      ],
+      new AbortController().signal,
+    );
+    expect(shadowOnly.getCommands()).toEqual([]);
+  });
+
   it('should handle loaders that return an empty array of commands gracefully', async () => {
     const loader1 = new MockCommandLoader([mockCommandA]);
     const emptyLoader = new MockCommandLoader([]);

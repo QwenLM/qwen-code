@@ -54,6 +54,10 @@ const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
+export function isReservedBundledSkill(name: string): boolean {
+  return name.toLowerCase() === 'coordinate';
+}
+
 // Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
 // detect any change. This keeps chokidar out of heavy subtrees like node_modules
 // that would otherwise exhaust file descriptors (see #3289).
@@ -298,6 +302,9 @@ export class SkillManager {
       );
 
       for (const skill of levelSkills) {
+        if (level !== 'bundled' && isReservedBundledSkill(skill.name)) {
+          continue;
+        }
         // Skip if we've already seen this name (precedence: project > user > extension > bundled)
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
@@ -323,7 +330,8 @@ export class SkillManager {
   /**
    * Loads a skill configuration by name.
    * If level is specified, only searches that level.
-   * If level is omitted, searches in precedence order: project > user > extension > bundled.
+   * Reserved bundled skills cannot be shadowed. Other names use the normal
+   * project > user > extension > bundled precedence.
    *
    * @param name - Name of the skill to load
    * @param level - Optional level to limit search to
@@ -336,6 +344,11 @@ export class SkillManager {
     debugLogger.debug(
       `Loading skill: ${name}${level ? ` at level: ${level}` : ''}`,
     );
+
+    if (isReservedBundledSkill(name)) {
+      if (level && level !== 'bundled') return null;
+      return this.findSkillByNameAtLevel(name, 'bundled');
+    }
 
     if (level) {
       const skill = await this.findSkillByNameAtLevel(name, level);
@@ -479,6 +492,9 @@ export class SkillManager {
     const eligibleForActivation: SkillConfig[] = [];
     for (const level of levels) {
       for (const skill of skillsCache.get(level) ?? []) {
+        if (level !== 'bundled' && isReservedBundledSkill(skill.name)) {
+          continue;
+        }
         if (seenForActivation.has(skill.name)) continue;
         seenForActivation.add(skill.name);
         if (skill.disableModelInvocation) continue;

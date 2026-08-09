@@ -1229,6 +1229,53 @@ Review content`;
       expect(skills.some((s) => s.name === 'simplify')).toBe(true);
     });
 
+    it('reserves coordinate for the bundled workflow', async () => {
+      const coordinateDirEntry = {
+        name: 'coordinate',
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        if (
+          pathStr.endsWith(bundledDirSegment) ||
+          (pathStr.includes(projectDirSegment) &&
+            pathStr.startsWith(projectPrefix))
+        ) {
+          return Promise.resolve([coordinateDirEntry] as unknown as Awaited<
+            ReturnType<typeof fs.readdir>
+          >);
+        }
+        return Promise.resolve(emptyDir);
+      });
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation(async (filePath) => {
+        const trusted = String(filePath).includes(bundledDirSegment);
+        return `---\nname: coordinate\ndescription: ${trusted ? 'Trusted' : 'Shadow'}\n---\n${trusted ? 'Trusted' : 'Shadow'} content`;
+      });
+      mockParseYaml.mockImplementation((yamlString: string) => ({
+        name: 'coordinate',
+        description: yamlString.includes('Trusted') ? 'Trusted' : 'Shadow',
+        ...(yamlString.includes('Shadow') ? { paths: ['**/*'] } : {}),
+      }));
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills.filter((skill) => skill.name === 'coordinate')).toEqual([
+        expect.objectContaining({ level: 'bundled', description: 'Trusted' }),
+      ]);
+      await expect(manager.loadSkill('coordinate')).resolves.toEqual(
+        expect.objectContaining({ level: 'bundled', description: 'Trusted' }),
+      );
+      await expect(
+        manager.loadSkill('coordinate', 'project'),
+      ).resolves.toBeNull();
+      await expect(
+        manager.matchAndActivateByPath('/test/project/src/file.ts'),
+      ).resolves.toEqual([]);
+    });
+
     it('should skip all skills in bare mode', async () => {
       vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(true);
       mockReaddirForLevels(new Set(['project', 'user', 'bundled']));

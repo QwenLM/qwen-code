@@ -98,6 +98,7 @@ import type {
 } from '../../agents/runtime/agent-events.js';
 import {
   BuiltinAgentRegistry,
+  COORDINATOR_EXPLORE_SUBAGENT_TYPE,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
 } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -940,7 +941,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team. The explicit \`/coordinate\` workflow is the bounded exception: follow its instructions and do not create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -1122,6 +1123,29 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           // cache and schema catch up for subsequent calls.
           void this.refreshSubagents();
         }
+      }
+    }
+
+    if (
+      params.subagent_type?.toLowerCase() === COORDINATOR_EXPLORE_SUBAGENT_TYPE
+    ) {
+      if (!isTopLevelSession()) {
+        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" can only be launched by the top-level Leader.`;
+      }
+      if (params.run_in_background !== false) {
+        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" requires run_in_background: false.`;
+      }
+      if (params.model !== undefined) {
+        return `Parameter "model" cannot be used with subagent_type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}".`;
+      }
+      if (
+        params.name !== undefined ||
+        params.plan_mode_required !== undefined
+      ) {
+        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" cannot be used as a named or plan-required teammate.`;
+      }
+      if (params.isolation !== undefined || params.working_dir !== undefined) {
+        return `Subagent type "${COORDINATOR_EXPLORE_SUBAGENT_TYPE}" must use the Leader's current workspace.`;
       }
     }
 

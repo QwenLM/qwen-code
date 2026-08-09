@@ -16,6 +16,7 @@ import { ToolConfirmationOutcome } from '../tools.js';
 import { ToolNames } from '../tool-names.js';
 import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
+import { COORDINATOR_EXPLORE_SUBAGENT_TYPE } from '../../subagents/builtin-agents.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import {
@@ -771,6 +772,36 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Parameter "subagent_type" must be a non-empty string.',
       );
+    });
+
+    it('keeps coordinator investigators foreground, homogeneous, and Leader-owned', async () => {
+      const params: AgentParams = {
+        ...validParams,
+        subagent_type: COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+        run_in_background: false,
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(
+        agentTool.validateToolParams({
+          ...params,
+          run_in_background: true,
+        }),
+      ).toMatch(/requires run_in_background: false/i);
+      expect(
+        agentTool.validateToolParams({ ...params, model: 'high' }),
+      ).toMatch(/model.*cannot be used/i);
+      expect(
+        agentTool.validateToolParams({ ...params, name: 'worker' }),
+      ).toMatch(/named or plan-required teammate/i);
+      expect(
+        agentTool.validateToolParams({ ...params, working_dir: '/tmp/work' }),
+      ).toMatch(/current workspace/i);
+      await expect(
+        runWithAgentContext('nested', async () =>
+          agentTool.validateToolParams(params),
+        ),
+      ).resolves.toMatch(/top-level Leader/i);
     });
 
     it('rejects an empty model grade', () => {

@@ -5,6 +5,7 @@
  */
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
+import { READ_ONLY_REPOSITORY_TOOLS } from '../agents/runtime/subagent-plan-tool-policy.js';
 import type { SubagentConfig } from './types.js';
 
 /**
@@ -15,6 +16,7 @@ import type { SubagentConfig } from './types.js';
  * prefix when it's the default" logic.
  */
 export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
+export const COORDINATOR_EXPLORE_SUBAGENT_TYPE = 'coordinator-explore';
 
 /**
  * Registry of built-in subagents that are always available to all users.
@@ -43,6 +45,20 @@ Notes:
 - Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.
 - Return a concise report to the parent agent containing, as applicable: the result and key evidence, files changed, verification performed and its outcome, and remaining issues or blockers.
 - Include code snippets only when the exact text is load-bearing (e.g., a bug you found or a function signature the caller asked for); do not recap code you merely read.`,
+    },
+    {
+      name: COORDINATOR_EXPLORE_SUBAGENT_TYPE,
+      description:
+        'Strictly read-only investigator used by the explicit /coordinate workflow.',
+      tools: [...READ_ONLY_REPOSITORY_TOOLS],
+      systemPrompt: `You are a read-only investigator working for a Qwen Code Leader. Complete only the assigned investigation and return concise, verifiable evidence.
+
+Rules:
+- Do not modify files or system state.
+- Do not delegate, ask questions, or expand the assignment.
+- Cite relevant absolute file paths and line numbers when available.
+- Distinguish verified facts, inferences, disagreements, and blockers.
+- Return only the findings the Leader needs to synthesize or implement the task.`,
     },
     {
       name: 'Explore',
@@ -301,6 +317,10 @@ Guidelines:
     return this.BUILTIN_AGENTS.some(
       (agent) => agent.name.toLowerCase() === lowerName,
     );
+  }
+
+  static isReservedBuiltinAgent(name: string): boolean {
+    return name.toLowerCase() === COORDINATOR_EXPLORE_SUBAGENT_TYPE;
   }
 
   /**
