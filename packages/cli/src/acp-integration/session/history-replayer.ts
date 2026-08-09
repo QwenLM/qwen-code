@@ -7,6 +7,7 @@
 import type {
   ChatRecord,
   GoalSnapshotV2,
+  GoalStateCause,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -40,6 +41,7 @@ export interface HistoryReplayPageOptions {
   finalizeDangling?: boolean;
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
+  goalCause?: GoalStateCause;
 }
 
 export interface HistoryReplayPageState {
@@ -159,6 +161,7 @@ export class HistoryReplayer {
             apiTimeMs: 0,
           },
       ...(options.goalState ? { goalState: options.goalState } : {}),
+      ...(options.goalCause ? { goalCause: options.goalCause } : {}),
     };
     return createTranscriptReplayMachine({
       initialState,

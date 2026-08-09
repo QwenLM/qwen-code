@@ -124,6 +124,14 @@ describe('projectGoalStateToLegacy', () => {
     expect(projected.goalTerminal).toBeNull();
   });
 
+  it('projects an internal checkpoint as legacy checking', () => {
+    const projected = projectGoalStateToLegacy(payload('checkpoint', 'active'));
+
+    expect(projected.goalStatus.kind).toBe('checking');
+    expect(projected.activeGoal).not.toBeNull();
+    expect(projected.goalTerminal).toBeNull();
+  });
+
   it('does not repeat an aborted terminal after a paused turn finishes', () => {
     const projected = projectGoalStateToLegacy(
       payload('turn_finished', 'paused'),
