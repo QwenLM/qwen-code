@@ -8,6 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
   isHardcodedProjectEnvExclusion,
@@ -36,6 +37,12 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes NODE_TLS_REJECT_UNAUTHORIZED so a project .env cannot disable TLS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'NODE_TLS_REJECT_UNAUTHORIZED',
+    );
+  });
+
+  it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
     );
   });
 

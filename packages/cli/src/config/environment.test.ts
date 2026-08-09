@@ -15,6 +15,7 @@ import {
   resetEnvironmentTrackingForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
+import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
 
 const TRACKED_ENV = [
@@ -71,6 +72,7 @@ const TRACKED_ENV = [
   'qwen_cli_entry',
   'Qwen_Cli_Entry',
   'QWEN_HOME',
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_RUNTIME_DIR',
   'QWEN_SERVER_TOKEN',
@@ -144,6 +146,7 @@ describe('buildRuntimeEnvironment', () => {
         'NPM_CONFIG_NODE_OPTIONS=--require ./bad.js',
         'QWEN_SERVER_TOKEN=dotenv-token',
         'QWEN_HOME=/tmp/ignored-qwen-home',
+        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD}=enforce`,
         '',
       ].join('\n'),
     );
@@ -166,6 +169,7 @@ describe('buildRuntimeEnvironment', () => {
           // line pins the settings.env gate in buildRuntimeEnvironment.
           NPM_CONFIG_NODE_OPTIONS: '--require ./bad.js',
           QWEN_RUNTIME_DIR: '/tmp/ignored-runtime-dir',
+          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'warn',
         },
       }),
       workspace,
@@ -187,6 +191,9 @@ describe('buildRuntimeEnvironment', () => {
     expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_HOME']).toBeUndefined();
     expect(snapshot.effectiveEnv['QWEN_RUNTIME_DIR']).toBeUndefined();
+    expect(
+      snapshot.effectiveEnv[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD],
+    ).toBeUndefined();
     expect(snapshot.overlayKeys).toEqual([
       'RUNTIME_DOTENV',
       'RUNTIME_EMPTY',
@@ -292,6 +299,7 @@ describe('loadEnvironment', () => {
           BASH_ENV: '/tmp/bad-profile',
           NODE_OPTIONS: '--require ./bad.js',
           QWEN_SERVER_TOKEN: 'bad-token',
+          [ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]: 'enforce',
         },
       }),
       workspace,
@@ -301,6 +309,7 @@ describe('loadEnvironment', () => {
     expect(process.env['BASH_ENV']).toBeUndefined();
     expect(process.env['NODE_OPTIONS']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD]).toBeUndefined();
   });
 
   // Regression for #8653: the daemon scrubs loader vars from process.env,

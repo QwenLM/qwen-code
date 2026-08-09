@@ -14,6 +14,8 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
 export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
 export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
+export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
+  'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
 
 // QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
 // credentials, installation IDs, etc.) is written. A project `.env` must never
@@ -31,6 +33,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   QWEN_CODE_DESKTOP_ENV,
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
+  // This is an operator rollout policy. A project must not be able to promote
+  // itself from the default shadow cohort into warning or enforcement.
+  ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
