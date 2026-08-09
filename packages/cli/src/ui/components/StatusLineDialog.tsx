@@ -177,7 +177,7 @@ export function StatusLineDialog({
   const handleConfirm = useCallback(() => {
     const effectiveScope = getEffectiveStatusLineScope(settings);
     const hideContextIndicator = normalizeStatusLinePresetConfig(
-      settings.merged.ui?.statusLine,
+      settings.forScope(effectiveScope).settings.ui?.statusLine,
     )?.hideContextIndicator;
     const savedConfig = {
       ...presetConfig,

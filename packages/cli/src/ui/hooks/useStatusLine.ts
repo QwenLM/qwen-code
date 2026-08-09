@@ -120,9 +120,13 @@ const CONTEXT_PRESET_ITEM_IDS = new Set<StatusLinePresetItemId>([
  */
 export function resolveHideContextIndicator(
   config: StatusLineConfig | undefined,
+  isContextOverLimit = false,
 ): boolean {
   if (typeof config?.hideContextIndicator === 'boolean') {
     return config.hideContextIndicator;
+  }
+  if (isContextOverLimit) {
+    return false;
   }
   if (config?.type === 'preset') {
     return config.items.some((item) => CONTEXT_PRESET_ITEM_IDS.has(item));
@@ -760,6 +764,10 @@ export function useStatusLine(): {
     respectUserColors:
       statusLineConfig?.type === 'command' &&
       statusLineConfig.respectUserColors === true,
-    hideContextIndicator: resolveHideContextIndicator(statusLineConfig),
+    hideContextIndicator: resolveHideContextIndicator(
+      statusLineConfig,
+      uiState.sessionStats.lastPromptTokenCount >
+        (config.getContentGeneratorConfig()?.contextWindowSize ?? Infinity),
+    ),
   };
 }

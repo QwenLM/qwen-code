@@ -207,26 +207,81 @@ describe('StatusLineDialog', () => {
     });
   });
 
-  it('saves back to workspace settings when workspace config is effective', async () => {
+  it.each([false, true])(
+    'saves hideContextIndicator=%s back to the effective workspace scope',
+    async (hideContextIndicator) => {
+      const settings = createSettings();
+      settings.workspace.settings.ui = {
+        statusLine: {
+          type: 'preset',
+          useThemeColors: false,
+          items: ['model'],
+          hideContextIndicator,
+        },
+      };
+      settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
+      settings.recomputeMerged();
+      const addItem = vi.fn();
+      const { stdin } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <StatusLineDialog
+            settings={settings}
+            config={config}
+            uiState={uiState}
+            addItem={addItem}
+            onClose={vi.fn()}
+            availableTerminalHeight={18}
+          />
+        </KeypressProvider>,
+      );
+
+      act(() => {
+        stdin.write('\r');
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(settings.forScope(SettingScope.User).settings.ui).toBeUndefined();
+      expect(settings.forScope(SettingScope.Workspace).settings.ui).toEqual({
+        statusLine: {
+          type: 'preset',
+          useThemeColors: false,
+          items: ['model'],
+          hideContextIndicator,
+        },
+      });
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: 'Status line preset saved to workspace settings.',
+        },
+        expect.any(Number),
+      );
+    },
+  );
+
+  it('does not copy a user override into workspace settings', async () => {
     const settings = createSettings();
+    settings.user.settings.ui = {
+      statusLine: {
+        type: 'preset',
+        items: ['model'],
+        hideContextIndicator: true,
+      },
+    };
     settings.workspace.settings.ui = {
       statusLine: {
         type: 'preset',
-        useThemeColors: false,
-        items: ['model'],
-        hideContextIndicator: false,
+        items: ['git-branch'],
       },
     };
-    settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
     settings.recomputeMerged();
-    const addItem = vi.fn();
     const { stdin } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <StatusLineDialog
           settings={settings}
           config={config}
           uiState={uiState}
-          addItem={addItem}
+          addItem={vi.fn()}
           onClose={vi.fn()}
           availableTerminalHeight={18}
         />
@@ -238,22 +293,12 @@ describe('StatusLineDialog', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(settings.forScope(SettingScope.User).settings.ui).toBeUndefined();
-    expect(settings.forScope(SettingScope.Workspace).settings.ui).toEqual({
-      statusLine: {
-        type: 'preset',
-        useThemeColors: false,
-        items: ['model'],
-        hideContextIndicator: false,
-      },
-    });
-    expect(addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.INFO,
-        text: 'Status line preset saved to workspace settings.',
-      },
-      expect.any(Number),
-    );
+    expect(
+      settings.forScope(SettingScope.Workspace).settings.ui?.statusLine,
+    ).not.toHaveProperty('hideContextIndicator');
+    expect(
+      settings.forScope(SettingScope.User).settings.ui?.statusLine,
+    ).toHaveProperty('hideContextIndicator', true);
   });
 
   it('does not append navigation keys to the search query', async () => {

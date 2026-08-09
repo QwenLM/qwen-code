@@ -379,6 +379,16 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
+    it('keeps the footer over-limit warning for an automatically hidden preset', () => {
+      mockUIState.sessionStats.lastPromptTokenCount = 131073;
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['context-used'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
     it('keeps the footer indicator when the status line is disabled (null)', () => {
       setStatusLineConfig(null);
       const { result } = renderHook(() => useStatusLine());
