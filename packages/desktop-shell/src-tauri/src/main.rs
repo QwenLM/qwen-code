@@ -102,6 +102,15 @@ fn main() {
                     .window_dirty
                     .store(true, Ordering::Relaxed);
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested { api, .. } => {
+                save_window_state(app_handle);
+                api.prevent_close();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
             _ => {}
         },
@@ -114,6 +123,8 @@ fn main() {
             save_window_state(app_handle);
             stop_runtime(app_handle);
         }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => focus_main_window(app_handle),
         _ => {}
     });
 }
