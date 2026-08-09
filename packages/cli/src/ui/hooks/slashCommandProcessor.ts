@@ -30,6 +30,7 @@ import {
   removeMCPStatusChangeListener,
   MCPServerStatus,
   recordSkillInvocation,
+  type ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -85,6 +86,7 @@ import {
   formatUserPromptExpansionBlockedMessage,
   serializeUserPromptExpansionPrompt,
 } from '../../utils/userPromptExpansionHook.js';
+import { combineToolInvocationGuards } from '../../utils/tool-invocation-guards.js';
 
 type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
@@ -907,6 +909,7 @@ export const useSlashCommandProcessor = (
           let firstModelOverride: string | undefined;
           const onCompleteCallbacks: Array<() => Promise<void>> = [];
           let refreshContextFilesOnWrite = false;
+          const toolInvocationGuards: ToolInvocationGuard[] = [];
 
           for (const skill of stackedResult.skills) {
             if (!skill.action) continue;
@@ -926,6 +929,9 @@ export const useSlashCommandProcessor = (
               refreshContextFilesOnWrite ||= Boolean(
                 skillResult.refreshContextFilesOnWrite,
               );
+              if (skillResult.toolInvocationGuard) {
+                toolInvocationGuards.push(skillResult.toolInvocationGuard);
+              }
               if (skillResult.onComplete) {
                 onCompleteCallbacks.push(skillResult.onComplete);
               }
@@ -973,6 +979,8 @@ export const useSlashCommandProcessor = (
 
           // Combine all content into a single submit_prompt
           const mergedContent: PartListUnion = combinedContent.flat();
+          const toolInvocationGuard =
+            combineToolInvocationGuards(toolInvocationGuards);
           return {
             type: 'submit_prompt',
             content: mergedContent,
@@ -982,6 +990,7 @@ export const useSlashCommandProcessor = (
             ...(refreshContextFilesOnWrite
               ? { refreshContextFilesOnWrite: true }
               : {}),
+            ...(toolInvocationGuard ? { toolInvocationGuard } : {}),
             ...(onCompleteCallbacks.length
               ? {
                   onComplete: async () => {

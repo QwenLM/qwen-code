@@ -75,6 +75,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import { recoverManualDreamToolInvocationGuard } from './utils/tool-invocation-guards.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -1031,6 +1032,10 @@ export async function runNonInteractive(
         }
 
         initialPartList = recoveryPlan.continuation.parts;
+        fullTurnToolInvocationGuard = recoverManualDreamToolInvocationGuard(
+          config,
+          recoveryPlan.originalApiHistory,
+        );
         if (recoveryPlan.continuation.mode === 'retry_user_parts') {
           continueSendType = SendMessageType.Retry;
         } else {
@@ -2131,35 +2136,26 @@ export async function runNonInteractive(
 
       let currentPromptId = prompt_id;
       while (true) {
-        // Drain pending teammate messages into the conversation.
-        // sendMessageStream only reads currentMessages[0].parts,
-        // so teammate text must be merged into that same parts
-        // array to avoid being silently dropped.
-        // Skip on the first turn to avoid replacing the user's
-        // initial query — early teammate messages will be picked
-        // up on the next iteration.
+        // Drain pending teammate messages only at a logical turn boundary.
+        // A teammate message is fresh external input, so merging it into an
+        // unsent tool response would make one persisted user entry belong to
+        // two different policy turns. Defer it until the current tool/Goal
+        // chain finalizes; the shouldFinalize path below clears any owning
+        // slash-command guard before looping back here.
         let isTeammateTurn = false;
-        if (!isFirstTurn && pendingTeammateMessages.length > 0) {
+        if (
+          !isFirstTurn &&
+          pendingTeammateMessages.length > 0 &&
+          !hasUnsentToolResponse &&
+          !activeGoalTurn
+        ) {
           const batch = pendingTeammateMessages.splice(0);
           const teammatePart = { text: batch.join('\n\n') };
-          if ((hasUnsentToolResponse || activeGoalTurn) && currentMessages[0]) {
-            currentMessages[0].parts = [
-              ...(currentMessages[0].parts || []),
-              teammatePart,
-            ];
-          } else {
-            currentMessages = [{ role: 'user', parts: [teammatePart] }];
-          }
-          // Treat BOTH the standalone and the merged-into-tool-response
-          // cases as a teammate turn. Teammate text is fresh external
-          // input, so the loop detector must reset — otherwise a leader
-          // that polls task_list while teammate messages keep merging
-          // into its tool-response turns climbs the identical-tool-call
-          // counter and trips a false LoopDetected. The Teammate send
-          // path prepends nothing to the request, so a merged turn's
-          // leading functionResponse parts stay paired with their
-          // functionCall.
+          currentMessages = [{ role: 'user', parts: [teammatePart] }];
           isTeammateTurn = true;
+          // Defensive clear for callers that enter this boundary without
+          // passing through shouldFinalize (the normal path already cleared).
+          fullTurnToolInvocationGuard = undefined;
         }
         hasUnsentToolResponse = false;
 
@@ -2329,6 +2325,10 @@ export async function runNonInteractive(
             return emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
+            // The slash-command guard belongs only to the turn that just
+            // terminated. Goal work dequeued below is a new turn and must not
+            // inherit the expired /dream policy.
+            fullTurnToolInvocationGuard = undefined;
             geminiClient.addHistory({
               role: 'user',
               parts: toolResponseParts,
@@ -2357,6 +2357,9 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          // Clear before any Goal/teammate continuation can loop back through
+          // the shared tool-batch call site.
+          fullTurnToolInvocationGuard = undefined;
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;
             await config.getChatRecordingService?.()?.flush();

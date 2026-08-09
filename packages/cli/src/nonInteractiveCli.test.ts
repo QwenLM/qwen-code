@@ -11,6 +11,7 @@ import type {
   GoalJournal,
   GoalRuntime,
   GoalStateRecordPayloadV2,
+  GoalTurnHost,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -32,6 +33,7 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
   LoopType,
   CronScheduler,
@@ -61,6 +63,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+import { MANUAL_DREAM_TOOL_GUARD_MARKER } from './utils/tool-invocation-guards.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
 import {
@@ -1532,6 +1535,61 @@ describe('runNonInteractive', () => {
         expect.any(AbortSignal),
         'prompt-c1',
         expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+    });
+
+    it('reconstructs the /dream tool guard for an interrupted continuation', async () => {
+      setupMetricsMock();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `${SYSTEM_REMINDER_OPEN}\nToday is tomorrow\n${SYSTEM_REMINDER_CLOSE}`,
+              },
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'deterministic recovered dream prompt' },
+              { text: 'context appended by UserPromptSubmit' },
+            ],
+          },
+        ]),
+      }));
+      const toolRequest: ToolCallRequestInfo = {
+        callId: 'continued-dream-tool',
+        name: 'write_file',
+        args: { file_path: '/memory/pinned.md' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-continued-dream',
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: toolRequest.callId,
+        responseParts: [{ text: 'denied' }],
+      });
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: GeminiEventType.ToolCallRequest, value: toolRequest },
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-continued-dream',
+        { continueInterrupted: true },
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        toolRequest,
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          toolInvocationGuard: expect.any(Function),
+        }),
       );
     });
 
@@ -4340,14 +4398,28 @@ describe('runNonInteractive', () => {
       isClientInitiated: false,
       prompt_id: 'prompt-guarded-headless',
     };
-    mockCoreExecuteToolCall.mockResolvedValue({
-      callId: toolRequest.callId,
-      responseParts: [{ text: 'tool result' }],
-    });
+    const secondToolRequest: ToolCallRequestInfo = {
+      callId: 'guarded-headless-call-2',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-headless',
+    };
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config: Config, request: ToolCallRequestInfo) => ({
+        callId: request.callId,
+        responseParts: [{ text: `tool result ${request.callId}` }],
+      }),
+    );
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(
         createStreamFromEvents([
           { type: GeminiEventType.ToolCallRequest, value: toolRequest },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.ToolCallRequest, value: secondToolRequest },
         ]),
       )
       .mockReturnValueOnce(
@@ -4369,6 +4441,228 @@ describe('runNonInteractive', () => {
       toolRequest,
       expect.any(AbortSignal),
       expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      secondToolRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+  });
+
+  it('defers teammate input until the guarded tool-result chain ends', async () => {
+    setupMetricsMock();
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'guarded-teammate-turn',
+        description: 'a guarded prompt command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Guarded prompt' }],
+          toolInvocationGuard,
+        }),
+      },
+    ]);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    const guardedRequest: ToolCallRequestInfo = {
+      callId: 'guarded-before-teammate',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-teammate',
+    };
+    const guardedContinuationRequest: ToolCallRequestInfo = {
+      callId: 'guarded-before-deferred-teammate',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-teammate',
+    };
+    const teammateRequest: ToolCallRequestInfo = {
+      callId: 'unguarded-after-teammate',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-teammate',
+    };
+    mockCoreExecuteToolCall
+      .mockImplementationOnce(async () => {
+        leaderMessageCallback?.('Fresh teammate input');
+        return {
+          callId: guardedRequest.callId,
+          responseParts: [{ text: 'guarded tool result' }],
+        };
+      })
+      .mockResolvedValueOnce({
+        callId: guardedContinuationRequest.callId,
+        responseParts: [{ text: 'guarded continuation result' }],
+      })
+      .mockResolvedValueOnce({
+        callId: teammateRequest.callId,
+        responseParts: [{ text: 'teammate turn tool result' }],
+      });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.ToolCallRequest, value: guardedRequest },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: guardedContinuationRequest,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.ToolCallRequest, value: teammateRequest },
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded-teammate-turn',
+      'prompt-guarded-teammate',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      1,
+      mockConfig,
+      guardedRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      2,
+      mockConfig,
+      guardedContinuationRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      3,
+      mockConfig,
+      teammateRequest,
+      expect.any(AbortSignal),
+      expect.not.objectContaining({
+        toolInvocationGuard: expect.anything(),
+      }),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'guarded tool result' }],
+      expect.any(AbortSignal),
+      'prompt-guarded-teammate',
+      { type: SendMessageType.ToolResult },
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      4,
+      [{ text: 'Fresh teammate input' }],
+      expect.any(AbortSignal),
+      expect.stringContaining('/teammate/'),
+      { type: SendMessageType.Teammate },
+    );
+  });
+
+  it('clears a slash-command guard before a queued Goal segment', async () => {
+    setupMetricsMock();
+    await prepareGoalState('active');
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'guarded-goal-turn',
+        description: 'a guarded prompt command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Guarded prompt' }],
+          toolInvocationGuard,
+        }),
+      },
+    ]);
+
+    let boundGoalHost: GoalTurnHost | undefined;
+    mockConfig.bindGoalTurnHost = vi.fn((host: GoalTurnHost) => {
+      boundGoalHost = host;
+      return () => {};
+    });
+    const goal = goalRuntime.getSnapshot().goal!;
+    const nextPermit: GoalTurnPermit = {
+      goalId: goal.goalId,
+      revision: goal.revision,
+      turnId: 'runtime-after-guarded-turn',
+    };
+    let finishCount = 0;
+    vi.spyOn(goalRuntime, 'finishTurn').mockImplementation(async () => {
+      finishCount += 1;
+      if (finishCount === 1) {
+        await boundGoalHost!.startGoalTurn({
+          permit: nextPermit,
+          continuationContext: 'continue the active goal',
+        });
+      }
+    });
+
+    const goalToolRequest: ToolCallRequestInfo = {
+      callId: 'goal-tool-after-guarded-turn',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-goal-turn',
+      goalContext: nextPermit,
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: goalToolRequest.callId,
+      responseParts: [{ text: 'goal tool result' }],
+      terminateTurn: true,
+    });
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.ToolCallRequest, value: goalToolRequest },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded-goal-turn',
+      'prompt-guarded-goal-turn',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      goalToolRequest,
+      expect.any(AbortSignal),
+      expect.not.objectContaining({
+        toolInvocationGuard: expect.anything(),
+      }),
     );
   });
 

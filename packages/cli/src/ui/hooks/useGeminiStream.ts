@@ -3108,6 +3108,7 @@ export const useGeminiStream = (
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
+        onToolContinuationScheduled?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
         goal?: QueuedGoalTurn;
@@ -3148,6 +3149,21 @@ export const useGeminiStream = (
         submitType === SendMessageType.UserQuery
           ? metadata?.submittedPrompt
           : undefined;
+      const replacesUserTurnGuard =
+        submitType === SendMessageType.UserQuery &&
+        !allowConcurrentBtwDuringResponse;
+      const previousUserTurnGuard = replacesUserTurnGuard
+        ? {
+            submitted: submitPromptToolInvocationGuardRef.current,
+            retry: lastPromptToolInvocationGuardRef.current,
+          }
+        : undefined;
+      const restorePreviousUserTurnGuard = () => {
+        if (!previousUserTurnGuard) return;
+        submitPromptToolInvocationGuardRef.current =
+          previousUserTurnGuard.submitted;
+        lastPromptToolInvocationGuardRef.current = previousUserTurnGuard.retry;
+      };
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
@@ -3214,13 +3230,13 @@ export const useGeminiStream = (
         }
       }
 
-      // A command-provided guard belongs to one real-user turn and its tool
-      // continuations. Automatic traffic neither clears nor consumes it; the
-      // next real user query replaces it before command preprocessing.
-      if (
-        submitType === SendMessageType.UserQuery &&
-        !allowConcurrentBtwDuringResponse
-      ) {
+      // A command-provided guard belongs to one model turn and its tool
+      // continuations. Clear it before command preprocessing so a new
+      // submit_prompt can replace it, but restore it below if preprocessing
+      // handles the input without starting a model turn. That keeps Ctrl+Y
+      // retry attached to the failed guarded turn across commands such as
+      // /help and /stats.
+      if (replacesUserTurnGuard) {
         submitPromptToolInvocationGuardRef.current = undefined;
         lastPromptToolInvocationGuardRef.current = undefined;
       }
@@ -3372,6 +3388,7 @@ export const useGeminiStream = (
                     allowConcurrentBtwDuringResponse,
                   );
         } catch (error) {
+          restorePreviousUserTurnGuard();
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
           metadata?.onAdmissionFailed?.();
@@ -3380,6 +3397,7 @@ export const useGeminiStream = (
         const { queryToSend, shouldProceed } = preparedQuery;
 
         if (!shouldProceed || queryToSend === null) {
+          restorePreviousUserTurnGuard();
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
           releaseSubmissionLease();
           metadata?.onDeliveryFailed?.();
@@ -3530,6 +3548,7 @@ export const useGeminiStream = (
 
         let cleanupReviewLease = false;
         let keepGoalBinding = false;
+        let nestedToolContinuationScheduled = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -3609,6 +3628,9 @@ export const useGeminiStream = (
             goalBinding = activeGoalTurnRef.current;
           }
           keepGoalBinding = processingResult.scheduledToolContinuation;
+          if (processingResult.scheduledToolContinuation) {
+            metadata?.onToolContinuationScheduled?.();
+          }
 
           if (
             processingResult.status === StreamProcessingStatus.UserCancelled
@@ -3680,7 +3702,13 @@ export const useGeminiStream = (
               responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
-              { goalBinding },
+              {
+                goalBinding,
+                onToolContinuationScheduled: () => {
+                  nestedToolContinuationScheduled = true;
+                  metadata?.onToolContinuationScheduled?.();
+                },
+              },
             );
             if (
               goalBinding &&
@@ -3726,6 +3754,7 @@ export const useGeminiStream = (
 
           if (
             !processingResult.scheduledToolContinuation &&
+            !nestedToolContinuationScheduled &&
             !lastPromptErroredRef.current &&
             submitPromptToolInvocationGuardRef.current?.promptId === prompt_id
           ) {

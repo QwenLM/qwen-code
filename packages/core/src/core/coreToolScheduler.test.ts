@@ -10004,6 +10004,58 @@ describe('CoreToolScheduler Plan shell routing', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('keeps a per-schedule guard after PermissionRequest rewrites args', async () => {
+    const execute = vi.fn();
+    const turnGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, reason: 'turn policy denied' });
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output:
+            request.eventName === 'PermissionRequest'
+              ? {
+                  hookSpecificOutput: {
+                    decision: {
+                      behavior: 'allow',
+                      updatedInput: { command: 'echo rewritten' },
+                    },
+                  },
+                }
+              : { decision: 'allow' },
+        }),
+      ),
+    } as unknown as MessageBus;
+    const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
+      tools: [shellTool({ permission: 'ask', execute })],
+      mode: () => ApprovalMode.DEFAULT,
+      messageBus,
+      disableHooks: false,
+      targetDir: () => '/workspace',
+    });
+
+    await scheduler.schedule(
+      [request('guarded-rewrite', 'echo original')],
+      new AbortController().signal,
+      undefined,
+      turnGuard,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(turnGuard).toHaveBeenCalledWith({
+      callId: 'guarded-rewrite',
+      toolName: ToolNames.SHELL,
+      args: { command: 'echo rewritten' },
+      signal: expect.any(AbortSignal),
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('applies an additional guard to one schedule without leaking it', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'ok',
@@ -10036,10 +10088,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
     });
     expect(execute).not.toHaveBeenCalled();
 
-    await scheduler.schedule(
-      [request('unguarded-next-turn', 'git status')],
-      new AbortController().signal,
-    );
+    await scheduler.schedule([firstRequest], new AbortController().signal);
     await vi.waitFor(() =>
       expect(onAllToolCallsComplete).toHaveBeenCalledTimes(2),
     );
@@ -10069,44 +10118,77 @@ describe('CoreToolScheduler Plan shell routing', () => {
       execute,
     });
     const guardOrder: string[] = [];
-    const firstGuard = vi.fn(async () => {
+    const guardContexts: Array<InvocationContextV1 | undefined> = [];
+    const firstGuard = vi.fn(async (context) => {
       guardOrder.push('first');
+      guardContexts.push(context.invocationContext);
       return { allowed: true } as const;
     });
-    const secondGuard = vi.fn(async () => {
+    const secondGuard = vi.fn(async (context) => {
       guardOrder.push('second');
+      guardContexts.push(context.invocationContext);
+      return { allowed: true } as const;
+    });
+    const thirdGuard = vi.fn(async (context) => {
+      guardOrder.push('third');
+      guardContexts.push(context.invocationContext);
       return { allowed: true } as const;
     });
     const { scheduler, onAllToolCallsComplete } = buildPlanShellScheduler({
       tools: [tool],
     });
     const sharedRequest = request('reused-queued-request', 'git status');
+    const firstContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'first-session',
+      promptId: 'first-prompt',
+    };
+    const secondContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'second-session',
+      promptId: 'second-prompt',
+    };
 
-    const firstSchedule = scheduler.schedule(
-      [sharedRequest],
-      new AbortController().signal,
-      undefined,
-      firstGuard,
+    const firstSchedule = runWithInvocationContext(firstContext, () =>
+      scheduler.schedule(
+        [sharedRequest],
+        new AbortController().signal,
+        undefined,
+        firstGuard,
+      ),
     );
     await vi.waitFor(() => expect(permissionCallCount).toBe(1));
-    const secondSchedule = scheduler.schedule(
-      [sharedRequest],
-      new AbortController().signal,
-      undefined,
-      secondGuard,
+    const secondSchedule = runWithInvocationContext(secondContext, () =>
+      scheduler.schedule(
+        [sharedRequest],
+        new AbortController().signal,
+        undefined,
+        secondGuard,
+      ),
+    );
+    const thirdSchedule = runWithInvocationContext(undefined, () =>
+      scheduler.schedule(
+        [sharedRequest],
+        new AbortController().signal,
+        undefined,
+        thirdGuard,
+      ),
     );
 
     releaseFirstPermission();
     await firstSchedule;
     await secondSchedule;
+    await thirdSchedule;
     await vi.waitFor(() =>
-      expect(onAllToolCallsComplete).toHaveBeenCalledTimes(2),
+      expect(onAllToolCallsComplete).toHaveBeenCalledTimes(3),
     );
 
-    expect(guardOrder).toEqual(['first', 'second']);
+    expect(guardOrder).toEqual(['first', 'second', 'third']);
+    expect(guardContexts).toEqual([firstContext, secondContext, undefined]);
     expect(firstGuard).toHaveBeenCalledOnce();
     expect(secondGuard).toHaveBeenCalledOnce();
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(thirdGuard).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(3);
   });
 
   it('cancels without execution when aborted while awaiting the host guard', async () => {

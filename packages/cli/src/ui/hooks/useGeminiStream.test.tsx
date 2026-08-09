@@ -8673,11 +8673,47 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('/dream');
+        await result.current.submitQuery(
+          '/dream',
+          SendMessageType.UserQuery,
+          'guarded-prompt',
+        );
       });
 
       expect(mockScheduleToolCalls).toHaveBeenCalledWith(
         [guardedRequest],
+        expect.any(AbortSignal),
+        undefined,
+        toolInvocationGuard,
+      );
+
+      const continuationRequest: ToolCallRequestInfo = {
+        callId: 'guarded-continuation-call',
+        name: 'read_file',
+        args: { file_path: '/memory/topic.md' },
+        isClientInitiated: false,
+        prompt_id: 'guarded-prompt',
+      };
+      mockScheduleToolCalls.mockClear();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: continuationRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [{ text: 'guarded tool result' }],
+          SendMessageType.ToolResult,
+          'guarded-prompt',
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [continuationRequest],
         expect.any(AbortSignal),
         undefined,
         toolInvocationGuard,
@@ -8803,6 +8839,166 @@ describe('useGeminiStream', () => {
         [ordinaryRequest],
         expect.any(AbortSignal),
         undefined,
+      );
+    });
+
+    it('retains a failed guarded turn across a handled command and retry', async () => {
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      mockHandleSlashCommand.mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: 'dream prompt',
+        toolInvocationGuard,
+      });
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'dream failed' } },
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          '/dream',
+          SendMessageType.UserQuery,
+          'failed-dream-prompt',
+        );
+      });
+
+      mockHandleSlashCommand.mockResolvedValueOnce({ type: 'handled' });
+      await act(async () => {
+        await result.current.submitQuery('/help');
+      });
+
+      const retryRequest: ToolCallRequestInfo = {
+        callId: 'retried-dream-call',
+        name: 'write_file',
+        args: { file_path: '/memory/pinned.md' },
+        isClientInitiated: false,
+        prompt_id: 'retried-dream-prompt',
+      };
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: retryRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'dream prompt',
+          SendMessageType.Retry,
+          'retried-dream-prompt',
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [retryRequest],
+        expect.any(AbortSignal),
+        undefined,
+        toolInvocationGuard,
+      );
+    });
+
+    it('retains a guard when a duplicate-only outer turn nests a tool continuation', async () => {
+      const promptId = 'guarded-duplicate-prompt';
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      const client = new MockedGeminiClientClass(mockConfig);
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['duplicate-provider-call']));
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: 'dream prompt',
+        toolInvocationGuard,
+      });
+      const freshRequest: ToolCallRequestInfo = {
+        callId: 'fresh-after-duplicate',
+        providerCallId: 'fresh-after-duplicate',
+        name: 'read_file',
+        args: { file_path: '/memory/topic.md' },
+        isClientInitiated: false,
+        prompt_id: promptId,
+      };
+      const nextRequest: ToolCallRequestInfo = {
+        callId: 'next-after-fresh',
+        providerCallId: 'next-after-fresh',
+        name: 'write_file',
+        args: { file_path: '/memory/topic.md' },
+        isClientInitiated: false,
+        prompt_id: promptId,
+      };
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'duplicate-provider-call',
+                providerCallId: 'duplicate-provider-call',
+                name: 'read_file',
+                args: { file_path: '/memory/topic.md' },
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: freshRequest,
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: nextRequest,
+            };
+          })(),
+        );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery(
+          '/dream',
+          SendMessageType.UserQuery,
+          promptId,
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [freshRequest],
+        expect.any(AbortSignal),
+        undefined,
+        toolInvocationGuard,
+      );
+      mockScheduleToolCalls.mockClear();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          [{ text: 'fresh tool result' }],
+          SendMessageType.ToolResult,
+          promptId,
+        );
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [nextRequest],
+        expect.any(AbortSignal),
+        undefined,
+        toolInvocationGuard,
       );
     });
 

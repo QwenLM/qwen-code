@@ -11,6 +11,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { MANUAL_DREAM_TOOL_GUARD_MARKER } from '../../utils/tool-invocation-guards.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 
@@ -55,12 +56,16 @@ export const dreamCommand: SlashCommand = {
         context.executionMode === 'non_interactive'
       ) {
         recordDream().catch(() => {});
-        return { type: 'submit_prompt', content: prompt, toolInvocationGuard };
+        return {
+          type: 'submit_prompt',
+          content: [{ text: MANUAL_DREAM_TOOL_GUARD_MARKER }, { text: prompt }],
+          toolInvocationGuard,
+        };
       }
 
       return {
         type: 'submit_prompt',
-        content: prompt,
+        content: [{ text: MANUAL_DREAM_TOOL_GUARD_MARKER }, { text: prompt }],
         onComplete: recordDream,
         toolInvocationGuard,
       };

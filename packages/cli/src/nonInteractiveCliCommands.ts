@@ -46,6 +46,7 @@ import {
   formatUserPromptExpansionBlockedMessage,
   serializeUserPromptExpansionPrompt,
 } from './utils/userPromptExpansionHook.js';
+import { combineToolInvocationGuards } from './utils/tool-invocation-guards.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
@@ -435,6 +436,7 @@ export const handleSlashCommand = async (
     const combinedContent: PartListUnion[] = [];
     let firstModelOverride: string | undefined;
     let refreshContextFilesOnWrite = false;
+    const toolInvocationGuards: ToolInvocationGuard[] = [];
     const onCompleteCallbacks: Array<() => Promise<void>> = [];
     const successfulSkillCommands: SlashCommand[] = [];
 
@@ -457,6 +459,9 @@ export const handleSlashCommand = async (
         refreshContextFilesOnWrite ||= Boolean(
           skillResult.refreshContextFilesOnWrite,
         );
+        if (skillResult.toolInvocationGuard) {
+          toolInvocationGuards.push(skillResult.toolInvocationGuard);
+        }
         if (skillResult.onComplete) {
           onCompleteCallbacks.push(skillResult.onComplete);
         }
@@ -477,6 +482,8 @@ export const handleSlashCommand = async (
     }
 
     const mergedContent: PartListUnion = combinedContent.flat();
+    const toolInvocationGuard =
+      combineToolInvocationGuards(toolInvocationGuards);
 
     const hookResult = await fireUserPromptExpansionHook(
       config,
@@ -499,6 +506,7 @@ export const handleSlashCommand = async (
       ...(refreshContextFilesOnWrite
         ? { refreshContextFilesOnWrite: true }
         : {}),
+      ...(toolInvocationGuard ? { toolInvocationGuard } : {}),
       ...(onCompleteCallbacks.length
         ? {
             onComplete: async () => {

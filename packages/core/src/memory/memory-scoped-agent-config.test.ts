@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
@@ -538,6 +539,39 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toEqual({
       allowed: false,
       reason: 'ManagedAutoMemory(agent: unavailable in this scoped turn)',
+    });
+  });
+
+  it('applies repository-local Git safety checks in the requested directory', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: projectRoot });
+    const guard = createManualDreamToolInvocationGuard(projectRoot);
+    const evaluate = (command: string) =>
+      guard({
+        callId: `call-${command}`,
+        toolName: ToolNames.SHELL,
+        args: { command, directory: projectRoot },
+        signal: new AbortController().signal,
+      });
+
+    execFileSync(
+      'git',
+      ['config', 'diff.external', 'untrusted-external-diff'],
+      { cwd: projectRoot },
+    );
+    await expect(evaluate('git diff')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+
+    execFileSync('git', ['config', '--unset', 'diff.external'], {
+      cwd: projectRoot,
+    });
+    execFileSync('git', ['config', 'core.fsmonitor', 'untrusted-fsmonitor'], {
+      cwd: projectRoot,
+    });
+    await expect(evaluate('git status')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
     });
   });
 

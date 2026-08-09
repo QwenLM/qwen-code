@@ -193,6 +193,7 @@ import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vis
 import {
   getInvocationContext,
   runWithInvocationContext,
+  type InvocationContextV1,
 } from '../utils/invocation-context.js';
 import {
   evaluateToolInvocationGuards,
@@ -1387,6 +1388,7 @@ export class CoreToolScheduler {
     signal: AbortSignal;
     runtimeView?: RuntimeContentGeneratorView;
     toolInvocationGuard?: ToolInvocationGuard;
+    invocationContext?: InvocationContextV1;
     resolve: () => void;
     reject: (reason?: Error) => void;
   }> = [];
@@ -1673,6 +1675,24 @@ export class CoreToolScheduler {
         return call;
       }
 
+      const updatedRequest = {
+        ...call.request,
+        args: args as Record<string, unknown>,
+      };
+      const requestToolInvocationGuard = this.requestToolInvocationGuards.get(
+        call.request,
+      );
+      if (requestToolInvocationGuard) {
+        // Argument edits replace the request object. Keep the turn-scoped
+        // guard attached to the replacement so hook-provided updatedInput and
+        // approval-dialog modifications cannot bypass it by changing object
+        // identity before execution.
+        this.requestToolInvocationGuards.set(
+          updatedRequest,
+          requestToolInvocationGuard,
+        );
+      }
+
       const invocationOrError = runInRequestGoalContext(call.request, () =>
         this.buildInvocation(
           call.tool,
@@ -1690,7 +1710,7 @@ export class CoreToolScheduler {
           'not_started',
         );
         return {
-          request: { ...call.request, args: args as Record<string, unknown> },
+          request: updatedRequest,
           status: 'error',
           tool: call.tool,
           response,
@@ -1700,7 +1720,7 @@ export class CoreToolScheduler {
       argsUpdated = true;
       return {
         ...call,
-        request: { ...call.request, args: args as Record<string, unknown> },
+        request: updatedRequest,
         invocation: invocationOrError,
       };
     });
@@ -2171,6 +2191,7 @@ export class CoreToolScheduler {
           signal,
           runtimeView,
           toolInvocationGuard,
+          invocationContext: getInvocationContext(),
           resolve: () => {
             signal.removeEventListener('abort', abortHandler);
             resolve();
@@ -2194,14 +2215,20 @@ export class CoreToolScheduler {
       return;
     }
     const next = this.requestQueue.shift()!;
-    this._schedule(
-      next.request,
-      next.signal,
-      next.runtimeView,
-      next.toolInvocationGuard,
-    )
-      .then(next.resolve)
-      .catch(next.reject);
+    const scheduleNext = () =>
+      this._schedule(
+        next.request,
+        next.signal,
+        next.runtimeView,
+        next.toolInvocationGuard,
+      );
+    // Run even for an undefined snapshot: that explicitly clears any
+    // AsyncLocalStorage context inherited from the request that just drained.
+    const schedulePromise = runWithInvocationContext(
+      next.invocationContext,
+      scheduleNext,
+    );
+    schedulePromise.then(next.resolve).catch(next.reject);
   }
 
   /**

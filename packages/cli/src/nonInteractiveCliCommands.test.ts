@@ -1171,6 +1171,53 @@ describe('handleSlashCommand', () => {
       }
     });
 
+    it('combines every turn guard from stacked skills', async () => {
+      const firstGuard = vi.fn().mockResolvedValue({ allowed: true as const });
+      const secondGuard = vi.fn().mockResolvedValue({
+        allowed: false as const,
+        reason: 'second skill denied',
+      });
+      const skillA = {
+        ...createSkillCommand('guard-a', 'first guard'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:guard-a' }],
+          toolInvocationGuard: firstGuard,
+        }),
+      };
+      const skillB = {
+        ...createSkillCommand('guard-b', 'second guard'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:guard-b' }],
+          toolInvocationGuard: secondGuard,
+        }),
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/guard-a /guard-b implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type !== 'submit_prompt' || !result.toolInvocationGuard) {
+        throw new Error('Expected a combined tool guard');
+      }
+      await expect(
+        result.toolInvocationGuard({
+          callId: 'stacked-call',
+          toolName: 'write_file',
+          args: { file_path: '/memory/topic.md' },
+          signal: abortController.signal,
+        }),
+      ).resolves.toEqual({ allowed: false, reason: 'second skill denied' });
+      expect(firstGuard).toHaveBeenCalledOnce();
+      expect(secondGuard).toHaveBeenCalledOnce();
+    });
+
     it('calls each skill action once', async () => {
       const skillA = createSkillCommand('feat-dev', 'a');
       const skillB = createSkillCommand('review', 'b');

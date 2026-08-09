@@ -120,6 +120,7 @@ import {
   isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
   formatDenialStateLog,
+  preserveManualDreamToolGuardMarker,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -247,6 +248,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
+import { recoverManualDreamToolInvocationGuard } from '../../utils/tool-invocation-guards.js';
 import {
   isTerminalGoalStatusKind,
   MessageType,
@@ -3260,6 +3262,7 @@ export class Session implements SessionContext {
                 DAEMON_CONTINUE_META_KEY
               ] === true;
             let continuationParts: Part[] | null = null;
+            let recoveredToolInvocationGuard: ToolInvocationGuard | undefined;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
             // throws before re-pushing it, the orphan would be permanently lost
@@ -3300,6 +3303,11 @@ export class Session implements SessionContext {
               } else {
                 continuationParts = recoveryPlan.continuation.parts;
               }
+              recoveredToolInvocationGuard =
+                recoverManualDreamToolInvocationGuard(
+                  this.config,
+                  recoveryPlan.originalApiHistory,
+                );
             }
 
             if (isContinue) {
@@ -3327,7 +3335,7 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
-            let fullTurnToolInvocationGuard: ToolInvocationGuard | undefined;
+            let fullTurnToolInvocationGuard = recoveredToolInvocationGuard;
             const onFullTurnModel = (model: string) => {
               if (fullTurnModelOverride === model) {
                 return true;
@@ -3887,6 +3895,13 @@ export class Session implements SessionContext {
       return true;
     };
     let midTurnContinuationCount = 0;
+    const preserveTurnPolicy = (parts: readonly Part[]): Part[] =>
+      toolInvocationGuard
+        ? preserveManualDreamToolGuardMarker(
+            this.#getCurrentChat().getHistory(),
+            parts,
+          )
+        : [...parts];
 
     while (true) {
       if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
@@ -3931,7 +3946,7 @@ export class Session implements SessionContext {
             pendingSend,
             promptId + '_mid_turn_' + ++midTurnContinuationCount,
             promptId,
-            drained.parts,
+            preserveTurnPolicy(drained.parts),
             false,
             {
               onFullTurnModel,
@@ -4031,7 +4046,7 @@ export class Session implements SessionContext {
               pendingSend,
               promptId + '_mid_turn_' + ++midTurnContinuationCount,
               promptId,
-              drained.parts,
+              preserveTurnPolicy(drained.parts),
               false,
               {
                 onFullTurnModel,
@@ -4143,7 +4158,7 @@ export class Session implements SessionContext {
         pendingSend,
         continuationPromptId,
         promptId,
-        continueParts,
+        preserveTurnPolicy(continueParts),
         stopHookIterationCount > 1 || (guardContinuation?.attempt ?? 0) > 1,
         {
           ...(guardContinuation ? { guardContinuation } : {}),
@@ -4194,6 +4209,13 @@ export class Session implements SessionContext {
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
     let nextGuardContinuation = options.guardContinuation;
+    const preserveTurnPolicy = (candidate: readonly Part[]): Part[] =>
+      options.toolInvocationGuard
+        ? preserveManualDreamToolGuardMarker(
+            this.#getCurrentChat().getHistory(),
+            candidate,
+          )
+        : [...candidate];
     const toolLoopState = createDaemonToolLoopState();
     let initialSend = true;
     let automaticContinuationValidated = false;
@@ -4311,18 +4333,20 @@ export class Session implements SessionContext {
                     if (initialSend) {
                       supersededAutomaticContinuation = true;
                     }
-                    preparedMessage = initialSend
-                      ? drained.parts
-                      : [
-                          ...(nextMessage?.parts ?? []).filter(
-                            (part) =>
-                              !(
-                                'text' in part &&
-                                isTodoStopGuardPromptText(part.text)
-                              ),
-                          ),
-                          ...drained.parts,
-                        ];
+                    preparedMessage = preserveTurnPolicy(
+                      initialSend
+                        ? drained.parts
+                        : [
+                            ...(nextMessage?.parts ?? []).filter(
+                              (part) =>
+                                !(
+                                  'text' in part &&
+                                  isTodoStopGuardPromptText(part.text)
+                                ),
+                            ),
+                            ...drained.parts,
+                          ],
+                    );
                     messageForPreservation = {
                       role: 'user',
                       parts: preparedMessage,
@@ -4469,10 +4493,11 @@ export class Session implements SessionContext {
                     await options.onAutomaticContinuationValidated();
                     automaticContinuationValidated = true;
                   }
-                  preparedMessage =
+                  preparedMessage = preserveTurnPolicy(
                     guardForThisSend || !externalParts
                       ? (nextMessage?.parts ?? [])
-                      : externalParts;
+                      : externalParts,
+                  );
                   messageForPreservation = {
                     role: 'user',
                     parts: preparedMessage,
@@ -4493,7 +4518,7 @@ export class Session implements SessionContext {
                   preserveGuardOnSkippedSend = true;
                   return { kind: 'stop', stopReason: 'end_turn' };
                 }
-                preparedMessage =
+                preparedMessage = preserveTurnPolicy(
                   initialSend && externalParts
                     ? externalParts
                     : preparedMessage.filter(
@@ -4502,7 +4527,8 @@ export class Session implements SessionContext {
                             'text' in part &&
                             isTodoStopGuardPromptText(part.text)
                           ),
-                      );
+                      ),
+                );
                 preservePreparedMessageOnSkippedSend = true;
               }
 
