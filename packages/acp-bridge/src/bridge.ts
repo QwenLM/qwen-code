@@ -103,6 +103,17 @@ import {
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_STALE_INTERVALS,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHeartbeatCapabilityV1,
+  type ActiveWorkHoldCategory,
+  type ActiveWorkSnapshotV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
@@ -476,6 +487,20 @@ interface ChannelInfo {
    * two-bit (alive, dying) state.
    */
   isDying: boolean;
+  /**
+   * Negotiated active-work reporting for this channel, or `undefined` when the
+   * child never acknowledged the capability. `undefined` is *not* "idle": it
+   * means this channel contributes no active-work facts at all, so the
+   * daemon's reporting grade degrades and pre-existing cleanup behavior
+   * applies unchanged. Conflating the two would let an older child either
+   * pin every Session forever or look permanently idle.
+   */
+  activeWork?: {
+    intervalMs: number;
+    categories: readonly ActiveWorkHoldCategory[];
+    /** Highest snapshot sequence applied; guards against reordering only. */
+    seq: number;
+  };
   handshakeComplete: boolean;
 }
 
@@ -518,6 +543,26 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  pendingAgentNotificationCount: number;
+  /**
+   * Last hold set the owning child reported for this Session, or `null` while
+   * the channel has negotiated reporting but has not yet been heard from.
+   *
+   * `null` (unknown) reads as *retained*, never as idle — but it is also the
+   * state that makes the daemon go ask, rather than a state it sits in
+   * forever. A channel that never negotiated leaves this `null` too; the
+   * `ChannelInfo.activeWork` presence check is what separates the two.
+   */
+  childHolds: Map<string, ActiveWorkHoldCategory> | null;
+  /** `Date.now()` of the snapshot behind `childHolds`; null while unknown. */
+  childHoldsAt: number | null;
+  /**
+   * A close-if-unheld request is on the wire. Only one may be outstanding: on
+   * timeout the daemon cannot tell whether the child already closed, so it
+   * neither retries nor assumes — it clears this flag and lets the next
+   * snapshot settle the question.
+   */
+  activeWorkCloseInFlight: boolean;
   /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
    * carries its `promptId`, summary, and an `abortController` so the
@@ -1617,6 +1662,332 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   /**
+   * Daemon-owned facts only: prompts this daemon accepted (queued *or*
+   * dispatched) and notifications it is currently pushing into the child.
+   * These never depend on the child reporting anything, which is why they
+   * stay authoritative for a channel that never negotiated.
+   */
+  function entryHasLocalWork(entry: SessionEntry): boolean {
+    return (
+      entry.pendingPromptCount > 0 || entry.pendingAgentNotificationCount > 0
+    );
+  }
+
+  /**
+   * Whether the child's cached hold set is recent enough to be evidence of
+   * anything. Anything older than the grading window is not a report that the
+   * Session is idle, it is the absence of a report.
+   */
+  function childHoldsAreFresh(
+    entry: SessionEntry,
+    capability: Pick<ActiveWorkHeartbeatCapabilityV1, 'intervalMs'>,
+  ): boolean {
+    if (entry.childHoldsAt === null) return false;
+    return (
+      Date.now() - entry.childHoldsAt <=
+      capability.intervalMs * ACTIVE_WORK_STALE_INTERVALS
+    );
+  }
+
+  /**
+   * Whether the child has told us, recently enough to count, that it is
+   * holding work for this Session. Positive knowledge only — a channel that
+   * never negotiated and one that has gone quiet both answer `false` here,
+   * because neither is a report *of work*.
+   */
+  function childReportsHeldWork(entry: SessionEntry): boolean {
+    const owner = channelInfoForEntry(entry);
+    if (!owner?.activeWork) return false;
+    if (!childHoldsAreFresh(entry, owner.activeWork)) return false;
+    return entry.childHolds !== null && entry.childHolds.size > 0;
+  }
+
+  /**
+   * Whether the child's side of this Session's state is currently unknown:
+   * the channel negotiated reporting, but no snapshot recent enough to grade
+   * has arrived. Never-reported and gone-quiet are the same state on purpose —
+   * a snapshot from ten minutes ago says nothing about whether a background
+   * agent started since.
+   *
+   * A channel that never negotiated is not "unknown", it is out of scope:
+   * treating it as unknown would make every legacy Session unreapable.
+   */
+  function childWorkIsUnknown(entry: SessionEntry): boolean {
+    const owner = channelInfoForEntry(entry);
+    if (!owner?.activeWork) return false;
+    return !childHoldsAreFresh(entry, owner.activeWork);
+  }
+
+  /**
+   * Whether this Session counts as busy for the health surface.
+   *
+   * Fails closed on ignorance: unknown reads the same as busy, because a
+   * controller must not be able to mistake "nobody told me" for "nothing is
+   * running". The reporting grade published alongside is what lets a caller
+   * tell those two apart when it needs to.
+   */
+  function entryHasActiveWork(entry: SessionEntry): boolean {
+    return (
+      entryHasLocalWork(entry) ||
+      childReportsHeldWork(entry) ||
+      childWorkIsUnknown(entry)
+    );
+  }
+
+  /**
+   * The guards every automatic teardown shares, whichever policy decided it
+   * was time to look. Each caller adds its own policy on top (the reaper its
+   * TTL, the detach path its client bookkeeping) but none of them may skip
+   * these.
+   *
+   * Note what is deliberately *not* here: `childWorkIsUnknown`. Unknown is not
+   * a reason to skip, it is a reason to ask — the candidate goes on to
+   * `confirmChildUnheld`, and the child answers authoritatively under its own
+   * close gate whether or not its snapshots are arriving. Skipping on unknown
+   * instead would retain such a Session forever, with no path that ever
+   * resolves it; asking costs one bounded round trip and still retains on any
+   * non-answer. Only *known* work — daemon-owned, or a fresh report of held
+   * work — blocks the attempt outright.
+   *
+   * `activeWorkCloseInFlight` is in here because a conditional close is a
+   * multi-step, awaited sequence: while one is outstanding this Session is
+   * already a teardown candidate under consideration, and a second path
+   * evaluating it concurrently would either duplicate the round trip or race
+   * its own guards against the first one's outcome.
+   */
+  function entryIsAutoCloseCandidate(entry: SessionEntry): boolean {
+    if (byId.get(entry.sessionId) !== entry) return false;
+    if (isClosingOrAuthorizingClose(entry)) return false;
+    if (entry.events.subscriberCount > 0) return false;
+    if (entryHasLocalWork(entry)) return false;
+    // A restore in flight looks exactly like an abandoned Session and is the
+    // opposite of one. `session/load` registers the entry before it awaits
+    // `artifacts.restore()` and `seedSessionUpdates()`, and its first client
+    // is registered only after those resolve — so for that whole window there
+    // are no clients, no subscribers, and nothing held, and the child answers
+    // the conditional close truthfully. Excluded here rather than at the
+    // snapshot trigger so every automatic path is covered: the reaper's TTL
+    // can elapse inside a slow restore too.
+    const owner = channelInfoForEntry(entry);
+    if (owner?.pendingRestoreIds.has(entry.sessionId)) return false;
+    return !childReportsHeldWork(entry);
+  }
+
+  /**
+   * Whether this Session is off-limits to new work.
+   *
+   * Two states, one meaning. `closing` is teardown already under way;
+   * `activeWorkCloseInFlight` is teardown authorized and being confirmed. Both
+   * must refuse admission, or a prompt accepted during the confirmation round
+   * trip is lost when the teardown it raced completes.
+   */
+  function isClosingOrAuthorizingClose(entry: SessionEntry): boolean {
+    return entry.closing || entry.activeWorkCloseInFlight;
+  }
+
+  /**
+   * Single decision point for "this Session is detached and has nothing left
+   * to do — let it go".
+   *
+   * Every automatic cleanup path funnels through here (last-client detach,
+   * prompt settle, notification settle, a child reporting itself idle) so the
+   * preservation rule lives in exactly one place. Explicit close, kill, and
+   * shutdown deliberately do NOT come through here: they keep their force
+   * semantics.
+   */
+  async function maybeCloseIdleSession(
+    entry: SessionEntry,
+    reason: string,
+  ): Promise<void> {
+    if (!entryIsAutoCloseCandidate(entry)) return;
+    // Note the asymmetry, preserved from the call sites this replaces: the
+    // kill path keys off `attachCount`, the close path off `clientIds`. A
+    // spawn owner that asked for a kill gets one once nothing is attached,
+    // even if some client id is still registered.
+    if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+      await bridgeApi.killSession(entry.sessionId).catch(() => {
+        /* best-effort; channel.exited will eventually reap anyway */
+      });
+      return;
+    }
+    if (entry.clientIds.size > 0) return;
+    await closeIfChildUnheld(entry, {
+      trigger: reason,
+      closeReason: 'last_client_detached',
+    });
+  }
+
+  /**
+   * Confirm with the child, then tear down locally — holding the in-flight flag
+   * across both steps.
+   *
+   * The span matters. `closeSessionImpl` sets `entry.closing` synchronously, so
+   * once teardown starts the ordinary close gate covers the rest; but the
+   * conditional-close round trip in front of it is an await of up to
+   * `ACTIVE_WORK_CLOSE_TIMEOUT_MS`. Leaving that span unmarked is what would
+   * let a client attach, prompt, or rewind into a Session that has already been
+   * authorized for destruction. Every admission path therefore checks this flag
+   * alongside `closing`, which is what restores the atomicity a single
+   * synchronous guard-then-teardown sequence used to give for free.
+   */
+  async function closeIfChildUnheld(
+    entry: SessionEntry,
+    opts: { trigger: string; closeReason: string },
+  ): Promise<void> {
+    entry.activeWorkCloseInFlight = true;
+    try {
+      if (!(await confirmChildUnheld(entry))) return;
+      // Re-check identity, not just liveness. `closeSessionImpl` re-resolves
+      // the target by raw id, and the id can be re-registered to a *different*
+      // entry during the round trip — an explicit kill removes this one (kill
+      // deliberately ignores the in-flight flag, keeping its force semantics)
+      // and a `session/load` for the same persisted id registers a fresh one.
+      // Without this, the stale continuation tears down the newly restored
+      // Session under its just-attached client.
+      if (byId.get(entry.sessionId) !== entry) return;
+      await closeSessionImpl(entry.sessionId, undefined, {
+        reason: opts.closeReason,
+      }).catch((err) => {
+        writeStderrLine(
+          `qwen serve: deferred close (${opts.trigger}) failed for ` +
+            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+      });
+    } finally {
+      entry.activeWorkCloseInFlight = false;
+    }
+  }
+
+  /**
+   * Ask the owning child to close this Session only if it holds nothing, and
+   * report whether the daemon may now finish its own teardown.
+   *
+   * The cached hold set says what was true when the last snapshot was built,
+   * which is not the same as what is true now — new work can start in the gap.
+   * So the authorization to destroy comes from the child, under its close
+   * gate, not from the cache. The cache's job is only to decide *when* it is
+   * worth asking.
+   *
+   * The child's gate makes the check atomic **on the child side**: with it held
+   * the Session admits no prompt and starts no automatic turn, so a hold cannot
+   * appear between the child's read and its teardown. It says nothing about the
+   * daemon side — the round trip below is an await, and covering that span is
+   * `closeIfChildUnheld`'s job, not this function's.
+   *
+   * Returns false on every uncertainty: a channel that never negotiated is
+   * handled by the pre-existing path, a refusal means work appeared, and a
+   * timeout means we cannot tell whether the child closed. None of those are
+   * retried here — the next snapshot resolves it, and a Session that is truly
+   * gone will be reported with no holds in that snapshot.
+   */
+  async function confirmChildUnheld(entry: SessionEntry): Promise<boolean> {
+    const info = channelInfoForEntry(entry);
+    if (!info?.activeWork) return true;
+    if (info.isDying) return false;
+    try {
+      const response = await withTimeout(
+        entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+          sessionId: entry.sessionId,
+          [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+        }),
+        ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+        SERVE_CONTROL_EXT_METHODS.sessionClose,
+      );
+      if (response['closed'] === true) {
+        // The child is done with it; only local teardown remains.
+        return true;
+      }
+      // Refused: adopt the hold set it handed back so the cache reflects the
+      // reason we are backing off rather than the stale set that sent us here.
+      const holds = response['holds'];
+      if (Array.isArray(holds)) {
+        const adopted = new Map<string, ActiveWorkHoldCategory>();
+        for (const hold of holds) {
+          if (typeof hold !== 'object' || hold === null) continue;
+          const record = hold as Record<string, unknown>;
+          const id = record['id'];
+          const category = record['category'];
+          if (
+            typeof id === 'string' &&
+            typeof category === 'string' &&
+            ACTIVE_WORK_HOLD_CATEGORIES.includes(
+              category as ActiveWorkHoldCategory,
+            )
+          ) {
+            adopted.set(id, category as ActiveWorkHoldCategory);
+          }
+        }
+        entry.childHolds = adopted;
+        entry.childHoldsAt = Date.now();
+      }
+      return false;
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: close-if-unheld for session ${JSON.stringify(entry.sessionId)} ` +
+          `did not resolve (${err instanceof Error ? err.message : String(err)}); ` +
+          `leaving it in place for the next snapshot to settle`,
+      );
+      return false;
+    }
+  }
+
+  /** Applies a validated channel-wide snapshot to every Session it names. */
+  function applyActiveWorkSnapshot(
+    info: ChannelInfo,
+    snapshot: ActiveWorkSnapshotV1,
+  ): void {
+    if (!info.activeWork || info.isDying) return;
+    // Reordering guard only. A gap is not an error: each snapshot is complete,
+    // so the newest one that arrives is the whole truth regardless of what was
+    // lost before it.
+    if (snapshot.seq <= info.activeWork.seq) return;
+    info.activeWork.seq = snapshot.seq;
+    const now = Date.now();
+    const reported = new Map<string, Map<string, ActiveWorkHoldCategory>>();
+    for (const session of snapshot.sessions) {
+      const holds = new Map<string, ActiveWorkHoldCategory>();
+      for (const hold of session.holds) holds.set(hold.id, hold.category);
+      reported.set(session.sessionId, holds);
+    }
+    // Iterate what the channel owns rather than what the snapshot named: a
+    // Session the child did not mention holds nothing on the child side.
+    // Because reports are complete, silence about a Session this channel owns
+    // is a statement about that Session, not a gap in the report — so absence
+    // and reported-with-no-holds are the same fact and take the same path.
+    // That is also how the daemon recovers from a close whose response never
+    // made it back: the next snapshot omits the Session, the daemon asks the
+    // child once more, and the child answers `closed` for a Session it no
+    // longer has.
+    //
+    // Crucially, absence does NOT authorize local teardown by itself. It only
+    // makes the Session a candidate, and every candidate still has to clear
+    // the shared guards — a live SSE subscriber or a registered client keeps it
+    // exactly as it keeps any other idle Session.
+    for (const sessionId of Array.from(info.sessionIds)) {
+      const entry = byId.get(sessionId);
+      if (!entry || entry.channel !== info.channel) continue;
+      const holds = reported.get(sessionId) ?? new Map();
+      const previouslyHeld = entry.childHolds
+        ? entry.childHolds.size > 0
+        : undefined;
+      entry.childHolds = holds;
+      entry.childHoldsAt = now;
+      // Only a change in whether the Session holds anything counts as
+      // activity. Cadence reports must not keep `lastActivityAt` warm, or a
+      // long-running agent would defeat every idle-based reclaim downstream.
+      if (previouslyHeld !== undefined && previouslyHeld !== holds.size > 0) {
+        touchActivity();
+      }
+      if (holds.size === 0) {
+        void maybeCloseIdleSession(
+          entry,
+          reported.has(sessionId) ? 'child_idle' : 'child_dropped',
+        );
+      }
+    }
+  }
+
+  /**
    * Idempotently clear a session's active-prompt bookkeeping, but only if
    * `promptId` still owns it. The ownership gate matters: after a deadline
    * releases the FIFO, the wedged agent's old `promptPromise` may settle
@@ -1794,10 +2165,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (shuttingDown) return;
       const now = Date.now();
       for (const [id, entry] of byId) {
-        // `pendingPromptCount` (not `promptActive`): queued prompts and the
-        // FIFO hand-off gap between two prompts must also block the reap.
-        if (entry.pendingPromptCount > 0) continue;
-        if (entry.events.subscriberCount > 0) continue;
+        // Shared guards first (`pendingPromptCount` rather than `promptActive`,
+        // so queued prompts and the FIFO hand-off gap between two prompts also
+        // block the reap), then the reaper's own TTL policy on top.
+        if (!entryIsAutoCloseCandidate(entry)) continue;
         // Note: clientIds.size is NOT checked here. Close-on-last-detach
         // handles the normal path (client sends detach → immediate close).
         // The reaper covers the crash path where detach was never sent —
@@ -1812,14 +2183,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `(idle for ${Math.round(idle / 1000)}s, ` +
             `threshold ${Math.round(sessionIdleTimeoutMs / 1000)}s)`,
         );
-        void closeSessionImpl(id, undefined, { reason: 'idle_timeout' }).catch(
-          (err) => {
-            writeStderrLine(
-              `qwen serve: session reaper failed to close ` +
-                `${JSON.stringify(id)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-            );
-          },
-        );
+        // The TTL says the *client* stopped caring, which is not the same as
+        // the child having nothing left to run. Ask before destroying, on the
+        // same terms as every other automatic path: an idle-looking cache is
+        // never enough on its own.
+        void closeIfChildUnheld(entry, {
+          trigger: 'idle_timeout',
+          closeReason: 'idle_timeout',
+        });
       }
     }, sessionReapIntervalMs);
     sessionReaper.unref();
@@ -2159,28 +2530,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       entry.attachCount - (released + (attachCountDelta - 1)),
     );
     unregisterClient(entry, clientId);
-    if (
-      entry.spawnOwnerWantedKill &&
-      entry.attachCount === 0 &&
-      entry.events.subscriberCount === 0
-    ) {
-      await bridgeApi.killSession(entry.sessionId).catch(() => {
-        /* best-effort; channel.exited will eventually reap anyway */
-      });
-    } else if (
-      entry.clientIds.size === 0 &&
-      entry.events.subscriberCount === 0 &&
-      entry.pendingPromptCount === 0
-    ) {
-      await closeSessionImpl(entry.sessionId, undefined, {
-        reason: 'last_client_detached',
-      }).catch((err) => {
-        writeStderrLine(
-          `qwen serve: close-on-attach-rollback failed for ` +
-            `${JSON.stringify(entry.sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-        );
-      });
-    }
+    await maybeCloseIdleSession(entry, 'attach_rollback');
   };
 
   const resolveTrustedClientId = (
@@ -2228,6 +2578,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }),
       );
       const sessionIds = new Set<string>();
+      const infoRef: { current?: ChannelInfo } = {};
       let client: BridgeClient;
       let connection: ClientSideConnection;
       try {
@@ -2341,6 +2692,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () => liveTaskToolRequestHandler,
           () => liveSpeakToUserHandler,
           opts.externalToolGuard,
+          (snapshot) => {
+            const currentInfo = infoRef.current;
+            if (!currentInfo) return;
+            applyActiveWorkSnapshot(currentInfo, snapshot);
+          },
         );
         connection = new ClientSideConnection(() => client, channel.stream);
       } catch (error) {
@@ -2392,6 +2748,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         isDying: false,
         handshakeComplete: false,
       };
+      infoRef.current = info;
       aliveChannels.add(info);
       // Belt-and-suspenders leak detection. The set is intentionally
       // multi-entry to cover the `killSession`-then-`spawnOrAttach`
@@ -2541,6 +2898,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               connection.initialize({
                 protocolVersion: PROTOCOL_VERSION,
                 _meta: {
+                  [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+                    v: ACTIVE_WORK_HEARTBEAT_VERSION,
+                    intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+                  },
                   [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                     v: CHANNEL_STARTUP_PROFILE_VERSION,
                   },
@@ -2565,6 +2926,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   `ACP child did not acknowledge the required external tool guard (received: ${JSON.stringify(guardAck)}).`,
                 );
               }
+            }
+            const activeWorkCapability = isRecord(response._meta)
+              ? response._meta[ACTIVE_WORK_HEARTBEAT_META_KEY]
+              : undefined;
+            if (
+              isRecord(activeWorkCapability) &&
+              activeWorkCapability['v'] === ACTIVE_WORK_HEARTBEAT_VERSION
+            ) {
+              const advertised = activeWorkCapability['categories'];
+              // Take the child's cadence rather than demanding it match ours,
+              // but clamp it: an out-of-range value would either flood the
+              // transport or make the freshness grade meaningless.
+              info.activeWork = {
+                intervalMs: clampActiveWorkIntervalMs(
+                  activeWorkCapability['intervalMs'],
+                ),
+                categories: Array.isArray(advertised)
+                  ? ACTIVE_WORK_HOLD_CATEGORIES.filter((category) =>
+                      advertised.includes(category),
+                    )
+                  : [],
+                seq: 0,
+              };
             }
             try {
               const attributes = getChannelStartupProfileAttributes(
@@ -3969,6 +4353,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
+      pendingAgentNotificationCount: 0,
       pendingPromptList: [],
       midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
@@ -3983,6 +4368,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachRefs: new Map(),
       spawnOwnerWantedKill: false,
       promptActive: false,
+      childHolds: null,
+      childHoldsAt: null,
+      activeWorkCloseInFlight: false,
       retryAllowed: false,
     };
     ci.sessionIds.add(entry.sessionId);
@@ -4479,7 +4867,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const existing = byId.get(req.sessionId);
     if (existing) {
-      if (existing.closing) {
+      // `isClosingOrAuthorizingClose`, not bare `closing`: this is an admission
+      // path like attach/prompt/rewind, so a conditional close being confirmed
+      // must refuse it too. Otherwise a client attaches inside the round trip
+      // and the teardown it raced destroys the Session under it.
+      if (isClosingOrAuthorizingClose(existing)) {
         throw new SessionNotFoundError(
           req.sessionId,
           'The session is closing; retry after close completes',
@@ -4497,7 +4889,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (byId.get(req.sessionId) !== existing || existing.closing) {
+      if (
+        byId.get(req.sessionId) !== existing ||
+        isClosingOrAuthorizingClose(existing)
+      ) {
         throw new SessionNotFoundError(req.sessionId);
       }
       existing.attachCount++;
@@ -4765,6 +5160,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const racedEntry = byId.get(req.sessionId);
       if (racedEntry) {
         restoreEvents.close();
+        // Same admission rule as the two checks above. This branch had no
+        // closing guard at all, so it could also attach to a Session already
+        // tearing down — narrower than the conditional-close window this PR
+        // introduced, but the same defect, and the fix is the same predicate.
+        if (isClosingOrAuthorizingClose(racedEntry)) {
+          throw new SessionNotFoundError(
+            req.sessionId,
+            'The session is closing; retry after close completes',
+          );
+        }
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -5191,6 +5596,63 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return activePromptCounter;
     },
 
+    get activeWork() {
+      for (const entry of byId.values()) {
+        if (entryHasActiveWork(entry)) return true;
+      }
+      return false;
+    },
+
+    /**
+     * Raw coverage counts rather than a pre-collapsed grade.
+     *
+     * The grade has to be computed over the whole daemon, not per runtime and
+     * then combined: a runtime with zero Sessions is vacuously `full`, and
+     * folding that in as evidence made a deployment whose only real Sessions
+     * were unreported aggregate to `partial`. Counts compose; grades do not.
+     */
+    get activeWorkCoverage() {
+      let covered = 0;
+      let onNegotiatedChannel = 0;
+      let total = 0;
+      let oldestCoveredReportAt: number | null = null;
+      for (const entry of byId.values()) {
+        total++;
+        const owner = channelInfoForEntry(entry);
+        const capability = owner?.activeWork;
+        if (!capability) continue;
+        // A child that negotiated but reports late or omits a category still
+        // tells us *something*; only a channel that never negotiated at all
+        // leaves us with nothing, which is what `none` is reserved for.
+        onNegotiatedChannel++;
+        // Missing categories and a stale snapshot are the same kind of defect
+        // from a controller's point of view: the boolean does not cover what
+        // it claims to. Both land in `partial` rather than being invisible.
+        if (
+          ACTIVE_WORK_HOLD_CATEGORIES.some(
+            (category) => !capability.categories.includes(category),
+          )
+        ) {
+          continue;
+        }
+        if (!childHoldsAreFresh(entry, capability)) continue;
+        covered++;
+        // Deliberately the oldest *covered* report, not the oldest report of
+        // any kind. An uncovered Session already shows up as a downgraded
+        // grade; letting it also drag the age down would double-count it, and
+        // it would make a positive staleness coexist with a grade saying
+        // nothing is covered. Bounded by the stale window by construction.
+        if (
+          entry.childHoldsAt !== null &&
+          (oldestCoveredReportAt === null ||
+            entry.childHoldsAt < oldestCoveredReportAt)
+        ) {
+          oldestCoveredReportAt = entry.childHoldsAt;
+        }
+      }
+      return { total, covered, onNegotiatedChannel, oldestCoveredReportAt };
+    },
+
     get lastActivityAt() {
       return lastActivityTimestamp;
     },
@@ -5270,7 +5732,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (effectiveScope === 'single') {
         const existing = defaultEntry;
         if (existing) {
-          if (existing.closing) {
+          if (isClosingOrAuthorizingClose(existing)) {
             throw new SessionNotFoundError(
               existing.sessionId,
               'The session is closing; retry after close completes',
@@ -5479,7 +5941,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
-      if (entry.closing) {
+      if (isClosingOrAuthorizingClose(entry)) {
         return Promise.reject(
           new SessionNotFoundError(
             sessionId,
@@ -6047,21 +6509,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // exact entry is still registered — after killSession's eager
           // delete the same persisted id can be re-registered as a NEW
           // entry by `session/load`, which a late settle must not close.
-          if (
-            entry.clientIds.size === 0 &&
-            entry.events.subscriberCount === 0 &&
-            entry.pendingPromptCount === 0 &&
-            byId.get(sessionId) === entry
-          ) {
-            void closeSessionImpl(sessionId, undefined, {
-              reason: 'last_client_detached',
-            }).catch((err) => {
-              writeStderrLine(
-                `qwen serve: deferred close-on-prompt-complete failed for ` +
-                  `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-              );
-            });
-          }
+          void maybeCloseIdleSession(entry, 'prompt_settled');
         })
         .catch(() => {});
       return result;
@@ -7940,18 +8388,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
-      const response = await Promise.race([
-        withTimeout(
-          entry.connection.extMethod(
+      entry.pendingAgentNotificationCount++;
+      try {
+        const response = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+              { sessionId, ...notification },
+            ),
+            initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
-            { sessionId, ...notification },
           ),
-          initTimeoutMs,
-          SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
-        ),
-        getTransportClosedReject(entry),
-      ]);
-      return { sessionId, accepted: response['accepted'] === true };
+          getTransportClosedReject(entry),
+        ]);
+        return { sessionId, accepted: response['accepted'] === true };
+      } finally {
+        entry.pendingAgentNotificationCount = Math.max(
+          0,
+          entry.pendingAgentNotificationCount - 1,
+        );
+        void maybeCloseIdleSession(entry, 'agent_notification_settled');
+      }
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {
@@ -8242,7 +8699,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async rewindSession(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      if (entry.closing) {
+      if (isClosingOrAuthorizingClose(entry)) {
         throw new SessionNotFoundError(sessionId, 'The session is closing');
       }
       const info = channelInfoForEntry(entry);
@@ -8901,40 +9358,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (entry.attachCount > 0) entry.attachCount--;
       }
       unregisterClient(entry, clientId);
-      if (
-        entry.spawnOwnerWantedKill &&
-        entry.attachCount === 0 &&
-        entry.events.subscriberCount === 0
-      ) {
-        // Defer-completed reap. Re-use killSession's logic; pass
-        // `requireZeroAttaches: false` (default) because we've
-        // already validated all the conditions ourselves.
-        await this.killSession(sessionId).catch(() => {
-          /* best-effort; channel.exited will eventually reap anyway */
-        });
-      } else if (
-        entry.clientIds.size === 0 &&
-        entry.events.subscriberCount === 0 &&
-        entry.pendingPromptCount === 0
-      ) {
-        // Last registered client left, no SSE subscribers remain, and
-        // no prompt is pending (active OR queued — `pendingPromptCount`
-        // covers the FIFO hand-off gap where `promptActive` is briefly
-        // false between two prompts). Close the session immediately so
-        // it doesn't linger in memory. The JSONL transcript on disk is
-        // preserved — session/load or session/resume can restore it
-        // later. When prompts ARE pending, skip the close: the deferred
-        // close in `sendPrompt`'s result.finally fires after the last
-        // one settles (and publishes its terminal).
-        await closeSessionImpl(sessionId, undefined, {
-          reason: 'last_client_detached',
-        }).catch((err) => {
-          writeStderrLine(
-            `qwen serve: close-on-last-detach failed for ` +
-              `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-          );
-        });
-      }
+      // Last registered client left. Whether that means close, kill, or
+      // nothing at all lives in one place now: a pending prompt (active OR
+      // queued — `pendingPromptCount` covers the FIFO hand-off gap), an
+      // unsettled Agent, or a child that has not confirmed it is unheld all
+      // hold the session open, and the deferred close fires from whichever
+      // path settles last. The JSONL transcript on disk survives either way,
+      // so session/load can restore it later.
+      await maybeCloseIdleSession(entry, 'last_client_detached');
     },
 
     killAllSync() {

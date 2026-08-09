@@ -425,7 +425,11 @@ export async function startTelemetrySdk(
     // `configureMetricProviderFromEnv()` unconditionally, so env-based readers
     // are only suppressed when an explicit reader is provided. This is
     // intentionally asymmetric with `spanProcessors`/`logRecordProcessors`,
-    // where an empty array disables env fallback for those signals.
+    // where an empty array disables env fallback for those signals. Those two
+    // must stay unconditional arrays: omitting them re-enables sdk-node's
+    // env-based fallback, and the logs fallback runs in the NodeSDK
+    // constructor — outside the env-var scrub window around `start()` in
+    // sdk.ts (`startSdkWithExplicitExporters`).
     ...(metricReader && { metricReader }),
     instrumentations: [
       new HttpInstrumentation({
