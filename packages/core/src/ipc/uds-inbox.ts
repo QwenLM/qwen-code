@@ -35,6 +35,16 @@ const debugLogger = createDebugLogger('PEER_IPC');
 const SOCKET_DIR_MODE = 0o700;
 const SOCKET_MODE = 0o600;
 
+/**
+ * How long `close()` waits for a live connection to finish delivering the
+ * frames already in flight. A sender resolves `send_message` on the
+ * transport close, which carries no delivery information, so a frame
+ * dropped here is reported to the sender as `sent` and never arrives. The
+ * peer has already written and half-closed by the time it reaches us, so
+ * this only bounds a peer that holds the connection open.
+ */
+const CLOSE_DRAIN_MS = 250;
+
 export interface PeerInboxOptions {
   /** Defaults to this process's resolved socket path. */
   socketPath?: string;
@@ -215,7 +225,32 @@ export async function startPeerInbox(
     async close() {
       if (closed) return;
       closed = true;
-      for (const socket of connections) socket.destroy();
+      // Drain instead of destroying: a frame the peer has already written
+      // can still be unread here, and destroy() discards it while the
+      // sender's transport close resolves as a successful send. Ending our
+      // write half and resuming the read side delivers the rest of the
+      // ordered stream (data precedes the peer's FIN) before 'close'.
+      await Promise.all(
+        [...connections].map(
+          (socket) =>
+            new Promise<void>((resolve) => {
+              if (socket.destroyed) {
+                resolve();
+                return;
+              }
+              const timer = setTimeout(() => {
+                socket.destroy();
+              }, CLOSE_DRAIN_MS);
+              timer.unref();
+              socket.once('close', () => {
+                clearTimeout(timer);
+                resolve();
+              });
+              socket.resume();
+              socket.end();
+            }),
+        ),
+      );
       connections.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       try {

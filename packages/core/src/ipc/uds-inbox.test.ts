@@ -125,6 +125,33 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     await expect(fs.stat(started.socketPath)).rejects.toThrow();
   });
 
+  // The sender resolves on the transport close, which carries no delivery
+  // information: a frame dropped by close() is reported as 'sent' and never
+  // arrives — indistinguishable from a real delivery.
+  it('delivers a frame still in flight when close() runs', async () => {
+    const started = await listen();
+    const client = net.connect({ path: started.socketPath });
+    await new Promise<void>((resolve, reject) => {
+      client.once('connect', () => resolve());
+      client.once('error', reject);
+    });
+    // Let the server register the connection; its 'connection' event is a
+    // separate loop turn from the client's 'connect'.
+    await settle();
+
+    // Write and close in the same tick, so the frame cannot already have
+    // been read: this is exactly the window a quitting user opens.
+    client.end(encodePeerFrame(buildUserFrame({ content: 'in flight' })));
+    await started.close();
+    inbox = null;
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      type: 'user',
+      message: { role: 'user', content: 'in flight' },
+    });
+  });
+
   it('is safe to close twice', async () => {
     const started = await listen();
     await started.close();
