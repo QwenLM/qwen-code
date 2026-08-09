@@ -111,9 +111,13 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
+  const ripgrepSigningBlock = workflow.slice(
+    workflow.indexOf('# ripgrep vendor binaries'),
+    workflow.indexOf('# Node.js runtime binary'),
+  );
   assert.doesNotMatch(
-    workflow,
-    /--entitlements src-tauri\/Entitlements\.plist \{\} \+/,
+    ripgrepSigningBlock,
+    /--entitlements/,
     'ripgrep must not inherit the app entitlements',
   );
   assert.match(
@@ -131,6 +135,29 @@ function testDesktopReleaseSigningWorkflow() {
     path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
     'utf8',
   );
+  const appEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Entitlements.plist'),
+    'utf8',
+  );
+  assert.match(
+    appEntitlements,
+    /com\.apple\.security\.device\.audio-input/,
+    'the app bundle must keep microphone access for voice dictation',
+  );
+  const infoPlist = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Info.plist'),
+    'utf8',
+  );
+  assert.match(
+    infoPlist,
+    /NSMicrophoneUsageDescription<\/key>\s*<string>.+<\/string>/,
+    'the app bundle must declare a non-empty microphone usage description',
+  );
+  assert.match(
+    nodeEntitlements,
+    /com\.apple\.security\.cs\.allow-jit/,
+    'the bundled Node.js runtime must keep its JIT entitlement',
+  );
   assert.doesNotMatch(
     nodeEntitlements,
     /com\.apple\.security\.device\.audio-input/,
@@ -145,6 +172,16 @@ function testDesktopReleaseSigningWorkflow() {
     workflow,
     /Node\.js runtime binary not found at \$node_bin/,
     'missing Node.js runtime binary must be visible in release logs',
+  );
+  assert.match(
+    workflow,
+    /Print :com\.apple\.security\.device\.audio-input/,
+    'the macOS signature check must keep verifying the audio-input entitlement',
+  );
+  assert.match(
+    workflow,
+    /Print :NSMicrophoneUsageDescription/,
+    'the packaged smoke must keep verifying the microphone usage description',
   );
   assert.ok(
     workflow.indexOf("name: 'Prepare bundled runtime'") <
