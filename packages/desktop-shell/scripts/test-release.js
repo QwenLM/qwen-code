@@ -111,9 +111,60 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
+  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
+  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
   assert.ok(
-    workflow.includes('--entitlements src-tauri/Entitlements.plist {} +'),
+    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
+    'the vendor signing step must keep its ripgrep/Node section markers',
+  );
+  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
+  assert.doesNotMatch(
+    ripgrepSigningBlock,
+    /--entitlements/,
+    'ripgrep must not inherit the app entitlements',
+  );
+  assert.match(
+    workflow,
+    /--options runtime --timestamp \\\n\s+\{\} \+/,
     'ripgrep codesign failures must fail the signing step',
+  );
+  assert.ok(
+    workflow.includes(
+      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+    ),
+    'Node.js must use its minimal helper entitlements',
+  );
+  const nodeEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
+    'utf8',
+  );
+  const appEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Entitlements.plist'),
+    'utf8',
+  );
+  assert.match(
+    appEntitlements,
+    /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/,
+    'the app bundle must keep microphone access for voice dictation',
+  );
+  const infoPlist = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Info.plist'),
+    'utf8',
+  );
+  assert.match(
+    infoPlist,
+    /NSMicrophoneUsageDescription<\/key>\s*<string>.+<\/string>/,
+    'the app bundle must declare a non-empty microphone usage description',
+  );
+  assert.match(
+    nodeEntitlements,
+    /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/,
+    'the bundled Node.js runtime must keep its JIT entitlement',
+  );
+  assert.doesNotMatch(
+    nodeEntitlements,
+    /com\.apple\.security\.device\.audio-input/,
+    'Node.js must not receive microphone access',
   );
   assert.match(
     workflow,
@@ -124,6 +175,16 @@ function testDesktopReleaseSigningWorkflow() {
     workflow,
     /Node\.js runtime binary not found at \$node_bin/,
     'missing Node.js runtime binary must be visible in release logs',
+  );
+  assert.match(
+    workflow,
+    /Print :com\.apple\.security\.device\.audio-input/,
+    'the macOS signature check must keep verifying the audio-input entitlement',
+  );
+  assert.match(
+    workflow,
+    /Print :NSMicrophoneUsageDescription/,
+    'the packaged smoke must keep verifying the microphone usage description',
   );
   assert.ok(
     workflow.indexOf("name: 'Prepare bundled runtime'") <
