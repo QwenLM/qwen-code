@@ -35,6 +35,8 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   }
   tmpDirs = [];
+  // The per-test entry directory goes with them.
+  entryDir = undefined;
 });
 
 function makeOutputFile(content: string): string {
@@ -51,16 +53,34 @@ function makeTempDir(): string {
   return dir;
 }
 
+// Every settle writes a status sidecar next to the entry's outputPath, so
+// the fixture must not point them all at one SHARED path. With the old
+// fixed `/tmp/s1.output`, every entry in a test wrote `/tmp/s1.status` — a
+// path a sticky-bit /tmp shares with every other job on the machine. When
+// that file already belongs to another user, the atomic write's rename
+// answers EPERM and retries with a blocking exponential backoff (50, 100,
+// 200ms), so ONE settle costs ~350ms: measured, 34 of them take 12.3s of a
+// 15s test budget, which is what turned the retention-cap tests into
+// timeouts on shared CI runners while passing everywhere else. A per-run
+// directory keyed by shellId cannot collide with anything.
+let entryDir: string | undefined;
+
+function entryOutputPath(shellId: string): string {
+  entryDir ??= makeTempDir();
+  return join(entryDir, `${shellId}.output`);
+}
+
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
 ): ShellTaskRegistration {
+  const shellId = overrides.shellId ?? 's1';
   return {
-    shellId: 's1',
+    shellId,
     command: 'sleep 60',
     cwd: '/tmp',
     status: 'running',
     startTime: 1000,
-    outputPath: '/tmp/s1.output',
+    outputPath: entryOutputPath(shellId),
     abortController: new AbortController(),
     ...overrides,
   };
@@ -318,12 +338,16 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      // The `&` in the BASENAME is what this test is about; the directory
+      // is the run's own so the settle below writes its status sidecar
+      // somewhere no other job shares.
+      const outputPath = join(makeTempDir(), 'out&err.log');
       reg.register(
         makeEntry({
           shellId: 'a&b',
           command: 'echo "<script>"',
           cwd: '/repo&work',
-          outputPath: '/tmp/out&err.log',
+          outputPath,
         }),
       );
 
@@ -338,7 +362,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
       expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
       expect(modelText).toContain(
-        '<output-file>/tmp/out&amp;err.log</output-file>',
+        `<output-file>${outputPath.replace('&', '&amp;')}</output-file>`,
       );
     });
 
@@ -391,11 +415,14 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      // The control character in the BASENAME is the subject; the run's own
+      // directory keeps the status sidecar out of a shared path.
+      const outputPath = join(makeTempDir(), 'out\x03.log');
       reg.register(
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath: '/tmp/out\x03.log',
+          outputPath,
         }),
       );
 
@@ -403,7 +430,9 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
-      expect(modelText).toContain('<output-file>/tmp/out.log</output-file>');
+      expect(modelText).toContain(
+        `<output-file>${outputPath.replace('\x03', '')}</output-file>`,
+      );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
