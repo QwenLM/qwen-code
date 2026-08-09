@@ -584,7 +584,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('keeps the final answer when active agents are pinned after it', () => {
+  it('does not mark narration as final while an agent is active', () => {
     const activeAgent = agentMsg('agent-1');
     activeAgent.tools[0]!.status = 'pending';
     const c = mount([
@@ -598,7 +598,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       c
         .querySelector('[data-testid="msg-a1"]')
         ?.getAttribute('data-assistant-actions'),
-    ).toBe('true');
+    ).toBe('false');
     click(toggle(c, 'u1'));
     expect(has(c, 'a1')).toBe(true);
     expect(parallelAgentsSummary(c)).toBeNull();
