@@ -135,6 +135,21 @@ describe('OmniDegradationCache', () => {
     });
   });
 
+  it('round-trips the optional artifact role (a hit must not strip it)', async () => {
+    await cache.put(ORIGINAL, fp, { ...ENTRY, role: 'thumbnail' });
+    await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject({
+      ...ENTRY,
+      role: 'thumbnail',
+    });
+    // And an entry without a role stays role-less.
+    const fp2 = computePolicyFingerprint('omni_downsample_image', {
+      quality: 51,
+    });
+    await cache.put(ORIGINAL, fp2, ENTRY);
+    const hit = await cache.get(ORIGINAL, fp2);
+    expect(hit!.role).toBeUndefined();
+  });
+
   it('removeByOriginalSha256 drops every policy result for the source', async () => {
     const fp2 = computePolicyFingerprint('omni_downsample_image', {
       quality: 50,
@@ -231,6 +246,8 @@ describe('OmniDegradationCache', () => {
       ['missing disclosure', { ...ENTRY, disclosure: undefined }],
       ['empty mimeType', { ...ENTRY, mimeType: '' }],
       ['missing mimeType', { ...ENTRY, mimeType: undefined }],
+      ['empty role', { ...ENTRY, role: '' }],
+      ['non-string role', { ...ENTRY, role: 42 }],
     ])(
       'drops a malformed entry instead of serving it: %s',
       async (_label, entry) => {

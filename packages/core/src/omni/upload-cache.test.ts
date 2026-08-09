@@ -55,6 +55,28 @@ describe('OmniUploadCache', () => {
     expect(await cache.get(SHA, 'model-b')).toBeNull();
   });
 
+  it('replaces a symlink at the cache path instead of writing through it', async () => {
+    // A link planted at the cache path (same-UID malware, dotfile
+    // managers) must never redirect the save onto its target: the atomic
+    // rename replaces the link itself, leaving the victim file untouched.
+    // The target holds VALID cache JSON so the operation takes the normal
+    // load→save path (invalid content would divert into corrupt-backup,
+    // which renames the link away before any write).
+    const victimContent = JSON.stringify({ version: 1, entries: {} });
+    const victim = path.join(root, 'victim.txt');
+    await fs.writeFile(victim, victimContent, { mode: 0o644 });
+    const cachePath = path.join(root, 'upload-cache.json');
+    await fs.symlink(victim, cachePath);
+
+    const cache = new OmniUploadCache(root);
+    await cache.put(SHA, 'm', 'oss://bucket/x');
+
+    expect(await fs.readFile(victim, 'utf8')).toBe(victimContent);
+    const st = await fs.lstat(cachePath);
+    expect(st.isSymbolicLink()).toBe(false);
+    expect(await cache.get(SHA, 'm')).toBe('oss://bucket/x');
+  });
+
   it('keys by scope — a different scope is a miss, same scope hits', async () => {
     const cacheA = new OmniUploadCache(root, 47, 'scope-a');
     const cacheB = new OmniUploadCache(root, 47, 'scope-b');

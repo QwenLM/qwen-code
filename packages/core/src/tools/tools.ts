@@ -187,6 +187,19 @@ export interface MediaPolicyToolDescriptor {
   /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
   settingsSchema?: object;
   /**
+   * Parameter names only the OPERATOR may set — via
+   * `policyTools.<name>.settings` or `modelAccess.defaultArguments` /
+   * `lockedArguments` — never the caller of a gated model/client call.
+   * For endpoint/credential selectors (e.g. a request base URL plus the
+   * NAME of the env var read for its bearer token): a model-controlled
+   * pair would let injected content exfiltrate arbitrary environment
+   * secrets to an attacker host. The modelAccess gate rejects gated calls
+   * that name these keys, and the declaration projection hides them from
+   * the model. Fixed-policy arguments (operator-authored settings.json)
+   * are unaffected.
+   */
+  operatorOnlyParams?: readonly string[];
+  /**
    * Transform-semantics version, part of the degradation-cache
    * fingerprint (decision D2). Bump it whenever the tool starts producing
    * different bytes for the same input and arguments (encoder change,

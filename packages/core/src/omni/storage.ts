@@ -64,6 +64,30 @@ async function assertRealDirIfExists(p: string): Promise<void> {
 }
 
 /**
+ * Prepare a `downloads/` staging area and verify it is a REAL directory
+ * before returning. Every caller that writes `.part` files (the URL
+ * funnel, the tool-result funnel) must go through this:
+ * `mkdir { recursive: true }` succeeds silently when the path already
+ * exists as a symlink to a directory, so a link planted at
+ * `.qwen/omni/downloads` would otherwise redirect the write to an
+ * attacker-chosen location (and outside the recovery sweep, which
+ * deliberately refuses to descend symlinked directories). Fails closed —
+ * callers degrade per their own contract (inline part, delivery error).
+ */
+export async function prepareOmniDownloadsDir(
+  downloadsDir: string,
+): Promise<string> {
+  await fs.mkdir(downloadsDir, { recursive: true, mode: 0o700 });
+  const st = await fs.lstat(downloadsDir);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(
+      `Omni downloads path is not a real directory (symlink or special file refused): ${downloadsDir}`,
+    );
+  }
+  return downloadsDir;
+}
+
+/**
  * Content-addressed, immutable object store under `<project>/.qwen/omni/`.
  *
  * Layout (storage design §4):

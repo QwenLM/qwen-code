@@ -5,11 +5,13 @@
  */
 
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
+import { ToolNames } from '../../tools/tool-names.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
 import type { OmniModality } from '../recognition.js';
 import { STAGING_GRACE_MS } from '../recovery.js';
 import { validateFixedPolicyCondition } from './conditions.js';
 import type { FixedPolicyCondition } from './conditions.js';
+import { isPlainRecord } from './types.js';
 import type {
   FixedPolicyOrigin,
   NormalizedFixedPolicy,
@@ -80,26 +82,6 @@ const RESERVED_ARGUMENT_KEYS = ['inputPath', 'outputDir', 'resourceId'];
  * conservative token charset. */
 const POLICY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-interface SystemDefaultPolicy {
-  mediaTypes: OmniModality[];
-  toolName: string;
-}
-
-const SYSTEM_DEFAULT_POLICY_BASES: Record<string, SystemDefaultPolicy> = {
-  'image-downsample': {
-    mediaTypes: ['image'],
-    toolName: 'omni_downsample_image',
-  },
-  'video-downscale': {
-    mediaTypes: ['video'],
-    toolName: 'omni_downscale_video',
-  },
-  'audio-downsample': {
-    mediaTypes: ['audio'],
-    toolName: 'omni_downsample_audio',
-  },
-};
-
 /**
  * System default policies, registered ONLY as `transportGuard.policies`
  * (decision D7, revised): no `when`, so the guard stage runs them exactly
@@ -107,20 +89,28 @@ const SYSTEM_DEFAULT_POLICY_BASES: Record<string, SystemDefaultPolicy> = {
  * satisfies the mandatory non-empty + three-modality-coverage validation
  * (policy design §10.1). There are NO system-default `fixedPolicies` —
  * preprocessing is pure user-experiment semantics, and a zero-config
- * setup must never trigger a policy below transport limits.
+ * setup must never trigger a policy below transport limits. Returns a
+ * fresh object per call: the entries flow into normalization as raw
+ * settings input, which must never share mutable state across calls.
  */
 export function systemDefaultTransportGuardPolicies(): Record<
   string,
   Record<string, unknown>
 > {
-  const entries: Record<string, Record<string, unknown>> = {};
-  for (const [id, base] of Object.entries(SYSTEM_DEFAULT_POLICY_BASES)) {
-    entries[id] = {
-      mediaTypes: base.mediaTypes,
-      toolName: base.toolName,
-    };
-  }
-  return entries;
+  return {
+    'image-downsample': {
+      mediaTypes: ['image'],
+      toolName: ToolNames.OMNI_DOWNSAMPLE_IMAGE,
+    },
+    'video-downscale': {
+      mediaTypes: ['video'],
+      toolName: ToolNames.OMNI_DOWNSCALE_VIDEO,
+    },
+    'audio-downsample': {
+      mediaTypes: ['audio'],
+      toolName: ToolNames.OMNI_DOWNSAMPLE_AUDIO,
+    },
+  };
 }
 
 /** Raw inputs to normalization, as threaded from settings. */
@@ -147,13 +137,16 @@ export interface OmniPolicyToolLookup {
   getTool(name: string):
     | {
         mediaPolicyDescriptor?: MediaPolicyToolDescriptor;
-        schema?: { parametersJsonSchema?: unknown };
+        /** The tool's NATIVE parameter schema (DeclarativeTool's public
+         * field) — never the `schema` getter: for media-policy tools that
+         * getter is the model-visible projection, which strips
+         * lockedArguments and operatorOnly keys, and validating operator
+         * config against the projection would reject every legitimate
+         * locked/operator-only argument at startup. */
+        parameterSchema?: unknown;
       }
     | undefined;
 }
-
-const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function fail(message: string): never {
   throw new OmniPolicyConfigError(message);
@@ -649,6 +642,36 @@ function validatePolicyTools(
         );
       }
     }
+    const nativeSchema = tool.parameterSchema;
+    const nativeProperties =
+      isPlainRecord(nativeSchema) && isPlainRecord(nativeSchema['properties'])
+        ? nativeSchema['properties']
+        : undefined;
+    // defaultArguments/lockedArguments are merged into every invocation's
+    // args (defaults + caller args + locked), so a key the tool's native
+    // schema does not declare, or a value its sub-schema rejects, would
+    // fail EVERY invocation at build time. Catch the misconfiguration at
+    // startup instead of per-call. `required` is intentionally dropped:
+    // these records are partial arg sets, the io params arrive per-run.
+    if (nativeProperties !== undefined) {
+      for (const [label, record] of [
+        ['defaultArguments', defaults],
+        ['lockedArguments', locked],
+      ] as const) {
+        if (!isPlainRecord(record)) continue;
+        const error = SchemaValidator.validate(
+          {
+            type: 'object',
+            properties: nativeProperties,
+            additionalProperties: false,
+          },
+          record,
+        );
+        if (error) {
+          fail(`${where}.modelAccess.${label}: ${error}`);
+        }
+      }
+    }
     // §13 #20: the model-visible projection may only narrow the native
     // schema — a property the native schema does not declare cannot be
     // introduced by projection.
@@ -660,10 +683,9 @@ function validatePolicyTools(
       const projectionProps = isPlainRecord(projection['properties'])
         ? Object.keys(projection['properties'])
         : [];
-      const nativeSchema = tool.schema?.parametersJsonSchema;
       const nativeProps =
-        isPlainRecord(nativeSchema) && isPlainRecord(nativeSchema['properties'])
-          ? new Set(Object.keys(nativeSchema['properties']))
+        nativeProperties !== undefined
+          ? new Set(Object.keys(nativeProperties))
           : new Set<string>();
       const introduced = projectionProps.filter((p) => !nativeProps.has(p));
       if (introduced.length > 0) {

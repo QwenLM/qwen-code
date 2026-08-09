@@ -17,6 +17,7 @@ import {
 } from '../extension/network-policy.js';
 import { loadUndici, detectRuntime } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { prepareOmniDownloadsDir } from './storage.js';
 
 const debugLogger = createDebugLogger('omni:download');
 
@@ -298,9 +299,11 @@ export async function downloadMediaUrl(params: {
 
   // Local filesystem failures (ENOTDIR, EROFS, EACCES) must stay inside the
   // OmniDownloadError contract, and fs error text embeds the absolute
-  // directory path, which must not reach the UI or the debug log.
+  // directory path, which must not reach the UI or the debug log. The
+  // prepare step is also the symlink guard: a link planted at downloads/
+  // would redirect the streamed bytes to an attacker-chosen location.
   try {
-    await fs.mkdir(downloadsDir, { recursive: true, mode: 0o700 });
+    await prepareOmniDownloadsDir(downloadsDir);
   } catch (err) {
     throw new OmniDownloadError(
       `Could not prepare the downloads directory for URL media: ${

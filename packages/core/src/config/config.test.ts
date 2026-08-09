@@ -592,6 +592,37 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('omni quarantine budget getters', () => {
+    it('passes through positive settings', () => {
+      const config = new Config({
+        ...baseParams,
+        omniQuarantineRetentionDays: 3,
+        omniQuarantineMaxBytes: 1024,
+      });
+      expect(config.getOmniQuarantineRetentionDays()).toBe(3);
+      expect(config.getOmniQuarantineMaxBytes()).toBe(1024);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['zero', 0],
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+    ])(
+      'falls back to defaults on a %s setting (a bad value must not expire the whole quarantine)',
+      (_label, bad) => {
+        const config = new Config({
+          ...baseParams,
+          omniQuarantineRetentionDays: bad,
+          omniQuarantineMaxBytes: bad,
+        });
+        expect(config.getOmniQuarantineRetentionDays()).toBe(7);
+        expect(config.getOmniQuarantineMaxBytes()).toBe(5 * 1024 * 1024 * 1024);
+      },
+    );
+  });
+
   describe('getMemoryAgentTimeoutMinutes', () => {
     it('returns undefined when unset', () => {
       expect(

@@ -28,7 +28,9 @@ const TUNABLE_SCHEMA = {
 
 interface ToolStub {
   mediaPolicyDescriptor?: MediaPolicyToolDescriptor;
-  schema?: { parametersJsonSchema?: unknown };
+  /** Native schema, mirroring DeclarativeTool's public field — the lookup
+   * contract deliberately avoids the projected `schema` getter. */
+  parameterSchema?: unknown;
 }
 
 function makeTool(
@@ -46,15 +48,13 @@ function makeTool(
       settingsSchema: TUNABLE_SCHEMA,
       ...overrides,
     },
-    schema: {
-      parametersJsonSchema: {
-        type: 'object',
-        properties: {
-          inputPath: { type: 'string' },
-          outputDir: { type: 'string' },
-          maxDimension: { type: 'number' },
-          quality: { type: 'number' },
-        },
+    parameterSchema: {
+      type: 'object',
+      properties: {
+        inputPath: { type: 'string' },
+        outputDir: { type: 'string' },
+        maxDimension: { type: 'number' },
+        quality: { type: 'number' },
       },
     },
   };
@@ -706,7 +706,7 @@ describe('normalizeOmniProcessingConfig', () => {
 
     it('rejects a registered tool without a media_policy descriptor', () => {
       const tools = defaultTools();
-      tools['read_file'] = { schema: { parametersJsonSchema: {} } };
+      tools['read_file'] = { parameterSchema: {} };
       expect(() =>
         normalize(
           {
@@ -1005,6 +1005,93 @@ describe('normalizeOmniProcessingConfig', () => {
         'omni.processing.policyTools.omni_downsample_image.modelAccess: ' +
           '"quality" present in both defaultArguments and lockedArguments',
       );
+    });
+
+    it('rejects a defaultArguments key the native schema does not declare', () => {
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: {
+              modelAccess: {
+                defaultArguments: { sharpen: 2 },
+              },
+            },
+          },
+        }),
+      ).toThrow(
+        /omni\.processing\.policyTools\.omni_downsample_image\.modelAccess\.defaultArguments/,
+      );
+    });
+
+    it('rejects a lockedArguments value the native sub-schema refuses', () => {
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: {
+              modelAccess: {
+                lockedArguments: { quality: 'very high' },
+              },
+            },
+          },
+        }),
+      ).toThrow(
+        /omni\.processing\.policyTools\.omni_downsample_image\.modelAccess\.lockedArguments/,
+      );
+    });
+
+    it('accepts schema-valid partial defaultArguments and lockedArguments', () => {
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: {
+              modelAccess: {
+                defaultArguments: { quality: 80 },
+                lockedArguments: { maxDimension: 1024 },
+              },
+            },
+          },
+        }),
+      ).not.toThrow();
+    });
+
+    it('validates locked/operator-only arguments against a REAL tool (whose `schema` getter hides them)', async () => {
+      // Regression: validation must read the tool's NATIVE parameterSchema.
+      // A real BaseMediaPolicyTool's `schema` getter is the model-visible
+      // projection, which strips lockedArguments and operatorOnlyParams
+      // keys — validated against THAT, every legitimate locked/operator
+      // config would abort startup with "must NOT have additional
+      // properties". The stub lookup can't catch this (its shape is
+      // static), so this test wires real tool instances whose config view
+      // serves the very settings under validation.
+      const raw: RawOmniProcessingSettings = {
+        policyTools: {
+          omni_downsample_image: {
+            modelAccess: {
+              enabled: true,
+              lockedArguments: { quality: 80 },
+            },
+          },
+          omni_transcribe_audio: {
+            modelAccess: {
+              enabled: true,
+              defaultArguments: { baseUrl: 'https://asr.example/v1' },
+            },
+          },
+        },
+      };
+      const view = {
+        getOmniPolicyToolsSettings: () => raw.policyTools,
+      };
+      const [image, transcribe] = await Promise.all([
+        import('./tools/downsample-image.js'),
+        import('./tools/transcribe-audio.js'),
+      ]);
+      const real: Record<string, ToolStub> = {
+        ...defaultTools(),
+        omni_downsample_image: new image.OmniDownsampleImageTool(view),
+        omni_transcribe_audio: new transcribe.OmniTranscribeAudioTool(view),
+      };
+      expect(() => normalize(raw, real)).not.toThrow();
     });
 
     it('rejects parameterSchema properties absent from the native schema (§13 #20)', () => {

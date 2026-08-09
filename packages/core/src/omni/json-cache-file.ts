@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 
 /** Per-cache-file operation serializer: cache instances are constructed
@@ -48,7 +48,8 @@ interface CacheFileShape<TEntry> {
  * `{ version: 1, entries: {} }` file with
  *
  * - per-file serialized load-modify-save (in-process),
- * - atomic writes (tmp + rename, 0600 file / 0700 dir),
+ * - atomic writes via `atomicWriteFile` (tmp + rename, `noFollow`; 0600
+ *   forced on every save, 0700 dir),
  * - corrupt files backed up as `.corrupt-<ts>` (newest
  *   {@link MAX_CORRUPT_BACKUPS} kept) and rebuilt empty — never fatal,
  * - unreadable-but-existing files (EACCES, EMFILE, …) making the current
@@ -160,16 +161,21 @@ export class OmniJsonCacheFile<TEntry> {
   }
 
   private async save(data: CacheFileShape<TEntry>): Promise<void> {
-    const tmp = `${this.filePath}.tmp-${randomBytes(4).toString('hex')}`;
     try {
       await fs.mkdir(path.dirname(this.filePath), {
         recursive: true,
         mode: 0o700,
       });
-      await fs.writeFile(tmp, JSON.stringify(data, null, 1), { mode: 0o600 });
-      await fs.rename(tmp, this.filePath);
+      await atomicWriteFile(this.filePath, JSON.stringify(data, null, 1), {
+        mode: 0o600,
+        forceMode: true,
+        // Rename-replacement semantics: a symlink planted at the cache
+        // path is REPLACED by the rename, never written through — without
+        // this the default symlink resolution would redirect the write
+        // (and the 0600 chmod) onto the link's target.
+        noFollow: true,
+      });
     } catch (err) {
-      await fs.rm(tmp, { force: true }).catch(() => {});
       // Cache persistence is best-effort by design.
       this.debugLogger.debug(
         `cache write failed: ${err instanceof Error ? err.message : err}`,

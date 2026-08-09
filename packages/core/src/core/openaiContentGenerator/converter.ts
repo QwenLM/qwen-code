@@ -673,6 +673,10 @@ function processContent(
           // (emitted immediately before its media part) moves WITH the media
           // into the follow-up user message instead of being stranded in the
           // text-only tool message, where the model could not attribute it.
+          // The asymmetry with transcript text (§6.2) is deliberate:
+          // transcripts FOLLOW their media part and read fine as plain text
+          // in the tool message — only the disclosure carries the D8
+          // adjacency requirement, so only the preceding disclosure migrates.
           let prev: OpenAIContentPart | undefined;
           for (const cp of toolMessage.content as OpenAIContentPart[]) {
             if (

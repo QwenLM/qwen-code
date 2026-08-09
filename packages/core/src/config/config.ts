@@ -6461,11 +6461,20 @@ export class Config {
   }
 
   getOmniQuarantineRetentionDays(): number {
-    return this.omniQuarantineRetentionDays ?? 7;
+    // A zero/negative/NaN setting would make the recovery sweep treat the
+    // whole quarantine as expired (or break its cutoff comparisons) —
+    // fall back to the default instead of propagating nonsense.
+    const days = this.omniQuarantineRetentionDays;
+    return typeof days === 'number' && Number.isFinite(days) && days > 0
+      ? days
+      : 7;
   }
 
   getOmniQuarantineMaxBytes(): number {
-    return this.omniQuarantineMaxBytes ?? 5 * 1024 * 1024 * 1024;
+    const bytes = this.omniQuarantineMaxBytes;
+    return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0
+      ? bytes
+      : 5 * 1024 * 1024 * 1024;
   }
 
   resolveImageGenerationModel(
@@ -8114,63 +8123,78 @@ export class Config {
       await registerComputerUseTools(registerLazy, this);
     }
 
-    // Register monitor tool
     // Omni media-policy tools: always registered when omni is enabled (the
     // fixed-policy orchestrator must be able to find them), but hidden from
     // every model-facing surface unless
     // `omni.processing.policyTools.<name>.modelAccess.enabled` opens them up
     // (see omni/policy/model-access.ts).
     if (this.isOmniEnabled()) {
-      await registerLazy(ToolNames.OMNI_DOWNSAMPLE_IMAGE, async () => {
-        const { OmniDownsampleImageTool } = await import(
-          '../omni/policy/tools/downsample-image.js'
-        );
-        return new OmniDownsampleImageTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_DOWNSCALE_VIDEO, async () => {
-        const { OmniDownscaleVideoTool } = await import(
-          '../omni/policy/tools/downscale-video.js'
-        );
-        return new OmniDownscaleVideoTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_DOWNSAMPLE_AUDIO, async () => {
-        const { OmniDownsampleAudioTool } = await import(
-          '../omni/policy/tools/downsample-audio.js'
-        );
-        return new OmniDownsampleAudioTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_EXTRACT_KEYFRAMES, async () => {
-        const { OmniExtractKeyframesTool } = await import(
-          '../omni/policy/tools/extract-keyframes.js'
-        );
-        return new OmniExtractKeyframesTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_EXTRACT_AUDIO, async () => {
-        const { OmniExtractAudioTool } = await import(
-          '../omni/policy/tools/extract-audio.js'
-        );
-        return new OmniExtractAudioTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_CLIP_VIDEO, async () => {
-        const { OmniClipVideoTool } = await import(
-          '../omni/policy/tools/clip-video.js'
-        );
-        return new OmniClipVideoTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_CONVERT_IMAGE, async () => {
-        const { OmniConvertImageTool } = await import(
-          '../omni/policy/tools/convert-image.js'
-        );
-        return new OmniConvertImageTool(this);
-      });
-      await registerLazy(ToolNames.OMNI_TRANSCRIBE_AUDIO, async () => {
-        const { OmniTranscribeAudioTool } = await import(
-          '../omni/policy/tools/transcribe-audio.js'
-        );
-        return new OmniTranscribeAudioTool(this);
-      });
+      // Table-driven: each entry pairs the registered name with a lazy
+      // import-and-construct factory (the module loads on first use).
+      const omniPolicyToolFactories: Array<[ToolName, ToolFactory]> = [
+        [
+          ToolNames.OMNI_DOWNSAMPLE_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/downsample-image.js')
+            ).OmniDownsampleImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_DOWNSCALE_VIDEO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/downscale-video.js')
+            ).OmniDownscaleVideoTool(this),
+        ],
+        [
+          ToolNames.OMNI_DOWNSAMPLE_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/downsample-audio.js')
+            ).OmniDownsampleAudioTool(this),
+        ],
+        [
+          ToolNames.OMNI_EXTRACT_KEYFRAMES,
+          async () =>
+            new (
+              await import('../omni/policy/tools/extract-keyframes.js')
+            ).OmniExtractKeyframesTool(this),
+        ],
+        [
+          ToolNames.OMNI_EXTRACT_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/extract-audio.js')
+            ).OmniExtractAudioTool(this),
+        ],
+        [
+          ToolNames.OMNI_CLIP_VIDEO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/clip-video.js')
+            ).OmniClipVideoTool(this),
+        ],
+        [
+          ToolNames.OMNI_CONVERT_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/convert-image.js')
+            ).OmniConvertImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_TRANSCRIBE_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/transcribe-audio.js')
+            ).OmniTranscribeAudioTool(this),
+        ],
+      ];
+      for (const [name, factory] of omniPolicyToolFactories) {
+        await registerLazy(name, factory);
+      }
     }
 
+    // Register monitor tool
     await registerLazy(ToolNames.MONITOR, async () => {
       const { MonitorTool } = await import('../tools/monitor.js');
       return new MonitorTool(this);

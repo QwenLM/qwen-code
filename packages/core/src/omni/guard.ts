@@ -18,8 +18,8 @@ export const DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
  * surface the message; there is no silent degradation. Messages must stay
  * free of absolute paths (they can reach model-visible content). */
 export class OmniTransportGuardError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'OmniTransportGuardError';
   }
 }

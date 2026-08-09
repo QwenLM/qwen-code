@@ -477,6 +477,34 @@ describe('downloadMediaUrl', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  it('refuses a symlink planted at the downloads path (no bytes through the link)', async () => {
+    // mkdir { recursive: true } succeeds silently on a symlink-to-dir, so
+    // without the lstat guard the streamed bytes would land at an
+    // attacker-chosen location outside the omni root.
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-dl-out-'));
+    const linkDir = path.join(downloadsDir, 'downloads');
+    await fs.symlink(outside, linkDir);
+    const fetchFn = fetchOk('media-bytes');
+    try {
+      const err = await downloadMediaUrl({
+        url: 'https://media.example.com/a.mp4',
+        downloadsDir: linkDir,
+        maxBytes: 1000,
+        fetchFn,
+        resolveTarget: async (u) => pinnedTarget(u),
+      }).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(OmniDownloadError);
+      expect((err as Error).message).toMatch(
+        /Could not prepare the downloads directory/,
+      );
+      expect(fetchFn).not.toHaveBeenCalled();
+      // Nothing was written through the link.
+      await expect(fs.readdir(outside)).resolves.toEqual([]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('pins the connection to the vetted address (real socket)', async () => {
     // The regression test for the check-then-connect hole: a preflight-only
     // gate lets `fetch` re-resolve the name, so this asserts the socket is

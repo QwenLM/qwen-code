@@ -24,6 +24,11 @@ export interface DegradationCacheEntry {
   /** Disclosure the tool emitted (D8) — redelivered verbatim on reuse. */
   disclosure: string;
   mimeType: string;
+  /** `metadata.omniRole` the tool stamped on the artifact, when any —
+   * without it a cache hit would strip the role a fresh derivation
+   * carries, changing downstream artifact matching between the first run
+   * and every cached rerun. */
+  role?: string;
   createdAt: string;
 }
 
@@ -125,7 +130,9 @@ export class OmniDegradationCache {
         typeof entry.disclosure !== 'string' ||
         entry.disclosure.length === 0 ||
         typeof entry.mimeType !== 'string' ||
-        entry.mimeType.length === 0
+        entry.mimeType.length === 0 ||
+        (entry.role !== undefined &&
+          (typeof entry.role !== 'string' || entry.role.length === 0))
       ) {
         delete entries[key];
         return { result: null, changed: true };
