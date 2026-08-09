@@ -842,8 +842,21 @@ jobs:
 
           # Label requested by issue #7383. Non-fatal: never create labels,
           # and a repo without it should not fail the run.
-          gh pr edit "${PR_URL}" --add-label 'autofix/repo-hygiene' \
-            || echo '⚠️  Could not add label autofix/repo-hygiene (missing in this repo?)'
+          # REST, not `gh pr edit`: its GraphQL lookup requests
+          # repository.pullRequest.projectCards, which GitHub rejects on the
+          # gh builds that still send that query (see
+          # pr-self-report-label.yml). The label autofix/repo-hygiene has
+          # never been created in this repo, and the existence probe
+          # preserves the no-create promise: the REST add alone would create
+          # a missing label. The probe cannot tell a 404 from any other API
+          # failure, so the skip message claims neither.
+          if gh api "repos/${GITHUB_REPOSITORY}/labels/autofix%2Frepo-hygiene" > /dev/null 2>&1; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_URL##*/}/labels" \
+              -f 'labels[]=autofix/repo-hygiene' > /dev/null \
+              || echo '⚠️  Could not add label autofix/repo-hygiene'
+          else
+            echo '⚠️  Could not verify label autofix/repo-hygiene; skipping'
+          fi
 
           if [[ -s "${WORKDIR}/report-only.md" ]]; then
             {
