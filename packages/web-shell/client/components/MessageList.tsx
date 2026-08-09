@@ -31,7 +31,7 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
 } from '../customization';
 import { useI18n } from '../i18n';
-import { formatContextTokens as formatTokenCount } from '../utils/formatTokenCount';
+import { formatContextTokens } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { MessageItem } from './MessageItem';
@@ -1871,11 +1871,11 @@ function tokenMetricText(collapse: TurnCollapseHead, t: Translate): string {
   const cachedTokens = collapse.cachedTokens ?? 0;
   const cached =
     cachedTokens > 0 && collapse.inputTokens > 0
-      ? ` (${formatTokenCount(cachedTokens)} ${t('turn.cached')}, ${Math.round(
+      ? ` (${formatContextTokens(cachedTokens)} ${t('turn.cached')}, ${Math.round(
           (cachedTokens / collapse.inputTokens) * 100,
         )}%)`
       : '';
-  return `↑${formatTokenCount(collapse.inputTokens)}${cached} ↓${formatTokenCount(
+  return `↑${formatContextTokens(collapse.inputTokens)}${cached} ↓${formatContextTokens(
     collapse.outputTokens,
   )}`;
 }

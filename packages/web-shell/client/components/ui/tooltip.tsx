@@ -29,9 +29,14 @@ function TooltipTrigger({
   return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />;
 }
 
+// With TooltipPrimitive.Arrow present, Radix's offset middleware computes
+// `mainAxis: sideOffset + arrowHeight`, so the arrow's 10px box already
+// pushes the content out. The previous pseudo-element arrow took no layout
+// space and was tuned against sideOffset 8; keeping 8 here would move every
+// tooltip ~10px farther from its trigger.
 function TooltipContent({
   className,
-  sideOffset = 8,
+  sideOffset = 0,
   children,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Content>) {

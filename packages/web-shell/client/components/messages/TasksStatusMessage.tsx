@@ -20,7 +20,7 @@ import {
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
-import { formatContextTokens as formatTokenCount } from '../../utils/formatTokenCount';
+import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { PlanExecutionView } from './PlanExecutionView';
@@ -1130,12 +1130,12 @@ function TaskDetail({
   if (agentOutputTokens) {
     subtitleParts.push(
       t('tasks.detail.tokens', {
-        count: formatTokenCount(agentOutputTokens),
+        count: formatContextTokens(agentOutputTokens),
       }),
     );
     compactFields.push({
       label: t('tasks.detail.tokenCount'),
-      value: formatTokenCount(agentOutputTokens),
+      value: formatContextTokens(agentOutputTokens),
     });
   }
 

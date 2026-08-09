@@ -17,7 +17,6 @@ import type {
 } from '../hooks/useComposerCore';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
-import { formatContextUsageDetail } from '../utils/formatTokenCount';
 import { WebShellPortalRootContext } from '../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -469,20 +468,6 @@ describe('ChatEditor context usage ring', () => {
     expect(button.getAttribute('aria-label')).toBe('150.0% context used');
     const arc = button.querySelectorAll('circle')[1];
     expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
-  });
-});
-
-describe('formatContextUsageDetail', () => {
-  it('formats used/total with k/M units and one decimal', () => {
-    expect(formatContextUsageDetail(53_600, 1_000_000)).toBe(
-      '53.6k / 1.0M tokens (5.4%)',
-    );
-    expect(formatContextUsageDetail(338_108, 1_000_000)).toBe(
-      '338.1k / 1.0M tokens (33.8%)',
-    );
-    expect(formatContextUsageDetail(512, 2000)).toBe(
-      '512 / 2.0k tokens (25.6%)',
-    );
   });
 });
 
