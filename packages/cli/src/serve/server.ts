@@ -519,6 +519,7 @@ export interface ServeAppDeps {
     enabled: boolean,
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
+  persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -1079,6 +1080,13 @@ export function createServeApp(
         (async () => {
           throw new Error(
             'setWorkspaceSkillEnabled requires persistDisabledSkills in ServeAppDeps',
+          );
+        }),
+      persistDisabledSkillsBatch:
+        deps.persistDisabledSkillsBatch ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceSkillsEnabled requires persistDisabledSkillsBatch in ServeAppDeps',
           );
         }),
       queryWorkspaceStatus: (method, idle) =>
