@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
@@ -5857,10 +5858,75 @@ describe('triage job budget', () => {
   // The budget is a repository variable so the next resize needs no PR;
   // the fallback keeps an unconfigured repo bounded. Both halves pinned so
   // neither the knob nor its default can silently vanish.
-  it('is operator-tunable with a bounded fallback', () => {
-    const triageJob = job('triage');
-    expect(triageJob).toContain(
-      "timeout-minutes: '${{ fromJSON(vars.QWEN_TRIAGE_TIMEOUT_MINUTES || 60) }}'",
+  it('is operator-tunable through the sanitized authorize output', () => {
+    // Active lines only: a commented-out timeout line would satisfy a raw
+    // substring check while the job silently inherits GitHub's 360-minute
+    // default — the probe-verified evasion of the first version of this pin.
+    const active = (text) =>
+      text
+        .split('\n')
+        .filter((l) => !l.trimStart().startsWith('#'))
+        .join('\n');
+    expect(active(job('triage'))).toContain(
+      "timeout-minutes: '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}'",
     );
+    expect(active(job('authorize'))).toContain(
+      "triage_timeout_minutes: '${{ steps.budget.outputs.triage_timeout_minutes }}'",
+    );
+  });
+
+  it('sanitizes the budget: integers clamp, garbage falls back with a warning', () => {
+    // The REAL sanitize step, replayed: timeout-minutes is evaluated before
+    // any step of the consuming job runs, so this bash is the only place a
+    // bad repository variable can be caught — and the knob's whole point is
+    // changing it without a PR, so nothing else reviews the value.
+    const doc = parse(workflow);
+    const budget = doc.jobs.authorize.steps.find((s) => s.id === 'budget');
+    expect(budget).toBeTruthy();
+    const runBudget = (raw) => {
+      const dir = mkdtempSync(join(tmpdir(), 'budget-'));
+      try {
+        const outFile = join(dir, 'out');
+        writeFileSync(outFile, '');
+        const res = execFileSync('bash', ['-c', budget.run], {
+          encoding: 'utf8',
+          env: { ...process.env, RAW: raw, GITHUB_OUTPUT: outFile },
+        });
+        return {
+          out: readFileSync(outFile, 'utf8').trim(),
+          warned: res.includes('::warning::'),
+          log: res,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // unset → default, silently
+    expect(runBudget('')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    // a sane value passes through untouched
+    expect(runBudget('90')).toMatchObject({
+      out: 'triage_timeout_minutes=90',
+      warned: false,
+    });
+    // 0 would be an instantly-cancelled job — clamped to the floor
+    expect(runBudget('0')).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: true,
+    });
+    // a runaway value would hold the runner for days — ceiling
+    expect(runBudget('3600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // every malformed shape the review enumerated falls back and NAMES the
+    // variable, so the operator's run log points at the knob, not fromJSON
+    for (const bad of ['60 minutes', '1h', '6O', '60.5', '"60"']) {
+      const r = runBudget(bad);
+      expect(r.out, bad).toBe('triage_timeout_minutes=60');
+      expect(r.log, bad).toContain('QWEN_TRIAGE_TIMEOUT_MINUTES');
+    }
   });
 });
