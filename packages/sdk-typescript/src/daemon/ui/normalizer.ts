@@ -841,9 +841,6 @@ function normalizeSessionUpdate(
     case 'current_mode_update':
     case 'usage_update':
       return [];
-    // Context occupancy is surfaced by the status bar, not the transcript.
-    case 'usage_update':
-      return [];
     default:
       return [
         {
