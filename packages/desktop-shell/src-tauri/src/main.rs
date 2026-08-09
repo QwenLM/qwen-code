@@ -8,6 +8,7 @@ use desktop_state::{default_window_size, restore_window, SettingsStore};
 use local_control::{LocalControlInfo, LocalControlSession};
 use runtime::{resolve_workspace, DesktopRuntime};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,6 +27,10 @@ use url::Url;
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+// Keep the default first-launch workspace aligned with the Electron shell's
+// getDefaultConversationWorkspacePath() in
+// packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
+// relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 
 #[derive(Clone, Serialize)]
@@ -501,15 +506,30 @@ fn initial_workspace(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn default_workspace(app: &AppHandle) -> Result<PathBuf, String> {
+    // Matches the Electron shell, where an empty override falls back to the
+    // ~/Documents/Qwen default.
+    let override_dir =
+        default_workspace_override_dir(std::env::var_os("QWEN_DEFAULT_WORKSPACE_DIR"));
     let home = app
         .path()
         .home_dir()
         .map_err(|error| format!("Failed to resolve the home directory: {error}"))?;
-    create_default_workspace(&home)
+    create_default_workspace(&home, override_dir.as_deref())
 }
 
-fn create_default_workspace(home: &Path) -> Result<PathBuf, String> {
-    let workspace = home.join("Documents").join(DEFAULT_WORKSPACE_DIRECTORY);
+// An empty override is treated as unset so the ~/Documents/Qwen default wins,
+// mirroring the Electron shell's `||` fallback.
+fn default_workspace_override_dir(value: Option<OsString>) -> Option<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn create_default_workspace(home: &Path, override_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let workspace = match override_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => home.join("Documents").join(DEFAULT_WORKSPACE_DIRECTORY),
+    };
     fs::create_dir_all(&workspace).map_err(|error| {
         format!(
             "Failed to create the default workspace {}: {error}",
@@ -685,10 +705,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_default_workspace, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
-        is_same_origin, origin_of, BOOTSTRAP_URL,
+        create_default_workspace, default_workspace_override_dir, is_allowed_navigation,
+        is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of, BOOTSTRAP_URL,
     };
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use url::Url;
 
@@ -717,8 +739,8 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&home);
 
-        let first = create_default_workspace(&home).expect("create workspace");
-        let second = create_default_workspace(&home).expect("reuse workspace");
+        let first = create_default_workspace(&home, None).expect("create workspace");
+        let second = create_default_workspace(&home, None).expect("reuse workspace");
 
         assert_eq!(first, home.join("Documents/Qwen"));
         assert_eq!(second, first);
@@ -736,8 +758,47 @@ mod tests {
         fs::create_dir_all(&home).expect("create home");
         fs::write(home.join("Documents"), b"not a directory").expect("block Documents");
 
-        assert!(create_default_workspace(&home).is_err());
+        assert!(create_default_workspace(&home, None).is_err());
         fs::remove_dir_all(home).expect("cleanup");
+    }
+
+    #[test]
+    fn treats_an_unset_or_empty_workspace_override_as_absent() {
+        assert_eq!(default_workspace_override_dir(None), None);
+        assert_eq!(default_workspace_override_dir(Some(OsString::new())), None);
+    }
+
+    #[test]
+    fn uses_a_non_empty_workspace_override_verbatim() {
+        let custom = PathBuf::from("/tmp/qwen-custom-workspace");
+        assert_eq!(
+            default_workspace_override_dir(Some(OsString::from(custom.clone()))),
+            Some(custom)
+        );
+    }
+
+    #[test]
+    fn honors_the_default_workspace_directory_override() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-override-home-{}",
+            std::process::id()
+        ));
+        let custom = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-override-target-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&custom);
+        fs::create_dir_all(&home).expect("create home");
+
+        let workspace =
+            create_default_workspace(&home, Some(&custom)).expect("create override workspace");
+
+        assert_eq!(workspace, custom);
+        assert!(custom.is_dir());
+        assert!(!home.join("Documents").exists());
+        fs::remove_dir_all(home).expect("cleanup home");
+        fs::remove_dir_all(custom).expect("cleanup override");
     }
 
     #[test]
