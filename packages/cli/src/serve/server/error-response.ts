@@ -51,10 +51,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
-import {
-  WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
-} from '../workspace-service/types.js';
+import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import { DaemonDrainingError } from './session-archive.js';
 
@@ -187,25 +184,11 @@ export function sendBridgeError(
     });
     return;
   }
-  if (err instanceof WorkspaceSkillNotFoundError) {
-    res.status(404).json({
-      error: err.message,
-      code: 'skill_not_found',
-      skillName: err.skillName,
-    });
-    return;
-  }
-  if (err instanceof WorkspaceSkillNotToggleableError) {
-    res.status(409).json({
-      error: err.message,
-      code:
-        err.reason === 'inactive_extension'
-          ? 'skill_inactive_extension'
-          : 'skill_not_toggleable',
-      skillName: err.skillName,
-      reason: err.reason,
-      ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
-    });
+  const skillError = mapWorkspaceSkillToggleError(err);
+  if (skillError) {
+    res
+      .status(skillError.code === 'skill_not_found' ? 404 : 409)
+      .json(skillError);
     return;
   }
   if (err instanceof InvalidSessionTranscriptCursorError) {
