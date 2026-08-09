@@ -11,7 +11,7 @@
  * the interactive UI bootstrap has flipped runtimeStatusEnabled on.
  */
 
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -264,6 +264,49 @@ describe('Config.startNewSession session-registry swap', () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(patchCalls).toEqual([]);
+  });
+});
+
+describe('Config.relocateWorkingDirectory session-registry patch', () => {
+  const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+
+  it('repoints the record at the directory the session moved to', async () => {
+    const config = makeConfig(sessionA);
+    const target = path.join(tmpDir, 'project-b');
+    await mkdir(target);
+    const expected = await realpath(target);
+
+    // `/cd` refreshes the sidecar; the registry is the other half of the
+    // same claim, and a reader of `qwen sessions ps` sees only the
+    // registry. Left unpatched, `cwd` and the name derived from it
+    // advertise the directory the session left until the next session
+    // swap — possibly never.
+    await config.relocateWorkingDirectory(target, expected, {
+      skipProcessChdir: true,
+      skipArtifactMigration: true,
+    });
+
+    expect(patchCalls).toHaveLength(1);
+    expect(patchCalls[0]).toMatchObject({ cwd: expected });
+    expect(patchCalls[0].name).toMatch(/^project-b-[0-9a-f]{2}$/);
+  });
+
+  it('patches the record even when this process never bootstrapped a sidecar', async () => {
+    // Same asymmetry as the swap above: refreshCurrentRuntimeStatus
+    // returns early when the sidecar was never claimed, and the registry
+    // patch must not inherit that gate.
+    const config = makeConfig(sessionA);
+    const target = path.join(tmpDir, 'project-c');
+    await mkdir(target);
+    const expected = await realpath(target);
+
+    await config.relocateWorkingDirectory(target, expected, {
+      skipProcessChdir: true,
+      skipArtifactMigration: true,
+    });
+
+    expect(patchCalls).toHaveLength(1);
+    expect(patchCalls[0]).toMatchObject({ cwd: expected });
   });
 });
 

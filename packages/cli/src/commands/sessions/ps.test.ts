@@ -31,6 +31,7 @@ function record(
     pid: 4242,
     procStart: '123',
     pidNamespace: '4026531836',
+    machineId: 'test-machine',
     sessionId: 'sess-1',
     cwd: '/w/app',
     name: 'app-ab',

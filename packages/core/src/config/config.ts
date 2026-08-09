@@ -4840,6 +4840,22 @@ export class Config {
     this.cwd = expected;
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
+    // The registry advertises this session's working directory and the
+    // name derived from it, so refreshing only the sidecar would leave
+    // `qwen sessions ps` naming the directory the session just left —
+    // until the next session swap, and possibly never. Queued on the same
+    // chain as the sidecar write so it cannot interleave with a
+    // concurrent swap, and deliberately not gated on runtimeStatusEnabled
+    // for the reason startNewSession gives: this patch cannot trample a
+    // sibling's record, so tying it to the sidecar's ownership signal
+    // would only let the two drift apart.
+    this.queueRuntimeStatusWrite(async () => {
+      await patchSessionRecord({
+        cwd: expected,
+        name: deriveSessionName(expected, this.sessionId),
+      });
+    });
+    await this.flushRuntimeStatusWrites();
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
     this.sessionService = undefined;

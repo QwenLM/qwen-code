@@ -17,6 +17,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { isNodeError } from './errors.js';
 
 /**
@@ -103,6 +104,53 @@ export function readPidNamespaceId(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Candidate sources for a machine identity, most specific first.
+ *
+ * Both are the standard 32-hex-character host id; the dbus copy is the
+ * fallback for distributions that populate it but not `/etc/machine-id`.
+ */
+const MACHINE_ID_FILES = ['/etc/machine-id', '/var/lib/dbus/machine-id'];
+
+/**
+ * An opaque identifier for the machine this process is running on, or
+ * `null` when none could be read.
+ *
+ * A PID namespace id does not identify a machine: the initial namespace's
+ * inode is the same constant on every non-containerized Linux box, so two
+ * machines sharing one registry directory — an NFS home, a `QWEN_HOME` on
+ * a shared volume — agree on it and each reads the other's PIDs as its
+ * own. Pair this with {@link readPidNamespaceId}: together they say
+ * whether a recorded PID is a number this process can probe at all.
+ *
+ * Backed by `/etc/machine-id`, which is *stable across reboots* on
+ * purpose. `/proc/sys/kernel/random/boot_id` would additionally invalidate
+ * every pre-reboot record, but it would also make a record written before
+ * the last reboot permanently unattributable — unsweepable, and (for
+ * writers that refuse to overwrite another origin's record) able to block
+ * registration at that PID forever. Reboot-recycled PIDs are already the
+ * job of {@link readProcStartToken}, whose token is boot-relative.
+ *
+ * Falls back to the hostname where no machine id file is readable, which
+ * covers every non-Linux platform. A hostname is weaker — it can change
+ * under a running session, leaving that session's own record
+ * unattributable to it — but the alternative, `null`, silently restores
+ * the cross-machine hole for exactly the platforms with no other
+ * discriminator.
+ */
+export function readMachineId(): string | null {
+  for (const file of MACHINE_ID_FILES) {
+    try {
+      const id = fs.readFileSync(file, 'utf8').trim();
+      if (id !== '') return id;
+    } catch {
+      // Not this one; try the next source.
+    }
+  }
+  const hostname = os.hostname().trim();
+  return hostname === '' ? null : hostname;
 }
 
 /**

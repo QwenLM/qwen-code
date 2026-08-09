@@ -19,6 +19,7 @@ import {
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
 import {
+  readMachineId,
   readPidNamespaceId,
   readProcStartToken,
 } from '../utils/process-liveness.js';
@@ -52,14 +53,23 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+/**
+ * Plant a file in the registry directory verbatim.
+ *
+ * Object bodies get this machine's `machineId` unless they name one
+ * themselves: a record without it reads as "written somewhere else",
+ * which is what the origin tests below assert deliberately and every
+ * other test would then hit by accident.
+ */
 async function writeRaw(fileName: string, body: unknown): Promise<string> {
   const dir = getSessionRegistryDir();
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, fileName);
-  await fs.writeFile(
-    filePath,
-    typeof body === 'string' ? body : JSON.stringify(body),
-  );
+  const content =
+    typeof body === 'string'
+      ? body
+      : JSON.stringify({ machineId: readMachineId(), ...(body as object) });
+  await fs.writeFile(filePath, content);
   return filePath;
 }
 
@@ -164,6 +174,85 @@ describe('registerSession', () => {
     }
   });
 
+  it('records the machine the pid was allocated on', async () => {
+    await registerSession({
+      sessionId: 's1',
+      cwd: '/w/app',
+      kind: 'interactive',
+    });
+
+    // The namespace id alone cannot carry this: every non-containerized
+    // Linux host reports the same initial-namespace inode, so a record
+    // without a machine claim is sweepable by any other machine sharing
+    // the directory.
+    const [record] = await listLiveSessions({
+      selfPid: DEAD_PID,
+      sweepStale: false,
+    });
+    expect(record.machineId).toBe(readMachineId());
+    expect(record.machineId).not.toBeNull();
+  });
+
+  it('refuses to overwrite a record from another origin', async () => {
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    // Their PID number, not ours to reuse: the session behind it is still
+    // running over there, registration is startup-only, so clobbering the
+    // file removes it from discovery for the rest of its life.
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+      }),
+    ).toBe(false);
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+    });
+  });
+
+  // Symlinks are not creatable without elevation on stock Windows.
+  it.skipIf(process.platform === 'win32')(
+    'does not write through a symlink planted at its record path',
+    async () => {
+      const victim = path.join(tmpDir, 'victim.txt');
+      await fs.writeFile(victim, 'do not clobber me');
+      const dir = getSessionRegistryDir();
+      await fs.mkdir(dir, { recursive: true });
+      await fs.symlink(victim, getSessionRecordPath());
+
+      expect(
+        await registerSession({
+          sessionId: 's1',
+          cwd: '/w/app',
+          kind: 'interactive',
+        }),
+      ).toBe(true);
+
+      // The sandbox mounts this directory across a trust boundary, so a
+      // planted `<pid>.json -> <host path>` is a write primitive pointed
+      // at a file the attacker chooses. Replacing the link is the correct
+      // outcome, not refusing to register.
+      expect(await fs.readFile(victim, 'utf8')).toBe('do not clobber me');
+      expect((await fs.lstat(getSessionRecordPath())).isSymbolicLink()).toBe(
+        false,
+      );
+      expect(await listLiveSessions({ includeSelf: true })).toHaveLength(1);
+    },
+  );
+
   // Windows synthesizes st_mode from file attributes (a writable dir reads
   // 0o777, a file 0o666) and chmod there can only toggle the read-only bit,
   // so POSIX permission bits are not assertable on the test_windows gate.
@@ -247,6 +336,30 @@ describe('patchSessionRecord', () => {
     await patchSessionRecord({ sessionId: 'new' });
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
   });
+
+  it('leaves a record from another origin unmerged', async () => {
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: null,
+      pidNamespace: 'not-our-namespace',
+      machineId: readMachineId(),
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    // A merge here would rewrite their sessionId/cwd/name in place,
+    // pointing every reader of that record at our transcript.
+    await patchSessionRecord({ sessionId: 'ours', cwd: '/w/ours' });
+
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+    });
+  });
 });
 
 describe('unregisterSession', () => {
@@ -262,6 +375,27 @@ describe('unregisterSession', () => {
 
   it('is a no-op when nothing was registered', async () => {
     await expect(unregisterSession()).resolves.toBeUndefined();
+  });
+
+  it('leaves a record from another origin in place', async () => {
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    // Our exit says nothing about their session, and they will not
+    // re-register: registration happens once, at startup.
+    await unregisterSession();
+
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
   });
 });
 
@@ -442,6 +576,86 @@ describe('listLiveSessions', () => {
     // rest of its life. Both files must survive.
     await expect(fs.stat(livePath)).resolves.toBeDefined();
     await expect(fs.stat(deadPath)).resolves.toBeDefined();
+  });
+
+  it('does not adopt a foreign record sitting at our own PID number', async () => {
+    // The test above routes around the self-pid shortcut by enumerating
+    // as another process. This one does not: container PIDs are small and
+    // host PIDs recycle, so `<our pid>.json` written on the other side of
+    // the border is the collision that actually happens.
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: readProcStartToken(process.pid),
+      pidNamespace: 'not-our-namespace',
+      sessionId: 's-foreign-self',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    // Reported as our own session, `qwen sessions ps` would print their
+    // sessionId, cwd and name as this process's — and ours not at all.
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
+  // `QWEN_HOME` on a shared volume, or an NFS home: one registry
+  // directory, two machines. The initial PID namespace inode is the same
+  // constant on both, so the namespace gate alone waves them through.
+  it('neither lists nor sweeps a record from another machine', async () => {
+    const deadPath = await writeRaw(`${DEAD_PID}.json`, {
+      schemaVersion: 1,
+      pid: DEAD_PID,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-remote-invisible',
+      cwd: '/w/app',
+      name: 'app-bb',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+    // No PID collision needed for the sweep to fire: it is enough that
+    // this machine has no process with that number, which is the normal
+    // case.
+    const livePath = await writeRaw(`${process.ppid}.json`, {
+      schemaVersion: 1,
+      pid: process.ppid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-remote-live',
+      cwd: '/w/app',
+      name: 'app-cc',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    expect(await listLiveSessions()).toEqual([]);
+    await expect(fs.stat(deadPath)).resolves.toBeDefined();
+    await expect(fs.stat(livePath)).resolves.toBeDefined();
+  });
+
+  it('leaves a record alone when its machine is unrecorded', async () => {
+    // Written by a build that predates the machine field: no claim we can
+    // check, so no proof its PID is ours to read.
+    const filePath = await writeRaw(`${DEAD_PID}.json`, {
+      schemaVersion: 1,
+      pid: DEAD_PID,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: null,
+      sessionId: 's-unknown-machine',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    expect(await listLiveSessions()).toEqual([]);
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
   });
 
   it('leaves a record alone when its namespace is unrecorded', async () => {
