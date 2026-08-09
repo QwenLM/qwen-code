@@ -459,6 +459,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_skill_toggle',
+  'workspace_skill_batch_toggle',
   'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',
@@ -18078,6 +18079,22 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('token_required');
     });
 
+    it('requires the strict bearer-auth mutation gate for Skill batches', async () => {
+      const bridge = fakeBridge();
+      const persistDisabledSkillsBatch = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        persistDisabledSkillsBatch,
+      });
+      const res = await request(app)
+        .post('/workspace/skills/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ skillNames: ['review'], enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(persistDisabledSkillsBatch).not.toHaveBeenCalled();
+    });
+
     it('validates skill names and the enabled body', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, {
@@ -18272,6 +18289,43 @@ describe('createServeApp', () => {
       ).send({ enabled: false });
       expect(res.status).toBe(403);
       expect(res.body.code).toBe('untrusted_workspace');
+    });
+
+    it('rejects Skill batch writes to an untrusted primary workspace', async () => {
+      const persistDisabledSkillsBatch = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        persistDisabledSkillsBatch,
+      });
+      const res = await auth(
+        request(app).post('/workspace/skills/enable'),
+      ).send({ skillNames: ['review'], enabled: false });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      expect(persistDisabledSkillsBatch).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unknown workspace client id before Skill batch persistence', async () => {
+      const persistDisabledSkillsBatch = vi.fn();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge({
+          workspaceSkillsImpl: async () => ({
+            v: 1,
+            workspaceCwd: WS_BOUND,
+            initialized: true,
+            skills: [reviewSkill],
+          }),
+        }),
+        boundWorkspace: WS_BOUND,
+        persistDisabledSkillsBatch,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await auth(request(app).post('/workspace/skills/enable'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ skillNames: ['review'], enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(persistDisabledSkillsBatch).not.toHaveBeenCalled();
     });
   });
 
