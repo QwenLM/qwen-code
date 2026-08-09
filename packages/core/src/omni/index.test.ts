@@ -1663,7 +1663,11 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
 
   it('fails closed when a guard pass itself fails', async () => {
     // A guard configuration error must never degrade into sending
-    // over-limit media (policy design §10.2).
+    // over-limit media (policy design §10.2). The error class matters:
+    // OmniTransportGuardError is what tells consumers with an inline
+    // fallback (the tool-result funnel) to WITHHOLD the bytes — a generic
+    // delivery error would fall back to delivering exactly what the guard
+    // rejected.
     const runMock = vi.fn().mockRejectedValue(new Error('guard blew up'));
     const { mod } = await armPipeline(runMock);
     await expect(
@@ -1676,9 +1680,71 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         }),
       ),
     ).rejects.toMatchObject({
-      name: 'OmniDeliveryError',
+      name: 'OmniTransportGuardError',
       message: 'Transport-guard processing failed for pic.png: guard blew up',
     });
+  });
+
+  it('re-filters guard policies by modality after a pass changes it', async () => {
+    // Pass 1 transforms the over-limit image into an over-limit AUDIO
+    // derivative (modality change); pass 2 must run the AUDIO guard policy
+    // against it. A pre-loop filter (image only) would find no matching
+    // policy and omit a resource the audio policy can still fix.
+    const imageGuard = { id: 'img-guard', mediaTypes: ['image'] };
+    const audioGuard = { id: 'audio-guard', mediaTypes: ['audio'] };
+    const bigAudioPath = path.join(tmpDir, 'objects', 'audio-big.mp3');
+    await fs.mkdir(path.dirname(bigAudioPath), { recursive: true });
+    await fs.writeFile(bigAudioPath, Buffer.alloc(900));
+    const smallAudioPath = path.join(tmpDir, 'objects', 'audio-small.mp3');
+    await fs.writeFile(smallAudioPath, Buffer.alloc(400));
+    const audioRecognized = (sizeBytes: number) => ({
+      modality: 'audio',
+      detectedMimeType: 'audio/mpeg',
+      sizeBytes,
+      metadata: { durationMs: 60000 },
+    });
+    const runMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: bigAudioPath,
+            recognized: audioRecognized(900),
+            sha256: 'c'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      })
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: smallAudioPath,
+            recognized: audioRecognized(400),
+            sha256: 'd'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        policies: [],
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [imageGuard, audioGuard],
+        maxTransportPasses: 3,
+      }),
+    );
+    expect(runMock).toHaveBeenCalledTimes(2);
+    // Pass 1 ran the image policy set; pass 2 must have run the AUDIO set.
+    expect(runMock.mock.calls[0][2].policies).toEqual([imageGuard]);
+    expect(runMock.mock.calls[1][2].policies).toEqual([audioGuard]);
+    expect(result.omission).toBeUndefined();
+    expect(result.fileUri).not.toBe('');
   });
 
   it('readMediaViaOmniDelivery renders an omission as the notice text, not an error', async () => {

@@ -623,21 +623,11 @@ export async function resolveAtCommandQuery({
           // the opaque staging path the download landed under.
           { signal, displayName: urlBase },
         );
-        // Transcript text Parts (§6.2) follow the media Part (or the
-        // omission notice), each preceded by its own disclosure (D8
-        // adjacency). Present when fixed policies produced text
-        // derivatives selected for delivery.
-        const transcriptParts: Array<{ text: string }> = [];
-        for (const t of delivery.transcripts ?? []) {
-          if (t.disclosure) {
-            transcriptParts.push({
-              text: core.formatDisclosureText(urlBase, t.disclosure),
-            });
-          }
-          transcriptParts.push({
-            text: core.formatTranscriptText(urlBase, t.text),
-          });
-        }
+        // §6.2/D8 ordering contract documented on buildTranscriptParts.
+        const transcriptParts = core.buildTranscriptParts(
+          urlBase,
+          delivery.transcripts,
+        );
         // Additional media Parts (multi-output fixed policies): follow the
         // primary media slot in every branch below.
         const additionalParts = core.buildAdditionalMediaParts(

@@ -259,6 +259,26 @@ export function buildAdditionalMediaParts(
   return parts;
 }
 
+/**
+ * Materialize transcript deliverables (§6.2) as text Parts — shared by
+ * every delivery consumer: each transcript follows its media Part (or the
+ * omission notice), preceded by its own disclosure (same D8 adjacency
+ * contract as media disclosures).
+ */
+export function buildTranscriptParts(
+  displayName: string,
+  transcripts: Array<{ text: string; disclosure?: string }> | undefined,
+): Array<{ text: string }> {
+  const parts: Array<{ text: string }> = [];
+  for (const t of transcripts ?? []) {
+    if (t.disclosure) {
+      parts.push({ text: formatDisclosureText(displayName, t.disclosure) });
+    }
+    parts.push({ text: formatTranscriptText(displayName, t.text) });
+  }
+  return parts;
+}
+
 /** Thrown for omni pipeline failures. The pipeline fails closed: callers
  * surface the message instead of silently falling back to inline base64.
  * Messages must not contain absolute paths or raw upstream response
@@ -477,6 +497,30 @@ export async function processMediaForOmniDelivery(
       transcripts.push({ text: file.text, disclosure: file.disclosure });
     }
   };
+  // Pure-transcript delivery result (§6.2): the policies replaced the
+  // media with text-only deliverables — no media Part is emitted
+  // (`fileUri: ''`), nothing to guard or upload for the primary, and the
+  // collected transcripts ride along. Shared by the preprocessing and
+  // transport-guard resolutions of this shape.
+  const textOnlyDelivery = (
+    recognizedFinal: RecognizedMedia,
+    tokenEstimate: OmniTokenEstimate,
+    extras?: {
+      disclosure?: string;
+      additionalMedia?: OmniAdditionalMediaDelivery[];
+    },
+  ): OmniMediaDelivery => ({
+    fileUri: '',
+    mimeType: recognizedFinal.detectedMimeType,
+    sha256: '',
+    recognized: recognizedFinal,
+    tokenEstimate,
+    deduped: false,
+    uploadCacheHit: false,
+    degraded: true,
+    transcripts,
+    ...extras,
+  });
   const policies = processingConfig?.fixedPolicies ?? [];
   if (policies.length > 0) {
     let deliveries: PolicyDeliveryResource[];
@@ -507,23 +551,14 @@ export async function processMediaForOmniDelivery(
       );
     }
     collectTranscripts(fileDeliveries);
-    // Pure-transcript delivery (§6.2): the policies replaced the media
-    // with text-only deliverables — nothing to guard or upload. The
-    // token estimate reports the RAW resource for logs/telemetry; no
-    // media Part is emitted, so the guard verdict is irrelevant.
+    // Pure-transcript delivery (§6.2): the token estimate reports the RAW
+    // resource for logs/telemetry; no media Part is emitted, so the guard
+    // verdict is irrelevant.
     if (deliveries.length === 0 && transcripts.length > 0) {
-      return {
-        fileUri: '',
-        mimeType: recognized.detectedMimeType,
-        sha256: '',
+      return textOnlyDelivery(
         recognized,
-        tokenEstimate: evaluateTransportLimits(config, recognized, displayName)
-          .estimate,
-        deduped: false,
-        uploadCacheHit: false,
-        degraded: true,
-        transcripts,
-      };
+        evaluateTransportLimits(config, recognized, displayName).estimate,
+      );
     }
     // The S4 delivery contract keeps ONE primary media Part per source
     // (plus any transcript text Parts); a multi-output fixed policy
@@ -647,35 +682,39 @@ export async function processMediaForOmniDelivery(
     OmniAdditionalMediaDelivery[] | undefined
   > => {
     if (extraDeliveries.length === 0) return undefined;
-    const extras: OmniAdditionalMediaDelivery[] = [];
-    for (const extra of extraDeliveries) {
-      const extraGuard = evaluateTransportLimits(
-        config,
-        extra.recognized,
-        displayName,
-      );
-      if (extraGuard.violation) {
-        debugLogger.debug(
-          `omni additional ${extra.recognized.modality} explicitly omitted (transport guard): ${extraGuard.violation}`,
-        );
-        extras.push({
-          fileUri: '',
-          mimeType: extra.recognized.detectedMimeType,
-          sha256: extra.sha256 ?? '',
-          disclosure: extra.disclosure,
-          omission: { reason: extraGuard.violation },
-        });
-        continue;
-      }
-      const uploaded = await uploadResource(extra, extraGuard.estimate);
-      extras.push({
-        fileUri: uploaded.fileUri,
-        mimeType: extra.recognized.detectedMimeType,
-        sha256: uploaded.sha256,
-        disclosure: extra.disclosure,
-      });
-    }
-    return extras;
+    // Extras are independent (content-addressed store + per-file serialized
+    // upload cache), so they upload concurrently; map keeps output order
+    // aligned with the policy's deliverable order.
+    return Promise.all(
+      extraDeliveries.map(
+        async (extra): Promise<OmniAdditionalMediaDelivery> => {
+          const extraGuard = evaluateTransportLimits(
+            config,
+            extra.recognized,
+            displayName,
+          );
+          if (extraGuard.violation) {
+            debugLogger.debug(
+              `omni additional ${extra.recognized.modality} explicitly omitted (transport guard): ${extraGuard.violation}`,
+            );
+            return {
+              fileUri: '',
+              mimeType: extra.recognized.detectedMimeType,
+              sha256: extra.sha256 ?? '',
+              disclosure: extra.disclosure,
+              omission: { reason: extraGuard.violation },
+            };
+          }
+          const uploaded = await uploadResource(extra, extraGuard.estimate);
+          return {
+            fileUri: uploaded.fileUri,
+            mimeType: extra.recognized.detectedMimeType,
+            sha256: uploaded.sha256,
+            disclosure: extra.disclosure,
+          };
+        },
+      ),
+    );
   };
 
   // Transport guard on the FINAL delivery set (decision D1): the bytes
@@ -689,15 +728,19 @@ export async function processMediaForOmniDelivery(
   // embedders skipping initialize) the guard keeps its fail-closed throw.
   let guard = evaluateTransportLimits(config, final.recognized, displayName);
   if (guard.violation && processingConfig) {
-    const guardPolicies = processingConfig.transportGuardPolicies.filter((p) =>
-      p.mediaTypes.includes(final.recognized.modality),
-    );
     const maxPasses = processingConfig.limits.maxTransportPasses;
-    for (
-      let pass = 0;
-      guard.violation && guardPolicies.length > 0 && pass < maxPasses;
-      pass++
-    ) {
+    for (let pass = 0; guard.violation && pass < maxPasses; pass++) {
+      // Re-filter per pass: a guard policy may transform the resource into
+      // another modality (e.g. video → extracted audio), and the NEXT pass
+      // must run that modality's guard policies — the pre-loop set would
+      // silently no-op and omit a resource the right policy could still
+      // bring under the limit. Coverage of all three modalities is
+      // enforced at config normalization, so the filter never strands a
+      // modality without a policy.
+      const guardPolicies = processingConfig.transportGuardPolicies.filter(
+        (p) => p.mediaTypes.includes(final.recognized.modality),
+      );
+      if (guardPolicies.length === 0) break;
       let deliveries: PolicyDeliveryResource[];
       let fileDeliveries: PolicyFileDelivery[];
       try {
@@ -721,8 +764,12 @@ export async function processMediaForOmniDelivery(
         if (signal?.aborted) throw err;
         // Guard-policy failure with no compliant alternative: fail closed
         // — a guard configuration error must never degrade into sending
-        // over-limit media (policy design §10.2).
-        throw new OmniDeliveryError(
+        // over-limit media (policy design §10.2). Thrown as a GUARD error
+        // (not a generic delivery error): the verdict "this resource is
+        // over the limit" already stands, so consumers with an inline
+        // fallback (the tool-result funnel) must withhold the bytes, not
+        // fall back to delivering exactly what the guard rejected.
+        throw new OmniTransportGuardError(
           `Transport-guard processing failed for ${displayName}: ` +
             `${sanitizeErrorMessage(err, [final.filePath, store.getOmniRootDir()])}`,
           { cause: err },
@@ -733,22 +780,15 @@ export async function processMediaForOmniDelivery(
       // replaced the over-limit media with text-only deliverables — the
       // violation is resolved by not sending media at all.
       if (deliveries.length === 0 && transcripts.length > 0) {
-        return {
-          fileUri: '',
-          mimeType: final.recognized.detectedMimeType,
-          sha256: '',
-          recognized: final.recognized,
-          tokenEstimate: guard.estimate,
-          deduped: false,
-          uploadCacheHit: false,
+        return textOnlyDelivery(final.recognized, guard.estimate, {
           disclosure: final.disclosure,
-          degraded: true,
-          transcripts,
           additionalMedia: await processAdditionalMedia(),
-        };
+        });
       }
       if (deliveries.length !== 1) {
-        throw new OmniDeliveryError(
+        // Same guard-error class as the pass failure above: the violation
+        // verdict stands, so inline fallbacks must withhold.
+        throw new OmniTransportGuardError(
           `Transport-guard policies produced ${deliveries.length} media deliverables for ${displayName}; exactly one is supported.`,
         );
       }
@@ -865,18 +905,11 @@ export async function readMediaViaOmniDelivery(params: {
       expectedModality,
       signal,
     });
-    // Transcript text Parts (§6.2): each transcript follows its media
-    // Part (or the omission notice), preceded by its own disclosure —
-    // same D8 adjacency contract as media disclosures.
-    const transcriptParts: Array<{ text: string }> = [];
-    for (const t of delivery.transcripts ?? []) {
-      if (t.disclosure) {
-        transcriptParts.push({
-          text: formatDisclosureText(displayName, t.disclosure),
-        });
-      }
-      transcriptParts.push({ text: formatTranscriptText(displayName, t.text) });
-    }
+    // §6.2/D8 ordering contract documented on buildTranscriptParts.
+    const transcriptParts = buildTranscriptParts(
+      displayName,
+      delivery.transcripts,
+    );
     // Additional media Parts (multi-output fixed policies): materialized
     // right after the primary media slot in every branch below.
     const additionalParts = buildAdditionalMediaParts(

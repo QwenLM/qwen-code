@@ -12,16 +12,13 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   buildAdditionalMediaParts,
+  buildTranscriptParts,
   isOmniDeliveryActive,
   processMediaForOmniDelivery,
 } from './index.js';
-import {
-  formatDisclosureText,
-  formatOmissionText,
-  formatTranscriptText,
-} from './disclosure.js';
+import { formatDisclosureText, formatOmissionText } from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
-import { OmniObjectStore } from './storage.js';
+import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
 import { sniffMediaType } from './recognition.js';
 
 const debugLogger = createDebugLogger('omni:tool-result');
@@ -102,13 +99,17 @@ export async function processToolResultOmniMedia(
     // part leaves THAT part inline — not that the whole tool result rejects,
     // which would report a tool that succeeded as failed.
     const store = new OmniObjectStore(config.storage.getQwenDir());
-    const stagingDir = path.join(store.getOmniRootDir(), 'downloads');
-    const tempPath = path.join(
-      stagingDir,
-      `${randomBytes(8).toString('hex')}.part`,
-    );
+    let tempPath: string | undefined;
     try {
-      await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
+      // Symlink-guarded (fail closed → this part stays inline): a link
+      // planted at downloads/ would redirect the write outside the store.
+      const stagingDir = await prepareOmniDownloadsDir(
+        path.join(store.getOmniRootDir(), 'downloads'),
+      );
+      tempPath = path.join(
+        stagingDir,
+        `${randomBytes(8).toString('hex')}.part`,
+      );
       await fs.writeFile(tempPath, bytes, { mode: 0o600 });
       const displayName = inline.displayName ?? `tool-media.${top}`;
       const delivery = await processMediaForOmniDelivery(tempPath, config, {
@@ -117,32 +118,29 @@ export async function processToolResultOmniMedia(
         displayName,
         origin: 'tool',
       });
-      // Transcript text Parts (§6.2) follow the media Part (or the
-      // omission notice), each preceded by its own disclosure (D8
-      // adjacency). Present when fixed policies produced text derivatives
-      // selected for delivery.
-      const transcriptParts: Part[] = [];
-      for (const t of delivery.transcripts ?? []) {
-        if (t.disclosure) {
-          transcriptParts.push({
-            text: formatDisclosureText(displayName, t.disclosure),
-          });
-        }
-        transcriptParts.push({
-          text: formatTranscriptText(displayName, t.text),
-        });
-      }
+      // §6.2/D8 ordering contract documented on buildTranscriptParts.
+      const transcriptParts: Part[] = buildTranscriptParts(
+        displayName,
+        delivery.transcripts,
+      );
       // Additional media Parts (multi-output fixed policies): follow the
-      // primary media slot in every branch below.
+      // primary media slot in every branch below. Each non-omitted extra
+      // is a real upload the pipeline already performed — charge it
+      // against the per-result upload-count budget so a multi-output
+      // policy cannot multiply a tool result's fan-out past the cap
+      // (extras carry no byte size, so only the count budget applies).
       const additionalParts: Part[] = buildAdditionalMediaParts(
         displayName,
         delivery.additionalMedia,
       );
+      uploadsRemaining -=
+        delivery.additionalMedia?.filter((e) => !e.omission).length ?? 0;
       if (delivery.omission) {
         // Explicit omission (policy design §10.2): the transport guard
         // could not bring the part within limits even after the guard
         // policies ran — the media is withheld, the notice stands in for
-        // it, and the upload budgets are untouched (nothing was uploaded).
+        // it, and nothing was uploaded FOR THE PRIMARY (uploaded extras
+        // were already charged above).
         changed = true;
         return [
           { text: formatOmissionText(displayName, delivery.omission.reason) },
@@ -153,7 +151,7 @@ export async function processToolResultOmniMedia(
       if (!delivery.fileUri && transcriptParts.length > 0) {
         // Pure-transcript delivery (§6.2): the policies replaced the media
         // with text-only deliverables — nothing was uploaded for the
-        // primary, budgets are untouched.
+        // primary (uploaded extras were already charged above).
         changed = true;
         return [...additionalParts, ...transcriptParts];
       }
@@ -198,7 +196,9 @@ export async function processToolResultOmniMedia(
       );
       return [part];
     } finally {
-      await fs.rm(tempPath, { force: true }).catch(() => {});
+      if (tempPath !== undefined) {
+        await fs.rm(tempPath, { force: true }).catch(() => {});
+      }
     }
   };
 

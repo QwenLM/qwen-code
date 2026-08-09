@@ -199,6 +199,28 @@ describe('processToolResultOmniMedia', () => {
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key3');
   });
 
+  it('withholds the part when guard-stage PROCESSING fails (never inline the rejected bytes)', async () => {
+    // A guard-policy execution failure arrives as OmniTransportGuardError
+    // with the underlying error as `cause` (see processMediaForOmniDelivery's
+    // guard loop): the violation verdict already stands, so falling back to
+    // inline would deliver exactly the over-limit bytes the guard rejected.
+    const { OmniTransportGuardError } = await import('./guard.js');
+    deliverMock.mockRejectedValueOnce(
+      new OmniTransportGuardError(
+        'Transport-guard processing failed for x.png: ffmpeg failed (exit 1)',
+        { cause: new Error('ffmpeg failed (exit 1)') },
+      ),
+    );
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', PNG_BYTES)],
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result[0]!.inlineData).toBeUndefined();
+    expect(result[0]!.text).toMatch(/withheld by the omni transport guard/);
+    expect(result[0]!.text).toMatch(/Transport-guard processing failed/);
+  });
+
   it('replaces an explicitly omitted delivery with the omission notice text', async () => {
     // Stage B (policy design §10.2): the pipeline itself withheld the media
     // after the guard policies could not bring it within limits. Not an
@@ -227,6 +249,44 @@ describe('processToolResultOmniMedia', () => {
     expect(result[0]).toEqual({
       text: '【媒体省略】tool-media.image：still 900 bytes over the upload limit',
     });
+  });
+
+  it('charges uploaded additionalMedia extras against the upload-count budget', async () => {
+    // One part whose delivery carries 7 uploaded extras uses 1 + 7 = 8
+    // upload slots — a multi-output policy must not let a tool result fan
+    // out past MAX_UPLOADS_PER_TOOL_RESULT. The next part stays inline.
+    deliverMock.mockResolvedValueOnce({
+      fileUri: 'oss://bucket/primary',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      additionalMedia: Array.from({ length: 8 }, (_, i) => ({
+        fileUri: i === 0 ? '' : `oss://bucket/frame${i}`,
+        mimeType: 'image/jpeg',
+        sha256: String(i).repeat(64).slice(0, 64),
+        // The omitted extra was NOT uploaded — it must not be charged.
+        ...(i === 0 ? { omission: { reason: 'too big' } } : {}),
+      })),
+    });
+    const parts = [
+      inlinePart('image/png', PNG_BYTES),
+      inlinePart('image/png', PNG_BYTES),
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    // Second part never started a delivery (budget exhausted).
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(result[result.length - 1]!.inlineData).toBeDefined();
+    expect(result.filter((p) => p.fileData).length).toBe(8);
   });
 
   it('an omission does not consume the per-result upload budgets', async () => {
@@ -280,6 +340,39 @@ describe('processToolResultOmniMedia', () => {
       expect(deliverMock).not.toHaveBeenCalled();
     } finally {
       await nodeFs.rm(qwenDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the part inline when downloads/ is a planted symlink (no bytes through the link)', async () => {
+    // mkdir { recursive: true } succeeds silently on a symlink-to-dir, so
+    // without the lstat guard the staged bytes would land at an
+    // attacker-chosen location outside the omni root.
+    const qwenDir = await nodeFs.mkdtemp(
+      nodePath.join(os.tmpdir(), 'omni-trm-link-'),
+    );
+    const outside = await nodeFs.mkdtemp(
+      nodePath.join(os.tmpdir(), 'omni-trm-out-'),
+    );
+    try {
+      await nodeFs.mkdir(nodePath.join(qwenDir, 'omni'), { recursive: true });
+      await nodeFs.symlink(
+        outside,
+        nodePath.join(qwenDir, 'omni', 'downloads'),
+      );
+      const config = {
+        isOmniEnabled: () => true,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+        storage: { getQwenDir: () => qwenDir },
+      } as unknown as Config;
+      const parts = [inlinePart('image/png', PNG_BYTES)];
+      const result = await processToolResultOmniMedia(parts, config, signal);
+      expect(result).toBe(parts);
+      expect(deliverMock).not.toHaveBeenCalled();
+      // Nothing was written through the link.
+      await expect(nodeFs.readdir(outside)).resolves.toEqual([]);
+    } finally {
+      await nodeFs.rm(qwenDir, { recursive: true, force: true });
+      await nodeFs.rm(outside, { recursive: true, force: true });
     }
   });
 

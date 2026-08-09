@@ -1764,6 +1764,11 @@ describe('handleAtCommand', () => {
       // the funnel calls it and splices its parts after the primary slot).
       buildAdditionalMediaParts: (name: string, extras?: unknown[]) =>
         (extras ?? []).map((_, i) => ({ text: `[extra ${name} ${i}]` })),
+      // Same wiring-only stand-in for the shared transcript materializer.
+      buildTranscriptParts: (name: string, transcripts?: unknown[]) =>
+        (transcripts ?? []).map((_, i) => ({
+          text: `[transcript ${name} ${i}]`,
+        })),
       OmniObjectStore: class {
         getOmniRootDir() {
           return path.join(os.tmpdir(), 'omni-at-test');
