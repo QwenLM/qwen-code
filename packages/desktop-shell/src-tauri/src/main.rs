@@ -26,6 +26,7 @@ use url::Url;
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+static FULLSCREEN_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +108,22 @@ fn main() {
                 save_window_state(app_handle);
                 api.prevent_close();
                 if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.hide();
+                    if FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if window.is_fullscreen().unwrap_or(false) {
+                        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Relaxed);
+                        let _ = window.set_fullscreen(false);
+                        // ponytail: remove this delay when Tauri exposes fullscreen-exit events.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            if FULLSCREEN_HIDE_PENDING.swap(false, Ordering::Relaxed) {
+                                let _ = window.hide();
+                            }
+                        });
+                    } else {
+                        let _ = window.hide();
+                    }
                 }
             }
             #[cfg(not(target_os = "macos"))]
@@ -538,6 +554,7 @@ fn spawn_window_state_flusher(app: AppHandle) {
 }
 
 fn focus_main_window(app: &AppHandle) {
+    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
