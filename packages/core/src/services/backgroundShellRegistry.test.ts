@@ -78,6 +78,10 @@ function makeEntry(
 }
 
 describe('BackgroundShellRegistry', () => {
+  it('gives each entry a unique default outputPath', () => {
+    expect(makeEntry().outputPath).not.toBe(makeEntry().outputPath);
+  });
+
   describe('register / get / getAll', () => {
     it('captures the Todo work-chain owner at registration', () => {
       const reg = new BackgroundShellRegistry();
@@ -334,7 +338,7 @@ describe('BackgroundShellRegistry', () => {
           shellId: 'a&b',
           command: 'echo "<script>"',
           cwd: '/repo&work',
-          outputPath: '/tmp/out&err.log',
+          outputPath: join(makeTempDir(), 'out&err.log'),
         }),
       );
 
@@ -348,9 +352,7 @@ describe('BackgroundShellRegistry', () => {
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
       expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
-      expect(modelText).toContain(
-        '<output-file>/tmp/out&amp;err.log</output-file>',
-      );
+      expect(modelText).toContain('out&amp;err.log</output-file>');
     });
 
     it('limits output-tail to the retained byte budget', () => {
@@ -406,7 +408,7 @@ describe('BackgroundShellRegistry', () => {
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath: '/tmp/out\x03.log',
+          outputPath: join(makeTempDir(), 'out\x03.log'),
         }),
       );
 
@@ -414,7 +416,7 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
-      expect(modelText).toContain('<output-file>/tmp/out.log</output-file>');
+      expect(modelText).toContain('out.log</output-file>');
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
@@ -782,16 +784,8 @@ describe('BackgroundShellRegistry', () => {
     function makeDirEntry(
       overrides: Partial<ShellTaskRegistration> = {},
     ): ShellTaskRegistration & { statusPath: string } {
-      const dir = makeTempDir();
-      const shellId = (overrides.shellId as string) ?? 's1';
-      const entry = makeEntry({
-        outputPath: join(dir, `shell-${shellId}.output`),
-        ...overrides,
-      });
-      return {
-        ...entry,
-        statusPath: join(dir, `shell-${shellId}.status`),
-      };
+      const entry = makeEntry(overrides);
+      return { ...entry, statusPath: statusFilePathFor(entry.outputPath) };
     }
 
     function readStatus(statusPath: string): Record<string, unknown> {
