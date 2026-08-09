@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use qrcode::{render::svg, QrCode};
 use rand::RngCore;
 use std::collections::HashMap;
@@ -337,14 +338,25 @@ fn rewrite_request(
                 return Err(403);
             }
             rewritten.push_str(&format!("Origin: {target_origin}\r\n"));
-        } else if name.eq_ignore_ascii_case("authorization")
-            && value == format!("Bearer {pair_token}")
-        {
+        } else if name.eq_ignore_ascii_case("authorization") {
+            if value != format!("Bearer {pair_token}") {
+                return Err(403);
+            }
             rewritten.push_str(&format!("Authorization: Bearer {runtime_token}\r\n"));
         } else if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+            let mut protocols = Vec::new();
+            for protocol in value.split(',').map(str::trim) {
+                if protocol == pair_protocol {
+                    protocols.push(runtime_protocol.as_str());
+                } else if protocol.contains("qwen-bearer.") {
+                    return Err(403);
+                } else {
+                    protocols.push(protocol);
+                }
+            }
             rewritten.push_str(name);
             rewritten.push_str(": ");
-            rewritten.push_str(&value.replace(&pair_protocol, &runtime_protocol));
+            rewritten.push_str(&protocols.join(", "));
             rewritten.push_str("\r\n");
         } else if name.eq_ignore_ascii_case("connection") && !websocket {
             rewritten.push_str("Connection: close\r\n");
@@ -391,6 +403,59 @@ fn runtime_socket_addr(url: &Url) -> Result<SocketAddr, String> {
 }
 
 fn primary_lan_ipv4() -> Result<Ipv4Addr, String> {
+    let routed = routed_ipv4().ok();
+    let interfaces = match NetworkInterface::show() {
+        Ok(interfaces) => interfaces,
+        Err(_) => {
+            return routed
+                .ok_or_else(|| "Local Control could not find a usable IPv4 network.".to_string())
+        }
+    };
+    let physical = interfaces
+        .into_iter()
+        .filter(|interface| {
+            !interface.internal
+                && interface
+                    .mac_addr
+                    .as_deref()
+                    .is_some_and(|mac| mac != "00:00:00:00:00:00")
+        })
+        .flat_map(|interface| interface.addr)
+        .filter_map(|address| match address {
+            Addr::V4(address)
+                if address.broadcast.is_some()
+                    && !address.ip.is_loopback()
+                    && !address.ip.is_unspecified() =>
+            {
+                Some(address.ip)
+            }
+            _ => None,
+        })
+        .collect();
+    choose_lan_ipv4(routed, physical)
+}
+
+fn choose_lan_ipv4(
+    routed: Option<Ipv4Addr>,
+    mut physical: Vec<Ipv4Addr>,
+) -> Result<Ipv4Addr, String> {
+    physical.sort_unstable();
+    physical.dedup();
+    if let Some(routed) = routed.filter(|address| physical.contains(address)) {
+        return Ok(routed);
+    }
+    physical.retain(|address| address.is_private() || address.is_link_local());
+    match physical.as_slice() {
+        [address] => Ok(*address),
+        [] => Err("Local Control could not find a usable IPv4 network.".to_string()),
+        _ => Err(
+            "Local Control found multiple local networks. Disconnect unused adapters or the VPN."
+                .to_string(),
+        ),
+    }
+}
+
+fn routed_ipv4() -> Result<Ipv4Addr, String> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .map_err(|error| format!("Failed to inspect the local network: {error}"))?;
     socket
@@ -458,10 +523,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_header_end, rewrite_request, runtime_socket_addr, spawn_proxy, Connections};
+    use super::{
+        choose_lan_ipv4, find_header_end, rewrite_request, runtime_socket_addr, spawn_proxy,
+        Connections,
+    };
     use std::collections::HashMap;
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -469,6 +537,20 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use url::Url;
+
+    #[test]
+    fn prefers_the_physical_lan_over_a_vpn_route() {
+        assert_eq!(
+            choose_lan_ipv4(
+                Some("10.8.0.2".parse::<Ipv4Addr>().expect("VPN address")),
+                vec!["192.168.1.20".parse::<Ipv4Addr>().expect("Wi-Fi address")],
+            )
+            .expect("LAN address"),
+            "192.168.1.20"
+                .parse::<Ipv4Addr>()
+                .expect("expected address"),
+        );
+    }
 
     #[test]
     fn relays_a_delayed_http_response() {
@@ -578,6 +660,36 @@ mod tests {
         assert!(rewritten.contains(&format!("qwen-bearer.{runtime}")));
         assert!(!rewritten.contains(&format!("qwen-bearer.{pair}")));
         assert!(rewritten.contains("Connection: Upgrade\r\n"));
+
+        let request = format!(
+            "GET /acp HTTP/1.1\r\nHost: 192.168.1.10:49152\r\nOrigin: http://192.168.1.10:49152\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: leak-qwen-bearer.{pair}, qwen-bearer.{pair}\r\n\r\n"
+        );
+        assert_eq!(
+            rewrite_request(
+                request.as_bytes(),
+                find_header_end(request.as_bytes()).expect("header"),
+                "http://192.168.1.10:49152",
+                "http://127.0.0.1:4170",
+                "127.0.0.1:4170",
+                "pair-token",
+                "runtime-token",
+            ),
+            Err(403),
+        );
+
+        let request = b"GET /session HTTP/1.1\r\nHost: 192.168.1.10:49152\r\nAuthorization: Bearer runtime-token\r\n\r\n";
+        assert_eq!(
+            rewrite_request(
+                request,
+                find_header_end(request).expect("header"),
+                "http://192.168.1.10:49152",
+                "http://127.0.0.1:4170",
+                "127.0.0.1:4170",
+                "pair-token",
+                "runtime-token",
+            ),
+            Err(403),
+        );
 
         assert_eq!(
             runtime_socket_addr(&Url::parse("http://127.0.0.1:4170/").expect("url"))
