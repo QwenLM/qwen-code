@@ -138,10 +138,12 @@ export interface TurnBoundaryCompactionEngineOptions {
    * Caps on the in-flight live journal (DAEMON-009). Compatible consecutive
    * text/thought chunks are grouped into bounded replay events; other events
    * retain their original boundaries. When either cap is hit the oldest
-   * journal entries are dropped and `snapshot()` prepends a
-   * `history_truncated` marker (`reason: 'replay_window_exceeded'`,
-   * `scope: 'live_journal'`). Turn compaction is unaffected: it folds from
-   * the `slots` working set, not the journal.
+   * journal entries are dropped whole (merged segments included), so the
+   * retained tail can be much smaller than the byte cap, and `snapshot()`
+   * prepends a `history_truncated` marker
+   * (`reason: 'replay_window_exceeded'`, `scope: 'live_journal'`). Turn
+   * compaction is unaffected: it folds from the `slots` working set, not
+   * the journal.
    */
   maxJournalEvents?: number;
   maxJournalBytes?: number;
@@ -451,7 +453,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        if (hasTodoStopGuardDiscreteMeta(data?.update?._meta)) {
+        if (hasDiscreteMessageMeta(data?.update?._meta)) {
           this.slots.push({ kind: 'misc', event });
           break;
         }
@@ -459,6 +461,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         break;
       }
       case 'agent_thought_chunk': {
+        if (hasDiscreteMessageMeta(data?.update?._meta)) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         this.mergeTextSlot('thought', event, data);
         break;
       }
@@ -1000,13 +1006,6 @@ function hasDiscreteMessageMeta(meta: unknown): boolean {
   );
 }
 
-function hasTodoStopGuardDiscreteMeta(meta: unknown): boolean {
-  return (
-    hasDiscreteMessageMeta(meta) &&
-    (meta as Record<string, unknown>)['source'] === 'todo_stop_guard'
-  );
-}
-
 function hasOnlyTimestampEnvelopeMeta(meta: unknown): boolean {
   if (meta === undefined) return true;
   if (typeof meta !== 'object' || meta === null) return false;
@@ -1020,18 +1019,32 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
   if (typeof meta !== 'object' || meta === null) return true;
   const record = meta as Record<string, unknown>;
   for (const [key, value] of Object.entries(record)) {
+    if (key === 'timestamp' || key === 'serverTimestamp') {
+      continue;
+    }
     if (key === 'parentToolCallId') {
-      if (typeof value !== 'string' || value.length === 0) return true;
+      // Empty strings model "no parent": extractParentToolCallIdFromMeta
+      // ignores them, so both replay surfaces agree the chunk is top-level.
+      if (typeof value !== 'string') return true;
       continue;
     }
     if (key === 'qwenTranscript') {
       if (typeof value !== 'object' || value === null) return true;
       const transcript = value as Record<string, unknown>;
-      if (
-        Object.keys(transcript).some((field) => field !== 'sourceRecordIds') ||
-        !Array.isArray(transcript['sourceRecordIds']) ||
-        transcript['sourceRecordIds'].some((id) => typeof id !== 'string')
-      ) {
+      for (const [field, fieldValue] of Object.entries(transcript)) {
+        if (field === 'sourceRecordIds') {
+          if (
+            !Array.isArray(fieldValue) ||
+            fieldValue.some((id) => typeof id !== 'string')
+          ) {
+            return true;
+          }
+          continue;
+        }
+        if (field === 'planToolCallId') {
+          if (typeof fieldValue !== 'string') return true;
+          continue;
+        }
         return true;
       }
       continue;

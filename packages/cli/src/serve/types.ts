@@ -134,9 +134,10 @@ export interface ServeOptions {
    */
   maxJournalEvents?: number;
   /**
-   * Per-session source-event byte cap on the in-flight live journal. Threaded
-   * into `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a
-   * positive safe integer.
+   * Per-session source-event byte cap on the in-flight live journal.
+   * Truncation drops whole entries, so the retained tail can be much smaller
+   * than the cap. Threaded into `BridgeOptions.maxJournalBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
   /**

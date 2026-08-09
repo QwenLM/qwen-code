@@ -201,6 +201,47 @@ function extractTexts(events: BridgeEvent[]): string[] {
     .filter((t) => t !== '');
 }
 
+type ChunkIdentity = {
+  parentToolCallId?: string;
+  sourceRecordIds?: string[];
+  promptId?: string;
+  originatorClientId?: string;
+  sessionId?: string;
+};
+
+function withIdentity(
+  event: BridgeEvent,
+  identity: ChunkIdentity,
+): BridgeEvent {
+  const update = (event.data as { update: Record<string, unknown> }).update;
+  if (
+    identity.parentToolCallId !== undefined ||
+    identity.sourceRecordIds !== undefined
+  ) {
+    update['_meta'] = {
+      ...(identity.parentToolCallId === undefined
+        ? {}
+        : { parentToolCallId: identity.parentToolCallId }),
+      ...(identity.sourceRecordIds === undefined
+        ? {}
+        : {
+            qwenTranscript: {
+              sourceRecordIds: identity.sourceRecordIds,
+            },
+          }),
+    };
+  }
+  event.promptId = identity.promptId;
+  event.originatorClientId = identity.originatorClientId;
+  if (identity.sessionId !== undefined) {
+    event.data = {
+      sessionId: identity.sessionId,
+      ...(event.data as Record<string, unknown>),
+    };
+  }
+  return event;
+}
+
 describe('TurnBoundaryCompactionEngine', () => {
   describe('basic compaction', () => {
     it('merges consecutive text chunks into a single event on turn_complete', () => {
@@ -276,6 +317,59 @@ describe('TurnBoundaryCompactionEngine', () => {
         }),
       ).toEqual([1, 2, 2]);
       expect(guardEvents.map((event) => event.id)).toEqual([2, 3, 4]);
+    });
+
+    it('keeps generic discrete message and thought chunks separate at turn boundaries', () => {
+      const makeDiscrete = (
+        makeChunk: (id: number, text: string) => BridgeEvent,
+        id: number,
+        text: string,
+        taskId: string,
+      ): BridgeEvent => {
+        const event = makeChunk(id, text);
+        (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId },
+        };
+        return event;
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'Before'));
+      engine.ingest(makeDiscrete(makeTextChunk, 2, 'notify-a', 'task-a'));
+      engine.ingest(makeDiscrete(makeTextChunk, 3, 'notify-b', 'task-b'));
+      engine.ingest(makeDiscrete(makeThoughtChunk, 4, 'thought-a', 'task-a'));
+      engine.ingest(makeDiscrete(makeThoughtChunk, 5, 'thought-b', 'task-b'));
+      engine.ingest(makeThoughtChunk(6, 'ordinary'));
+      engine.ingest(makeTextChunk(7, 'After'));
+      engine.ingest(makeTurnComplete(8));
+
+      const events = engine.snapshot().compactedTurns;
+      expect(extractTexts(events)).toEqual([
+        'Before',
+        'notify-a',
+        'notify-b',
+        'thought-a',
+        'thought-b',
+        'ordinary',
+        'After',
+      ]);
+      const discrete = events.filter((event) => {
+        const data = event.data as {
+          update?: { _meta?: { qwenDiscreteMessage?: boolean } };
+        };
+        return data.update?._meta?.qwenDiscreteMessage === true;
+      });
+      expect(discrete.map((event) => event.id)).toEqual([2, 3, 4, 5]);
+      expect(
+        discrete.map(
+          (event) =>
+            (
+              event.data as {
+                update: { _meta: { backgroundTask: { taskId: string } } };
+              }
+            ).update._meta.backgroundTask.taskId,
+        ),
+      ).toEqual(['task-a', 'task-b', 'task-a', 'task-b']);
     });
 
     it('keeps user messages as-is', () => {
@@ -647,46 +741,6 @@ describe('TurnBoundaryCompactionEngine', () => {
         second: { sessionId: 'session-b' },
       },
     ])('does not merge across $name boundaries', ({ first, second }) => {
-      const withIdentity = (
-        event: BridgeEvent,
-        identity: {
-          parentToolCallId?: string;
-          sourceRecordIds?: string[];
-          promptId?: string;
-          originatorClientId?: string;
-          sessionId?: string;
-        },
-      ): BridgeEvent => {
-        const update = (event.data as { update: Record<string, unknown> })
-          .update;
-        if (
-          identity.parentToolCallId !== undefined ||
-          identity.sourceRecordIds !== undefined
-        ) {
-          update['_meta'] = {
-            ...(identity.parentToolCallId === undefined
-              ? {}
-              : { parentToolCallId: identity.parentToolCallId }),
-            ...(identity.sourceRecordIds === undefined
-              ? {}
-              : {
-                  qwenTranscript: {
-                    sourceRecordIds: identity.sourceRecordIds,
-                  },
-                }),
-          };
-        }
-        event.promptId = identity.promptId;
-        event.originatorClientId = identity.originatorClientId;
-        if (identity.sessionId !== undefined) {
-          event.data = {
-            sessionId: identity.sessionId,
-            ...(event.data as Record<string, unknown>),
-          };
-        }
-        return event;
-      };
-
       const engine = new TurnBoundaryCompactionEngine();
       engine.ingest(withIdentity(makeTextChunk(1, 'first'), first));
       engine.ingest(withIdentity(makeTextChunk(2, 'second'), second));
@@ -701,6 +755,29 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal[1]).toMatchObject(
         withIdentity(makeTextChunk(2, 'second'), second),
       );
+    });
+
+    it.each([
+      { name: 'parentToolCallId', identity: { parentToolCallId: 'tool-a' } },
+      {
+        name: 'sourceRecordIds',
+        identity: { sourceRecordIds: ['record-a'] },
+      },
+      { name: 'promptId', identity: { promptId: 'prompt-a' } },
+      {
+        name: 'originatorClientId',
+        identity: { originatorClientId: 'client-a' },
+      },
+      { name: 'sessionId', identity: { sessionId: 'session-a' } },
+    ])('merges consecutive chunks sharing a defined $name', ({ identity }) => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(1);
+      expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
     });
 
     it.each([
@@ -890,6 +967,63 @@ describe('TurnBoundaryCompactionEngine', () => {
         expect(live.map((event) => event.id)).toEqual([1, 2, 3]);
       },
     );
+
+    it('merges live chunks whose empty-string parentToolCallId the extractor ignores', () => {
+      const withEmptyParent = (event: BridgeEvent): BridgeEvent => {
+        (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+          parentToolCallId: '',
+        };
+        return event;
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withEmptyParent(makeTextChunk(1, 'first')));
+      engine.ingest(withEmptyParent(makeTextChunk(2, 'second')));
+
+      const live = engine.snapshot().liveJournal;
+      expect(live).toHaveLength(1);
+      expect(extractTexts(live)).toEqual(['firstsecond']);
+
+      engine.ingest(makeTurnComplete(3));
+      expect(extractTexts(engine.snapshot().compactedTurns)).toEqual([
+        'firstsecond',
+      ]);
+    });
+
+    it('merges chunks carrying buildUpdateMeta timestamp and plan shapes', () => {
+      const withTranscriptMeta = (
+        event: BridgeEvent,
+        meta: Record<string, unknown>,
+      ): BridgeEvent => {
+        (event.data as { update: Record<string, unknown> }).update['_meta'] =
+          meta;
+        return event;
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(
+        withTranscriptMeta(makeTextChunk(1, 'first'), {
+          timestamp: 1700000000000,
+          qwenTranscript: {
+            sourceRecordIds: ['record-a'],
+            planToolCallId: 'plan-1',
+          },
+        }),
+      );
+      engine.ingest(
+        withTranscriptMeta(makeTextChunk(2, 'second'), {
+          timestamp: 1700000000001,
+          serverTimestamp: 1700000000002,
+          qwenTranscript: {
+            sourceRecordIds: ['record-a'],
+            planToolCallId: 'plan-2',
+          },
+        }),
+      );
+
+      const live = engine.snapshot().liveJournal;
+      expect(live).toHaveLength(1);
+      expect(extractTexts(live)).toEqual(['firstsecond']);
+      expect(live.map((event) => event.id)).toEqual([2]);
+    });
 
     it('does not let snapshot frequency change journal eviction', () => {
       const engine = new TurnBoundaryCompactionEngine({

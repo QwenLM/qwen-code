@@ -408,8 +408,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: DEFAULT_MAX_JOURNAL_BYTES,
         description:
           'Per-session source-event byte cap on the in-flight live journal. ' +
-          'When exceeded, the oldest entries are dropped (at least one is ' +
-          'always kept). Must be a positive safe integer.',
+          'When exceeded, the oldest entries are dropped whole (at least ' +
+          'one is always kept), so the retained tail can be much smaller ' +
+          'than the cap. Must be a positive safe integer.',
       })
       .option('http-bridge', {
         type: 'boolean',

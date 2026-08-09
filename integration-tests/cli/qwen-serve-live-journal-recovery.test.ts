@@ -137,19 +137,19 @@ describe('qwen serve live journal recovery', () => {
         data: {
           scope: 'live_journal',
           maxEvents: 3,
+          truncatedEvents: expect.any(Number),
           fullTranscriptAvailable: true,
         },
       });
-      expect(duringTurn!.replaySnapshot.liveJournal).not.toContainEqual(
-        expect.objectContaining({
-          type: 'session_update',
-          data: expect.objectContaining({
-            update: expect.objectContaining({
-              content: expect.objectContaining({ text: 'chunk-0' }),
-            }),
-          }),
-        }),
-      );
+      expect(
+        (marker?.data as { truncatedEvents?: number } | undefined)
+          ?.truncatedEvents,
+      ).toBeGreaterThan(0);
+      // Merged entries concatenate up to 256 source chunks, so an exact
+      // per-entry match can never hold; assert on the serialized tail.
+      expect(
+        JSON.stringify(duringTurn!.replaySnapshot.liveJournal),
+      ).not.toContain('chunk-0');
 
       await prompt;
       const repaired = await DaemonSessionClient.load(
