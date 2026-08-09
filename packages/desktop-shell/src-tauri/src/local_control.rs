@@ -52,7 +52,11 @@ pub struct LocalControlSession {
 }
 
 impl LocalControlSession {
-    pub fn start(runtime_url: &Url, runtime_token: &str) -> Result<Self, String> {
+    pub fn start(
+        runtime_url: &Url,
+        runtime_token: &str,
+        current_url: &Url,
+    ) -> Result<Self, String> {
         let target = runtime_socket_addr(runtime_url)?;
         let lan_ip = primary_lan_ipv4()?;
         let listener = TcpListener::bind((lan_ip, 0))
@@ -66,7 +70,7 @@ impl LocalControlSession {
             .port();
         let public_origin = format!("http://{lan_ip}:{port}");
         let pair_token = random_token();
-        let url = format!("{public_origin}/#token={pair_token}");
+        let url = local_control_url(current_url, lan_ip, port, &pair_token)?;
         let qr_svg = QrCode::new(url.as_bytes())
             .map_err(|error| format!("Failed to generate Local Control QR code: {error}"))?
             .render::<svg::Color>()
@@ -402,15 +406,33 @@ fn runtime_socket_addr(url: &Url) -> Result<SocketAddr, String> {
     Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
 }
 
+fn local_control_url(
+    current_url: &Url,
+    lan_ip: Ipv4Addr,
+    port: u16,
+    pair_token: &str,
+) -> Result<String, String> {
+    let workspace = current_url
+        .query_pairs()
+        .find(|(name, value)| name == "workspace" && !value.is_empty())
+        .map(|(_, value)| value.into_owned());
+    let mut url = current_url.clone();
+    url.set_host(Some(&lan_ip.to_string()))
+        .map_err(|error| format!("Failed to construct the Local Control URL: {error}"))?;
+    url.set_port(Some(port))
+        .map_err(|_| "Failed to construct the Local Control URL.".to_string())?;
+    url.set_query(None);
+    if let Some(workspace) = workspace {
+        url.query_pairs_mut().append_pair("workspace", &workspace);
+    }
+    url.set_fragment(Some(&format!("token={pair_token}")));
+    Ok(url.into())
+}
+
 fn primary_lan_ipv4() -> Result<Ipv4Addr, String> {
     let routed = routed_ipv4().ok();
-    let interfaces = match NetworkInterface::show() {
-        Ok(interfaces) => interfaces,
-        Err(_) => {
-            return routed
-                .ok_or_else(|| "Local Control could not find a usable IPv4 network.".to_string())
-        }
-    };
+    let interfaces = NetworkInterface::show()
+        .map_err(|_| "Local Control could not inspect IPv4 networks.".to_string())?;
     let physical = interfaces
         .into_iter()
         .filter(|interface| {
@@ -441,10 +463,10 @@ fn choose_lan_ipv4(
 ) -> Result<Ipv4Addr, String> {
     physical.sort_unstable();
     physical.dedup();
+    physical.retain(|address| address.is_private() || address.is_link_local());
     if let Some(routed) = routed.filter(|address| physical.contains(address)) {
         return Ok(routed);
     }
-    physical.retain(|address| address.is_private() || address.is_link_local());
     match physical.as_slice() {
         [address] => Ok(*address),
         [] => Err("Local Control could not find a usable IPv4 network.".to_string()),
@@ -526,8 +548,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_lan_ipv4, find_header_end, rewrite_request, runtime_socket_addr, spawn_proxy,
-        Connections,
+        choose_lan_ipv4, find_header_end, local_control_url, rewrite_request, runtime_socket_addr,
+        spawn_proxy, Connections,
     };
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -541,7 +563,7 @@ mod tests {
     use url::Url;
 
     #[test]
-    fn prefers_the_physical_lan_over_a_vpn_route() {
+    fn selects_only_a_private_physical_lan() {
         assert_eq!(
             choose_lan_ipv4(
                 Some("10.8.0.2".parse::<Ipv4Addr>().expect("VPN address")),
@@ -551,6 +573,29 @@ mod tests {
             "192.168.1.20"
                 .parse::<Ipv4Addr>()
                 .expect("expected address"),
+        );
+        assert!(choose_lan_ipv4(
+            Some("203.0.113.10".parse().expect("public route")),
+            vec!["203.0.113.10".parse().expect("public interface")],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn shares_only_the_current_local_session() {
+        let url = local_control_url(
+            &Url::parse(
+                "http://127.0.0.1:4170/session/a%20b?workspace=work%2Ftree&token=runtime&theme=light#old",
+            )
+            .expect("current URL"),
+            "192.168.1.20".parse().expect("LAN address"),
+            49152,
+            "pair-token",
+        )
+        .expect("Local Control URL");
+        assert_eq!(
+            url,
+            "http://192.168.1.20:49152/session/a%20b?workspace=work%2Ftree#token=pair-token"
         );
     }
 
