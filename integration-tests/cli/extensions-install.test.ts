@@ -53,7 +53,7 @@ test('installs a local extension, verifies a command, and updates it', async () 
 
 test('installs a local Qoder plugin', async () => {
   const rig = new TestRig();
-  rig.setup('qoder plugin install test');
+  await rig.setup('qoder plugin install test');
   const manifestDir = join(rig.testDir!, '.qoder-plugin');
   mkdirSync(manifestDir, { recursive: true });
   writeFileSync(
