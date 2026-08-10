@@ -112,11 +112,11 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Cause:** With the default `ui.useTerminalBuffer: true` (Virtualized History), Qwen Code renders the conversation in an app-owned viewport using full-screen ANSI repaints. High-latency web terminals often cannot apply those repaints fast enough, which shows up as flicker or tearing. Such terminals typically report `TERM=xterm` on a TTY without `COLORTERM` or `TERM_PROGRAM`, so Qwen Code cannot distinguish them from ordinary terminals automatically yet.
   - **Solution:** Set `"ui.useTerminalBuffer": false` in your `settings.json` and restart. This switches rendering back to append-only output and the terminal's native scrollback buffer, which web terminals handle well. Optionally also set `"ui.mouseTracking": false` to restore native right-click menus and clickable links.
     - Example:
+    - Example:
       ```json
       {
         "ui": {
-          "useTerminalBuffer": false,
-          "mouseTracking": false
+          "useTerminalBuffer": false
         }
       }
       ```
