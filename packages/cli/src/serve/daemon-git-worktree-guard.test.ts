@@ -1442,6 +1442,49 @@ it -C ${outsideRepo} reset --hard`,
       });
     });
 
+    it('contains a sub-agent to an in-project agent worktree', async () => {
+      // `AgentTool` with `isolation: 'worktree'` provisions under
+      // `<projectRoot>/.qwen/worktrees/`, i.e. inside the session — being
+      // inside is not enough to leave the boundary alone.
+      const agentWorktree = path.join(
+        effectiveCwd,
+        '.qwen',
+        'worktrees',
+        'agent-abc1234',
+      );
+      const sibling = path.join(
+        effectiveCwd,
+        '.qwen',
+        'worktrees',
+        'agent-def5678',
+      );
+      await mkdir(path.join(agentWorktree, 'src'), { recursive: true });
+      await mkdir(sibling, { recursive: true });
+      await writeFile(
+        path.join(agentWorktree, '.git'),
+        `gitdir: ${path.join(outsideRepo, '.git', 'worktrees', 'agent-abc1234')}\n`,
+      );
+      await mkdir(
+        path.join(outsideRepo, '.git', 'worktrees', 'agent-abc1234'),
+        { recursive: true },
+      );
+      await writeFile(
+        path.join(outsideRepo, '.git', 'worktrees', 'agent-abc1234', 'gitdir'),
+        `${path.join(agentWorktree, '.git')}\n`,
+      );
+
+      const guard = createDaemonToolGuard();
+      // Work inside its own worktree is allowed...
+      await expect(
+        guard(call('cd src && git commit -m x', agentWorktree)),
+      ).resolves.toEqual({ allowed: true });
+      // ...reaching into a sibling agent's worktree is not, even though both
+      // sit inside the session's directory.
+      await expect(
+        guard(call(`git -C ${sibling} reset --hard`, agentWorktree)),
+      ).resolves.toMatchObject({ allowed: false });
+    });
+
     it('contains a sub-agent to the worktree it reports', async () => {
       // A session id unique to this test: `getWorktreesDir` resolves under the
       // user's global Qwen dir, so a shared id would have this test create and

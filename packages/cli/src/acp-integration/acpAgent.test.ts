@@ -18860,6 +18860,36 @@ describe('createManagedExternalToolGuard', () => {
     expect(extMethod).toHaveBeenCalledOnce();
   });
 
+  // The only link between a worktree-pinned sub-agent's real execution
+  // directory and the daemon's containment check.
+  it('forwards the invocation directory to the daemon', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'git status' },
+        signal: new AbortController().signal,
+        sessionId: 'session-1',
+        cwd: '/work/agent-worktree',
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'git status' },
+        invocationCwd: '/work/agent-worktree',
+      },
+    );
+  });
+
   // `monitor` spawns its `command` through the same shell, so the built-in
   // daemon policy has to see it too.
   it('routes monitor commands to the daemon without an external provider', async () => {

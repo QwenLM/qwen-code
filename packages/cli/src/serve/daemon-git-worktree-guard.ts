@@ -1610,7 +1610,6 @@ async function evaluateUnrecognizedRun(
   run: GuardToken[],
   state: PrefixState,
   basisCwd: string | undefined,
-  entryCwd: string | undefined,
   context: GuardEvaluationContext,
   relink?: RelinkState,
 ): Promise<GuardDenial | undefined> {
@@ -1990,7 +1989,6 @@ async function evaluateCommandWithCwd(
             expanded,
             analysis.state,
             trackedCwd,
-            entryCwd,
             inherited,
             scope.relink,
           );
@@ -2021,7 +2019,6 @@ async function evaluateCommandWithCwd(
             run,
             analysis.state,
             trackedCwd,
-            entryCwd,
             activeContext(),
             scope.relink,
           );
@@ -2053,7 +2050,6 @@ async function evaluateCommandWithCwd(
               [run[0]!, { text: 'git', dynamic: false }],
               analysis.state,
               trackedCwd,
-              entryCwd,
               activeContext(),
               scope.relink,
             );
@@ -2138,7 +2134,6 @@ async function evaluateCommandWithCwd(
             run,
             analysis.state,
             trackedCwd,
-            entryCwd,
             activeContext(),
             scope.relink,
           );
@@ -2195,7 +2190,35 @@ async function evaluateBuiltInGuard(
   const reportedCwd = request.invocationCwd;
   if (typeof reportedCwd === 'string' && reportedCwd.length > 0) {
     const canonicalReported = await realpathNearestExistingAsync(reportedCwd);
-    if (!isWithinRoot(canonicalReported, sessionCwd)) {
+    if (isWithinRoot(canonicalReported, sessionCwd)) {
+      // `AgentTool` with `isolation: 'worktree'` provisions under
+      // `<projectRoot>/.qwen/worktrees/`, which is inside the session — so
+      // "inside" is not enough to leave the boundary alone. A reported
+      // directory that is a checkout root in its own right is the sub-agent's
+      // worktree, and containing it there is what stops one sub-agent from
+      // reaching into a sibling's. An ordinary subdirectory resolves to the
+      // session's own repository and changes nothing.
+      if (canonicalReported !== sessionCwd) {
+        let discovered: string | undefined;
+        try {
+          discovered = await resolveDiscoveredRepository(
+            canonicalReported,
+            sessionCwd,
+          );
+        } catch {
+          return denyTarget(
+            UNVERIFIABLE_SCOPE_DENIAL_PREFIX,
+            canonicalReported,
+          );
+        }
+        if (
+          discovered !== undefined &&
+          (await realpathNearestExistingAsync(discovered)) === canonicalReported
+        ) {
+          canonicalEffectiveCwd = canonicalReported;
+        }
+      }
+    } else {
       const ownedWorktrees = await realpathNearestExistingAsync(
         GitWorktreeService.getWorktreesDir(request.sessionId),
       );
