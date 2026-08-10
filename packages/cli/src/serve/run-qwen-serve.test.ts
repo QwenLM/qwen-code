@@ -1236,7 +1236,9 @@ describe('runQwenServe daemon logger wiring', () => {
 
     // Point daemon logger at our temp debug dir
     const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
     process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
 
     try {
       const handle = await runQwenServe(
@@ -1273,6 +1275,7 @@ describe('runQwenServe daemon logger wiring', () => {
       expect(logContent).toContain('project memory scope resolved');
       expect(logContent).toContain('projectMemoryScope=workspace');
       expect(logContent).toContain('projectMemoryScopeSource=default');
+      expect(logContent).toContain('projectMemoryScopeRaw=workspace');
 
       await Promise.all(
         Array.from({ length: 70 }, (_, index) =>
@@ -1304,6 +1307,11 @@ describe('runQwenServe daemon logger wiring', () => {
       delete process.env['QWEN_RUNTIME_DIR'];
       if (origEnv !== undefined) {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+      if (originalScope === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = originalScope;
       }
     }
   }, 10_000);

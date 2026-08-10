@@ -2685,6 +2685,7 @@ async function runQwenServeImpl(
   daemonLog.info('project memory scope resolved', {
     projectMemoryScope: resolvedMemoryProjectScope,
     projectMemoryScopeSource: memoryProjectScopeSource,
+    projectMemoryScopeRaw: memoryProjectScopeValue,
   });
   // Per-workspace .env loads keep running after boot (skill status, voice
   // capability checks, settings reloads); boot stderr is long gone by then,
