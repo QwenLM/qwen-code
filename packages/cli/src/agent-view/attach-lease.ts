@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 
 export const DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS = 30_000;
+export const MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS = 3_600_000;
 
 export interface AgentViewAttachLease {
   sessionId: string;
@@ -148,6 +149,11 @@ export class AgentViewAttachLeaseManager {
     const resolvedTtlMs = ttlMs ?? this.defaultTtlMs;
     if (!Number.isFinite(resolvedTtlMs) || resolvedTtlMs <= 0) {
       throw new RangeError('Attach lease ttlMs must be positive.');
+    }
+    if (resolvedTtlMs > MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS) {
+      throw new RangeError(
+        `Attach lease ttlMs must not exceed ${MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS}.`,
+      );
     }
     return new Date(now.getTime() + resolvedTtlMs);
   }

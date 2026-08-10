@@ -145,6 +145,23 @@ describe('Agent View PTY host process server', () => {
     expect(host.killedWith).toBe('SIGTERM');
   });
 
+  it('rejects non-positive or non-integer resize dimensions', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    await expect(
+      requestHost(socketPath, 'resize', { columns: 0, rows: 40 }),
+    ).rejects.toThrow('columns must be a positive integer');
+    await expect(
+      requestHost(socketPath, 'resize', { columns: 120, rows: 2.5 }),
+    ).rejects.toThrow('rows must be a positive integer');
+
+    expect(host.resizes).toEqual([]);
+  });
+
   it('rejects unsupported kill signals', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -482,6 +499,23 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
+  it('rejects input written before an attach stream is established', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-early-write'),
+      socketPath,
+    );
+
+    expect(() => connected.write(Buffer.from('early'))).toThrow(
+      'Agent View PTY host input requires an active attach stream.',
+    );
+    expect(host.input).toBe('');
+  });
+
   it('bridges data through a connected host handle', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -645,7 +679,9 @@ describe('Agent View PTY host process server', () => {
           createLaunch('session-malformed-response'),
           socketPath,
         ),
-      ).rejects.toThrow('Unexpected token');
+      ).rejects.toMatchObject({
+        name: 'AgentViewPtyHostProtocolError',
+      });
     } finally {
       server.close();
       await removeTestSocket(socketPath);

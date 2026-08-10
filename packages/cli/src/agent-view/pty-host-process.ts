@@ -190,7 +190,12 @@ function createRemotePtyHostHandle({
       return '';
     },
     write(data: Buffer): void {
-      attachSocket?.write(data);
+      if (!attachSocket) {
+        throw new Error(
+          'Agent View PTY host input requires an active attach stream.',
+        );
+      }
+      attachSocket.write(data);
     },
     onData(callback: (data: string) => void): AgentViewPtyDisposable {
       attachSocket?.destroy();
@@ -569,7 +574,9 @@ export function createAgentViewPtyHostServer(
             resolve();
             return;
           }
-          fs.chmod(socketPath, 0o600).then(resolve, reject);
+          fs.chmod(socketPath, 0o600).then(resolve, (error) => {
+            server.close(() => reject(error));
+          });
         });
       });
     },

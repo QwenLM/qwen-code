@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AgentViewAttachLeaseManager } from './attach-lease.js';
+import {
+  AgentViewAttachLeaseManager,
+  MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS,
+} from './attach-lease.js';
 
 describe('AgentViewAttachLeaseManager', () => {
   it('acquires a lease for an unattached session', () => {
@@ -107,6 +110,46 @@ describe('AgentViewAttachLeaseManager', () => {
     expect(manager.get('session-1')).toMatchObject({ leaseId: 'lease-1' });
     expect(manager.release('session-1', 'lease-1')).toBe(true);
     expect(manager.get('session-1')).toBeUndefined();
+  });
+
+  it('rejects non-positive, oversized, and non-finite ttls', () => {
+    const manager = new AgentViewAttachLeaseManager();
+
+    expect(() => manager.acquire('session-1', { ttlMs: 0 })).toThrow(
+      'Attach lease ttlMs must be positive.',
+    );
+    expect(() => manager.acquire('session-1', { ttlMs: Number.NaN })).toThrow(
+      RangeError,
+    );
+    expect(() =>
+      manager.acquire('session-1', {
+        ttlMs: MAX_AGENT_VIEW_ATTACH_LEASE_TTL_MS + 1,
+      }),
+    ).toThrow('Attach lease ttlMs must not exceed');
+    expect(() => manager.acquire('')).toThrow(
+      'Agent View session id is required.',
+    );
+    expect(manager.get('session-1')).toBeUndefined();
+  });
+
+  it('honors per-call ttls and expires lazily through get and release', () => {
+    const clock = fakeClock('2026-07-17T00:00:00.000Z');
+    const manager = new AgentViewAttachLeaseManager({
+      now: clock.now,
+      createLeaseId: () => 'lease-1',
+      defaultTtlMs: 1000,
+    });
+    manager.acquire('session-1', { ttlMs: 2000 });
+
+    clock.advance(1500);
+    expect(manager.get('session-1')).toMatchObject({ leaseId: 'lease-1' });
+    expect(
+      manager.heartbeat('session-1', 'lease-1', { ttlMs: 3000 }),
+    ).toMatchObject({ expiresAt: '2026-07-17T00:00:04.500Z' });
+
+    clock.advance(3000);
+    expect(manager.get('session-1')).toBeUndefined();
+    expect(manager.release('session-1', 'lease-1')).toBe(false);
   });
 
   it('expires stale leases and allows reacquire', () => {

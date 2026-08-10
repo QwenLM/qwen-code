@@ -73,6 +73,17 @@ describe('BoundedOutputRing', () => {
     expect(ring.retainedBytes).toBeLessThanOrEqual(4);
   });
 
+  it('does not retain partial UTF-8 characters when sub-capacity chunks overflow', () => {
+    const ring = new BoundedOutputRing(6);
+
+    ring.append('ab你');
+    ring.append('你x');
+
+    expect(ring.toString()).toBe('你x');
+    expect(ring.toString()).not.toContain('\uFFFD');
+    expect(ring.retainedBytes).toBeLessThanOrEqual(6);
+  });
+
   it('coalesces small chunks while preserving the byte cap', () => {
     const ring = new BoundedOutputRing(1024 * 1024);
 
@@ -132,6 +143,19 @@ describe('validateAgentViewLaunchConfig', () => {
 });
 
 describe('launchAgentViewPtyHost', () => {
+  it('rejects commands containing empty segments', async () => {
+    const pty = createFakePty();
+
+    await expect(
+      launchAgentViewPtyHost(createLaunch(), {
+        pty,
+        fakeCommand: ['fake-worker', ''],
+      }),
+    ).rejects.toThrow('command must contain at least one non-empty string');
+
+    expect(pty.spawnCalls).toEqual([]);
+  });
+
   it('spawns the provided fake command in a PTY and captures output', async () => {
     const pty = createFakePty();
     const handle = await launchAgentViewPtyHost(createLaunch(), {

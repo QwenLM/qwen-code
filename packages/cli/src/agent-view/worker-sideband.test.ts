@@ -82,6 +82,7 @@ describe('worker sideband env', () => {
   it('returns undefined outside worker mode or when required fields are absent', () => {
     expect(readAgentViewWorkerSidebandEnv({})).toBeUndefined();
     for (const missingKey of [
+      QWEN_AGENT_VIEW_WORKER,
       QWEN_AGENT_VIEW_SESSION_ID,
       QWEN_AGENT_VIEW_SIDEBAND,
       QWEN_AGENT_VIEW_TOKEN,
@@ -421,6 +422,16 @@ describe('worker sideband env', () => {
             ?.sessionState,
       ),
     ).toEqual(['working', 'needs_input', 'working']);
+  });
+
+  it('skips worker events, control reads, and heartbeats outside worker mode', async () => {
+    await expect(
+      sendAgentViewWorkerEvent({ type: 'heartbeat' }, {}),
+    ).resolves.toBeUndefined();
+    await expect(readAgentViewWorkerControlEvents({})).resolves.toEqual([]);
+    expect(startAgentViewWorkerHeartbeat({})).toBeUndefined();
+
+    expect(mockCallAgentViewSupervisor).not.toHaveBeenCalled();
   });
 
   it('skips worker state reports outside worker mode', async () => {
