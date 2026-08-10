@@ -40,10 +40,10 @@ import {
   HOSTNAME_RE,
   gh,
   getGhHost,
+  isOwnerRepo,
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
-import { OWNER_REPO_RE } from './cleanup.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
@@ -68,6 +68,7 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
+  FOOTER_MARKER,
   REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
@@ -266,13 +267,8 @@ function planPrIdentity(plan: unknown): PrIdentity | null {
     prNumber?: unknown;
     host?: unknown;
   };
-  // The character class admits `.`/`..` segments (`../repo`), which mean
-  // something else entirely once they reach the anchor URL's path — the
-  // same rule submit's isRepo applies.
   const ownerRepo =
-    typeof p.ownerRepo === 'string' &&
-    OWNER_REPO_RE.test(p.ownerRepo) &&
-    p.ownerRepo.split('/').every((s) => s !== '.' && s !== '..')
+    typeof p.ownerRepo === 'string' && isOwnerRepo(p.ownerRepo)
       ? p.ownerRepo
       : null;
   const prNumber = isPositivePrNumber(p.prNumber) ? String(p.prNumber) : null;
@@ -309,13 +305,16 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
   // Defaulting to github.com 404s a GHE review's anchors, or lands them on
   // a same-named public repo's different PR.
   // Normalized before the github.com comparison below: hostnames are
-  // case-insensitive and :443 is the implicit port, so a cased or
-  // port-suffixed variant of the default host (`GH_HOST=GitHub.com`) must
-  // not dodge the short-id floor and link an ordinal `comment 5` into a
-  // dead anchor.
+  // case-insensitive, :443 is the implicit port (leading zeros included),
+  // a trailing dot is the same DNS name, and www. fronts the same default
+  // instance — every one of these variants must land on the floor, or a
+  // `GH_HOST=www.github.com` run links an ordinal `comment 5` into a dead
+  // anchor.
   const host = (resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com')
     .toLowerCase()
-    .replace(/:443$/, '');
+    .replace(/:0*443$/, '')
+    .replace(/\.$/, '')
+    .replace(/^www\.github\.com$/, 'github.com');
   const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
   // github.com's comment ids run long, so a short number after "comment"
   // reads likelier as an ordinal; a GHE instance's id space is its own and
@@ -327,11 +326,18 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
     host === 'github.com'
       ? /\b(issue-level )?comment (\d{6,})\b/gi
       : /\b(issue-level )?comment (\d+)\b/gi;
+  // The anchor family is decided per ENTRY, not per match: issue-comment
+  // ids and review-comment ids are separate id spaces, and an issue-level
+  // entry that echoes pr-context's own header shape (`**Issue-level
+  // comment** — … (comment 5199834809)`) carries its id apart from the
+  // phrase — routed by adjacency alone, that id anchors under
+  // #discussion_r, a link that can never resolve.
+  const issueLevelEntry = /\bissue(?:-level)?\s+comment\b/i.test(text);
   return text.replace(
     commentRef,
     (_m, issueLevel: string | undefined, id: string) =>
-      issueLevel
-        ? `[issue-level comment ${id}](${base}#issuecomment-${id})`
+      issueLevel || issueLevelEntry
+        ? `[${issueLevel ?? ''}comment ${id}](${base}#issuecomment-${id})`
         : `[comment ${id}](${base}#discussion_r${id})`,
   );
 }
@@ -352,12 +358,22 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
   const parsed = cannotTell.map((raw) => {
     // Entries render as one-line list items: an unindented newline ends a
     // list item (CommonMark), so a model-written entry spanning lines would
-    // leak its continuation out of the list. Collapse them first.
+    // leak its continuation out of the list. Collapsed by split/join, not
+    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
+    // a long whitespace run with no newline in it, and these entries are
+    // model-written with no length cap — one such entry stalled a measured
+    // probe for seconds at 80k characters.
+    const unmarked = raw.startsWith(CRITICAL_PREFIX)
+      ? raw.slice(CRITICAL_PREFIX.length).trim()
+      : raw;
     const line = linkifyCommentRefs(
-      (raw.startsWith(CRITICAL_PREFIX)
-        ? raw.slice(CRITICAL_PREFIX.length).trim()
-        : raw
-      ).replace(/\s*\n+\s*/g, ' '),
+      unmarked.includes('\n')
+        ? unmarked
+            .split('\n')
+            .map((seg) => seg.trim())
+            .filter((seg) => seg !== '')
+            .join(' ')
+        : unmarked,
       pr,
     );
     const idx = line.indexOf(' — ');
@@ -436,7 +452,14 @@ function toStringList(value: unknown, field: string): string[] {
 }
 
 function stripReviewFooter(entry: string): string {
-  return entry.replace(REVIEW_FOOTER_RE, '');
+  // Guarded on the marker: the strip regex opens `\s*` under an unanchored
+  // search, which scans quadratically on a long whitespace run in an entry
+  // that carries no footer at all — and these entries are model-written
+  // with no length cap (measured ~20 s at 80k characters). An entry
+  // without the marker has nothing to strip.
+  return entry.includes(FOOTER_MARKER)
+    ? entry.replace(REVIEW_FOOTER_RE, '')
+    : entry;
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is

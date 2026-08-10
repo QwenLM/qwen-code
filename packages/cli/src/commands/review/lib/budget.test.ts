@@ -298,6 +298,20 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: none — all planned checks completed',
       'Budget gap: nothing skipped',
       'Budget gap: no gaps',
+      // The rest of the drop vocabulary, pinned — this regex is a live
+      // edit site, and a narrowing that turns `no checks` into a phantom
+      // gap must not ship green.
+      'Budget gap: no checks',
+      'Budget gap: nothing',
+      'Budget gap: n/a',
+      'Budget gap: none — planned checks completed',
+      'Budget gap: none — every check covered',
+      'Budget gap: none — everything completed',
+      // The found / to-report non-answers, and inner paren padding.
+      'Budget gap: none found',
+      'Budget gap: nothing to report',
+      'Budget gap: no gaps found',
+      'Budget gap: none ( all checks completed)',
       'Budget gap:',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);
@@ -358,6 +372,30 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       '<integration tests on Windows> runner unavailable',
     ]) {
       expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+  });
+
+  it('keeps the stayed / negated-completion / exception shapes — real gaps that brush the idioms', () => {
+    for (const gap of [
+      // The stayed idiom is end-anchored: text continuing past `budget`
+      // discloses skipped work, and `stayed` heading somewhere else
+      // entirely is no completion at all.
+      'N/A - stayed under budget, but the Windows matrix never ran',
+      'no checks — stayed queued behind the runner outage',
+      'none — stayed under budget but skipped the Windows matrix',
+      // A completion word that is NEGATED is a failure report ending in
+      // "completed", not completion.
+      'none — all checks crashed, none completed',
+      'no checks — all deferred, nothing finished',
+      // An exception quantifier between head and completion word restricts
+      // the claim — `all but X completed` names the X that was not.
+      'none — all but the Windows checks completed',
+      'none — all but one check completed',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+      expect(budgetGapDisclosures(`Budget gap: (${gap})`)).toEqual([
+        `(${gap})`,
+      ]);
     }
   });
 
@@ -431,6 +469,20 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     const t1 = performance.now();
     expect(budgetGapDisclosures(spaced)).toHaveLength(1);
     expect(performance.now() - t1).toBeLessThan(1000);
+    // The line matcher's own hazard shape — a long indentation run on a
+    // line that is NOT a disclosure. The pre-rewrite matcher's overlapping
+    // `[ \t]*` pair backtracked quadratically here (seconds at 40k tabs);
+    // the disclosure on the line above pins that a real gap still parses
+    // out of the same text.
+    const indented = `Budget gap: ok\n${'\t'.repeat(40_000)}not a gap line`;
+    const t2 = performance.now();
+    expect(budgetGapDisclosures(indented)).toEqual(['ok']);
+    expect(performance.now() - t2).toBeLessThan(1000);
+    // And a deep-indented bullet disclosure still matches — the leading
+    // whitespace lives inside the optional bullet group, not beside it.
+    expect(
+      budgetGapDisclosures(`${'\t'.repeat(4000)}- Budget gap: the check`),
+    ).toEqual(['the check']);
   });
 });
 

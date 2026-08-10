@@ -69,6 +69,26 @@ let ghHost: string | undefined;
 
 export const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
 
+const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * `owner/repo` — and neither half may be a dot segment.
+ *
+ * The character class alone admits `../repo`, `owner/..` and `./repo`: `.`
+ * and `..` are made of legal characters and mean something else entirely
+ * once they reach a URL path. One home for the rule — submit's --repo
+ * check and compose-review's plan identity both build API/anchor URLs
+ * from it, and a hardening that lands in only one of them leaves the
+ * other URL-building site on the stale rule.
+ */
+export function isOwnerRepo(repo: string): boolean {
+  const parts = repo.split('/');
+  return (
+    parts.length === 2 &&
+    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
+  );
+}
+
 /**
  * Route every subsequent `gh` invocation in this process at a GitHub host
  * other than github.com (GitHub Enterprise). The subcommands thread their

@@ -102,7 +102,7 @@ function plan(
     repositoryContext?: unknown;
     /** The PR identity fetch-pr records — anchors and bilingual recovery. */
     ownerRepo?: string;
-    prNumber?: string;
+    prNumber?: string | number;
     host?: string;
   } = {},
 ): string {
@@ -360,7 +360,7 @@ function coveredPlan(
     srcDiffLines?: number;
     repositoryContext?: unknown;
     ownerRepo?: string;
-    prNumber?: string;
+    prNumber?: string | number;
     host?: string;
   } = {},
 ): string {
@@ -4313,7 +4313,8 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
   it('anchors an Issue-level mention at #issuecomment whatever its casing', () => {
     // pr-context renders `**Issue-level comment**` capitalized; an entry
     // echoing that casing must still anchor under #issuecomment, not
-    // #discussion_r — an anchor GitHub cannot resolve.
+    // #discussion_r — an anchor GitHub cannot resolve. The link text keeps
+    // the entry's own casing: the linkifier navigates, it does not rewrite.
     const r = composeReview({
       cannotTellCriticals: [
         'Issue-level comment 5199834809 (author review) — body truncated',
@@ -4326,7 +4327,7 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
       modelId: MODEL,
     });
     expect(r.body).toContain(
-      '[issue-level comment 5199834809](https://github.com/QwenLM/qwen-code/pull/8388#issuecomment-5199834809)',
+      '[Issue-level comment 5199834809](https://github.com/QwenLM/qwen-code/pull/8388#issuecomment-5199834809)',
     );
   });
 
@@ -4399,5 +4400,110 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
       '- **[Critical]** old blocker (a.ts) — body truncated',
     );
     expect(r.body).not.toContain('**[Critical]** **[Critical]**');
+  });
+
+  it('reads www./trailing-dot/zero-padded-port github.com variants as the default host', () => {
+    // Each is the same default instance; a variant must not dodge the
+    // short-id floor and link an ordinal into a dead anchor.
+    for (const variant of [
+      'www.github.com',
+      'github.com.',
+      'github.com:0443',
+    ]) {
+      process.env['GH_HOST'] = variant;
+      const r = composeReview({
+        cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+        planPath: coveredPlan(undefined, {
+          ownerRepo: 'QwenLM/qwen-code',
+          prNumber: '8388',
+        }),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.body).toContain(
+        '- **[Critical]** comment 12345 (a.ts) — body truncated',
+      );
+      expect(r.body).not.toContain('discussion_r12345');
+    }
+    // And a long id under the www variant anchors at the apex host.
+    process.env['GH_HOST'] = 'www.github.com';
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+  });
+
+  it("routes an issue-level entry's bare id to #issuecomment — the anchor family is per entry", () => {
+    // pr-context's own header shape carries the id apart from the phrase:
+    // `**Issue-level comment** — by @alice (comment 5199834809)`. Issue-
+    // comment ids and review-comment ids are separate id spaces, so
+    // routing that id by adjacency alone mints a #discussion_r anchor
+    // that can never resolve.
+    const r = composeReview({
+      cannotTellCriticals: [
+        '**Issue-level comment** — by @alice (comment 5199834809) — full text unfetchable',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('#issuecomment-5199834809');
+    expect(r.body).not.toContain('discussion_r5199834809');
+  });
+
+  it('degrades to bare ids on a corrupt plan file — never throws', () => {
+    // The orchestrator killed mid-write leaves plan.json truncated; the
+    // anchors degrade, the composition survives.
+    const planPath = join(dir, 'corrupt-plan.json');
+    writeFileSync(planPath, '{ not json');
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r');
+  });
+
+  it('accepts a numeric prNumber — plans record both JSON forms', () => {
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: 8388,
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+  });
+
+  it('stays linear on a cannot-tell entry with a long whitespace run', () => {
+    // The newline collapse must not reintroduce a quadratic scan: a
+    // model-written entry has no length cap, and `/\s*\n+\s*/g` was
+    // measured at seconds on an 80k whitespace run with no newline in it.
+    const flat = `comment 101 (a.ts) — body${' '.repeat(80_000)}truncated`;
+    const wrapped = `comment 102 (b.ts) — body\n${' '.repeat(80_000)}truncated`;
+    const t0 = performance.now();
+    const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
+    expect(performance.now() - t0).toBeLessThan(2000);
+    // The multi-line entry still collapses to one list item.
+    expect(r.body).toContain('comment 102 (b.ts) — body truncated');
   });
 });

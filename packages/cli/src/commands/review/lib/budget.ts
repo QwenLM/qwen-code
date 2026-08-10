@@ -297,21 +297,30 @@ export const INLINE_BUDGET_GAP_RE =
  *  - the brief's own `<the check>` template, and dash-only text — both
  *    end-anchored, so inner text merely STARTING with them keeps;
  *  - a bare placeholder token in any trailing punctuation (`none`,
- *    `None.`, `no gaps`), and `nothing skipped`;
- *  - the stayed-under-budget idiom (`N/A - stayed under budget`);
+ *    `None.`, `no gaps`), and the non-answer idioms `nothing skipped`,
+ *    `none found`, `nothing to report`;
+ *  - the stayed-under-budget idiom, end-anchored like its siblings
+ *    (`N/A - stayed under budget`); text continuing past `budget` keeps
+ *    (`N/A - stayed under budget, but the Windows matrix never ran`);
  *  - the completion idiom — token, dash, an "all done" head, then a
  *    completion word the text ENDS with (`none — all planned checks
- *    completed`). The head alone is not completion: `none — all 5
- *    Windows checks failed to start` keeps;
+ *    completed`). The head alone is not completion (`none — all 5
+ *    Windows checks failed to start` keeps), the completion word must be
+ *    AFFIRMED (`none — all checks crashed, none completed` keeps), and
+ *    the span must not cross an exception (`none — all but the Windows
+ *    checks completed` keeps);
  *  - a token followed by a parenthesized completion clause (`None (all
- *    checks completed)`).
+ *    checks completed)`), inner padding tolerated — under the same
+ *    negation and exception guards.
  *
  * No two quantifiers overlap on whitespace: a placeholder token followed
  * by a long whitespace run must stay linear (the module header's hazard
- * note applies — this parse runs on every agent return).
+ * note applies — this parse runs on every agent return). The completion
+ * spans are tempered (a per-character exception lookahead), which keeps
+ * them linear too.
  */
 const PLACEHOLDER_GAP_RE =
-  /^(?:<[^>]*>$|[-—*_~`]+$|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b(?:[.!…,;:\s]*$|\s+skipped\b[.!…,;:\s]*$|\s*[-—–]\s*(?:stayed\b|(?:all|every|planned|further|no further)\b.*\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*$)|\s*\((?:all|every)\b[^()]*\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*\)\s*$))/i;
+  /^(?:<[^>]*>$|[-—*_~`]+$|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b(?:[.!…,;:\s]*$|\s+(?:skipped|found|to report)\b[.!…,;:\s]*$|\s*[-—–]\s*(?:stayed\s+(?:under|within|below)\s+budget\b[.!…,;:\s]*$|(?:all|every(?:thing)?|planned|further|no further)\b(?:(?!\b(?:but|except|excepting|excluding)\b).)*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*$)|\s*\(\s*(?:all|every(?:thing)?)\b(?:(?!\b(?:but|except|excepting|excluding)\b)[^()])*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*\)\s*$))/i;
 
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;
