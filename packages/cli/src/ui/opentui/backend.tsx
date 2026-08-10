@@ -393,14 +393,6 @@ function App({
     }
   });
 
-  // Ensure the prompt owns keyboard focus on mount so typing/Enter work.
-  useEffect(() => {
-    const el = promptRef.current as
-      | (EditBufferRenderable & { focus?: () => void })
-      | null;
-    el?.focus?.();
-  }, []);
-
   const onSubmit = useCallback(() => {
     const el = promptRef.current;
     const text = (el?.plainText ?? '').trim();
@@ -549,10 +541,8 @@ function App({
           }}
           focused
           onSubmit={onSubmit}
-          placeholder="Ask anything… (Enter submits)"
+          placeholder="Ask anything… (Enter submits — replays the scripted scenario)"
           placeholderColor={C.dim}
-          textColor={C.text}
-          backgroundColor={C.hover}
           flexGrow={1}
           height={3}
         />
