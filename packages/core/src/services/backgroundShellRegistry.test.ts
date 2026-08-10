@@ -41,12 +41,17 @@ function expectedOutputFileElement(path: string): string {
 }
 
 let tmpDirs: string[] = [];
+let tmpFiles: string[] = [];
 
 afterEach(() => {
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+  for (const file of tmpFiles) {
+    rmSync(file, { force: true });
+  }
   tmpDirs = [];
+  tmpFiles = [];
 });
 
 function makeOutputFile(content: string): string {
@@ -490,6 +495,10 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
+      // A dir outputPath gets its `<dir>.status` sidecar as a sibling of
+      // the temp dir, which the dir cleanup above never removes; tracking
+      // it here lets afterEach delete it even if the assertions fail.
+      tmpFiles.push(statusFilePathFor(dir));
       reg.setNotificationCallback(callback);
       reg.register(makeEntry({ shellId: 'a', outputPath: dir }));
 
@@ -498,9 +507,6 @@ describe('BackgroundShellRegistry', () => {
       expect(callback).toHaveBeenCalledTimes(1);
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).not.toContain('<output-tail');
-      // register/complete also mirrored a `<dir>.status` sidecar next to
-      // the temp dir, and afterEach only tracks the dir itself.
-      rmSync(statusFilePathFor(dir), { force: true });
     });
 
     it('skips output-tail when the output file is empty (stat.size === 0)', () => {
