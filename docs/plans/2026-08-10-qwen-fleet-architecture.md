@@ -595,7 +595,7 @@ status through the **existing `AgentTabBar`**, which already renders per-agent s
 
 | PR     | Scope                                  | Prod LOC | Test LOC | Files | Review risk | Impl. risk |
 | ------ | -------------------------------------- | -------- | -------- | ----- | ----------- | ---------- |
-| **1A** | Fleet contracts + in-process semantics | ~1,300   | ~1,400   | ~25   | Medium      | Low        |
+| **1A** | Fleet contracts + in-process preview   | ~1,300   | ~1,400   | ~25   | Medium      | Low        |
 | **1B** | Supervised runtime — **the MVP**       | ~1,900   | ~2,000   | ~25   | High        | High       |
 | **2**  | Persistence, recovery, hardening       | ~1,200   | ~1,600   | ~20   | Medium      | Medium     |
 | **3**  | PTY attach + legacy cleanup            | ~1,100   | ~1,000   | ~25   | Medium      | Medium     |
@@ -604,11 +604,13 @@ status through the **existing `AgentTabBar`**, which already renders per-agent s
 
 Contracts, `ApprovalRegistry` with one-shot semantics, serializable confirmation details, turn
 correlation, `TeamManager` migration, `InProcessBackend` split, view extraction, and #8804's
-`read_only` enforcement folded in (§0.1 makes it load-bearing).
+`read_only` enforcement folded in (§0.1 makes it load-bearing). The `experimental.fleet` gate
+and `/coordinate` entry expose these semantics as a bounded in-process preview; Fleet enables
+the underlying Agent Team tools internally rather than requiring a second user-facing switch.
 
-_Demonstrable:_ in-process teammates whose turns are correlated end to end, whose approvals reach
-the leader with real call IDs and cannot be double-answered, and whose read-only mode is enforced
-by the runtime rather than by prompt. This is product behaviour, not plumbing.
+_Demonstrable:_ enable `experimental.fleet` and run `/coordinate` to dispatch up to three
+in-process read-only investigation teammates with shared tasks, messages, existing Agent View
+tabs, correlated turns, and one-shot approvals. This is product behaviour, not plumbing.
 
 _Incomplete:_ no subprocess teammates; teammates still share the leader process.
 
@@ -625,13 +627,15 @@ Commits:
 5. `TeamManager` retargeted to `AgentRuntime`/`AgentSession`
 6. `AgentSessionView` extraction in the tab UI
 7. `read_only` enforcement (from #8804)
-8. tests + docs
+8. `experimental.fleet` gate + `/coordinate` in-process preview
+9. tests + docs
 
 #### PR 1B — Supervised runtime (the MVP)
 
 The six new supervisor ops, the supervisor process entrypoint, the teammate subprocess entrypoint
 and sideband, `SupervisedRuntime` / `RemoteSession`, semantic event streaming, session
-projection, the `experimental.fleet` gate, and teammate status in the existing tab bar.
+projection, wiring the existing Fleet entry to the supervised runtime, and teammate status in
+the existing tab bar.
 
 _Demonstrable — the acceptance criterion in full:_ one leader plus multiple real Qwen subprocess
 teammates, task assignment, reliable semantic messaging, correlated turns, explicit approvals,
@@ -651,7 +655,7 @@ Commits:
 4. teammate sideband client (worker → supervisor events)
 5. `SupervisedRuntime` + `RemoteSession`
 6. session projection into the existing tab UI
-7. feature gate + `/coordinate` entry
+7. route the existing `/coordinate` entry through `SupervisedRuntime`
 8. end-to-end tests + docs
 
 #### PR 2 — Persistence, recovery, hardening
@@ -888,17 +892,19 @@ Common to all stages — **invariants that may never be violated**:
 
 ---
 
-#### Stage 1A — Fleet contracts and in-process semantics
+#### Stage 1A — Fleet contracts and in-process preview
 
 **Objective.** Establish the three contracts and prove them in-process, delivering correlated
-turns, call-ID approval routing, and runtime-enforced read-only teammates.
+turns, call-ID approval routing, and runtime-enforced read-only teammates through an independently
+usable Fleet preview.
 
 **Scope.** `fleet/` contracts (`session.ts`, `runtime.ts`, `view.ts`, `approvals.ts`);
 serializable confirmation details for all six variants; `turnId` threading through
 `AgentInteractive`; `InProcessBackend` split into `InProcessRuntime` + `InProcessSession` with
 `createPerAgentConfig` (`InProcessBackend.ts:487`) extracted to a shared module; `TeamManager`
 retargeted across its 19 call sites; `AgentSessionView` extraction in the tab UI; #8804's
-`read_only` enforcement corrected to a four-tool inspection base.
+`read_only` enforcement corrected to a four-tool inspection base; the `experimental.fleet` gate;
+and a bundled `/coordinate` workflow for bounded in-process investigations.
 
 **Non-goals.** No subprocess. No socket. No supervisor. No `Backend` deletion. No Arena change.
 No new UI component.
@@ -908,12 +914,15 @@ No new UI component.
 **Expected files.** New: `packages/core/src/agents/fleet/*`. Changed: `TeamManager.ts`,
 `InProcessBackend.ts`, `agent-interactive.ts`, `leaderPermissionBridge.ts`,
 `subagent-plan-tool-policy.ts`, `AgentViewContext.tsx`, `useTeamInProcess.ts`,
-`AgentChatView.tsx`, `fake-backend.ts`, `coordination-harness.ts`, `team-create.ts`.
+`AgentChatView.tsx`, `fake-backend.ts`, `coordination-harness.ts`, `team-create.ts`, CLI settings
+and bundled-skill loading. New user entry: `packages/core/src/skills/bundled/coordinate/SKILL.md`.
 
 **Expected behaviour.** Teammates spawn through `AgentRuntime`; every turn carries a `turnId`
 that correlates its status transitions and final text; teammate approvals reach the leader
 carrying a real `callId` and cannot be answered twice; a `read_only` teammate has no shell, write,
-memory, schedule, or agent-spawn tool at either the declaration or execution layer.
+memory, schedule, or agent-spawn tool at either the declaration or execution layer. Enabling
+`experimental.fleet` exposes `/coordinate` and internally enables the required Team tools without
+requiring `experimental.agentTeam`.
 
 **Acceptance criteria.**
 
@@ -924,6 +933,8 @@ memory, schedule, or agent-spawn tool at either the declaration or execution lay
    and `create_sub_session` at both layers.
 5. A test proves `turnId` on a status transition matches the `turnId` returned by `send()`.
 6. The six no-op display methods are deleted from the runtime, not ported.
+7. A test proves `/coordinate` is hidden when Fleet is disabled and visible when enabled.
+8. A test proves Fleet enables Team coordination internally while `agentTeam` remains unset.
 
 **Required tests.** Extend `coordination-harness.test.ts`; new `fleet/approvals.test.ts`,
 `fleet/serializable-confirmation.test.ts`; update `agent.test.ts` for `read_only`.
@@ -938,7 +949,8 @@ prompted otherwise. The four-tool base must not silently inherit the plan-mode p
 all dormant until 1B, and may land in either stage.
 
 **Next agent may assume.** The three contracts exist and are stable; an `AgentRuntime`
-implementation is injectable via `Config`; approvals are serializable and one-shot.
+implementation is injectable via `Config`; approvals are serializable and one-shot; the
+`experimental.fleet` setting and `/coordinate` product entry already exist.
 
 **Next agent must NOT assume.** Any subprocess exists; any socket op is implemented; the tab UI
 can render a non-in-process session end to end; `Backend` is gone.
@@ -947,15 +959,15 @@ can render a non-in-process session end to end; `Backend` is gone.
 
 #### Stage 1B — Supervised teammate runtime (the fleet MVP)
 
-**Objective.** Deliver the first genuinely useful fleet experience: real Qwen subprocess
-teammates coordinated by a leader.
+**Objective.** Upgrade the in-process Fleet preview to the Fleet MVP: real Qwen subprocess
+teammates coordinated by a leader through the existing entry.
 
 **Scope.** Six supervisor handler ops (`dispatch`, `send`, `answer`, `stop`, `list`, plus a
 `subscribe` broadcast) against the existing store; the supervisor process entrypoint for
 `--internal-agent-view-supervisor`; a teammate subprocess entrypoint reusing the extracted agent
 construction; the teammate sideband client; `SupervisedRuntime` + `RemoteSession`;
-`session-projection.ts`; the `experimental.fleet` gate; teammate status surfaced through the
-existing `AgentTabBar`.
+`session-projection.ts`; selecting the supervised runtime for the existing `experimental.fleet`
+entry; teammate status surfaced through the existing `AgentTabBar`.
 
 **Non-goals.** No PTY attach, resize, scrollback, or `peek`. No hibernation or respawn. No
 reattach. No single-leader lock. No socket fan-out — polling stays. No new roster component.
@@ -965,7 +977,7 @@ reattach. No single-leader lock. No socket fan-out — polling stays. No new ros
 **Expected files.** New: `packages/cli/src/agent-view/SupervisedRuntime.ts`, `RemoteSession.ts`,
 `session-projection.ts`, `teammate-entry.ts`, sideband client; supervisor handler ops in
 `supervisor-process.ts`. Changed: `gemini.tsx` (two early dispatches), `identity.ts`,
-`send-message.ts`, `settingsSchema.ts`, `AgentTabBar.tsx`.
+`send-message.ts`, Fleet runtime selection, `AgentTabBar.tsx`.
 
 **Expected behaviour — the acceptance demo.** One leader plus two or more real Qwen subprocess
 teammates; tasks assigned through the existing shared task list; messages delivered reliably in
@@ -979,7 +991,8 @@ teammate's transcript inspectable in a tab. No PTY attach anywhere.
 3. Killing the leader cleanly stops every teammate.
 4. A teammate cannot create a team (`team_create` rejected under teammate identity).
 5. No `QWEN_AGENT_VIEW_*` credential is visible in a teammate's shell child.
-6. Disabling `experimental.fleet` restores exactly today's in-process behaviour.
+6. Disabling `experimental.fleet` hides `/coordinate`; the legacy `experimental.agentTeam`
+   path retains its in-process behaviour.
 
 **Required tests.** Supervisor op tests in the style of `supervisor-server.test.ts`; a
 `RemoteSession` contract test asserting parity with `InProcessSession`; an end-to-end test
