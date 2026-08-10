@@ -2621,6 +2621,68 @@ describe('Session', () => {
       );
     });
 
+    it('keeps resumed cron prompts out of user-turn rewind indexes', () => {
+      const records = [
+        chatRecord({
+          uuid: 'user-1',
+          message: { role: 'user', parts: [{ text: 'first' }] },
+        }),
+        chatRecord({
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'first reply' }] },
+        }),
+        chatRecord({
+          uuid: 'cron-1',
+          parentUuid: 'assistant-1',
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: 'scheduled prompt' }] },
+        }),
+        chatRecord({
+          uuid: 'assistant-2',
+          parentUuid: 'cron-1',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'scheduled result' }] },
+        }),
+        chatRecord({
+          uuid: 'user-2',
+          parentUuid: 'assistant-2',
+          message: { role: 'user', parts: [{ text: 'second' }] },
+        }),
+        chatRecord({
+          uuid: 'assistant-3',
+          parentUuid: 'user-2',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'second reply' }] },
+        }),
+      ];
+      mockConfig.getResumedSessionData = vi.fn().mockReturnValue({
+        conversation: { messages: records },
+      });
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const history = records.flatMap((record) =>
+        record.message ? [record.message] : [],
+      );
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 4,
+      });
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        [],
+      );
+    });
+
     it('can rewind the conversation without restoring file history', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
@@ -13430,6 +13492,18 @@ describe('Session', () => {
               },
             });
           });
+          await vi.waitFor(() => {
+            expect(
+              mockChatRecordingService.recordCronPrompt,
+            ).toHaveBeenCalledWith(
+              [
+                {
+                  text: expect.stringContaining('# Autonomous loop check'),
+                },
+              ],
+              'Autonomous loop tick',
+            );
+          });
         } finally {
           restoreHome();
           await fs.rm(tmpDir, { recursive: true, force: true });
@@ -16912,11 +16986,22 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
         );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
+        ).toBeLessThan(
+          vi.mocked(mockChat.sendMessageStream).mock.invocationCallOrder[1]!,
+        );
 
         await session.cancelPendingPrompt();
         releaseCron!();
 
         expect(scheduler.stop).toHaveBeenCalled();
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
         const finals = messageBus.request.mock.calls.filter(
           ([request]) =>
             request.eventName === 'MessageDisplay' && request.input.is_final,

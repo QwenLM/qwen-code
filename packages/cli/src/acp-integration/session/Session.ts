@@ -1460,6 +1460,8 @@ export class Session implements SessionContext {
    */
   private followupAbort: AbortController | null = null;
   private turn: number = 0;
+  // Parallel to model-history user text entries; automatic turns are false.
+  private rewindApiUserTurns: boolean[] | null = null;
   private refreshContextFilesOnWrite = false;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly createdAt: number = Date.now();
@@ -1593,6 +1595,11 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
+    const resumedRecords =
+      config.getResumedSessionData?.()?.conversation.messages;
+    if (resumedRecords) {
+      this.#rebuildRewindUserTurns(resumedRecords);
+    }
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -2730,6 +2737,18 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
+    if (this.rewindApiUserTurns) {
+      const keptMappedTurns = apiHistory
+        .slice(
+          getStartupContextLength(apiHistory, { includeCompressed: true }),
+          apiTruncateIndex,
+        )
+        .filter((content) => this.#isUserTextContent(content)).length;
+      this.rewindApiUserTurns = this.rewindApiUserTurns.slice(
+        0,
+        keptMappedTurns,
+      );
+    }
     this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
@@ -2769,6 +2788,10 @@ export class Session implements SessionContext {
   }
 
   getRewindableUserTurnCount(): number {
+    if (this.rewindApiUserTurns) {
+      return this.rewindApiUserTurns.filter(Boolean).length;
+    }
+
     const apiHistory = this.captureHistorySnapshot();
     const startIndex = getStartupContextLength(apiHistory, {
       includeCompressed: true,
@@ -2796,6 +2819,7 @@ export class Session implements SessionContext {
       .getGeminiClient()!
       .getChat()
       .setHistory(structuredClone(history));
+    this.rewindApiUserTurns = null;
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -2807,6 +2831,21 @@ export class Session implements SessionContext {
     const startIndex = getStartupContextLength(apiHistory, {
       includeCompressed: true,
     });
+
+    if (this.rewindApiUserTurns) {
+      let mappedUserIndex = 0;
+      let realUserIndex = 0;
+      for (let i = startIndex; i < apiHistory.length; i++) {
+        if (!this.#isUserTextContent(apiHistory[i]!)) continue;
+        const rewindable = this.rewindApiUserTurns[mappedUserIndex];
+        mappedUserIndex += 1;
+        if (rewindable) {
+          if (realUserIndex === targetTurnIndex) return i;
+          realUserIndex += 1;
+        }
+      }
+      return -1;
+    }
 
     if (targetTurnIndex === 0) {
       return startIndex;
@@ -2826,6 +2865,29 @@ export class Session implements SessionContext {
     }
 
     return -1;
+  }
+
+  #rebuildRewindUserTurns(records: ChatRecord[]): void {
+    this.rewindApiUserTurns = [];
+
+    for (const record of records) {
+      if (record.type === 'system' && record.subtype === 'chat_compression') {
+        this.rewindApiUserTurns = [];
+        continue;
+      }
+      if (
+        record.subtype === 'mid_turn_user_message' ||
+        record.subtype === 'realtime_message'
+      ) {
+        continue;
+      }
+      if (!record.message || !this.#isUserTextContent(record.message)) {
+        continue;
+      }
+      this.rewindApiUserTurns.push(
+        record.type === 'user' && record.subtype === undefined,
+      );
+    }
   }
 
   #isUserTextContent(content: Content): boolean {
@@ -3690,7 +3752,12 @@ export class Session implements SessionContext {
                       promptId,
                       nextMessage?.parts ?? [],
                       pendingSend.signal,
-                      { modelOverride: fullTurnModelOverride },
+                      {
+                        modelOverride: fullTurnModelOverride,
+                        ...(turnCount === 1 && !isContinue && !isRetry
+                          ? { rewindableUserTurn: true }
+                          : {}),
+                      },
                     );
                   if (!sendResult.responseStream) {
                     this.todoStopGuard.suspend();
@@ -5105,6 +5172,7 @@ export class Session implements SessionContext {
       beforeSend?: (
         context: BeforeModelSendContext,
       ) => Promise<BeforeModelSendDecision>;
+      rewindableUserTurn?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const geminiClient = this.config.getGeminiClient()!;
@@ -5142,6 +5210,7 @@ export class Session implements SessionContext {
           compressed.compressionStatus,
         );
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          this.rewindApiUserTurns = [];
           // Context was just compacted; a loop.md tick must re-deliver the full
           // task block (a short reminder refers back to a message that is no
           // longer in context).
@@ -5232,19 +5301,52 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    const responseStream = await this.#getCurrentChat().sendMessageStream(
-      options.getModelOverride?.() ??
-        options.modelOverride ??
-        this.config.getModel(),
-      {
-        message,
-        config: {
-          abortSignal,
+    const chat = this.#getCurrentChat();
+    const userTurnCountBeforeSend = chat
+      .getHistoryShallow()
+      .filter((content) => this.#isUserTextContent(content)).length;
+    let responseStream: Awaited<ReturnType<GeminiChat['sendMessageStream']>>;
+    try {
+      responseStream = await chat.sendMessageStream(
+        options.getModelOverride?.() ??
+          options.modelOverride ??
+          this.config.getModel(),
+        {
+          message,
+          config: {
+            abortSignal,
+          },
         },
-      },
-      promptId,
-    );
+        promptId,
+      );
+    } catch (error) {
+      if (
+        Object.hasOwn(options, 'rewindableUserTurn') &&
+        chat
+          .getHistoryShallow()
+          .filter((content) => this.#isUserTextContent(content)).length >
+          userTurnCountBeforeSend
+      ) {
+        this.#trackRewindApiUserTurn(options.rewindableUserTurn === true);
+      }
+      throw error;
+    }
+    if (Object.hasOwn(options, 'rewindableUserTurn')) {
+      this.#trackRewindApiUserTurn(options.rewindableUserTurn === true);
+    }
     return { responseStream };
+  }
+
+  #trackRewindApiUserTurn(rewindable: boolean): void {
+    if (this.rewindApiUserTurns === null) {
+      const chat = this.#getCurrentChat();
+      const userTurnCount = chat
+        .getHistoryShallow()
+        .filter((content) => this.#isUserTextContent(content)).length;
+      if (userTurnCount > 1) return;
+      this.rewindApiUserTurns = [];
+    }
+    this.rewindApiUserTurns.push(rewindable);
   }
 
   #preserveUnsentMessageHistory(
@@ -6199,6 +6301,7 @@ export class Session implements SessionContext {
                     promptId,
                     nextMessage.parts ?? [],
                     ac.signal,
+                    turnCount === 1 ? { rewindableUserTurn: false } : {},
                   );
                 if (!sendResult.responseStream) {
                   this.todoStopGuard.suspend();
@@ -6792,6 +6895,7 @@ export class Session implements SessionContext {
             ],
           };
           const toolLoopState = createDaemonToolLoopState('off');
+          let initialSend = true;
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -6813,6 +6917,7 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
+              initialSend ? { rewindableUserTurn: false } : {},
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
@@ -6827,6 +6932,7 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            initialSend = false;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
