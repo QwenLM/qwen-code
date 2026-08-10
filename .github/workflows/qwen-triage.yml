@@ -112,7 +112,66 @@ jobs:
       # maintainer's /verify comment approves the code that exists now, not
       # whatever the author pushes while the job queues.
       verify_head_oid: '${{ steps.perm.outputs.verify_head_oid }}'
+      # The triage job's timeout-minutes, SANITIZED: that field is evaluated
+      # before any step of the consuming job runs, so a malformed repository
+      # variable would kill triage at expression time — no steps, no
+      # always() finalize, no status comment: a silent stop. And the knob
+      # exists to be changed WITHOUT a PR, so no reviewer ever sees a bad
+      # value. This job can run bash, so it validates and clamps instead.
+      triage_timeout_minutes: '${{ steps.budget.outputs.triage_timeout_minutes }}'
     steps:
+      - name: 'Sanitize the triage budget'
+        id: 'budget'
+        env:
+          RAW: '${{ vars.QWEN_TRIAGE_TIMEOUT_MINUTES }}'
+        run: |-
+          set -euo pipefail
+          # Bare positive integer minutes only — no units, quotes or
+          # decimals. Floor 10: below that the agent cannot finish even a
+          # trivial pass and every run becomes an instant kill. Ceiling 600:
+          # a runaway value would hold a scarce ECS runner and the per-PR
+          # concurrency group for days — though only the self-hosted pool
+          # can actually reach it: GitHub-hosted runners hard-cap any job
+          # at 360 minutes, so runs routed to ubuntu-latest die there
+          # whatever this validates. Anything unparsable warns, names the
+          # variable (the run log otherwise blames fromJSON), and falls
+          # back to the 60-minute default.
+          # Hand-maintained sibling of the QWEN_TIMEOUT_MS clamp in
+          # qwen-autofix.yml's review-address step; the failure modes
+          # deliberately differ (that one clamps garbage to its ceiling,
+          # this one falls back to the default), so a boundary-bug fix in
+          # one must be re-derived in the other.
+          MINUTES=60
+          if [[ -n "${RAW}" ]]; then
+            if [[ "${RAW}" =~ ^[0-9]+$ ]]; then
+              # Strip leading zeros so the width test counts SIGNIFICANT
+              # digits: 000000000000000000060 is 60, not a ceiling
+              # violation, and an all-zero value is 0.
+              TRIMMED="${RAW#"${RAW%%[!0]*}"}"
+              TRIMMED="${TRIMMED:-0}"
+              # Over 18 significant digits, bash's 64-bit arithmetic
+              # wraps, and the residue can land inside [10,600], silently
+              # skipping both clamps. Any such value is above the ceiling
+              # by construction.
+              if (( ${#TRIMMED} > 18 )); then
+                echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} exceeds the 600-minute ceiling; clamping to 600."
+                MINUTES=600
+              else
+                MINUTES=$((10#${TRIMMED}))
+                if (( MINUTES < 10 )); then
+                  echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} is below the 10-minute floor; clamping to 10."
+                  MINUTES=10
+                elif (( MINUTES > 600 )); then
+                  echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} exceeds the 600-minute ceiling; clamping to 600."
+                  MINUTES=600
+                fi
+              fi
+            else
+              echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES='${RAW}' is not a bare positive integer of minutes; using the 60-minute default."
+            fi
+          fi
+          echo "triage_timeout_minutes=${MINUTES}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Check principal write permission'
         id: 'perm'
         env:
@@ -370,7 +429,23 @@ jobs:
 
   triage:
     needs: ['authorize']
-    timeout-minutes: 30
+    # TUNABLE WITHOUT A CODE CHANGE: set the repository variable in
+    # Settings → Variables. Why the fallback is 60: the fixed 30 was
+    # measurably clipping the distribution — 22 successful triage jobs
+    # sampled on 2026-08-09 ran median 5.8m / p90 22.3m / max 29.5m, and
+    # five substantial PRs (8723, 8726, 8731, 8764, 8801) died at exactly
+    # the cap, each discarding a full agent run. Triage is advisory, so
+    # the worst case a longer budget risks is one held runner; a killed
+    # run wastes the same runner AND the work. The value arrives via the
+    # authorize job's sanitize step (validated, clamped 10..600 — but
+    # GitHub-hosted runners hard-cap any job at 360 minutes, so values
+    # above 360 only take effect on the self-hosted pool): a
+    # malformed variable in a raw fromJSON(vars.X) would kill this job at
+    # expression time with no status comment. The || 60 covers the events
+    # where authorize is skipped (issues, plain-number dispatch) and its
+    # outputs are empty. Expression-valued timeout-minutes is
+    # probe-verified on a live runner (see #8731).
+    timeout-minutes: '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}'
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
       # Keep non-runnable PR/comment triggers out of the shared per-number
