@@ -91,7 +91,8 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // a session subprocess. GIT_SSH_COMMAND / GIT_SSH (its documented legacy
   // counterpart, still exec'd by git for SSH transports) / GIT_EXTERNAL_DIFF
   // execute a command directly; GIT_ASKPASS / GIT_PROXY_COMMAND / GIT_EDITOR
-  // are exec'd conditionally (credential prompt, proxy transport, editor);
+  // / GIT_SEQUENCE_EDITOR are exec'd conditionally (credential prompt, proxy
+  // transport, editor, `git rebase -i` todo-list edit);
   // GIT_EXEC_PATH redirects git's own remote-helper/subcommand lookup at an
   // attacker directory and GIT_TEMPLATE_DIR plants hooks that run after the
   // next clone/init; GIT_CONFIG_* injects arbitrary config (`core.hooksPath`,
@@ -110,9 +111,15 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'GIT_ASKPASS',
   'GIT_PROXY_COMMAND',
   'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR',
   'GIT_EXTERNAL_DIFF',
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
+  // git merges `$XDG_CONFIG_HOME/git/config` with `~/.gitconfig`, so a
+  // project `.env` redirecting XDG_CONFIG_HOME plants the same config
+  // injection (`core.hooksPath`, …) the GIT_CONFIG_* keys block — without
+  // naming a git config file at all.
+  'XDG_CONFIG_HOME',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
   // git falls back to executing $SSH_ASKPASS for passphrase prompts (its
@@ -139,15 +146,37 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'NODE_GYP_FORCE_PYTHON',
   'npm_config_python',
   'PYTHON',
+  // CPython executes $PYTHONSTARTUP at interactive startup — the Python
+  // analogue of NODE_REPL_EXTERNAL_MODULE. It stays reject-only (like
+  // PYTHON) because operators legitimately set it in their own shells.
+  'PYTHONSTARTUP',
+  // git's documented editor fallback chain (GIT_EDITOR → core.editor →
+  // $VISUAL → $EDITOR) executes these exactly like the blocked GIT_EDITOR,
+  // and the CLI's own useLaunchEditor spawns them from ordinary interactive
+  // flows.
+  'VISUAL',
+  'EDITOR',
   // npm runs `$npm_config_git` as the git binary for install-from-git and
   // similar flows, so a project `.env` pointing it at an attacker script is
   // the same exec redirect as the interpreter keys above.
   'npm_config_git',
+  // The CLI itself execs $BROWSER via openBrowserSecurely (core/utils/
+  // secure-browser-launcher.ts) before any CI/DISPLAY gate, so a project
+  // `.env` pointing it at an attacker script runs on any browser-launch
+  // flow.
+  'BROWSER',
   // QWEN_CLI_ENTRY is the script path daemon-spawned session processes run.
   // A project `.env` or settings.env fixing it turns
   // `cd <untrusted repo> && qwen serve` into code execution as the daemon
   // via an attacker-chosen ACP entrypoint, for every workspace's sessions.
   'QWEN_CLI_ENTRY',
+  // QWEN_CDP_MCP_COMMAND is the command the daemon spawns as the
+  // browser-automation MCP adapter, and QWEN_SERVE_CDP_TUNNEL_OVER_WS
+  // switches that tunnel surface on. A project `.env` or settings.env fixing
+  // either hijacks the daemon the same way QWEN_CLI_ENTRY does; values the
+  // operator set in the daemon's launch env still apply.
+  'QWEN_CDP_MCP_COMMAND',
+  'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env

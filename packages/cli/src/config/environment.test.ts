@@ -67,6 +67,14 @@ const TRACKED_ENV = [
   'CURL_HOME',
   'WGETRC',
   'PYTHON',
+  'GIT_SEQUENCE_EDITOR',
+  'XDG_CONFIG_HOME',
+  'VISUAL',
+  'EDITOR',
+  'PYTHONSTARTUP',
+  'BROWSER',
+  'QWEN_CDP_MCP_COMMAND',
+  'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'NODE_EXTRA_CA_CERTS',
@@ -496,6 +504,68 @@ describe('loadEnvironment', () => {
     expect(snapshot.effectiveEnv['PIP_CONFIG_FILE']).toBeUndefined();
     expect(snapshot.effectiveEnv['SSH_ASKPASS']).toBeUndefined();
     expect(snapshot.effectiveEnv['LESSOPEN']).toBeUndefined();
+    expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
+      'from-settings',
+    );
+  });
+
+  // #8663 round-4: git executes GIT_SEQUENCE_EDITOR on `git rebase -i` and
+  // merges `$XDG_CONFIG_HOME/git/config` with `~/.gitconfig` (bypassing the
+  // GIT_CONFIG_* blocks); $VISUAL/$EDITOR are git's editor fallback and the
+  // CLI's own editor launch; CPython executes PYTHONSTARTUP at interactive
+  // startup; the CLI execs $BROWSER via openBrowserSecurely; the daemon
+  // spawns QWEN_CDP_MCP_COMMAND as the browser-automation MCP adapter and
+  // QWEN_SERVE_CDP_TUNNEL_OVER_WS switches that tunnel surface on.
+  it('never applies the round-4 exec-redirect keys from project .env or settings.env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'GIT_SEQUENCE_EDITOR=/workspace-a/evil-sequence.sh',
+        'VISUAL=/workspace-a/evil-visual.sh',
+        'EDITOR=/workspace-a/evil-editor.sh',
+        'PYTHONSTARTUP=/workspace-a/evil-startup.py',
+        'XDG_CONFIG_HOME=/workspace-a/.xdg',
+        'BROWSER=/workspace-a/evil-browser.sh',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+    const settings = testSettings({
+      env: {
+        QWEN_CDP_MCP_COMMAND: '/workspace-a/evil-adapter',
+        QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
+        RUNTIME_SETTINGS_ONLY: 'from-settings',
+      },
+    });
+
+    const expectRound4Rejected = (env: Readonly<NodeJS.ProcessEnv>) => {
+      expect(env['GIT_SEQUENCE_EDITOR']).toBeUndefined();
+      expect(env['VISUAL']).toBeUndefined();
+      expect(env['EDITOR']).toBeUndefined();
+      expect(env['PYTHONSTARTUP']).toBeUndefined();
+      expect(env['XDG_CONFIG_HOME']).toBeUndefined();
+      expect(env['BROWSER']).toBeUndefined();
+      expect(env['QWEN_CDP_MCP_COMMAND']).toBeUndefined();
+      expect(env['QWEN_SERVE_CDP_TUNNEL_OVER_WS']).toBeUndefined();
+    };
+
+    loadEnvironment(settings, workspace);
+    expectRound4Rejected(process.env);
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    // A mid-session reload must not apply them either.
+    reloadEnvironment(settings, workspace);
+    expectRound4Rejected(process.env);
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    // The daemon's per-workspace runtime env build consults the same gate.
+    const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+    expectRound4Rejected(snapshot.effectiveEnv);
+    expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe('allowed');
     expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
       'from-settings',
     );

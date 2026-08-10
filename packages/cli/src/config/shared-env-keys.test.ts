@@ -178,6 +178,35 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(isHardcodedProjectEnvExclusion('SSH_ASKPASS_REQUIRE')).toBe(false);
   });
 
+  // git executes GIT_SEQUENCE_EDITOR for the `git rebase -i` todo list like
+  // GIT_EDITOR, and merges `$XDG_CONFIG_HOME/git/config` with `~/.gitconfig`
+  // — a config-discovery redirect that bypasses the GIT_CONFIG_* blocks.
+  it('excludes the git sequence editor and XDG config redirect', () => {
+    for (const key of ['GIT_SEQUENCE_EDITOR', 'XDG_CONFIG_HOME']) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // git's editor fallback chain ($VISUAL/$EDITOR) and the CLI's own
+  // useLaunchEditor spawn these like the blocked GIT_EDITOR; CPython executes
+  // PYTHONSTARTUP at interactive startup; the CLI execs $BROWSER via
+  // openBrowserSecurely. Each is an exec redirect from a project .env.
+  it('excludes the editor, startup, and browser exec-redirect keys', () => {
+    for (const key of ['VISUAL', 'EDITOR', 'PYTHONSTARTUP', 'BROWSER']) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // QWEN_CDP_MCP_COMMAND is spawned by the daemon as the browser-automation
+  // MCP adapter and QWEN_SERVE_CDP_TUNNEL_OVER_WS switches that tunnel
+  // surface on — the same daemon-hijack class as QWEN_CLI_ENTRY.
+  it('excludes the serve CDP adapter command and tunnel switch', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CDP_MCP_COMMAND');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+    );
+  });
+
   // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
   // feature (fast-path.test.ts loads it without the full settings loader);
   // it stays reload-only rather than hardcoded-excluded.
@@ -232,6 +261,26 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('ssh_askpass')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('LESSOPEN')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('lessclose')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('GIT_SEQUENCE_EDITOR')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('git_sequence_editor')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('XDG_CONFIG_HOME')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('xdg_config_home')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('VISUAL')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('visual')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('EDITOR')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('editor')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('PYTHONSTARTUP')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('pythonstartup')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('BROWSER')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('browser')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_CDP_MCP_COMMAND')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_cdp_mcp_command')).toBe(true);
+    expect(
+      isHardcodedProjectEnvExclusion('QWEN_SERVE_CDP_TUNNEL_OVER_WS'),
+    ).toBe(true);
+    expect(
+      isHardcodedProjectEnvExclusion('qwen_serve_cdp_tunnel_over_ws'),
+    ).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded
@@ -328,6 +377,14 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('SSH_ASKPASS')).toBe(false);
     expect(isLoaderEnvKey('LESSOPEN')).toBe(false);
     expect(isLoaderEnvKey('LESSCLOSE')).toBe(false);
+    expect(isLoaderEnvKey('GIT_SEQUENCE_EDITOR')).toBe(false);
+    expect(isLoaderEnvKey('XDG_CONFIG_HOME')).toBe(false);
+    expect(isLoaderEnvKey('VISUAL')).toBe(false);
+    expect(isLoaderEnvKey('EDITOR')).toBe(false);
+    expect(isLoaderEnvKey('PYTHONSTARTUP')).toBe(false);
+    expect(isLoaderEnvKey('BROWSER')).toBe(false);
+    expect(isLoaderEnvKey('QWEN_CDP_MCP_COMMAND')).toBe(false);
+    expect(isLoaderEnvKey('QWEN_SERVE_CDP_TUNNEL_OVER_WS')).toBe(false);
   });
 
   // Library search paths and the interactive-sh-only ENV are deliberately
@@ -349,6 +406,10 @@ describe('scrubInheritedLoaderEnv', () => {
       npm_config_node_options: '--import file:///other-checkout/hook.mjs',
       npm_config_userconfig: '/other-checkout/.npmrc',
       NODE_PATH: '/other-checkout/node_modules',
+      OPENSSL_CONF: '/evil.cnf',
+      NODE_REPL_EXTERNAL_MODULE: '/evil.mjs',
+      npm_config_node_gyp: '/evil-gyp.js',
+      npm_config_init_module: '/evil-init.js',
       LD_PRELOAD: '/evil.so',
       LD_AUDIT: '/evil-audit.so',
       DYLD_INSERT_LIBRARIES: '/evil.dylib',
@@ -375,6 +436,10 @@ describe('scrubInheritedLoaderEnv', () => {
       'npm_config_node_options',
       'npm_config_userconfig',
       'NODE_PATH',
+      'OPENSSL_CONF',
+      'NODE_REPL_EXTERNAL_MODULE',
+      'npm_config_node_gyp',
+      'npm_config_init_module',
       'LD_PRELOAD',
       'LD_AUDIT',
       'DYLD_INSERT_LIBRARIES',
