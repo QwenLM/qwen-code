@@ -2378,6 +2378,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getJsonSchema: () => ({ type: 'object' }),
       getQuestion: () => '',
       getSandbox: () => false,
+      getBareMode: () => false,
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
