@@ -761,6 +761,7 @@ fn check_updates_silently(app: AppHandle) {
         let version = update.version.clone();
         let confirmed = tauri::async_runtime::spawn_blocking({
             let app = app.clone();
+            let version = version.clone();
             move || {
                 app.dialog()
                     .message(format!(
@@ -779,11 +780,21 @@ fn check_updates_silently(app: AppHandle) {
         if !matches!(confirmed, Ok(true)) {
             return;
         }
-        if update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .is_err()
-        {
+        if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
+            let _ = tauri::async_runtime::spawn_blocking({
+                let app = app.clone();
+                let version = version.clone();
+                move || {
+                    app.dialog()
+                        .message(format!(
+                            "Qwen Code Desktop {version} could not be installed.\n\n{error}\n\nSave your work before quitting. Reinstall Qwen Code if it does not reopen."
+                        ))
+                        .title("Qwen Code update failed")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show()
+                }
+            })
+            .await;
             return;
         }
         app.request_restart();
