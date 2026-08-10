@@ -32,6 +32,7 @@ export type ChannelEditorValidationCode =
   | 'credential'
   | 'duplicate'
   | 'invalid'
+  | 'invalidGroupId'
   | 'invalidOption'
   | 'number'
   | 'outOfRange'
@@ -220,11 +221,12 @@ export function validateChannelEditorDraft(
     errors['senderPolicy'] = 'policy';
   }
   if (
+    String(draft.values['groupPolicy'] ?? '') === 'allowlist' &&
     splitList(draft.allowedGroupIds).some((groupId) =>
       UNSAFE_OBJECT_KEYS.includes(groupId),
     )
   ) {
-    errors['allowedGroupIds'] = 'invalid';
+    errors['allowedGroupIds'] = 'invalidGroupId';
   }
   return errors;
 }
@@ -338,7 +340,10 @@ export function buildChannelUpsertRequest(
   if (!hasDescriptorSenderPolicy(descriptor)) {
     config['senderPolicy'] = draft.senderPolicy;
   }
-  if (hasDescriptorGroupPolicy(descriptor)) {
+  if (
+    hasDescriptorGroupPolicy(descriptor) &&
+    config['groupPolicy'] === 'allowlist'
+  ) {
     assignGroups(config, draft.allowedGroupIds, instance);
   }
   return { expectedRevision, config, secrets };

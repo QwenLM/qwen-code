@@ -2786,6 +2786,8 @@ const EN: Messages = {
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
+  'channels.editor.validation.invalidGroupId':
+    'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -5510,6 +5512,8 @@ const ZH: Messages = {
     '请输入令牌，或开启本地 GitHub CLI 认证。',
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
+  'channels.editor.validation.invalidGroupId':
+    '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>

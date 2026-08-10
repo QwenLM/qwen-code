@@ -7,6 +7,7 @@
 import {
   useEffect,
   useId,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -223,6 +224,7 @@ export function ChannelEditorDialog({
   const [submitError, setSubmitError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const dismissedRef = useRef(false);
   const accessFields = descriptor.fields.filter((field) =>
     SHARED_ACCESS_FIELD_KEYS.has(field.key),
   );
@@ -243,6 +245,7 @@ export function ChannelEditorDialog({
 
   useEffect(() => {
     if (!open) return;
+    dismissedRef.current = false;
     setDraft(createChannelEditorDraft(descriptor, instance));
     setErrors({});
     setSubmitError(undefined);
@@ -292,6 +295,8 @@ export function ChannelEditorDialog({
     if (code === 'credential')
       return t('channels.editor.validation.credential');
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
+    if (code === 'invalidGroupId')
+      return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
@@ -340,7 +345,7 @@ export function ChannelEditorDialog({
           instance,
         ),
       );
-      onOpenChange(false);
+      if (!dismissedRef.current) onOpenChange(false);
     } catch (error) {
       setSubmitError(extractErrorDetail(error));
     } finally {
@@ -597,7 +602,8 @@ export function ChannelEditorDialog({
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (nextOpen || !saving) onOpenChange(nextOpen);
+        if (!nextOpen) dismissedRef.current = true;
+        onOpenChange(nextOpen);
       }}
     >
       <DialogContent className="max-w-[calc(100%-2rem)] p-5 sm:max-w-xl">
@@ -926,8 +932,10 @@ export function ChannelEditorDialog({
             <Button
               type="button"
               variant="outline"
-              disabled={saving}
-              onClick={() => onOpenChange(false)}
+              onClick={() => {
+                dismissedRef.current = true;
+                onOpenChange(false);
+              }}
             >
               {t('channels.editor.cancel')}
             </Button>

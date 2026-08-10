@@ -281,7 +281,28 @@ describe('Channel editor state', () => {
 
     expect(
       validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, []),
-    ).toMatchObject({ allowedGroupIds: 'invalid' });
+    ).toMatchObject({ allowedGroupIds: 'invalidGroupId' });
+  });
+
+  it('ignores a hidden group allowlist outside allowlist policy', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.values.senderPolicy = 'allowlist';
+    draft.values.groupPolicy = 'open';
+    draft.allowedGroupIds = '__proto__';
+    draft.secrets.clientSecret = {
+      operation: 'replace',
+      value: 'ding-client-secret',
+    };
+
+    expect(validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, [])).toEqual(
+      {},
+    );
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'revision-open')
+        .config,
+    ).not.toHaveProperty('groups');
   });
 
   it('supports explicitly clearing a stored secret', () => {

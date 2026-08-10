@@ -373,7 +373,7 @@ describe('ChannelEditorDialog', () => {
     });
   });
 
-  it('cannot be dismissed while a save is in flight', async () => {
+  it('can be dismissed while a save finishes in the background', async () => {
     let finishSave!: () => void;
     const onSave = vi.fn(
       () =>
@@ -399,14 +399,45 @@ describe('ChannelEditorDialog', () => {
       (button) => button.textContent?.trim() === 'Cancel',
     );
 
-    expect(cancel?.disabled).toBe(true);
+    expect(cancel?.disabled).toBe(false);
     await act(async () => {
       cancel?.click();
     });
-    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
 
     await act(async () => finishSave());
-    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('explains reserved group IDs under the allowlist field', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    await selectOption('Group policy', 'Allowlist');
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed group IDs')!, '__proto__');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Enter a group ID other than __proto__, constructor, or prototype.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'Choose a different instance name.',
+    );
   });
 
   it('submits sender and group allowlists in their runtime config shapes', async () => {
