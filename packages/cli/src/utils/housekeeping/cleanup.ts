@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdir, stat, rm, rmdir, unlink } from 'node:fs/promises';
+import { opendir, readdir, stat, rm, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   Storage,
@@ -16,6 +16,8 @@ const debugLogger = createDebugLogger('HOUSEKEEPING');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MS_PER_HOUR = 60 * 60 * 1000;
+// Prevent oversized hand-edited settings from producing an Invalid Date.
+const MIN_DATE_MS = -8_640_000_000_000_000;
 // Stays well below typical fd ulimits (256 on macOS, 1024 on Linux) even
 // for users with thousands of session dirs accumulated before this PR.
 const SWEEP_CONCURRENCY = 20;
@@ -54,7 +56,7 @@ export interface OpenAILogCleanupOptions {
 export function getCutoffDate(cleanupPeriodDays: number): Date {
   const periodMs =
     cleanupPeriodDays > 0 ? cleanupPeriodDays * MS_PER_DAY : MS_PER_HOUR;
-  return new Date(Date.now() - periodMs);
+  return new Date(Math.max(Date.now() - periodMs, MIN_DATE_MS));
 }
 
 // Shared session-dir sweeper: removes immediate child dirs of `root` whose
@@ -129,15 +131,11 @@ export async function cleanupOldSubagentTranscripts(
   });
 }
 
-// Matches the filenames OpenAILogger writes:
-// `openai-<ISO timestamp>[_<diagnostic suffix>].json` — same predicate the
-// reader side uses (see packages/cli/src/utils/sessionPaths.ts).
-const OPENAI_LOG_FILE_PATTERN = /^openai-.*\.json$/;
-// Fast path: the UTC date embedded in the filename avoids one stat() per
-// file, which matters for users with hundreds of thousands of accumulated
-// logs. Only the boundary day (filename date == cutoff date) still needs an
-// mtime check; unparseable names fall back to mtime as well.
-const OPENAI_LOG_DATE_PATTERN = /^openai-(\d{4}-\d{2}-\d{2})/;
+// Match only filenames emitted by OpenAILogger. Custom log directories may
+// contain unrelated `openai-*.json` files, so deletion is deliberately
+// stricter than the reader-side discovery predicate.
+const OPENAI_LOG_FILE_PATTERN =
+  /^openai-(\d{4}-\d{2}-\d{2})T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{8}(?:-[a-zA-Z0-9._](?:[a-zA-Z0-9._-]*[a-zA-Z0-9._])?)?\.json$/;
 
 // OpenAI API logs are flat files in a single dir (default
 // `<cwd>/logs/openai/`, or a custom `openAILoggingDir`), so this sweeps
@@ -148,31 +146,30 @@ export async function cleanupOldOpenAILogs(
 ): Promise<CleanupResult> {
   const result: CleanupResult = { removed: 0, errors: 0 };
 
-  let entries;
+  let dir;
   try {
-    entries = await readdir(opts.logDir, { withFileTypes: true });
+    dir = await opendir(opts.logDir);
   } catch (e) {
     if (isENOENT(e)) return result;
-    debugLogger.error('readdir failed', e);
-    return result;
+    debugLogger.error('opendir failed', e);
+    throw e;
   }
 
-  const files = entries
-    .filter((e) => e.isFile() && OPENAI_LOG_FILE_PATTERN.test(e.name))
-    .map((e) => ({
-      filePath: join(opts.logDir, e.name),
-      filenameDate: OPENAI_LOG_DATE_PATTERN.exec(e.name)?.[1],
-    }));
-
   const cutoffDay = opts.cutoffDate.toISOString().slice(0, 10);
+  let batch: Array<Promise<void>> = [];
 
-  for (let i = 0; i < files.length; i += SWEEP_CONCURRENCY) {
-    const batch = files.slice(i, i + SWEEP_CONCURRENCY);
-    await Promise.all(
-      batch.map(async ({ filePath, filenameDate }) => {
+  for await (const entry of dir) {
+    const filenameDate = entry.isFile()
+      ? OPENAI_LOG_FILE_PATTERN.exec(entry.name)?.[1]
+      : undefined;
+    if (!filenameDate) continue;
+
+    const filePath = join(opts.logDir, entry.name);
+    batch.push(
+      (async () => {
         try {
           let shouldRemove: boolean;
-          if (filenameDate && filenameDate !== cutoffDay) {
+          if (filenameDate !== cutoffDay) {
             shouldRemove = filenameDate < cutoffDay;
           } else {
             const s = await stat(filePath);
@@ -183,12 +180,18 @@ export async function cleanupOldOpenAILogs(
             result.removed++;
           }
         } catch (err) {
+          if (isENOENT(err)) return;
           result.errors++;
           debugLogger.error(`failed to sweep ${filePath}`, err);
         }
-      }),
+      })(),
     );
+    if (batch.length === SWEEP_CONCURRENCY) {
+      await Promise.all(batch);
+      batch = [];
+    }
   }
+  await Promise.all(batch);
   return result;
 }
 

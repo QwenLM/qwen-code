@@ -15,6 +15,7 @@ import {
   resolveOpenAILogDir,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { DEFAULT_OPENAI_LOG_RETENTION_DAYS } from '../../config/settingsSchema.js';
 import {
   cleanupOldFileHistoryBackups,
   cleanupOldOpenAILogs,
@@ -43,8 +44,6 @@ const STARTUP_DELAY_CATCHUP_MS = 60 * 1000;
 const FILE_HISTORY_MARKER = '.file-history-cleanup';
 const SUBAGENT_MARKER = '.subagent-cleanup';
 const OPENAI_LOGS_MARKER = '.openai-logs-cleanup';
-// Mirrors the settingsSchema default for model.openAILogRetentionDays.
-const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
 let started = false;
 
@@ -72,12 +71,25 @@ async function scheduleFirstPass(
   config: Config,
   settings: LoadedSettings,
 ): Promise<void> {
-  const markerPath = join(Storage.getGlobalQwenDir(), FILE_HISTORY_MARKER);
-  const delay = (await needsCatchUp(markerPath))
-    ? STARTUP_DELAY_CATCHUP_MS
-    : STARTUP_DELAY_MS;
+  const delay = await getFirstPassDelay(config, settings);
   debugLogger.debug(`first pass in ${delay / 1000}s`);
   setTimeout(() => scheduleNextPass(config, settings), delay).unref();
+}
+
+async function getFirstPassDelay(
+  config: Config,
+  settings: LoadedSettings,
+): Promise<number> {
+  const qwenDir = Storage.getGlobalQwenDir();
+  const markerPaths = [join(qwenDir, FILE_HISTORY_MARKER)];
+  const openaiTarget = getOpenAILogCleanupTarget(config, settings);
+  if (openaiTarget) {
+    markerPaths.push(getOpenAILogsMarkerPath(qwenDir, openaiTarget.logDir));
+  }
+  const catchUpStates = await Promise.all(markerPaths.map(needsCatchUp));
+  return catchUpStates.some(Boolean)
+    ? STARTUP_DELAY_CATCHUP_MS
+    : STARTUP_DELAY_MS;
 }
 
 async function needsCatchUp(markerPath: string): Promise<boolean> {
@@ -106,6 +118,54 @@ function getOpenAILogsMarkerPath(qwenDir: string, logDir: string): string {
     .digest('hex')
     .slice(0, 16);
   return join(qwenDir, `${OPENAI_LOGS_MARKER}-${logDirKey}`);
+}
+
+interface OpenAILogCleanupTarget {
+  logDir: string;
+  retentionDays: number;
+}
+
+function getOpenAILogCleanupTarget(
+  config: Config,
+  settings: LoadedSettings,
+): OpenAILogCleanupTarget | undefined {
+  try {
+    const customLogDir =
+      config.getContentGeneratorConfig?.()?.openAILoggingDir ??
+      settings.merged.model?.openAILoggingDir;
+    const systemRetention =
+      settings.system?.settings.model?.openAILogRetentionDays;
+    const workspaceRetention = settings.isTrusted
+      ? settings.workspace?.settings.model?.openAILogRetentionDays
+      : undefined;
+    if (
+      customLogDir &&
+      workspaceRetention !== undefined &&
+      systemRetention === undefined
+    ) {
+      debugLogger.error(
+        'workspace-scoped openAILogRetentionDays is unsafe with a custom openAILoggingDir; skipping cleanup',
+      );
+      return undefined;
+    }
+    const retentionDays = customLogDir
+      ? (systemRetention ??
+        settings.user?.settings.model?.openAILogRetentionDays ??
+        settings.systemDefaults?.settings.model?.openAILogRetentionDays ??
+        DEFAULT_OPENAI_LOG_RETENTION_DAYS)
+      : (settings.merged.model?.openAILogRetentionDays ??
+        DEFAULT_OPENAI_LOG_RETENTION_DAYS);
+    return {
+      logDir: resolveOpenAILogDir(customLogDir, config.getWorkingDir()),
+      retentionDays,
+    };
+  } catch (err) {
+    debugLogger.error(
+      'failed to resolve OpenAI log cleanup target; skipping',
+      err,
+    );
+    return undefined;
+  }
 }
 
 async function runPass(
@@ -217,18 +277,9 @@ async function runHousekeeping(
   // own retention setting: these logs grow far faster than file-history
   // backups (one JSON file per API call), so sharing cleanupPeriodDays'
   // 30-day default would retain tens of GB for heavy users.
-  let openaiLogDir: string | undefined;
-  try {
-    openaiLogDir = resolveOpenAILogDir(
-      config.getContentGeneratorConfig().openAILoggingDir ??
-        settings.merged.model?.openAILoggingDir,
-      config.getWorkingDir(),
-    );
-  } catch (err) {
-    debugLogger.error('failed to resolve OpenAI log dir; skipping', err);
-  }
-  if (openaiLogDir) {
-    const logDir = openaiLogDir;
+  const openaiTarget = getOpenAILogCleanupTarget(config, settings);
+  if (openaiTarget) {
+    const { logDir, retentionDays } = openaiTarget;
     const markerPath = getOpenAILogsMarkerPath(qwenDir, logDir);
     await runThrottledOnce(
       {
@@ -239,10 +290,7 @@ async function runHousekeeping(
       async () => {
         const r = await cleanupOldOpenAILogs({
           logDir,
-          cutoffDate: getCutoffDate(
-            settings.merged.model?.openAILogRetentionDays ??
-              DEFAULT_OPENAI_LOG_RETENTION_DAYS,
-          ),
+          cutoffDate: getCutoffDate(retentionDays),
         });
         debugLogger.debug(
           `openai-logs: removed=${r.removed} errors=${r.errors}`,
@@ -260,6 +308,7 @@ export function _resetForTesting(): void {
   started = false;
 }
 export const _needsCatchUpForTesting = needsCatchUp;
+export const _getFirstPassDelayForTesting = getFirstPassDelay;
 export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;

@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { OpenAILogger } from '@qwen-code/qwen-code-core';
 import {
   cleanupOldFileHistoryBackups,
   cleanupOldOpenAILogs,
@@ -62,6 +63,12 @@ describe('getCutoffDate', () => {
     expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - MS_PER_HOUR);
     expect(cutoff.getTime()).toBeLessThanOrEqual(after - MS_PER_HOUR);
     expect(cutoff.getTime()).toBeLessThanOrEqual(after); // NOT in future
+  });
+
+  it('keeps oversized retention values within the valid Date range', () => {
+    const cutoff = getCutoffDate(Number.MAX_VALUE);
+    expect(cutoff.getTime()).toBe(-8_640_000_000_000_000);
+    expect(() => cutoff.toISOString()).not.toThrow();
   });
 });
 
@@ -275,6 +282,14 @@ describe('cleanupOldOpenAILogs', () => {
     return p;
   }
 
+  function openAILogName(
+    timestamp: Date,
+    id = 'a1b2c3d4',
+    suffix?: string,
+  ): string {
+    return `openai-${timestamp.toISOString().replace(/:/g, '-')}-${id}${suffix ? `-${suffix}` : ''}.json`;
+  }
+
   it('returns zero result when the log dir does not exist', async () => {
     const r = await cleanupOldOpenAILogs({
       logDir: path.join(logDir, 'nope'),
@@ -286,7 +301,10 @@ describe('cleanupOldOpenAILogs', () => {
   it('removes logs whose filename date is older than the cutoff, even with a fresh mtime', async () => {
     // Filename date is authoritative when parseable: the mtime may have been
     // touched long after the log was written.
-    const old = mkLog('openai-2026-06-01T10-00-00-000Z_aaa.json', new Date());
+    const old = mkLog(
+      openAILogName(new Date(Date.now() - 30 * MS_PER_DAY)),
+      new Date(),
+    );
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
     expect(r).toEqual({ removed: 1, errors: 0 });
     expect(fs.existsSync(old)).toBe(false);
@@ -296,33 +314,53 @@ describe('cleanupOldOpenAILogs', () => {
 
   it('keeps logs whose filename date is newer than the cutoff', async () => {
     const recent = new Date(Date.now() - 1 * MS_PER_DAY);
-    const name = `openai-${recent.toISOString().replace(/[:.]/g, '-')}_bbb.json`;
+    const name = openAILogName(recent, 'b2c3d4e5', 'side-query-session-title');
     const fresh = mkLog(name, recent);
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
     expect(r).toEqual({ removed: 0, errors: 0 });
     expect(fs.existsSync(fresh)).toBe(true);
   });
 
-  it('falls back to mtime when the filename has no parseable date', async () => {
-    const old = mkLog(
+  it('preserves old openai-prefixed JSON files not emitted by OpenAILogger', async () => {
+    const oldPrefixedFile = mkLog(
       'openai-not-a-date.json',
       new Date(Date.now() - 30 * MS_PER_DAY),
     );
-    const fresh = mkLog('openai-also-not-a-date.json', new Date());
+    const missingId = mkLog(
+      'openai-2026-06-01T10-00-00.000Z.json',
+      new Date(Date.now() - 30 * MS_PER_DAY),
+    );
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(fs.existsSync(oldPrefixedFile)).toBe(true);
+    expect(fs.existsSync(missingId)).toBe(true);
+  });
+
+  it('recognizes the current OpenAILogger filename contract', async () => {
+    const logger = new OpenAILogger(logDir);
+    const generated = await logger.logInteraction(
+      { model: 'test-model' },
+      { choices: [] },
+      undefined,
+      'side-query:session-title',
+    );
+
+    const r = await cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: new Date(Date.now() + MS_PER_DAY),
+    });
     expect(r).toEqual({ removed: 1, errors: 0 });
-    expect(fs.existsSync(old)).toBe(false);
-    expect(fs.existsSync(fresh)).toBe(true);
+    expect(fs.existsSync(generated)).toBe(false);
   });
 
   it('uses mtime to disambiguate files dated exactly on the cutoff day', async () => {
     const cutoffDay = cutoff.toISOString().slice(0, 10);
     const olderThanCutoff = mkLog(
-      `openai-${cutoffDay}T00-00-00-000Z_old.json`,
+      `openai-${cutoffDay}T00-00-00.000Z-a1b2c3d4.json`,
       new Date(cutoff.getTime() - MS_PER_HOUR),
     );
     const newerThanCutoff = mkLog(
-      `openai-${cutoffDay}T23-59-59-999Z_new.json`,
+      `openai-${cutoffDay}T23-59-59.999Z-b2c3d4e5-subagent-Explore-g2tss0.json`,
       new Date(cutoff.getTime() + MS_PER_HOUR),
     );
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
@@ -339,7 +377,7 @@ describe('cleanupOldOpenAILogs', () => {
     );
     const dirWithMatchingName = path.join(
       logDir,
-      'openai-2026-06-01T00-00-00-000Z.json',
+      'openai-2026-06-01T00-00-00.000Z-a1b2c3d4.json',
     );
     fs.mkdirSync(dirWithMatchingName);
 
@@ -349,4 +387,18 @@ describe('cleanupOldOpenAILogs', () => {
     expect(fs.existsSync(otherLog)).toBe(true);
     expect(fs.existsSync(dirWithMatchingName)).toBe(true);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects when the log directory cannot be scanned',
+    async () => {
+      fs.chmodSync(logDir, 0o000);
+      try {
+        await expect(
+          cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff }),
+        ).rejects.toMatchObject({ code: 'EACCES' });
+      } finally {
+        fs.chmodSync(logDir, 0o700);
+      }
+    },
+  );
 });
