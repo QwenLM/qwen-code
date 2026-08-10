@@ -24,7 +24,7 @@ on:
           - 'release'
 
 concurrency:
-  group: 'sync-live-host-to-oss-${{ inputs.version }}'
+  group: 'sync-live-host-to-oss'
   cancel-in-progress: false
 
 jobs:
@@ -125,6 +125,7 @@ jobs:
           install -m 0755 "$ossutil_path" "$HOME/.local/bin/ossutil"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           rm -rf "$tmp_dir"
+          "$HOME/.local/bin/ossutil" >/dev/null
 
       - name: 'Configure Aliyun OSS credentials'
         env:
@@ -179,6 +180,19 @@ jobs:
               if (asset?.name !== name || asset.size !== statSync(file).size || asset.sha256 !== checksum) throw new Error(`Mirrored asset verification failed for ${architecture}.`);
             }
           '
+
+      - name: 'Confirm latest manifest matches GitHub stable feed'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |
+          set -euo pipefail
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          gh release download 'live-host-latest' \
+            --dir "$directory" \
+            --pattern 'Qwen-Live-Host-manifest.json'
+          cmp dist/live-host/Qwen-Live-Host-manifest.json \
+            "$directory/Qwen-Live-Host-manifest.json"
 
       - name: 'Publish latest manifest to Aliyun OSS'
         env:

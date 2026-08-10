@@ -325,7 +325,12 @@ export async function downloadLiveHostRelease(
   }
 
   await fsp.rm(destination, { force: true });
-  throw new AggregateError(errors, 'Qwen Live Host download failed.');
+  throw new AggregateError(
+    errors,
+    `Qwen Live Host download failed. ${errors
+      .map((error) => error.message)
+      .join(' ')}`,
+  );
 }
 
 async function installLatestHost(

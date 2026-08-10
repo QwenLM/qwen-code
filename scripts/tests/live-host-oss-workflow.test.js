@@ -50,4 +50,28 @@ describe('Live Host OSS mirror workflow', () => {
     expect(latestUpload).toContain('Qwen-Live-Host-manifest.json');
     expect(latestUpload).not.toContain('Qwen-Live-Host-arm64.zip');
   });
+
+  it('serializes latest updates and checks the GitHub stable feed', () => {
+    expect(syncWorkflow).toContain("group: 'sync-live-host-to-oss'");
+    expect(syncWorkflow).not.toContain(
+      "group: 'sync-live-host-to-oss-${{ inputs.version }}'",
+    );
+
+    const latestCheck = getWorkflowStep(
+      getWorkflowJob(syncWorkflow, 'sync'),
+      'Confirm latest manifest matches GitHub stable feed',
+    );
+    expect(latestCheck).toContain("gh release download 'live-host-latest'");
+    expect(latestCheck).toContain(
+      'cmp dist/live-host/Qwen-Live-Host-manifest.json',
+    );
+  });
+
+  it('smoke-tests the installed ossutil binary', () => {
+    const install = getWorkflowStep(
+      getWorkflowJob(syncWorkflow, 'sync'),
+      'Install ossutil',
+    );
+    expect(install).toContain('"$HOME/.local/bin/ossutil" >/dev/null');
+  });
 });

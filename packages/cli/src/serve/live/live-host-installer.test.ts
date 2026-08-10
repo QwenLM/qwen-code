@@ -132,6 +132,73 @@ describe('LiveHostInstaller', () => {
     }
   });
 
+  it('removes a checksum-invalid OSS archive before falling back', async () => {
+    const expectedOssBytes = Buffer.from('expected-oss-archive');
+    const corruptOssBytes = Buffer.alloc(expectedOssBytes.byteLength, 0x78);
+    const githubBytes = Buffer.from('github-archive');
+    const ossManifest = manifestForBytes('0.1.0', expectedOssBytes);
+    const githubManifest = manifestForBytes('0.2.0', githubBytes);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(ossManifest))
+      .mockResolvedValueOnce(
+        new Response(corruptOssBytes, {
+          headers: { 'content-length': String(corruptOssBytes.byteLength) },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json(githubManifest))
+      .mockResolvedValueOnce(
+        new Response(githubBytes, {
+          headers: { 'content-length': String(githubBytes.byteLength) },
+        }),
+      );
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      const release = await downloadLiveHostRelease(
+        'arm64',
+        destination,
+        () => {},
+        fetchImpl,
+      );
+      expect(release.manifest).toEqual(githubManifest);
+      await expect(fsp.readFile(destination)).resolves.toEqual(githubBytes);
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports both source failures and removes the destination', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 503 }));
+    const directory = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'live-host-download-test-'),
+    );
+    const destination = path.join(directory, 'host.zip');
+
+    try {
+      await expect(
+        downloadLiveHostRelease('arm64', destination, () => {}, fetchImpl),
+      ).rejects.toMatchObject({
+        message:
+          'Qwen Live Host download failed. OSS: Live Host manifest download failed (503). GitHub: Live Host manifest download failed (503).',
+        errors: [
+          { message: 'OSS: Live Host manifest download failed (503).' },
+          { message: 'GitHub: Live Host manifest download failed (503).' },
+        ],
+      });
+      await expect(fsp.stat(destination)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await fsp.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('passes separate bounded signals to manifest and archive requests', async () => {
     const bytes = Buffer.from('signed-live-host-archive');
     const expected = manifestForBytes('0.1.0', bytes);
