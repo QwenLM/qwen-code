@@ -2455,6 +2455,33 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toContain('АБВГ');
     });
 
+    it('detects stdout and stderr encodings independently', async () => {
+      // A child whose stdout is valid UTF-8 while stderr is OEM cp866 (modern
+      // tool on stdout, legacy native tool errors on stderr) on a non-UTF-8
+      // Windows host. Each stream's encoding must be detected from its own
+      // buffered bytes — deriving stderr from the stdout label would decode
+      // the cp866 stderr through utf-8 and mojibake "Ошибка".
+      mockGetCachedEncodingForBuffer.mockImplementation((buf: Buffer) =>
+        isUtf8(buf) ? 'utf-8' : 'cp866',
+      );
+
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stdout?.emit('data', Buffer.from('Привет', 'utf-8'));
+        // CP-866 bytes for "Ошибка" — invalid UTF-8.
+        cp.stderr?.emit(
+          'data',
+          Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+        );
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      expect(result.output).toContain('Привет');
+      expect(result.output).toContain('Ошибка');
+      // stdout and stderr are each detected from their own buffer.
+      expect(mockGetCachedEncodingForBuffer).toHaveBeenCalledTimes(2);
+    });
+
     it('decodes a child that emits only stderr (stdout stays empty)', async () => {
       // Pins the cleanup() empty-stream guard: with no stdout chunks the
       // stdout branch is skipped and the combined output is the stderr text

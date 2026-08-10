@@ -951,10 +951,12 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
     const args = ['images', '-q', image];
     const checkProcess = spawn(sandbox, args);
 
-    let stdoutData = '';
+    // Accumulate raw stdout chunks and decode once on close so a chunk that
+    // splits a multi-byte sequence doesn't mojibake.
+    const stdoutChunks: Buffer[] = [];
     if (checkProcess.stdout) {
       checkProcess.stdout.on('data', (data) => {
-        stdoutData += decodeProcessOutput(data);
+        stdoutChunks.push(data);
       });
     }
 
@@ -967,8 +969,8 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
 
     checkProcess.on('close', () => {
       // Non-zero exit code may indicate docker daemon not running, etc.
-      // The primary success indicator is non-empty stdoutData.
-      resolve(stdoutData.trim() !== '');
+      // The primary success indicator is non-empty decoded stdout.
+      resolve(decodeProcessOutput(Buffer.concat(stdoutChunks)).trim() !== '');
     });
   });
 }
@@ -979,16 +981,12 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
     const args = ['pull', image];
     const pullProcess = spawn(sandbox, args, { stdio: 'pipe' });
 
-    let stderrData = '';
-
     const onStdoutData = (data: Buffer) => {
       writeStderrLine(decodeProcessOutput(data).trim()); // Show pull progress
     };
 
     const onStderrData = (data: Buffer) => {
-      const decoded = decodeProcessOutput(data);
-      stderrData += decoded;
-      writeStderrLine(decoded.trim());
+      writeStderrLine(decodeProcessOutput(data).trim());
     };
 
     const onError = (err: Error) => {
@@ -1008,9 +1006,6 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
         writeStderrLine(
           `Failed to pull image ${image}. '${sandbox} pull ${image}' exited with code ${code}.`,
         );
-        if (stderrData.trim()) {
-          // Details already printed by the stderr listener above
-        }
         cleanup();
         resolve(false);
       }

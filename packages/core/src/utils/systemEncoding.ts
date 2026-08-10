@@ -38,7 +38,8 @@ const CHARDET_SAMPLE_BYTES = 64 * 1024;
  * Detects the encoding of a buffer.
  *
  * Strategy: try strict UTF-8, then UTF-8 with replacement for
- * mostly-valid buffers, then chardet, then system encoding.
+ * mostly-valid buffers, then the system encoding (when non-UTF-8), then
+ * chardet.
  * UTF-8 is tried first because modern developer tools, PowerShell Core,
  * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
  * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
@@ -54,22 +55,18 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
     return 'utf-8';
   }
 
-  // Not strictly valid UTF-8, but a few stray bytes in otherwise-valid
-  // UTF-8 (mixed-encoding file content, legacy tool banners) must not be
-  // handed to chardet: its statistical guess (commonly windows-1252) would
-  // decode the entire buffer with a single-byte label and silently mojibake
-  // all the valid multi-byte content. If invalid bytes are scarce relative
-  // to the buffer, treat it as UTF-8 and let the non-fatal TextDecoder
-  // substitute U+FFFD for just the bad bytes.
-  const decoded = new TextDecoder('utf-8').decode(buffer);
-  let replacements = 0;
-  for (let i = 0; i < decoded.length; i++) {
-    if (decoded.charCodeAt(i) === 0xfffd) {
-      replacements++;
-    }
+  // A UTF-16 byte-order mark is an authoritative signal that the buffer is
+  // not a mostly-valid UTF-8 buffer with a couple of stray bytes. Without
+  // this short-circuit the replacement-ratio heuristic below would count only
+  // the 2 invalid BOM bytes (FF FE / FE FF) and classify ASCII-range UTF-16
+  // text (char + NUL — valid UTF-8) as utf-8, silently NUL-interleaving the
+  // output. TextDecoder('utf-16') reads the byte order from the BOM and drops
+  // it. (UTF-32 is not covered: WHATWG TextDecoder has no utf-32 label.)
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return 'utf-16';
   }
-  if (replacements / buffer.length < 0.01) {
-    return 'utf-8';
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return 'utf-16';
   }
 
   // Substantially invalid UTF-8. On Windows, native CLI tools (cmd.exe,
@@ -86,6 +83,31 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
   }
   if (cachedSystemEncoding && cachedSystemEncoding !== 'utf-8') {
     return cachedSystemEncoding;
+  }
+
+  // Not strictly valid UTF-8, but a few stray bytes in otherwise-valid
+  // UTF-8 (mixed-encoding file content, legacy tool banners) must not be
+  // handed to chardet: its statistical guess (commonly windows-1252) would
+  // decode the entire buffer with a single-byte label and silently mojibake
+  // all the valid multi-byte content. If invalid bytes are scarce relative
+  // to the buffer, treat it as UTF-8 and let the non-fatal TextDecoder
+  // substitute U+FFFD for just the bad bytes. The absolute allowance
+  // (replacements <= 2 && replacements * 2 < buffer.length) additionally
+  // rescues short (<= ~100 byte) buffers that carry a single stray byte yet
+  // miss the strict 1% ratio (exactly 1/100 = 0.01: the `length` side of the
+  // comparison is strictly greater).
+  const decoded = new TextDecoder('utf-8').decode(buffer);
+  let replacements = 0;
+  for (let i = 0; i < decoded.length; i++) {
+    if (decoded.charCodeAt(i) === 0xfffd) {
+      replacements++;
+    }
+  }
+  if (
+    replacements / buffer.length < 0.01 ||
+    (replacements <= 2 && replacements * 2 < buffer.length)
+  ) {
+    return 'utf-8';
   }
 
   const detected = detectEncodingFromBuffer(buffer);
@@ -199,11 +221,13 @@ export function getSystemEncoding(): string | null {
  */
 
 export function windowsCodePageToEncoding(cp: number): string | null {
-  // Most common mappings; extend as needed
+  // Most common mappings; extend as needed.
+  // 437/850/852 are deliberately absent: there is no WHATWG TextDecoder label
+  // for them (`cp437`/`cp850`/`cp852` throw RangeError), so returning a label
+  // here would make the system code page authoritative for a label Node cannot
+  // decode, silently falling back to UTF-8 garbage. Returning null lets
+  // detection fall through to chardet instead.
   const map: { [key: number]: string } = {
-    437: 'cp437',
-    850: 'cp850',
-    852: 'cp852',
     866: 'cp866',
     874: 'windows-874',
     932: 'shift_jis',
@@ -245,13 +269,20 @@ export function windowsCodePageToEncoding(cp: number): string | null {
  */
 export function detectEncodingFromBuffer(buffer: Buffer): string | null {
   // Try chardet statistical detection first — works well for larger files.
-  // Detection runs on a bounded head sample (CHARDET_SAMPLE_BYTES) so a
-  // large buffer doesn't pay chardet's full O(n) byte-statistics pass.
+  // Detection runs on a bounded sample (CHARDET_SAMPLE_BYTES from the head
+  // and the tail) so a large buffer doesn't pay chardet's full O(n)
+  // byte-statistics pass. Sampling both ends keeps detection correct for
+  // buffers whose head is pure ASCII but whose bulk is a foreign encoding
+  // (e.g. a large shell log or file with an ASCII prefix followed by
+  // OEM/GBK content), which a head-only sample would misdetect as Latin-1.
   try {
-    const sample =
-      buffer.length > CHARDET_SAMPLE_BYTES
-        ? buffer.subarray(0, CHARDET_SAMPLE_BYTES)
-        : buffer;
+    let sample = buffer;
+    if (buffer.length > CHARDET_SAMPLE_BYTES) {
+      sample = Buffer.concat([
+        buffer.subarray(0, CHARDET_SAMPLE_BYTES),
+        buffer.subarray(buffer.length - CHARDET_SAMPLE_BYTES),
+      ]);
+    }
     const detected = chardetDetect(sample);
     if (detected && typeof detected === 'string') {
       return detected.toLowerCase();

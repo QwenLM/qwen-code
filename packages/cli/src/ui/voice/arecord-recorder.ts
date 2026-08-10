@@ -72,9 +72,12 @@ class ArecordRecorder implements VoiceRecorder {
     ]);
     this.child = child;
 
-    let stderr = '';
+    // Accumulate raw stderr chunks; decode once on close so a chunk split
+    // mid-multi-byte-sequence doesn't mojibake (decodeProcessOutput's
+    // detection is per-buffer, not per-chunk).
+    const stderrChunks: Buffer[] = [];
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += decodeProcessOutput(chunk);
+      stderrChunks.push(chunk);
     });
 
     this.closePromise = new Promise((resolve) => {
@@ -103,7 +106,9 @@ class ArecordRecorder implements VoiceRecorder {
           if (settled) return;
           settled = true;
           clearTimeout(grace);
-          const detail = stderr.trim();
+          const detail = decodeProcessOutput(
+            Buffer.concat(stderrChunks),
+          ).trim();
           reject(
             new Error(
               `arecord could not open an audio device (exit code ${code ?? 'unknown'})${

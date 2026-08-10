@@ -50,8 +50,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
   describe('windowsCodePageToEncoding', () => {
     it('should map common Windows code pages correctly', () => {
-      expect(windowsCodePageToEncoding(437)).toBe('cp437');
-      expect(windowsCodePageToEncoding(850)).toBe('cp850');
       expect(windowsCodePageToEncoding(65001)).toBe('utf-8');
       expect(windowsCodePageToEncoding(1252)).toBe('windows-1252');
       expect(windowsCodePageToEncoding(932)).toBe('shift_jis');
@@ -60,6 +58,16 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(windowsCodePageToEncoding(950)).toBe('big5');
       expect(windowsCodePageToEncoding(1200)).toBe('utf-16le');
       expect(windowsCodePageToEncoding(1201)).toBe('utf-16be');
+    });
+
+    it('should return null for 437/850/852 (no WHATWG TextDecoder label)', () => {
+      // Node's WHATWG TextDecoder rejects `cp437`/`cp850`/`cp852` with
+      // RangeError, so returning these labels would make the system code page
+      // authoritative for a label that cannot be decoded and silently fall
+      // back to UTF-8 garbage. Null lets detection fall through to chardet.
+      expect(windowsCodePageToEncoding(437)).toBe(null);
+      expect(windowsCodePageToEncoding(850)).toBe(null);
+      expect(windowsCodePageToEncoding(852)).toBe(null);
     });
 
     it('should return null for unmapped code pages and warn', () => {
@@ -125,6 +133,28 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const result = detectEncodingFromBuffer(buffer);
       expect(result).toBe(null);
     });
+
+    it('should sample both head and tail for buffers larger than the chardet sample cap', () => {
+      // A buffer larger than CHARDET_SAMPLE_BYTES must feed chardet a
+      // bounded head+tail sample, not a head-only one, so a pure-ASCII head
+      // followed by foreign-encoded bulk is still detected correctly.
+      const chunk = Buffer.alloc(64 * 1024, 0x61); // 'a'
+      const buffer = Buffer.concat([
+        chunk,
+        Buffer.from('тест', 'utf-8'),
+        chunk,
+      ]);
+      mockedChardetDetect.mockReturnValue('UTF-8');
+
+      detectEncodingFromBuffer(buffer);
+
+      expect(mockedChardetDetect).toHaveBeenCalledWith(
+        Buffer.concat([
+          buffer.subarray(0, 64 * 1024),
+          buffer.subarray(buffer.length - 64 * 1024),
+        ]),
+      );
+    });
   });
 
   describe('getSystemEncoding - Windows', () => {
@@ -151,7 +181,8 @@ describe('Shell Command Processor - Encoding Functions', () => {
       mockedExecSync.mockReturnValue('Active code page:   437   ');
 
       const result = getSystemEncoding();
-      expect(result).toBe('cp437');
+      // 437 has no WHATWG TextDecoder label → null.
+      expect(result).toBe(null);
     });
 
     it('should return null when chcp command fails', () => {
@@ -506,6 +537,61 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       expect(result3).toBe('utf-32');
     });
+
+    it('returns the system encoding for sparse OEM bytes in a large mostly-ASCII buffer', () => {
+      // ~10 KiB ASCII log plus the 7 CP-866 bytes of "Каталог". The OEM bytes
+      // are <1% of the buffer, so the replacement-ratio heuristic alone would
+      // classify it as utf-8 — but the system code page is authoritative and
+      // is consulted before the heuristic, so it must win.
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      const asciiLog = Buffer.alloc(10 * 1024, 0x61); // 'a'
+      const cp866Name = Buffer.from([0x8a, 0xa0, 0xe2, 0xa0, 0xab, 0xae, 0xa3]);
+      const buffer = Buffer.concat([asciiLog, cp866Name]);
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('cp866');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
+
+    it('returns utf-8 for a short mostly-valid buffer with a single stray byte (absolute allowance)', () => {
+      // 1/88 ≈ 0.011 misses the strict <1% ratio, so without the absolute
+      // allowance (replacements <= 2 && replacements * 2 < length) this short
+      // buffer would be handed to chardet as wholesale non-UTF-8 and mojibake.
+      mockedOsPlatform.mockReturnValue('linux');
+      process.env['LANG'] = 'en_US.UTF-8';
+      const body = Buffer.from(
+        'line: normal utf-8 text here\n'.repeat(3),
+        'utf-8',
+      );
+      const buffer = Buffer.concat([body, Buffer.from([0x93])]);
+      expect(buffer.length).toBeLessThanOrEqual(101);
+      mockedChardetDetect.mockReturnValue('windows-1252');
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('utf-8');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
+
+    it('detects UTF-16LE BOM output as utf-16, not utf-8', () => {
+      // PowerShell 5.1 Out-File / Set-Content emits UTF-16LE with a BOM. The
+      // ASCII-range payload (char + NUL) is valid UTF-8, so without the BOM
+      // short-circuit the replacement-ratio heuristic would count only the 2
+      // invalid BOM bytes and classify the output as utf-8, NUL-interleaving it.
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      const buffer = Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from('Hello', 'utf16le'),
+      ]);
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('utf-16');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
   });
 
   describe('Cross-platform behavior', () => {
@@ -612,6 +698,10 @@ describe('Shell Command Processor - Encoding Functions', () => {
       // U+FFFD while keeping the surrounding multi-byte text intact —
       // instead of handing the buffer to chardet, whose single-byte guess
       // (e.g. windows-1252) would silently mojibake all the valid content.
+      // The system encoding is UTF-8 here, so the guard skips it and the
+      // replacement-ratio heuristic below decides utf-8.
+      mockedOsPlatform.mockReturnValue('linux');
+      process.env['LANG'] = 'en_US.UTF-8';
       const body = 'line: 你好 мир OK\n'.repeat(100);
       const buffer = Buffer.concat([
         Buffer.from(body, 'utf-8'),
@@ -656,6 +746,17 @@ describe('Shell Command Processor - Encoding Functions', () => {
       // Exact-text oracle: the system code page (cp866) is authoritative, so
       // detection must not fall to chardet's windows-1252 wrong guess.
       expect(decoded).toBe('Каталог');
+    });
+
+    it('decodes UTF-16LE BOM output to the exact text', () => {
+      // BOM'd UTF-16 (PowerShell 5.1, MSVC tooling) must decode via utf-16 and
+      // drop the BOM — not be NUL-interleaved by a utf-8 misclassfification.
+      const buffer = Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from('Ошибка чтения файла', 'utf16le'),
+      ]);
+
+      expect(decodeProcessOutput(buffer)).toBe('Ошибка чтения файла');
     });
 
     it('returns string input unchanged (setEncoding guard)', () => {

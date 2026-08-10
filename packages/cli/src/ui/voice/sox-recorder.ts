@@ -87,17 +87,20 @@ class SoxRecorder implements VoiceRecorder {
       ...(options.silenceDetection ? SILENCE_EFFECT_ARGS : []),
     ]);
     const child = this.child;
+    // Accumulate raw stderr chunks and decode once on close, so a chunk that
+    // splits a multi-byte sequence doesn't mojibake: decodeProcessOutput's
+    // full-buffer detection is per-buffer, not per-chunk.
+    const stderrChunks: Buffer[] = [];
     child.stderr?.on('data', (chunk: Buffer) => {
-      if (this.stderr.length < MAX_STDERR_LENGTH) {
-        this.stderr = (this.stderr + decodeProcessOutput(chunk)).slice(
-          0,
-          MAX_STDERR_LENGTH,
-        );
-      }
+      stderrChunks.push(chunk);
     });
     this.closePromise = new Promise((resolve) => {
       child.once('close', (code, signal) => {
         this.closeResult = { code, signal };
+        this.stderr = decodeProcessOutput(Buffer.concat(stderrChunks)).slice(
+          0,
+          MAX_STDERR_LENGTH,
+        );
         // SoX exited on its own with a clean status while we were still
         // recording => the silence effect fired. Notify the hook to finalize.
         if (!this.stopRequested && code === 0 && this.onAutoStop) {

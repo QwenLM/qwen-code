@@ -160,7 +160,7 @@ async function saveFromCommand(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const fileStream = fd.createWriteStream();
-    let stderr = '';
+    const stderrChunks: Buffer[] = [];
     let resolved = false;
 
     const safeResolve = (value: boolean) => {
@@ -186,7 +186,7 @@ async function saveFromCommand(
     }, PROCESS_TIMEOUT_MS);
 
     child.stderr.on('data', (data: Buffer) => {
-      stderr += decodeProcessOutput(data);
+      stderrChunks.push(data);
     });
 
     child.stdout.pipe(fileStream);
@@ -217,7 +217,9 @@ async function saveFromCommand(
         debugLogger.debug(
           `${command} exited with code ${code}. Args: ${args.join(' ')}`,
         );
-        if (stderr) debugLogger.debug(`${command} stderr: ${stderr.trim()}`);
+        const stderrText = decodeProcessOutput(Buffer.concat(stderrChunks));
+        if (stderrText)
+          debugLogger.debug(`${command} stderr: ${stderrText.trim()}`);
         safeResolve(false);
         return;
       }
@@ -268,7 +270,7 @@ async function checkClipboardForImage(
       const child = spawn(command, args, {
         stdio: ['ignore', 'pipe', 'ignore'],
       });
-      let stdout = '';
+      const stdoutChunks: Buffer[] = [];
 
       const timer = setTimeout(() => {
         try {
@@ -280,13 +282,13 @@ async function checkClipboardForImage(
       }, PROCESS_TIMEOUT_MS);
 
       child.stdout.on('data', (data: Buffer) => {
-        stdout += decodeProcessOutput(data);
+        stdoutChunks.push(data);
       });
       child.on('close', (code) => {
         clearTimeout(timer);
         resolve(
           code === 0 &&
-            stdout
+            decodeProcessOutput(Buffer.concat(stdoutChunks))
               .split('\n')
               // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
               // which we convert to PNG via python3 PIL. Both formats must be detected.
@@ -362,7 +364,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     const child = spawn('wl-paste', ['--list-types'], {
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    let stdout = '';
+    const stdoutChunks: Buffer[] = [];
 
     const timer = setTimeout(() => {
       try {
@@ -375,7 +377,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     }, PROCESS_TIMEOUT_MS);
 
     child.stdout.on('data', (data: Buffer) => {
-      stdout += decodeProcessOutput(data);
+      stdoutChunks.push(data);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -384,7 +386,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
         resolve([]);
         return;
       }
-      const types = stdout
+      const types = decodeProcessOutput(Buffer.concat(stdoutChunks))
         .trim()
         .split('\n')
         .filter((t) => t === 'image/png' || t === 'image/bmp');
@@ -443,9 +445,9 @@ async function saveFileWithWlPaste(
             ],
             { stdio: ['ignore', 'ignore', 'pipe'] },
           );
-          let stderr = '';
+          const stderrChunks: Buffer[] = [];
           child.stderr.on('data', (d: Buffer) => {
-            stderr += decodeProcessOutput(d);
+            stderrChunks.push(d);
           });
           const timer = setTimeout(() => {
             try {
@@ -457,13 +459,18 @@ async function saveFileWithWlPaste(
           }, PROCESS_TIMEOUT_MS);
           child.on('close', (code) => {
             clearTimeout(timer);
-            if (code === 0) resolve();
-            else
-              reject(
-                new Error(
-                  `python3 exited with code ${code}${stderr ? ': ' + stderr.trim() : ''}`,
-                ),
-              );
+            if (code === 0) {
+              resolve();
+              return;
+            }
+            const errText = decodeProcessOutput(
+              Buffer.concat(stderrChunks),
+            ).trim();
+            reject(
+              new Error(
+                `python3 exited with code ${code}${errText ? ': ' + errText : ''}`,
+              ),
+            );
           });
           child.on('error', (err) => {
             clearTimeout(timer);

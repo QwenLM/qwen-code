@@ -104,7 +104,7 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
   return new Promise<DetectedTheme | undefined>((resolve) => {
     const stdin = process.stdin;
     let resolved = false;
-    let buffer = '';
+    const bufferChunks: Buffer[] = [];
 
     const finish = (result: DetectedTheme | undefined) => {
       if (resolved) return;
@@ -117,7 +117,11 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
     const timer = setTimeout(() => finish(undefined), OSC11_TIMEOUT_MS);
 
     const onData = (data: Buffer) => {
-      buffer += decodeProcessOutput(data);
+      bufferChunks.push(data);
+      // Decode the accumulated buffer (not the raw chunk) so a chunk that
+      // splits a multi-byte sequence doesn't mojibake. The OSC response is
+      // tiny, so re-decoding the whole buffer per chunk is cheap.
+      const buffer = decodeProcessOutput(Buffer.concat(bufferChunks));
       // OSC response: ESC ] 11 ; <data> BEL  or  ESC ] 11 ; <data> ST
       // eslint-disable-next-line no-control-regex
       const match = /\x1b\]11;(.*?)(?:\x07|\x1b\\)/.exec(buffer);
