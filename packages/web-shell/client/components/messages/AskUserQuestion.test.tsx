@@ -738,6 +738,19 @@ describe('AskUserQuestion multiple questions', () => {
     expect(container!.textContent).toContain('Enter next · Esc stop editing');
   });
 
+  it('describes Enter as editing when the empty custom row is focused', () => {
+    render();
+    pressKey(optionButtons()[0]!, 'End');
+
+    expect(container!.textContent).toContain(
+      '↑↓ select · Enter edit · Esc ignore',
+    );
+    expect(container!.textContent).not.toContain('Enter submit');
+
+    pressKey(optionButtons()[2]!, 'Enter');
+    expect(container!.querySelector('input')).not.toBeNull();
+  });
+
   it('keeps the shortcut footer hidden while the dialog is collapsed', () => {
     render();
     const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
