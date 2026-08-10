@@ -10453,7 +10453,9 @@ export function App({
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
                             onOpen={
-                              showFloatingTodos ? openTasksPanel : undefined
+                              sessionWorkflowEnabled && showFloatingTodos
+                                ? openTasksPanel
+                                : undefined
                             }
                           />
                         </div>
