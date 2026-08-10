@@ -67,6 +67,7 @@ reject_fix() {
   local preamble tail_budget
   preamble="**${label}**"
   if [[ "${preexisting}" == 'true' ]]; then
+    # shellcheck disable=SC2016
     preamble+="$(printf '\n\nMeasured fact: the same check also fails at `origin/%s` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind `main`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
   fi
   tail_budget=$(( 3300 - ${#preamble} ))
