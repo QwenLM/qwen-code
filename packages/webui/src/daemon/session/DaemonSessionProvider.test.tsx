@@ -7246,6 +7246,67 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[1]?.[3]).toBe('client-a');
   });
 
+  it('retries a session switch while the target session is closing', async () => {
+    const firstSession = createMockSession({ sessionId: 'session-a' });
+    const secondSession = createMockSession({ sessionId: 'session-b' });
+    sdkMocks.sessions.push(firstSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    let notices: readonly DaemonSessionNotice[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      notices = useDaemonSessionNotices().notices;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      new DaemonHttpError(
+        404,
+        {
+          error:
+            'No session with id "session-b". The session is closing; retry after close completes',
+          sessionId: 'session-b',
+        },
+        'POST /session/:id/load: No session with id "session-b". The session is closing; retry after close completes',
+      ),
+    );
+    sdkMocks.sessions.push(secondSession);
+
+    let switched: Promise<void> | undefined;
+    act(() => {
+      switched = requireActions(actions).loadSession('session-b');
+    });
+    if (!switched) throw new Error('Session switch was not started');
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      await expect(switched).resolves.toBeUndefined();
+      await flushPromises();
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2);
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-b',
+      missingSession: false,
+    });
+    expect(notices).toEqual([]);
+  });
+
   it('reuses the branched session client when switching after branch', async () => {
     window.sessionStorage.clear();
     const sourceSession = createMockSession({
