@@ -45,6 +45,7 @@ GATE_LOG="${WORKDIR}/gate-output.log"
 reject_fix() {
   local label="${1}"
   local preexisting="${2:-false}"
+  local retryable="${3:-true}"
   echo "❌ ${label}"
   # Declare the verdict before writing its detail. An empty outcome on a failed
   # step means the gate itself crashed, so losing the detail file must not turn
@@ -56,7 +57,7 @@ reject_fix() {
     # by definition — the 18-minute repair budget cannot reach it. The remedy
     # is a base update (merge main into the branch), not a repair.
     echo "preexisting=true" >> "${GITHUB_OUTPUT}"
-  else
+  elif [[ "${retryable}" == 'true' ]]; then
     echo "retryable=true" >> "${GITHUB_OUTPUT}"
   fi
   # The evidence tail flexes so the WHOLE document stays under the report
@@ -66,8 +67,8 @@ reject_fix() {
   local preamble tail_budget
   preamble="**${label}**"
   if [[ "${preexisting}" == 'true' ]]; then
-    # shellcheck disable=SC2016 # intentional: printf format string; the backticks and quote-concatenated apostrophes are literal markdown, not unexpanded expressions
-    preamble+="$(printf '\n\nMeasured fact: the same check also fails at \`origin/%s\` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind \`main\`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
+    # shellcheck disable=SC2016
+    preamble+="$(printf '\n\nMeasured fact: the same check also fails at `origin/%s` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind `main`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
   fi
   tail_budget=$(( 3300 - ${#preamble} ))
   (( tail_budget < 500 )) && tail_budget=500
@@ -116,9 +117,8 @@ baseline_also_fails() {
     "(${baseline})" | tee -a "${GATE_LOG}"
   git checkout --quiet --detach "${baseline}" 2>> "${GATE_LOG}" || return 1
   # The baseline transcript goes to a SIDE log: gate-rejection.md renders
-  # the SIZED tail of GATE_LOG (tail_budget, see reject_fix) as the
-  # evidence window, and on a green
-  # baseline a chatty success transcript would fill it and push the actual
+  # the dynamic `tail_budget` tail of GATE_LOG as the evidence window, and
+  # on a green baseline a chatty success transcript would fill it and push the actual
   # failure text out — misdirecting the repair agent, the PR comment, and
   # the next round's LAST_REJECTION block all at once.
   local ab_log="${GATE_LOG}.baseline"
@@ -129,14 +129,12 @@ baseline_also_fails() {
   fi
   if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
     # The tree is no longer the one under verification and nothing after
-    # this point may trust it — INCLUDING the repair agent: HEAD is detached
-    # at the baseline, a repair commit would orphan on it, and the repair
-    # verification's own opening checkout dies on the same clash. Write the
-    # verdict with NEITHER retryable NOR preexisting, so the repair is
-    # skipped and the next scan retries on a fresh checkout.
-    echo "❌ could not restore the verification tree after the baseline check"
-    echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-    exit 1
+    # this point may trust it. Not retryable either: the repair agent works
+    # in this very checkout and performs no git recovery, so on a detached
+    # tree its commit would land on the baseline and be orphaned. The round
+    # ends here; the next one starts clean from the trusted checkout.
+    reject_fix 'could not restore the verification tree after the baseline check' \
+      false false
   fi
   if [[ "${rc}" -ne 1 ]]; then
     # Both retryable exits below hand the tree to the repair agent with
@@ -151,26 +149,27 @@ baseline_also_fails() {
   fi
   # A nonzero baseline is NOT enough: the branch can fail there for reason A
   # while the round fails for reason B, and an infrastructure hiccup in the
-  # baseline leg is a nonzero exit too. Pre-existing requires the SAME
-  # failure identity on both legs — compiler diagnostics normalized to
-  # file + error code (line/column shift with the round's edits). No
-  # diagnostics on either side means identity cannot be established, and
-  # the rejection stays charged to the round (fail closed).
-  local sig_base
+  # baseline leg is a nonzero exit too. Pre-existing requires the round's
+  # failing signatures to be a SUBSET of the baseline's — compiler
+  # diagnostics normalized to file + error code + message (line/column shift
+  # with the round's edits): a round that ADDS a diagnostic charges the
+  # failure to the round even when it also shares baseline diagnostics. The
+  # difference is captured before testing — piping `comm` into `grep -q`
+  # exits `grep` at the first match and SIGPIPEs `comm` under pipefail once
+  # the shared output outruns the pipe buffer, flipping identical large
+  # failure sets to NO-MATCH. No diagnostics on either side means identity
+  # cannot be established, and the rejection stays charged to the round
+  # (fail closed).
+  local sig_base new_in_round
   # `|| true`: grep exits 1 on the NORMAL no-match case, and the assignment
   # only survives `set -e` today because this function is called from an
   # `if` condition (which suspends errexit). A future unconditional call
   # site would otherwise turn the documented fail-closed path into a
   # verdict-less gate crash. (sig_head was extracted before the detach.)
   sig_base="$(fail_signature "${ab_log}")" || true
-  # Captured, not piped through grep -q: grep -q exits at the first line,
-  # comm then dies of SIGPIPE (141), pipefail propagates it, and the `!`
-  # inversion misreads a large MATCHING intersection as "different reason" —
-  # measured at a few hundred shared diagnostics, exactly the badly-red
-  # baseline this feature exists for.
-  local common
-  common="$(comm -12 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}") || true)"
-  if [[ -z "${sig_head}" || -z "${sig_base}" || -z "${common}" ]]; then
+  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" ||
+    return 1
+  if [[ -z "${sig_head}" || -z "${sig_base}" ]] || [[ -n "${new_in_round}" ]]; then
     echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
     echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
       | tee -a "${GATE_LOG}"

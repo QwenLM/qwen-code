@@ -18,6 +18,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob } from './workflow-helpers.js';
+
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
@@ -3276,7 +3278,7 @@ describe('qwen-autofix workflow', () => {
     // no-op, a skip-labeled add refuses, and a fork refuses — neither posts
     // a toggle.
     const toggle = workflow.match(
-      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n {14}gh pr edit "\$\{PR\}" --repo "\$\{REPO\}" --remove-label "\$\{TAKEOVER_LABEL\}"\n[\s\S]*?\n {10}fi)/,
+      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/[\s\S]*?\n {10}fi)/,
     )?.[1];
     expect(toggle).toBeTruthy();
     const runToggle = ({
@@ -3288,6 +3290,8 @@ describe('qwen-autofix workflow', () => {
       state = 'OPEN',
       base = 'main',
       author = 'fork-owner',
+      postFails = '',
+      deleteFails = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3305,7 +3309,14 @@ describe('qwen-autofix workflow', () => {
             '#!/bin/bash',
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
-            `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
+            // Label mutations are REST gh api calls (gh pr edit's
+            // projectCards lookup errors on older gh builds); record them.
+            // The TOGGLE_*_FAILS knobs make the matching call exit 1 with
+            // the knob value on stderr (like a real gh HTTP error), pinning
+            // the block's two failure policies instead of the stub
+            // universally exiting 0.
+            `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3314,7 +3325,16 @@ describe('qwen-autofix workflow', () => {
         writeFileSync(join(dir, 'writes.log'), '');
         const stdout = execFileSync(
           'bash',
-          ['-c', `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`],
+          // -eo pipefail like the runner's bash default: the replay must
+          // reproduce the step's failure semantics — the engage POST is
+          // deliberately loud, and plain `bash -c` would swallow its exit
+          // status.
+          [
+            '-eo',
+            'pipefail',
+            '-c',
+            `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
+          ],
           {
             env: {
               ...process.env,
@@ -3327,6 +3347,8 @@ describe('qwen-autofix workflow', () => {
               TAKEOVER_COMMAND: '@qwen-code /takeover',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
+              TOGGLE_POST_FAILS: postFails,
+              TOGGLE_DELETE_FAILS: deleteFails,
             },
             encoding: 'utf8',
           },
@@ -3336,6 +3358,14 @@ describe('qwen-autofix workflow', () => {
           log: stdout,
           writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
         };
+      } catch (error) {
+        // A throwing replay must stay INSPECTABLE: the engage arm's whole
+        // ordering claim (no public ack for an unlabeled PR) lives in what
+        // was written BEFORE the failure, and the finally below deletes it.
+        error.writes = existsSync(join(dir, 'writes.log'))
+          ? readFileSync(join(dir, 'writes.log'), 'utf8')
+          : '';
+        throw error;
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -3345,22 +3375,33 @@ describe('qwen-autofix workflow', () => {
     // (#7999, #8002), so the user-visible ack cannot depend on that
     // round-trip. In-repo PRs get no fork note.
     const addAbsent = runToggle({ cmd: 'add' });
-    expect(addAbsent.writes).toContain('EDIT pr edit 7165');
-    expect(addAbsent.writes).toContain('--add-label');
+    expect(addAbsent.writes).toContain(
+      'API api -X POST repos/QwenLM/qwen-code/issues/7165/labels',
+    );
+    // Idempotent create precedes the POST: the REST add would otherwise
+    // silently create a missing label with a random color.
+    expect(addAbsent.writes).toContain('LABEL-CREATE label create');
+    expect(addAbsent.writes.indexOf('LABEL-CREATE')).toBeLessThan(
+      addAbsent.writes.indexOf('API api -X POST'),
+    );
+    expect(addAbsent.writes).toContain('labels[]=autofix/takeover');
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, label untouched.
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
-    expect(rearm.writes).not.toContain('EDIT');
+    expect(rearm.writes).not.toContain('API');
     expect(rearm.log).toContain('re-armed');
-    // remove + present → label removed.
+    // remove + present → label removed, through the URI-encoded path segment
+    // (real jq runs in the substitution, so the %2F is the executed truth).
     const removePresent = runToggle({
       cmd: 'remove',
       labels: ['autofix/takeover'],
     });
-    expect(removePresent.writes).toContain('--remove-label');
+    expect(removePresent.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // Release acks directly too — the exact mirror of the engage side: a
     // loud add next to a mute stop re-creates the lost-event ambiguity on
     // the release side (and fork/non-main releases have no other ack path
@@ -3390,14 +3431,14 @@ describe('qwen-autofix workflow', () => {
     // skip present vetoes engagement — refusal comment, never a toggle.
     const skipBlocked = runToggle({ cmd: 'add', labels: ['autofix/skip'] });
     expect(skipBlocked.writes).toContain('COMMENT');
-    expect(skipBlocked.writes).not.toContain('EDIT');
+    expect(skipBlocked.writes).not.toContain('API');
     // Fork WITHOUT allow-edits refuses with the actionable ask, never
     // toggling; fork WITH allow-edits is fully manageable and toggles.
     const forkRefused = runToggle({ cmd: 'add', fork: true, canModify: false });
     expect(forkRefused.writes).toContain('COMMENT');
-    expect(forkRefused.writes).not.toContain('EDIT');
+    expect(forkRefused.writes).not.toContain('API');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
-    expect(forkManaged.writes).toContain('--add-label');
+    expect(forkManaged.writes).toContain('labels[]=autofix/takeover');
     // Fork label events carry no secrets, so no other job could ever ack a
     // fork engage — the command's own ack is the ONLY one, and it sets the
     // expectation that the first round comes from the next scheduled scan.
@@ -3417,7 +3458,7 @@ describe('qwen-autofix workflow', () => {
     // nothing ever manages it) — the command refuses with the adoption ask.
     const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
     expect(forkGhost.writes).toContain('COMMENT');
-    expect(forkGhost.writes).not.toContain('EDIT');
+    expect(forkGhost.writes).not.toContain('API');
     expect(forkGhost.log).toContain('below write');
     // Release is NEVER blocked by engage-side fork requirements: stop on an
     // allow-edits-revoked fork still removes the label.
@@ -3427,7 +3468,9 @@ describe('qwen-autofix workflow', () => {
       canModify: false,
       labels: ['autofix/takeover'],
     });
-    expect(forkStop.writes).toContain('--remove-label');
+    expect(forkStop.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // Fork unlabeled events carry no secrets, so this is the ONLY possible
     // release ack for a fork — it must post here.
     expect(forkStop.writes).toContain('<!-- takeover-ack released -->');
@@ -3436,7 +3479,7 @@ describe('qwen-autofix workflow', () => {
     const stacked = runToggle({ cmd: 'add', base: 'feat/base-pr' });
     expect(stacked.writes).toContain('<!-- takeover-ack base-refused -->');
     expect(stacked.writes).toContain('`feat/base-pr`');
-    expect(stacked.writes).not.toContain('EDIT');
+    expect(stacked.writes).not.toContain('API');
     // …but a stop on a non-main PR PROCEEDS: removing a stuck label is
     // harmless and matches the latest intent (previously dropped, leaving a
     // manually-applied label with no command able to remove it).
@@ -3445,7 +3488,9 @@ describe('qwen-autofix workflow', () => {
       base: 'feat/base-pr',
       labels: ['autofix/takeover'],
     });
-    expect(stackedStop.writes).toContain('--remove-label');
+    expect(stackedStop.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // A non-main release never reaches the ack job (route ignores it), so
     // the command's own ack is the only voice here too.
     expect(stackedStop.writes).toContain('<!-- takeover-ack released -->');
@@ -3453,6 +3498,46 @@ describe('qwen-autofix workflow', () => {
     const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
     expect(closed.writes.trim()).toBe('');
     expect(closed.log).toContain('no longer an open PR');
+    // Failure policies, pinned like the pr-self-report-label suite: the
+    // engage POST is deliberately LOUD — under the runner's -e a failing
+    // apply aborts the step BEFORE the engage ack, so no comment can claim
+    // "engaged" for an unlabeled PR. The throw alone does not pin the
+    // ORDER (an ack posted before a failing POST also throws) — the
+    // captured writes must show no engage ack ever landed.
+    let engageFailure;
+    try {
+      runToggle({ cmd: 'add', postFails: 'HTTP 500' });
+    } catch (error) {
+      engageFailure = error;
+    }
+    expect(engageFailure).toBeTruthy();
+    expect(engageFailure.writes).not.toContain('takeover-ack engaged');
+    // The release DELETE tolerates the 404 race (a concurrent removal
+    // already reached the end state): the release ack still posts, no
+    // warning.
+    const releaseRace = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 404: Not Found',
+    });
+    expect(releaseRace.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
+    expect(releaseRace.writes).toContain('takeover-ack released');
+    expect(releaseRace.log).not.toContain('::warning::');
+    // Any other DELETE failure must not drop the release ack either — a
+    // later `/takeover stop` retries the removal — but it MUST warn:
+    // masked, the ack reads "released" while the loop keeps managing the
+    // PR.
+    const releaseFailed = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 500',
+    });
+    expect(releaseFailed.writes).toContain('takeover-ack released');
+    expect(releaseFailed.log).toContain('::warning::');
+    expect(releaseFailed.log).toContain('removal failed');
+    expect(releaseFailed.log).toContain('HTTP 500');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -4428,9 +4513,11 @@ exit 1
     expect(cmdBranch).toBeTruthy();
     expect(cmdBranch).not.toContain('DO_REVIEW=true');
     expect(cmdBranch).toContain('TAKEOVER_CMD="${CMD}"');
-    // The toggle job is presence-aware and PAT-verified.
+    // The toggle job is presence-aware and PAT-verified. Label mutations
+    // are REST — on older gh builds `gh pr edit` exits 1 on its projectCards
+    // lookup.
     expect(workflow).toMatch(
-      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?--add-label "\$\{TAKEOVER_LABEL\}"[\s\S]*?--remove-label "\$\{TAKEOVER_LABEL\}"/,
+      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?-f "labels\[\]=\$\{TAKEOVER_LABEL\}"[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\//,
     );
     // No other command surface exists.
     expect(workflow).not.toContain('pull_request_review_comment');
@@ -8714,6 +8801,19 @@ exit 1
     expect(timedOutCapped).toContain(
       'split the PR or raise the agent time budget',
     );
+    // An IDLE timeout at the cap gets the sandbox remedy, not budget
+    // advice: more minutes cannot cure a sandbox that produced nothing.
+    const idleCapped = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      ROUND: '4',
+    });
+    expect(idleCapped).toContain('this was the last automatic attempt');
+    expect(idleCapped).toContain(
+      'raising the time budget cannot cure a silent sandbox',
+    );
+    expect(idleCapped).not.toContain('split the PR or raise');
 
     // At the cap the gate crash names the operator fix rather than promising a
     // retry the scan's round gate would refuse.
@@ -9066,6 +9166,50 @@ exit 1
     expect(interleaved.terminal).toBe(true);
     expect(interleaved.headline).toContain('time-budget exhaustions');
     expect(interleaved.headline).toContain('/retry');
+    // Idle (silent-sandbox) timeouts share the census — each burns a full
+    // budget — and when the window contains any, the breaker's advice says
+    // a budget increase cannot cure them.
+    const IDLE_HEAD =
+      '🤖 AutoFix ran out of time before finishing (idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)) (attempt 2/100) — it will retry on the next scan.';
+    const idleMixed = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleMixed.terminal).toBe(true);
+    expect(idleMixed.headline).toContain('time-budget exhaustions');
+    expect(idleMixed.headline).toContain(
+      'silent-sandbox (idle) timeouts that no budget increase can cure',
+    );
+    // An ALL-idle window swaps the closing remedy for the sandbox
+    // investigation — mirroring the round-level split — instead of
+    // prescribing the budget increase the clause above declared useless.
+    expect(idleMixed.headline).toContain(
+      'A human should investigate the sandbox image and runner docker daemon',
+    );
+    expect(idleMixed.headline).not.toContain('raise the agent time budget');
+    // A MIXED window (any real budget timeout) keeps the budget remedy.
+    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleSome.terminal).toBe(true);
+    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
+    expect(idleSome.headline).toContain('raise the agent time budget');
+    // The CURRENT round's idle timeout is counted by the increment, not
+    // the grep: cap-1 budget priors plus an idle current round render
+    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
+    // suppresses the clause entirely (the grep sees no idle prior) and
+    // must fail here.
+    const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleCurrentOnly.terminal).toBe(true);
+    expect(idleCurrentOnly.headline).toContain(
+      '1 of those were silent-sandbox (idle) timeouts',
+    );
+    // A window WITHOUT idle rounds keeps today's advice untouched.
+    expect(interleaved.headline).not.toContain('silent-sandbox');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
       terminal: false,
@@ -9127,6 +9271,9 @@ exit 1
     );
     expect(reviewAddressReportStep).toContain(
       'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'IDLE_N="$(grep -c \'idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
@@ -11203,7 +11350,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     baselineCode = '',
     baselineMsg = '',
     headMsg = '',
+    extraRoundDiag = false,
+    extraBaselineDiag = false,
     restoreClash = false,
+    hugeFail = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -11268,7 +11418,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '  for s in ${FAIL_BUILD_SHAS}; do',
           '    if [[ "$s" == "$head" ]]; then',
           '      code=9999',
-          '      pos="(1,1)"; msg="${HEAD_MSG:-stub failure}"',
+          '      pos="(1,1)"; msg="stub failure"',
           '      if [[ "$head" == "${BASELINE_SHA:-}" ]]; then',
           // The baseline leg emits a SHIFTED position — the strip is what
           // makes the two legs comparable, so the fixture must exercise it.
@@ -11276,6 +11426,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '        if [[ -n "${BASELINE_CODE:-}" ]]; then code="${BASELINE_CODE}"; fi',
           '        if [[ -n "${BASELINE_MSG:-}" ]]; then msg="${BASELINE_MSG}"; fi',
           '        if [[ "${RESTORE_CLASH:-}" == "1" ]]; then echo untracked > clash.txt; fi',
+          '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" ]]; then',
+          '        if [[ -n "${HEAD_MSG:-}" ]]; then msg="${HEAD_MSG}"; fi',
           '      fi',
           '      if [[ "${NOISY_FAILURE:-}" == "1" ]]; then',
           '        for i in $(seq 1 800); do echo "noisy failing-build line $i, padding the transcript well past the evidence budget"; done',
@@ -11285,6 +11438,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '        for i in $(seq 1 2000); do echo "src/m${i}.ts${pos}: error TS7777: mass failure ${i}"; done',
           '      fi',
           '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
+          '      if [[ "${HUGE_FAIL:-}" == "1" ]]; then',
+          '        for i in $(seq 1 200); do echo "verbose failure context line $i ****************************************"; done',
+          '        echo "root cause marker line"',
+          '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" && "${EXTRA_ROUND_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(2,2): error TS7777: round-introduced defect"',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${EXTRA_BASELINE_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(7,3): error TS8888: baseline-only defect"',
+          '      fi',
           '      exit 1',
           '    fi',
           '  done',
@@ -11342,12 +11505,15 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             BASELINE_CODE: baselineCode,
             BASELINE_MSG: baselineMsg,
             HEAD_MSG: headMsg,
+            EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
+            EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
             NOISY_SUCCESS: noisySuccess ? '1' : '',
             NOISY_FAILURE: noisyFailure ? '1' : '',
             MANY_DIAGS: manyDiagnostics ? '1' : '',
+            HUGE_FAIL: hugeFail ? '1' : '',
             WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
             RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
           },
@@ -11437,25 +11603,71 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('DIFFERENT reason');
   });
 
-  it('rejects with neither flag when the baseline leg breaks the restore', () => {
+  it('rejects WITHOUT retry when the baseline leg breaks the restore', () => {
     // The baseline run recreates (untracked) a file the branch tracks, so
-    // `git checkout` back refuses — the tree can no longer be trusted, and
-    // the guard must reject WITHOUT the pre-existing label: a transient
-    // git failure is not a verdict about the failure's origin.
+    // `git checkout` back refuses — the tree can no longer be trusted. No
+    // pre-existing label (a transient git failure is not a verdict about
+    // the failure's origin) and no retry either: the repair agent works in
+    // this very checkout and performs no git recovery, so on the detached
+    // tree its commit would land on the baseline and be orphaned. The next
+    // round starts clean from the trusted checkout instead.
     const r = runGate({
       failAt: ['feature', 'origin/feature'],
       restoreClash: true,
     });
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('outcome=failed');
-    // NEITHER flag: retryable would hand the repair agent a tree DETACHED
-    // at the baseline (its commit orphans; the repair verification's own
-    // checkout dies on the same clash), and preexisting would be a verdict
-    // a transient git failure cannot support. The next scan retries on a
-    // fresh checkout instead.
     expect(r.outputs).not.toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('could not restore the verification tree');
+  });
+
+  it('keeps the full message past the first n (the bracket class ate it)', () => {
+    // In an ERE bracket expression `\` is literal, so the earlier
+    // `[^\n]*` meant "neither backslash nor the letter n" and truncated
+    // every message at its first 'n' — collapsing "Cannot find module
+    // './foo'" and "'./bar'" into one signature and skipping the only
+    // repair that could fix the round-caused one. `.*` keeps the message.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      headMsg: "Cannot find module './foo'",
+      baselineMsg: "Cannot find module './bar'",
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('charges the round when it ADDS a diagnostic to a failing baseline', () => {
+    // Pre-existing means the round's failing set is a SUBSET of the
+    // baseline's: sharing one signature with the baseline while adding
+    // another is a round-caused failure the repair can still fix — an
+    // intersection test labeled it pre-existing and skipped the repair.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraRoundDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('reports pre-existing when the baseline fails with a SUPERSET of the round signatures', () => {
+    // The other arm of the subset semantics: every failing signature of
+    // the round also fails at the baseline, which ADDITIONALLY carries a
+    // baseline-only diagnostic. Still pre-existing — the repair may only
+    // amend the round's fix, so the extra baseline diagnostic is equally
+    // beyond its reach. A set-equality comparator instead of the subset
+    // check would flip this round to retryable.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraBaselineDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.headAfter).toBe('feature');
   });
 
   it('charges the round when the baseline fails for a DIFFERENT reason', () => {
@@ -11498,6 +11710,19 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('retryable=true');
     expect(r.rejection).toContain('stub build FAILED');
+  });
+
+  it('keeps the closing fence when the failure saturates the evidence window', () => {
+    // The report renders head -c 3900 of the FINISHED document; reject_fix
+    // sizes its own tail against the preamble so the closing fence survives
+    // even when the captured failure dwarfs the window. A future preamble
+    // or constant change that breaks the invariant fails here, not in a
+    // posted comment.
+    const r = runGate({ failAt: ['feature'], hugeFail: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
+    expect(r.rejection).toContain('root cause marker line');
   });
 
   it('never A/Bs a check with no round commit to remove', () => {
@@ -11551,13 +11776,25 @@ describe('review verification gate: preexisting output is consumed', () => {
     expect(workflow).toContain(
       "PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'",
     );
-    // behind/diverged → base update; otherwise the branch's own pre-round
-    // code — an up-to-date branch cannot be cured by merging main.
+    // behind/diverged → base update; a MEASURED not-behind → the branch's
+    // own pre-round code (an up-to-date branch cannot be cured by merging
+    // main); an EMPTY CMP_R means the compare never ran (a transient API
+    // failure) and must not assert either — it says the base state could
+    // not be compared.
     expect(workflow).toContain('needs a base update (merge main)');
+    expect(workflow).toContain('the base state could not be compared');
     // The YAML embeds the apostrophe via shell quoting, so match around it.
     expect(workflow).toContain('own pre-round code needs attention');
     expect(workflow).toMatch(
       /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then/,
+    );
+    expect(workflow).toMatch(/elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then/);
+    // Correspondence, not just existence: swapping the clause bodies must
+    // fail. Each {0,600} bound keeps the match inside this if/elif/else —
+    // a swapped clause puts its anchor on the wrong side of the arm it
+    // belongs to, more than 600 chars away.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then[\s\S]{0,600}?needs a base update \(merge main\)[\s\S]{0,600}?elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then[\s\S]{0,600}?could not be compared[\s\S]{0,600}?else[\s\S]{0,600}?own pre-round code needs attention/,
     );
   });
 
@@ -11571,5 +11808,271 @@ describe('review verification gate: preexisting output is consumed', () => {
     expect(reviewVerificationRunner).toContain(
       'tail -c "${tail_budget}" "${GATE_LOG}"',
     );
+  });
+});
+
+describe('run-agent idle watchdog', () => {
+  // Four observed sandbox hangs (#8663 x2, #8761 r3, #8763 r4) printed their
+  // last byte at docker container entry and then sat SILENT for the whole
+  // 2-hour absolute budget — four different runners, two image versions, so
+  // the watchdog lives in the runner script, not the environment. A wedged
+  // sandbox produces nothing; a legitimate run is never silent for 20
+  // minutes (the fleet's longest tolerated quiet is the review pipeline's
+  // 10-minute stream-idle window). These tests execute the REAL script with
+  // a stub agent whose only difference is whether it keeps talking.
+  const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'qwen');
+      writeFileSync(bin, stub);
+      chmodSync(bin, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve('.qwen/skills/autofix/scripts/run-agent.mjs'),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          bin,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            QWEN_IDLE_TIMEOUT_MS: String(idleMs),
+            QWEN_TIMEOUT_MS: String(timeoutMs),
+          },
+        },
+      );
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        timeoutSentinel: existsSync(join(workdir, 'agent-timeout'))
+          ? readFileSync(join(workdir, 'agent-timeout'), 'utf8')
+          : null,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('kills a silent agent at the idle window, naming the idle limit', () => {
+    // The hang shape: one line at startup, then nothing, ever.
+    const r = runAgent({
+      stub: '#!/bin/bash\necho "entering sandbox"\nsleep 600\n',
+      idleMs: 1200,
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // NOT the absolute-budget wording: the comment must say which limit
+    // fired, or the operator tunes the wrong knob.
+    expect(r.failure).not.toContain('timeout (60000ms)');
+    // The sentinel routes the round to RETRY; deleting `timedOut = true`
+    // from the idle branch must fail here (the absolute-timeout test pins
+    // the same sentinel for its own path).
+    expect(r.timeoutSentinel).toContain('idle-timeout (no output for 1200ms');
+  });
+
+  it('never fires while the agent keeps talking, however slowly', () => {
+    // Output every 400ms with a 1500ms idle window: an absolute-timer
+    // regression disguised as an idle watchdog would kill this run.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+        // The mode's output contract: a real run ends by writing its
+        // summary, and the script fails a run that produced neither output.
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('never fires while the agent talks on stderr only', () => {
+    // The sandbox launcher emits ContainerName on stderr, and a cold
+    // runner's image pull or docker progress is a realistic stderr-only
+    // span with quiet stdout — the liveness contract covers both streams.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "tick $i" >&2; sleep 0.4; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
+    // Number('-1') is truthy, so a bare `|| default` guard would arm a
+    // negative window: Date.now() - lastOutputAt >= -1 is instantly true
+    // and every agent dies at the first idle tick. `0` (an operator's
+    // "disable") arms a zero-length window that is true at the first tick,
+    // and NaN arms one too — every rejection class named in the parse
+    // guard's comment must fall back to the default.
+    for (const idleMs of [-1, 0, Number.NaN]) {
+      const r = runAgent({
+        stub: [
+          '#!/bin/bash',
+          'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+          'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+          'echo done',
+          'exit 0',
+        ].join('\n'),
+        idleMs,
+      });
+      expect(r.status).toBe(0);
+      expect(r.failure).toBe('');
+    }
+  });
+});
+
+describe('stale sandbox container cleanup', () => {
+  // Two layers. The kill path: run-agent.mjs captures the container name
+  // its child's launcher printed and force-removes exactly that container
+  // when a budget/idle kill fires — ownership is unambiguous there, which
+  // is why the startup reap below may not touch running containers. The
+  // startup reap: a JOB timeout still reaps only the host-side docker
+  // client, so both sandboxed jobs reap before the sandbox picks a name
+  // (observed: a later leg's name counter found qwen-code-0.21.8-0
+  // occupied) — but the docker daemon is per HOST and this pool runs
+  // several registrations on one OS, so a RUNNING container can belong to
+  // a concurrent job on another registration: the reap is restricted to
+  // provably-dead states.
+  it('both agent jobs remove stale qwen-code containers at start', () => {
+    const step = "- name: 'Remove stale sandbox containers'";
+    expect(workflow.split(step).length - 1).toBe(2);
+    for (const jobId of ['issue-autofix', 'review-address']) {
+      const j = getWorkflowJob(workflow, jobId);
+      expect(j, jobId).toContain(step);
+      expect(j, jobId).toContain(
+        "timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead'",
+      );
+      // Best-effort hygiene under bash -eo pipefail: a daemon blip, a
+      // racing reap on another registration, or a container that refuses
+      // removal must not kill the round at setup — and an alive-but-wedged
+      // daemon must not block the step until the job timeout, so every
+      // docker call runs under `timeout`.
+      expect(j, jobId).toContain(
+        "STALE=\"$(timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)\" || STALE=''",
+      );
+      expect(j, jobId).toContain(
+        'xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true',
+      );
+      // Before the sandbox can pick a colliding name.
+      expect(j.indexOf(step)).toBeLessThan(
+        j.indexOf("- name: 'Reset autofix workspace'"),
+      );
+    }
+  });
+
+  // The kill path is shared by the idle watchdog and the absolute budget
+  // timer (both fire escalateKill). Pin BOTH branches: a future edit that
+  // keeps the container removal on only one of them leaks the other's
+  // sandbox while a single-branch test still passes.
+  const runKillPath = (idleTimeoutMs, timeoutMs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-orphan-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'docker'),
+        '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
+      );
+      chmodSync(join(bin, 'docker'), 0o755);
+      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // prints it, then the wedge shape: one line, then silence.
+      const stub = join(dir, 'qwen');
+      writeFileSync(
+        stub,
+        '#!/bin/bash\necho "ContainerName (regular): qwen-code-9.9.9-9" >&2\nsleep 600\n',
+      );
+      chmodSync(stub, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve(autofixRunnerScriptPath),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          stub,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            PATH: `${bin}:${process.env.PATH}`,
+            QWEN_IDLE_TIMEOUT_MS: idleTimeoutMs,
+            QWEN_TIMEOUT_MS: timeoutMs,
+          },
+        },
+      );
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        calls: existsSync(join(workdir, 'docker-calls.txt'))
+          ? readFileSync(join(workdir, 'docker-calls.txt'), 'utf8').trim()
+          : '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('an idle kill removes only the running sandbox its own agent launched', () => {
+    // The startup reaper stays restricted to exited/dead containers (a
+    // running one can belong to a concurrent job on another registration),
+    // so the running orphan a kill creates is removed by the kill path
+    // itself: run-agent.mjs captures the container name its child's
+    // launcher printed and force-removes exactly that one.
+    const r = runKillPath('1200', '60000');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // The ONLY docker call is the owned container's removal.
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+
+  it('a budget kill removes only the running sandbox its own agent launched', () => {
+    // The idle window sits far above the absolute budget, so the budget
+    // timer is the branch that fires here (the idle variant above pins the
+    // shared kill path from the other side).
+    const r = runKillPath('600000', '1200');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('timeout (1200ms)');
+    expect(r.failure).not.toContain('idle-timeout');
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
   });
 });

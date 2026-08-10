@@ -2,7 +2,7 @@
 
 Qwen Code extensions package prompts, MCP servers, subagents, skills and custom commands into a familiar and user-friendly format. With extensions, you can expand the capabilities of Qwen Code and share those capabilities with others. They are designed to be easily installable and shareable.
 
-Extensions and plugins from [Gemini CLI Extensions Gallery](https://geminicli.com/extensions/) and [Claude Code Marketplace](https://claudemarketplaces.com/) can be directly installed into Qwen Code. This cross-platform compatibility gives you access to a rich ecosystem of extensions and plugins, dramatically expanding Qwen Code's capabilities without requiring extension authors to maintain separate versions.
+Extensions and plugins from [Gemini CLI Extensions Gallery](https://geminicli.com/extensions/), [Claude Code Marketplace](https://claudemarketplaces.com/), and Qoder can be directly installed into Qwen Code. This cross-platform compatibility gives you access to a rich ecosystem of extensions and plugins, dramatically expanding Qwen Code's capabilities without requiring extension authors to maintain separate versions.
 
 ## Extension management
 
@@ -98,6 +98,20 @@ Gemini extensions are automatically converted to Qwen Code format during install
 - `gemini-extension.json` is converted to `qwen-extension.json`
 - TOML command files are automatically migrated to Markdown format
 - MCP servers, context files, and settings are preserved
+
+#### From Qoder Plugins
+
+Qwen Code supports [Qoder plugins](https://docs.qoder.com/en/cli/sdk/plugins) that contain a `.qoder-plugin/plugin.json` manifest. Install a local directory, archive, Git repository, archive URL, or scoped npm package with the existing `qwen extensions install` command:
+
+```bash
+qwen extensions install ./sample-qoder-plugin
+qwen extensions install ./sample-qoder-plugin.zip
+qwen extensions install owner/sample-qoder-plugin
+```
+
+The installer converts the Qoder manifest to `qwen-extension.json` and preserves standard `commands/`, `agents/`, and `skills/` directories. MCP servers declared in a root `.mcp.json` file are included as extension MCP servers.
+
+When a Qoder plugin contains `system-prompt.md` at its root, Qwen Code loads it as extension context. If the plugin also contains `QWEN.md` or declares other context files, all context files are retained and deduplicated.
 
 #### From npm Registry
 

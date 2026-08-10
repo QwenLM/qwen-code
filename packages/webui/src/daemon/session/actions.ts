@@ -22,6 +22,7 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
+  DaemonCapabilities,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
@@ -52,6 +53,36 @@ interface RefBox<T> {
   current: T;
 }
 
+const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
+const RESTORE_REQUEST_HEADROOM_MS = 10_000;
+const RESTORE_WATCHDOG_HEADROOM_MS = 15_000;
+const ATTACH_WATCHDOG_TIMEOUT_MS = 30_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+export function resolveSessionRestoreTimeouts(
+  capabilities: DaemonCapabilities | undefined,
+): { requestTimeoutMs: number; watchdogTimeoutMs: number | undefined } {
+  const advertised = capabilities?.limits?.sessionRestoreTimeoutMs;
+  const serverTimeoutMs =
+    typeof advertised === 'number' &&
+    Number.isInteger(advertised) &&
+    advertised > 0
+      ? advertised
+      : DEFAULT_RESTORE_SERVER_TIMEOUT_MS;
+  const requestTimeoutMs = serverTimeoutMs + RESTORE_REQUEST_HEADROOM_MS;
+  const watchdogTimeoutMs = serverTimeoutMs + RESTORE_WATCHDOG_HEADROOM_MS;
+  return {
+    requestTimeoutMs:
+      requestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : requestTimeoutMs,
+    watchdogTimeoutMs:
+      watchdogTimeoutMs > MAX_TIMER_DELAY_MS ? undefined : watchdogTimeoutMs,
+  };
+}
+
+function clearPendingLoadTimeout(load: PendingSessionLoad): void {
+  if (load.timeout !== undefined) clearTimeout(load.timeout);
+}
+
 export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
@@ -61,7 +92,7 @@ export interface CreateDaemonSessionActionsArgs {
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
   manualSessionClearRef: RefBox<boolean>;
-  skipNextCleanupDetachSessionIdRef: RefBox<string | undefined>;
+  skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
@@ -132,7 +163,7 @@ export function createDaemonSessionActions({
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
   manualSessionClearRef,
-  skipNextCleanupDetachSessionIdRef,
+  skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
   createDetachedSession,
@@ -165,12 +196,12 @@ export function createDaemonSessionActions({
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
     if (pendingSessionLoadRef.current) {
       if (
-        skipNextCleanupDetachSessionIdRef.current ===
+        skipNextCleanupDetachSessionRef.current?.sessionId ===
         pendingSessionLoadRef.current.sessionId
       ) {
-        skipNextCleanupDetachSessionIdRef.current = undefined;
+        skipNextCleanupDetachSessionRef.current = undefined;
       }
-      clearTimeout(pendingSessionLoadRef.current.timeout);
+      clearPendingLoadTimeout(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException('Session cleared', 'AbortError'),
       );
@@ -190,7 +221,7 @@ export function createDaemonSessionActions({
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
     if (pendingSessionLoadRef.current) {
-      clearTimeout(pendingSessionLoadRef.current.timeout);
+      clearPendingLoadTimeout(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException(
           `Session ${mode} superseded by a newer request`,
@@ -199,24 +230,37 @@ export function createDaemonSessionActions({
       );
     }
     const loadPromise = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (pendingSessionLoadRef.current?.id === loadId) {
-          pendingSessionLoadRef.current = undefined;
-          reject(
-            dispatchActionError(
-              addNotice,
-              `${capitalize(mode)} session failed`,
-              new Error(`Session ${mode} timed out`),
-              getSessionLoadNoticeOperation(mode),
-            ),
-          );
-        }
-      }, 30_000);
+      const restoreTimeouts = resolveSessionRestoreTimeouts(
+        getConnection().capabilities,
+      );
+      const watchdogTimeoutMs =
+        mode === 'attach'
+          ? ATTACH_WATCHDOG_TIMEOUT_MS
+          : restoreTimeouts.watchdogTimeoutMs;
+      const timeout =
+        watchdogTimeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              if (pendingSessionLoadRef.current?.id === loadId) {
+                pendingSessionLoadRef.current = undefined;
+                reject(
+                  dispatchActionError(
+                    addNotice,
+                    `${capitalize(mode)} session failed`,
+                    new Error(`Session ${mode} timed out`),
+                    getSessionLoadNoticeOperation(mode),
+                  ),
+                );
+              }
+            }, watchdogTimeoutMs);
       pendingSessionLoadRef.current = {
         id: loadId,
         sessionId,
         mode,
         timeout,
+        ...(mode !== 'attach'
+          ? { requestTimeoutMs: restoreTimeouts.requestTimeoutMs }
+          : {}),
         resolve,
         reject,
         ...(signal ? { signal } : {}),
@@ -271,8 +315,14 @@ export function createDaemonSessionActions({
           );
         });
       if (reloadingCurrentSession) {
-        skipNextCleanupDetachSessionIdRef.current = sessionId;
-        void loadPromise.then(detachCurrentSession, () => undefined);
+        skipNextCleanupDetachSessionRef.current = currentSession;
+        void loadPromise
+          .then(detachCurrentSession, () => undefined)
+          .finally(() => {
+            if (skipNextCleanupDetachSessionRef.current === currentSession) {
+              skipNextCleanupDetachSessionRef.current = undefined;
+            }
+          });
       } else {
         void detachCurrentSession();
       }
@@ -362,6 +412,7 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        options?.onAdmissionStarted?.();
         const accepted = await session.submitPrompt(
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
@@ -452,24 +503,27 @@ export function createDaemonSessionActions({
         promptRequest as Parameters<typeof session.submitPrompt>[0],
       );
       if (options?.signal?.aborted) {
-        await session
-          .removePendingPrompt(accepted.promptId)
-          .catch((err: unknown) => {
-            console.warn(
-              '[submitPrompt] removePendingPrompt failed after abort',
-              err,
-            );
-            addNotice({
-              severity: 'error',
-              category: 'user_action',
-              operation: 'send_prompt',
-              code: 'daemon.send_prompt.pending_cleanup_failed',
-              message:
-                'Prompt was accepted after cancellation but could not be removed from the queue.',
-              debugMessage: err instanceof Error ? err.message : String(err),
-              recoverable: true,
-            });
+        try {
+          const removal = await session.removePendingPrompt(accepted.promptId);
+          if (removal.removed) {
+            return { promptId: accepted.promptId, removedAfterAbort: true };
+          }
+        } catch (err) {
+          console.warn(
+            '[submitPrompt] removePendingPrompt failed after abort',
+            err,
+          );
+          addNotice({
+            severity: 'error',
+            category: 'user_action',
+            operation: 'send_prompt',
+            code: 'daemon.send_prompt.pending_cleanup_failed',
+            message:
+              'Prompt was accepted after cancellation but could not be removed from the queue.',
+            debugMessage: err instanceof Error ? err.message : String(err),
+            recoverable: true,
           });
+        }
         throw (
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         );
@@ -531,7 +585,9 @@ export function createDaemonSessionActions({
           session.setModel(modelId),
           'Set model timed out',
         );
-        setConnection((current) => ({ ...current, currentModel: modelId }));
+        if (sessionRef.current === session) {
+          setConnection((current) => ({ ...current, currentModel: modelId }));
+        }
         return result;
       } catch (error) {
         throw dispatchActionError(
@@ -558,10 +614,12 @@ export function createDaemonSessionActions({
           }),
           'Set approval mode timed out',
         );
-        setConnection((current) => ({
-          ...current,
-          currentMode: result.mode || mode,
-        }));
+        if (sessionRef.current === session) {
+          setConnection((current) => ({
+            ...current,
+            currentMode: result.mode || mode,
+          }));
+        }
         return result;
       } catch (error) {
         throw dispatchActionError(
@@ -742,7 +800,7 @@ export function createDaemonSessionActions({
         }
         persistStableClientId(nextSession.clientId, nextSession.sessionId);
         sessionRef.current = nextSession;
-        skipNextCleanupDetachSessionIdRef.current = nextSession.sessionId;
+        skipNextCleanupDetachSessionRef.current = nextSession;
         setConnection((current) => ({
           ...current,
           status: 'connected',
@@ -860,13 +918,15 @@ export function createDaemonSessionActions({
           session.supportedCommands(),
           'Refresh commands timed out',
         );
-        const { commands, skills } = mapSupportedCommands(status);
-        setConnection((current) => ({
-          ...current,
-          commands,
-          skills,
-          supportedCommands: status,
-        }));
+        if (sessionRef.current === session) {
+          const { commands, skills } = mapSupportedCommands(status);
+          setConnection((current) => ({
+            ...current,
+            commands,
+            skills,
+            supportedCommands: status,
+          }));
+        }
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -889,14 +949,16 @@ export function createDaemonSessionActions({
           session.context(),
           'Load context timed out',
         );
-        setConnection((current) => ({
-          ...current,
-          context,
-          currentMode:
-            getModeFromSessionContext(context) ?? current.currentMode,
-          currentModel:
-            getModelFromSessionContext(context) ?? current.currentModel,
-        }));
+        if (sessionRef.current === session) {
+          setConnection((current) => ({
+            ...current,
+            context,
+            currentMode:
+              getModeFromSessionContext(context) ?? current.currentMode,
+            currentModel:
+              getModelFromSessionContext(context) ?? current.currentModel,
+          }));
+        }
         return context;
       } catch (error) {
         throw dispatchActionError(

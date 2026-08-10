@@ -296,6 +296,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('keeps discrete thought messages separate with their metadata', () => {
+    const makeThought = (id: number, text: string, taskId: string) =>
+      normalizeDaemonEvent({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              qwenDiscreteMessage: true,
+              backgroundTask: { taskId },
+            },
+          },
+        },
+      });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...makeThought(11, 'first thought', 'task-a'),
+        ...makeThought(12, 'second thought', 'task-b'),
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'thought',
+        text: 'first thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-a' },
+        },
+      },
+      {
+        kind: 'thought',
+        text: 'second thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-b' },
+        },
+      },
+    ]);
+  });
+
   it('keeps discrete assistant messages separate from normal text blocks', () => {
     const normalBefore = normalizeDaemonEvent({
       id: 11,
@@ -2509,6 +2556,131 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('does not surface usage_update as a debug transcript event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 46_351,
+          size: 1_000_000,
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('stamps debugReason on unrecognized daemon events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('some_future_event', { sessionId: 's1' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('stamps debugReason on unrecognized session_update kinds', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: { sessionUpdate: 'some_future_kind', payload: { a: 1 } },
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_session_update',
+      }),
+    ]);
+  });
+
+  it('classifies a session_update with no usable discriminator as malformed', () => {
+    // `getSessionUpdatePayload` accepts any record, so these reach the default
+    // branch with `kind === undefined`. They are broken frames, not kinds from
+    // a newer daemon — marking them unrecognized would let renderers hide the
+    // only diagnostic they produce.
+    for (const update of [
+      {},
+      { sessionUpdate: 42 },
+      { sessionUpdate: '' },
+      // Truthy but no more usable than an empty string.
+      { sessionUpdate: '   ' },
+    ]) {
+      expect(
+        normalizeDaemonEvent(envelopeOf('session_update', { update })),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          debugReason: 'malformed_payload',
+        }),
+      ]);
+    }
+  });
+
+  it('stamps debugReason on malformed payloads of known events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', { scope: 'not-a-scope' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    ]);
+  });
+
+  it('carries debugReason through the reducer onto the transcript block', () => {
+    // The normalizer tests above inspect events directly and the Web Shell
+    // adapter tests construct blocks by hand, so neither would notice if the
+    // reducer dropped the field on the way across. Production blocks would
+    // then lose their classification and Web Shell would render raw JSON
+    // again with both suites still green.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        envelopeOf('some_future_event', { sessionId: 's1' }),
+      ),
+    );
+
+    expect(state.blocks).toEqual([
+      expect.objectContaining({
+        kind: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('leaves client-dispatched debug blocks without a debugReason', () => {
+    // The mirror of the test above, and the invariant that keeps Web Shell's
+    // model-switch summary visible. Without it, defaulting the field in
+    // `appendStatusBlock` (e.g. `event.debugReason ?? 'unrecognized_event'`)
+    // passes every other test in both suites while silently tagging the
+    // summary as unrecognized, which Web Shell then filters out.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          text: 'Model switched to qwen3-coder-plus',
+          source: 'model_switch_summary',
+        },
+      ],
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        source: 'model_switch_summary',
+      }),
+    );
+    expect(state.blocks[0]).not.toHaveProperty('debugReason');
+  });
+
   it('normalizes memory_changed with closed-enum scope + mode', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', {
@@ -3586,9 +3758,12 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       source: 'history_truncated',
       data,
       text: expect.stringContaining(
-        'kept the latest 10000 events and dropped 16371 older replay events',
+        'kept the latest 10000 source events and dropped 16371 older source events',
       ) as string,
     });
+    expect((event as { text: string }).text).toContain(
+      'limits: 10000 replay entries / 8388608 bytes',
+    );
     expect((event as { text: string }).text).toContain(
       'Complete content remains available after the turn finishes.',
     );
