@@ -25,6 +25,7 @@ import styles from './VoiceButton.module.css';
 /** Live waveform bar count in the recording pill. */
 const BAR_COUNT = 16;
 const NOTICE_TIMEOUT_MS = 2_000;
+const HOLD_THRESHOLD_MS = 250;
 
 export interface VoiceButtonProps {
   /** Insert the final transcript into the composer (user reviews, then sends). */
@@ -118,6 +119,9 @@ export function VoiceButton({
     mode: 'hold',
   }));
   const holdPointerIdRef = useRef<number | null>(null);
+  const holdStartedAtRef = useRef(0);
+  const ignoreNextClickRef = useRef(false);
+  const tapLatchedRef = useRef(false);
   const targetRef = useRef(target);
   targetRef.current = target;
   const requestGenerationRef = useRef(0);
@@ -310,7 +314,14 @@ export function VoiceButton({
   const canCancel = isRecording || isConnecting;
 
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (voiceGate.mode === 'hold' && event.detail !== 0) return;
+    if (voiceGate.mode === 'hold' && event.detail !== 0) {
+      if (ignoreNextClickRef.current) {
+        ignoreNextClickRef.current = false;
+        return;
+      }
+      if (!tapLatchedRef.current) return;
+      tapLatchedRef.current = false;
+    }
     if (isRecording) {
       stop();
     } else if (isConnecting) {
@@ -333,6 +344,7 @@ export function VoiceButton({
     }
     event.preventDefault();
     holdPointerIdRef.current = event.pointerId;
+    holdStartedAtRef.current = event.timeStamp;
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -350,7 +362,10 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    stop();
+    ignoreNextClickRef.current = true;
+    tapLatchedRef.current =
+      event.timeStamp - holdStartedAtRef.current < HOLD_THRESHOLD_MS;
+    if (!tapLatchedRef.current) stop();
   };
 
   const handlePointerCancel = (
@@ -363,6 +378,7 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
+    tapLatchedRef.current = false;
     abort();
   };
 
