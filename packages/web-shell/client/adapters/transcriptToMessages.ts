@@ -46,6 +46,7 @@ interface TranscriptMessageLabels {
   branchSuccess?: (name: string) => string;
   midTurnInserted?: (message: string) => string;
   modelStreamInterrupted?: string;
+  loopDetected?: string;
 }
 
 interface TranscriptMessageOptions {
@@ -195,6 +196,9 @@ function getErrorDisplayText(
   block: DaemonStatusTranscriptBlock,
   labels?: TranscriptMessageLabels,
 ): string {
+  if (block.errorKind === 'loop_detected') {
+    return labels?.loopDetected ?? block.text;
+  }
   if (
     block.errorKind === 'model_stream_interrupted' ||
     // Older daemons emit this turn_error before they know about errorKind.
@@ -775,7 +779,8 @@ export function transcriptBlocksToDaemonMessages(
           role: 'system',
           content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
-          retryable: errorBlock.source === 'turn_error',
+          retryable:
+            errorBlock.source === 'turn_error' && errorKind !== 'loop_detected',
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
           ...getErrorMessageData(errorBlock.data, errorKind),

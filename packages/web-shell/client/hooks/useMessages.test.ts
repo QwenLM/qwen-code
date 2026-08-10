@@ -77,12 +77,22 @@ describe('transcriptBlocksToLocalizedMessages', () => {
         DaemonStatusTranscriptBlock,
         'clientReceivedAt' | 'createdAt' | 'updatedAt'
       >),
+      baseBlock({
+        id: 'loop',
+        kind: 'error',
+        text: 'internal fallback',
+        errorKind: 'loop_detected',
+      } as Omit<
+        DaemonStatusTranscriptBlock,
+        'clientReceivedAt' | 'createdAt' | 'updatedAt'
+      >),
     ];
 
     expect(transcriptBlocksToLocalizedMessages(blocks, t)).toMatchObject([
       { content: 'localized:request.cancelled' },
       { content: 'branch.success:review' },
       { content: 'localized:error.modelStreamInterrupted' },
+      { content: 'localized:error.loopDetected' },
     ]);
   });
 });

@@ -487,6 +487,7 @@ export type DaemonToolLoopState = {
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
+  loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
 };
@@ -499,6 +500,8 @@ const LOOP_DETECTED_SKIP_MESSAGE =
   'Skipped because loop detection stopped the current turn before this tool call could run.';
 const LOOP_DETECTED_CONTEXT_MESSAGE =
   'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
+const LOOP_DETECTED_TURN_ERROR_MESSAGE =
+  'Tool-call loop protection stopped this turn. The session is still available; send a more specific instruction to continue.';
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
@@ -604,6 +607,7 @@ function recordDaemonLoopDetected(
 ): true {
   if (!loopState.loopDetected) {
     loopState.loopDetected = true;
+    loopState.loopType = loopType;
     debugLogger.warn(message);
     try {
       logLoopDetected(
@@ -619,6 +623,16 @@ function recordDaemonLoopDetected(
     }
   }
   return true;
+}
+
+function createLoopDetectedTurnError(
+  loopState: DaemonToolLoopState,
+): RequestError {
+  return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
+    code: 'LOOP_DETECTED',
+    errorKind: 'loop_detected',
+    ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+  });
 }
 
 function recordDaemonToolCalls(
@@ -3920,11 +3934,10 @@ export class Session implements SessionContext {
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                    return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
-                    };
+                    if (pendingSend.signal.aborted) {
+                      return { stopReason: 'cancelled' };
+                    }
+                    throw createLoopDetectedTurnError(toolLoopState);
                   }
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
@@ -3932,11 +3945,10 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
-                    };
+                    if (pendingSend.signal.aborted) {
+                      return { stopReason: 'cancelled' };
+                    }
+                    throw createLoopDetectedTurnError(toolLoopState);
                   }
                 }
               }
@@ -4853,11 +4865,7 @@ export class Session implements SessionContext {
               options.onFullTurnModel,
             ),
         );
-        if (
-          toolRun.stopAfterPermissionCancel ||
-          toolRun.loopDetected ||
-          pendingSend.signal.aborted
-        ) {
+        if (toolRun.stopAfterPermissionCancel || pendingSend.signal.aborted) {
           this.todoStopGuard.suspend();
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
@@ -4868,6 +4876,20 @@ export class Session implements SessionContext {
               : {}),
           };
         }
+        if (toolRun.loopDetected) {
+          this.todoStopGuard.suspend();
+          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          if (pendingSend.signal.aborted) {
+            return {
+              kind: 'terminal',
+              stopReason: 'cancelled',
+              ...(supersededAutomaticContinuation
+                ? { supersededAutomaticContinuation: true }
+                : {}),
+            };
+          }
+          throw createLoopDetectedTurnError(toolLoopState);
+        }
         const nextAfterTools = await this.#buildNextMessageAfterToolRun(
           toolRun,
           pendingSend.signal,
@@ -4876,6 +4898,18 @@ export class Session implements SessionContext {
           options.onFullTurnModel,
         );
         nextMessage = nextAfterTools.message;
+        if (nextAfterTools.stoppedByRepeatedToolFailure) {
+          if (pendingSend.signal.aborted) {
+            return {
+              kind: 'terminal',
+              stopReason: 'cancelled',
+              ...(supersededAutomaticContinuation
+                ? { supersededAutomaticContinuation: true }
+                : {}),
+            };
+          }
+          throw createLoopDetectedTurnError(toolLoopState);
+        }
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -5405,15 +5439,6 @@ export class Session implements SessionContext {
         toolLoopState,
         { recordToQwenLogger: false },
       );
-      try {
-        await this.messageEmitter.emitAgentMessage(
-          REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
-        );
-      }
       return {
         message: null,
         hadMidTurnUserInput,

@@ -6858,22 +6858,45 @@ describe('Session', () => {
           args: { file_path: `file_${index}.ts` },
         }));
         functionCalls[101].id = 'read_0';
-        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
-          createStreamWithChunks([
-            {
-              type: core.StreamEventType.CHUNK,
-              value: { functionCalls },
-            },
-          ]),
-        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: { functionCalls },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'read many files' }],
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read many files' }],
+          }),
+        ).rejects.toMatchObject({
+          data: {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: core.LoopType.TURN_TOOL_CALL_CAP,
+          },
         });
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+        const skippedUpdates = vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([params]) => params.update)
+          .filter(
+            (update) =>
+              update.sessionUpdate === 'tool_call_update' &&
+              update.status === 'failed' &&
+              JSON.stringify(update).includes(
+                'Skipped because loop detection stopped the current turn',
+              ),
+          );
+        expect(skippedUpdates).toHaveLength(101);
         expect(mockChat.addHistory).toHaveBeenCalledWith({
           role: 'user',
           parts: expect.arrayContaining([
@@ -6910,6 +6933,14 @@ describe('Session', () => {
             'Stopping ACP turn after 101 tool calls in one turn.',
           ),
         );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'continue with a simpler step' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('lets a productive turn continue past the default cap (adaptive)', async () => {
@@ -8251,7 +8282,13 @@ describe('Session', () => {
               sessionId: 'test-session-id',
               prompt: [{ type: 'text', text: 'run the failing tool' }],
             }),
-          ).resolves.toEqual({ stopReason: 'end_turn' });
+          ).rejects.toMatchObject({
+            data: {
+              code: 'LOOP_DETECTED',
+              errorKind: 'loop_detected',
+              loopType: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            },
+          });
 
           expect(execute).toHaveBeenCalledTimes(9);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
@@ -8282,20 +8319,16 @@ describe('Session', () => {
               }),
             ]),
           });
-          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
-            expect.objectContaining({
-              sessionId: 'test-session-id',
-              update: expect.objectContaining({
-                sessionUpdate: 'agent_message_chunk',
-                content: expect.objectContaining({
-                  type: 'text',
-                  text: expect.stringContaining(
-                    'Automatic continuation stopped',
-                  ),
-                }),
-              }),
+          expect(
+            vi.mocked(mockClient.sessionUpdate).mock.calls.some(([params]) => {
+              const update = params.update;
+              return (
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text.includes('Automatic continuation stopped')
+              );
             }),
-          );
+          ).toBe(false);
         } finally {
           restoreGuardMode();
         }
@@ -8340,36 +8373,6 @@ describe('Session', () => {
             role: 'user',
             parts: expect.arrayContaining([{ text: reminder }]),
           });
-        } finally {
-          restoreGuardMode();
-        }
-      });
-
-      it('returns cancelled when cancellation arrives while the stop message is emitted', async () => {
-        recreateSessionWithGuardMode('enforce');
-        try {
-          installFailingTool();
-          vi.mocked(mockClient.sessionUpdate).mockImplementation(
-            async ({ update }) => {
-              if (
-                update.sessionUpdate === 'agent_message_chunk' &&
-                update.content.type === 'text' &&
-                update.content.text.includes('Automatic continuation stopped')
-              ) {
-                await session.cancelPendingPrompt();
-              }
-            },
-          );
-          queueMatchingFailureStreak();
-
-          await expect(
-            session.prompt({
-              sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: 'run the failing tool' }],
-            }),
-          ).resolves.toEqual({ stopReason: 'cancelled' });
-
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
         } finally {
           restoreGuardMode();
         }
@@ -23975,6 +23978,57 @@ describe('Session', () => {
       await waitStarted;
       await session.cancelPendingPrompt();
       releaseWait();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    });
+
+    it('lets cancellation win while a loop-detected Stop continuation is preserved', async () => {
+      mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+      mockConfig.isMaxToolCallsPerTurnExplicit = vi.fn().mockReturnValue(true);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'loop-1', name: 'read_file', args: { path: 'a' } },
+                  { id: 'loop-2', name: 'read_file', args: { path: 'b' } },
+                ],
+              },
+            },
+          ]),
+        );
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: { decision: 'block', reason: 'continue once' },
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'Stop');
+      let startDrain!: () => void;
+      const drainStarted = new Promise<void>((resolve) => {
+        startDrain = resolve;
+      });
+      let releaseDrain!: () => void;
+      const drainGate = new Promise<void>((resolve) => {
+        releaseDrain = resolve;
+      });
+      mockClient.extMethod = vi.fn(async () => {
+        startDrain();
+        await drainGate;
+        return { messages: [] };
+      });
+
+      const prompt = runGuardPrompt();
+      await drainStarted;
+      await session.cancelPendingPrompt();
+      releaseDrain();
 
       await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     });

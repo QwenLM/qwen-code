@@ -6053,7 +6053,9 @@ export function App({
       const block = blocks[i];
       if (block?.kind === 'user') break;
       if (block?.kind === 'error' && block.source === 'turn_error') {
-        retryableTurnErrorId = block.id;
+        if (block.errorKind !== 'loop_detected') {
+          retryableTurnErrorId = block.id;
+        }
         break;
       }
       if (block?.kind !== 'debug') break;

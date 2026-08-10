@@ -4084,6 +4084,65 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keeps the current turn error when refreshing from persisted history', async () => {
+    const handle = makeChannel({
+      promptImpl: () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'loop' }],
+        },
+        undefined,
+        { promptId: 'prompt-loop' },
+      ),
+    ).rejects.toThrow('Loop protection stopped this turn');
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(refreshed.compactedReplay).toContainEqual(
+      expect.objectContaining({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        }),
+      }),
+    );
+
+    await bridge.shutdown();
+  });
+
   it('propagates partial and replayError from a bounded refresh', async () => {
     const handle = makeChannel({
       loadSessionImpl: () => ({
@@ -8391,6 +8450,61 @@ describe('createAcpSessionBridge', () => {
         message: 'terminated',
         errorKind: 'model_stream_interrupted',
         promptId: 'prompt-error',
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('preserves structured loop detection details on turn_error', async () => {
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new RequestError(-32603, 'Loop protection stopped this turn', {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'turn_tool_call_cap',
+          });
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const turnError = (async () => {
+        for await (const event of iter) {
+          if (event.type === 'turn_error') return event;
+        }
+        throw new Error('turn_error was not published');
+      })();
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      await expect(turnError).resolves.toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+          promptId: 'prompt-loop',
+        },
+      });
+      expect(bridge.getSessionSummary(session.sessionId).turnError).toEqual({
+        message: 'Loop protection stopped this turn',
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
       });
 
       abort.abort();

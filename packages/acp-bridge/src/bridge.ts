@@ -1182,6 +1182,17 @@ function extractJsonRpcErrorDetail(data: unknown): string | undefined {
   return undefined;
 }
 
+function extractJsonRpcErrorField(
+  err: unknown,
+  field: string,
+): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const data = (err as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  const value = (data as Record<string, unknown>)[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 export function extractErrorCode(err: unknown): string | undefined {
   if (typeof err !== 'object' || err === null || !('code' in err))
     return undefined;
@@ -1208,8 +1219,13 @@ function broadcastTurnError(
   mutateTurnState: boolean,
 ): void {
   const message = extractErrorMessage(err);
-  const code = extractErrorCode(err);
-  const errorKind = classifyTurnErrorKind(message);
+  const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
+  const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
+  const code =
+    structuredErrorKind === 'loop_detected'
+      ? (extractJsonRpcErrorField(err, 'code') ?? extractErrorCode(err))
+      : extractErrorCode(err);
+  const loopType = extractJsonRpcErrorField(err, 'loopType');
   if (errorKind) {
     writeServeDebugLine(
       `turn_error classified session=${JSON.stringify(sessionId)} ` +
@@ -1242,6 +1258,7 @@ function broadcastTurnError(
         message,
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
+        ...(loopType ? { loopType } : {}),
         ...(promptId ? { promptId } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
@@ -4920,8 +4937,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           !entry.promptActive &&
           entry.events.lastEventId === lastEventId
         ) {
+          const replay = entry.events.snapshotReplay();
+          const turnError = entry.turnError
+            ? [
+                ...(replay?.compactedTurns ?? []),
+                ...(replay?.liveJournal ?? []),
+              ]
+                .reverse()
+                .find((event) => event.type === 'turn_error')
+            : undefined;
           return {
-            compactedReplay: page.events,
+            compactedReplay: turnError
+              ? [...page.events, turnError]
+              : page.events,
             liveJournal: [],
             lastEventId,
             ...(page.partial === true ? { partial: true as const } : {}),

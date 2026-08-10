@@ -10809,6 +10809,30 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('asks for a new instruction instead of retrying a loop-detected turn', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'repeat this';
+    await clickSubmit(container);
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-loop',
+          errorKind: 'loop_detected',
+          text: 'internal fallback',
+        },
+      ];
+      rerender();
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+  });
+
   it('locks an image retry when its admission response is lost', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const retrySend = deferred<void>();
