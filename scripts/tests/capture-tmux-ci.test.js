@@ -94,19 +94,73 @@ function logicalLinesOf(run) {
 // An apt-get behind any of them is still an apt-get; option residue used to
 // break the recognition check and silently skip the guard requirement.
 const WRAPPERS = /^(sudo|env|nice|timeout|time|nohup|stdbuf|ionice|setsid)\s+/;
+
+// ONE prefix per call, in shell order: a run of env assignments, one
+// wrapper verb, the options that verb takes, then the bare duration.
+// unwrapCommand loops it to the fixpoint; runsThroughSudo tests for sudo
+// between removals — sudo must be observable the moment it is exposed, or
+// the next env assignment lets it slip past unseen. Two copies of this
+// pipeline had already drifted (the env strip inside one fixpoint, once up
+// front in the other), and the sudo expectation disagreed with the install
+// pins on where the command starts.
+function stripPrefixLayer(stmt) {
+  if (/^\w+=\S+\s+/.test(stmt)) return stmt.replace(/^(\w+=\S+\s+)+/, '');
+  if (WRAPPERS.test(stmt)) return stmt.replace(WRAPPERS, '');
+  // Options belonging to the wrapper just stripped, plus the bare
+  // duration `timeout`/`nice` take before the command word.
+  if (/^-{1,2}[\w-]+(=\S+)?\s+/.test(stmt))
+    return stmt.replace(/^(-{1,2}[\w-]+(=\S+)?\s+)+/, '');
+  if (/^\d+[smhd]?\s+/.test(stmt)) return stmt.replace(/^(\d+[smhd]?\s+)/, '');
+  return stmt;
+}
+
 function unwrapCommand(stmt) {
   let out = stmt.trim();
   for (;;) {
-    const next = out
-      .replace(/^(\w+=\S+\s+)+/, '')
-      .replace(WRAPPERS, '')
-      // Options belonging to the wrapper just stripped, plus the bare
-      // duration `timeout`/`nice` take before the command word.
-      .replace(/^(-{1,2}[\w-]+(=\S+)?\s+)+/, '')
-      .replace(/^(\d+[smhd]?\s+)/, '');
+    const next = stripPrefixLayer(out);
     if (next === out) return out;
     out = next;
   }
+}
+
+// The env assignments the prefix layers expose, at EVERY layer — `FOO=1
+// cmd` and `timeout 5 env BAR=2 cmd` alike. They ride the prefix the NO_OP
+// checks cannot see, and APT_CONFIG among them turns the install into a
+// no-op with every other pin green.
+function envAssignmentsOf(stmt) {
+  const envs = [];
+  let out = stmt.trim();
+  for (;;) {
+    for (;;) {
+      const m = out.match(/^(\w+=\S+)\s+/);
+      if (!m) break;
+      envs.push(m[1]);
+      out = out.slice(m[0].length);
+    }
+    const next = stripPrefixLayer(out);
+    if (next === out) return envs;
+    out = next;
+  }
+}
+
+// The seconds `timeout` bounds this statement with — null when it carries
+// no `timeout` wrapper. Speaks the same grammar unwrapCommand strips:
+// options before the bare duration, attached (`--signal=KILL`) or as the
+// next token (`-k 9`), and the duration's optional s/m/h/d suffix — a
+// bare-integer pin reddened `timeout 140s` and `timeout -k 9 140`, both
+// bounded at exactly 140 s.
+const TIMEOUT_UNITS = { s: 1, m: 60, h: 3600, d: 86400 };
+function timeoutSeconds(stmt) {
+  const tokens = stmt.trim().split(/\s+/);
+  if (tokens[0] !== 'timeout') return null;
+  let i = 1;
+  while (i < tokens.length && tokens[i].startsWith('-')) {
+    // -k/--kill-after and -s/--signal consume the next token as their
+    // value; every other option stands alone.
+    i += /^--?(kill-after|signal|k|s)$/.test(tokens[i]) ? 2 : 1;
+  }
+  const m = tokens[i]?.match(/^(\d+(?:\.\d+)?)([smhd])?$/);
+  return m ? Number(m[1]) * (TIMEOUT_UNITS[m[2]] ?? 1) : null;
 }
 
 // The statement with quoted spans blanked out, for questions about SHELL
@@ -143,13 +197,10 @@ const SEPARATORS = /(\|\||&&|;|\||(?<!>)&(?!>))/;
 // walks and look for sudo anywhere along it — requiring it FIRST would red
 // a legitimately bounded install.
 function runsThroughSudo(stmt) {
-  let out = stmt.trim().replace(/^(\w+=\S+\s+)+/, '');
+  let out = stmt.trim();
   for (;;) {
     if (/^sudo\b/.test(out)) return true;
-    const next = out
-      .replace(WRAPPERS, '')
-      .replace(/^(-{1,2}[\w-]+(=\S+)?\s+)+/, '')
-      .replace(/^(\d+[smhd]?\s+)/, '');
+    const next = stripPrefixLayer(out);
     if (next === out) return false;
     out = next;
   }
@@ -242,6 +293,17 @@ function enablesErrexit(stmt) {
   );
 }
 
+// Whether one install argument names the EXACT package: apt's documented
+// `pkg=version` and `pkg:arch` qualifications install that package and
+// nothing else — rejecting them reddened a version-pinned install of the
+// very same package. Near-misses stay caught: `powerline-tmux=1.0` starts
+// with neither `tmux=` nor `tmux:`.
+function isPackageToken(token, pkg) {
+  return (
+    token === pkg || token.startsWith(`${pkg}=`) || token.startsWith(`${pkg}:`)
+  );
+}
+
 // Whether this argv-ish line installs the EXACT package, as a whole token:
 // `\btmux` matches across a hyphen, so `powerline-tmux` satisfied a \b
 // anchor while installing no tmux binary at all.
@@ -254,7 +316,9 @@ function installsPackage(line, pkg) {
     (stmt) =>
       isAptGet(stmt) &&
       /^apt-get\s+install\b/.test(unwrapCommand(stmt)) &&
-      unwrapCommand(stmt).split(/\s+/).includes(pkg),
+      unwrapCommand(stmt)
+        .split(/\s+/)
+        .some((t) => isPackageToken(t, pkg)),
   );
 }
 
@@ -271,6 +335,10 @@ const NO_OP_INSTALL_FLAGS = new Set([
   '--download-only',
   '-d',
   '--print-uris',
+  // The short forms of --help and --version: apt PRINTS and exits 0
+  // without installing anything, from any argument position.
+  '-h',
+  '-v',
 ]);
 
 // The same no-op modes reachable through apt's generic option override:
@@ -284,18 +352,53 @@ const NO_OP_INSTALL_OPTION =
 const NO_OP_INSTALL_LONG =
   /--(simulate|just-print|dry-run|recon|no-act|download-only|print-uris)(=(true|1|yes|on)|\b)|--(version|help)\b/i;
 
+// The same no-op modes hidden in apt's getopt short-flag clustering — the
+// shipped step's own `-qq` (= `-q -q`) proves apt parses clusters, so
+// `-qs` is `-q -s`: simulate, exit 0, nothing installed. apt-get install
+// uses the short letters s/d for nothing but simulate/download-only, and
+// package arguments never start with `-`.
+const NO_OP_INSTALL_CLUSTER = /^-\w*[sd]\w*$/;
+
+// The only env assignments that may qualify an apt call: DEBIAN_FRONTEND
+// and the locale variables change how apt prompts and prints, never WHAT
+// it installs. Anything else rides the prefix the NO_OP checks cannot see.
+const SAFE_APT_ENV = /^(DEBIAN_FRONTEND|LC_ALL|LANG)=/;
+
 // Statements that HARD-FAIL the step, so nothing may BE one. `exit` and
 // `false` were the known pair; `return` and `exec` are the same family
 // under the runner's `bash -e` — `return 0` errors outside a function and
 // `-e` makes that fatal before the first branch runs, `exec true` replaces
 // the shell — and either one leaves the required check green with nothing
-// installed and not even the else-branch warning emitted.
-const HARD_FAIL = /^(exit(\s+\d+)?|false|return(\s+\d+)?|exec(\s.*)?)$/;
+// installed and not even the else-branch warning emitted. The argument
+// does not save it: `exit $?` exits 0 at step top (the prior status) and
+// `exit foo` errors to a status continue-on-error absorbs — both silent.
+const HARD_FAIL = /^(exit(\s.*)?|false|return(\s.*)?|exec(\s.*)?)$/;
 
 // A branch condition that can be satisfied without the tools it claims to
 // test: a literal constant, or bash's null command `:` (status 0 always).
 function hasForcingTerm(line) {
   return /(^|[\s;&|(])(\|\|\s*(true|:)|&&\s*false)(\s|;|$)/.test(line);
+}
+
+// A constant as the condition's COMMAND — `elif true && …`, `if :; then`,
+// `if command -v tmux; true; then` (the condition list's status is the
+// LAST command's). Command position is the first word of each &&/||/;
+// segment, after env assignments and the condition keyword: matching any
+// whitespace position caught `sudo -n true` — the passwordless-sudo probe,
+// where `true` is an ARGUMENT of sudo — and reddened a semantics-
+// preserving rewording of the shipped elif. Split the QUOTE-BLANKED line,
+// like the rest of this file: a separator inside a quoted word is text.
+function hasConstantCommand(line) {
+  return outsideQuotes(line)
+    .split(/&&|\|\||;/)
+    .some((segment) =>
+      /^(true|false|:)(\s|$)/.test(
+        segment
+          .trim()
+          .replace(/^(if|elif|while|until)\s+/, '')
+          .replace(/^(\w+=\S+\s+)+/, ''),
+      ),
+    );
 }
 
 // The helpers above are the ORACLE every pin below reasons through: if
@@ -388,6 +491,17 @@ describe('the bash model these pins run on', () => {
     expect(
       installsPackage('sudo apt-get install -y powerline-tmux', 'tmux'),
     ).toBe(false);
+    // apt's qualification forms install the exact package; a near-miss
+    // keeps failing under them too.
+    expect(
+      installsPackage('sudo apt-get install -y tmux=1:3.5-1build1', 'tmux'),
+    ).toBe(true);
+    expect(installsPackage('sudo apt-get install -y tmux:amd64', 'tmux')).toBe(
+      true,
+    );
+    expect(
+      installsPackage('sudo apt-get install -y powerline-tmux=1.0', 'tmux'),
+    ).toBe(false);
     // Not from the guard's message, only from the install's arguments.
     expect(
       installsPackage(
@@ -410,6 +524,55 @@ describe('the bash model these pins run on', () => {
     // A `>` inside a message is text; the one outside is a redirection.
     expect(outsideQuotes("echo '::warning::a > b'")).not.toMatch(/>/);
     expect(outsideQuotes("echo '::warning::a' > /dev/null")).toMatch(/>/);
+  });
+
+  it('finds sudo at any wrapper layer, env assignments included', () => {
+    expect(runsThroughSudo('timeout 140 sudo -n apt-get update')).toBe(true);
+    expect(
+      runsThroughSudo('FOO=1 nice -n 10 BAR=2 sudo apt-get install -y tmux'),
+    ).toBe(true);
+    expect(
+      runsThroughSudo(
+        'timeout 140 DEBIAN_FRONTEND=noninteractive sudo -n apt-get install -y tmux',
+      ),
+    ).toBe(true);
+    expect(runsThroughSudo('timeout 140 apt-get update')).toBe(false);
+  });
+
+  it('reads a timeout bound in the wrapper grammar', () => {
+    expect(timeoutSeconds('timeout 140 apt-get update -qq')).toBe(140);
+    expect(timeoutSeconds('timeout 140s apt-get update -qq')).toBe(140);
+    expect(timeoutSeconds('timeout 2m apt-get update -qq')).toBe(120);
+    expect(timeoutSeconds('timeout -k 9 140 apt-get update -qq')).toBe(140);
+    expect(timeoutSeconds('timeout --signal=KILL 5 apt-get update')).toBe(5);
+    expect(timeoutSeconds('timeout 0 apt-get update')).toBe(0);
+    expect(timeoutSeconds('apt-get update')).toBe(null);
+  });
+
+  it('collects env assignments at every prefix layer', () => {
+    expect(
+      envAssignmentsOf(
+        'timeout 140 env APT_CONFIG=/tmp/sim.conf apt-get install -y tmux',
+      ),
+    ).toEqual(['APT_CONFIG=/tmp/sim.conf']);
+    expect(
+      envAssignmentsOf('DEBIAN_FRONTEND=noninteractive apt-get update'),
+    ).toEqual(['DEBIAN_FRONTEND=noninteractive']);
+    expect(envAssignmentsOf('timeout 140 apt-get update')).toEqual([]);
+  });
+
+  it('anchors a constant condition to command position', () => {
+    expect(hasConstantCommand('elif true && command -v apt-get; then')).toBe(
+      true,
+    );
+    expect(hasConstantCommand('if :; then')).toBe(true);
+    expect(hasConstantCommand('if command -v tmux; true; then')).toBe(true);
+    expect(
+      hasConstantCommand('elif sudo -n true && command -v apt-get; then'),
+    ).toBe(false);
+    expect(
+      hasConstantCommand('if command -v tmux > /dev/null 2>&1; then'),
+    ).toBe(false);
   });
 });
 
@@ -506,7 +669,9 @@ describe('ci.yml capture tooling', () => {
       for (const pkg of ['tmux', 'zip', 'unzip']) {
         expect(
           installStatements.some((s) =>
-            unwrapCommand(s).split(/\s+/).includes(pkg),
+            unwrapCommand(s)
+              .split(/\s+/)
+              .some((t) => isPackageToken(t, pkg)),
           ),
           `${branch.name} branch does not install ${pkg}`,
         ).toBe(true);
@@ -556,17 +721,40 @@ describe('ci.yml capture tooling', () => {
       // together stay under the step budget, or the guard never runs.
       let innerTotal = 0;
       for (const stmt of branch.statements.filter((s) => isAptGet(s))) {
-        const bound = stmt.trim().match(/^timeout\s+(\d+)\s/);
+        const bound = timeoutSeconds(
+          // See through the env prefix the env pin below allows:
+          // `DEBIAN_FRONTEND=noninteractive timeout 140 …` is bounded at
+          // 140 exactly like the bare form.
+          stmt.replace(/^(\w+=\S+\s+)+/, ''),
+        );
         expect(
           bound,
           `${branch.name} branch: ${stmt} carries no inner bound`,
         ).not.toBeNull();
-        innerTotal += Number(bound[1]);
+        // GNU `timeout 0` DISABLES the bound — the command runs unbounded.
+        expect(
+          bound,
+          `${branch.name} branch: ${stmt} bound is zero, which disables it`,
+        ).toBeGreaterThan(0);
+        innerTotal += bound;
       }
       expect(
         innerTotal,
         `${branch.name} branch: inner bounds outlast the step budget`,
       ).toBeLessThan(stepBudget);
+      // The env assignments the unwrap strips ride the prefix no NO_OP
+      // check can see: APT_CONFIG pointing at a simulate config turns the
+      // install into a no-op with every other pin green. Only variables
+      // that cannot change WHAT apt installs may ride there — at any
+      // layer, since `timeout 140 env VAR=x apt-get` buries them one in.
+      for (const stmt of branch.statements.filter((s) => isAptGet(s))) {
+        for (const env of envAssignmentsOf(stmt)) {
+          expect(
+            SAFE_APT_ENV.test(env),
+            `${branch.name} branch: ${env} qualifies ${stmt}`,
+          ).toBe(true);
+        }
+      }
     }
     // Nothing foreign may sit on the install's chain: only apt-get calls
     // and the guard's echo, so no prefixed command can short-circuit it.
@@ -585,14 +773,19 @@ describe('ci.yml capture tooling', () => {
     }
     // And it must really install: `-s`/`--download-only` and friends exit 0
     // having installed nothing, with no warning — the step stays green while
-    // the real-tmux suite skips inside the required check.
+    // the real-tmux suite skips inside the required check. On the install
+    // STATEMENT's own tokens, not the whole logical line: the guard's
+    // quoted message shares the line, and a rewording that mentions `-s`
+    // in it reddened this pin while the install itself stayed clean.
     for (const line of installLines) {
-      if (!/apt-get\s+install\b/.test(line)) continue;
-      for (const token of line.split(/\s+/)) {
-        expect(
-          NO_OP_INSTALL_FLAGS.has(token),
-          `${token} makes the install a no-op :: ${line}`,
-        ).toBe(false);
+      for (const stmt of statementsOf(line)) {
+        if (!/^apt-get\s+install\b/.test(stmt)) continue;
+        for (const token of stmt.split(/\s+/)) {
+          expect(
+            NO_OP_INSTALL_FLAGS.has(token) || NO_OP_INSTALL_CLUSTER.test(token),
+            `${token} makes the install a no-op :: ${line}`,
+          ).toBe(false);
+        }
       }
     }
   });
@@ -651,7 +844,10 @@ describe('ci.yml capture tooling', () => {
     // command `:` — `command -v tmux || :` is permanently true.
     for (const line of [ifLine, ...elifLines]) {
       expect(hasForcingTerm(line), `forced condition :: ${line}`).toBe(false);
-      expect(line, line).not.toMatch(/(^|\s)(true|false|:)\s*(&&|\|\||;)/);
+      expect(
+        hasConstantCommand(line),
+        `constant as the branch condition :: ${line}`,
+      ).toBe(false);
     }
     // The install branches are pinned WHOLE: a near-miss falsifier
     // (`elif false2 && …`, a command that does not exist and therefore
@@ -687,7 +883,7 @@ describe('ci.yml capture tooling', () => {
         line,
         `the already-installed branch never runs ${probe}`,
       ).toBeDefined();
-      expect(line, `${probe} is unguarded`).toMatch(/\|\|\s*echo\b/);
+      expect(line, `${probe} is unguarded`).toMatch(/\|\|\s*(?:\{\s*)?echo\b/);
     }
     // And the ELSE fallback exists: on a lane with no usable install path
     // — no apt-get at all, and no passwordless sudo when running non-root
@@ -715,7 +911,7 @@ describe('ci.yml capture tooling', () => {
       // one in the already-installed branch reds the check on a broken-
       // but-installed tmux.
       if (/\btmux -V\b/.test(line)) {
-        expect(line, line).toMatch(/tmux -V[^;&|]*\|\|\s*echo\b/);
+        expect(line, line).toMatch(/tmux -V[^;&|]*\|\|\s*(?:\{\s*)?echo\b/);
       }
       // NOTHING may hard-fail the step: no statement may BE one (including
       // a subshell-wrapped one, whose status is the branch's), and no `set`
@@ -735,6 +931,15 @@ describe('ci.yml capture tooling', () => {
         const at = line.indexOf('apt-get', from);
         if (at === -1) break;
         from = at + 1;
+        // An apt-get INSIDE the guard's quoted message is message text:
+        // outsideQuotes blanks quoted spans while preserving offsets, so a
+        // blanked span at this offset is a mention, not an invocation.
+        if (
+          outsideQuotes(line)
+            .slice(at, at + 7)
+            .trim() === ''
+        )
+          continue;
         const stmt =
           line
             .slice(0, at)
@@ -760,7 +965,9 @@ describe('ci.yml capture tooling', () => {
         const ops = new RegExp(SEPARATORS.source, 'g');
         for (let m = ops.exec(rest); m !== null; m = ops.exec(rest)) {
           if (m[1] === '&&') continue;
-          guarded = m[1] === '||' && /^\|\|\s*echo\b/.test(rest.slice(m.index));
+          guarded =
+            m[1] === '||' &&
+            /^\|\|\s*(?:\{\s*)?echo\b/.test(rest.slice(m.index));
           break;
         }
         expect(guarded, `apt-get reaches no \`|| echo\` guard :: ${line}`).toBe(
@@ -779,7 +986,7 @@ describe('ci.yml capture tooling', () => {
         )
       ) {
         expect(
-          /(^|\|)\s*echo\b[^|]*$/.test(outsideQuotes(line)),
+          /(^|\|)\s*(?:\{\s*)?echo\b[^|]*$/.test(outsideQuotes(line)),
           `annotation piped to a sink :: ${line}`,
         ).toBe(true);
       }
@@ -814,10 +1021,10 @@ describe('ci.yml capture tooling', () => {
   it('catches a hard-fail statement spliced into the step', () => {
     // The axis HARD_FAIL pins, end to end: splice one in as the first run
     // line and the oracle must surface it as a statement. Under the runner's
-    // `bash -e` either one kills the step before its first branch — a green
+    // `bash -e` any one kills the step before its first branch — a green
     // check with nothing installed and no ::warning:: anywhere.
     const run = steps[nameIndex(INSTALL)].run;
-    for (const splice of ['return 0', 'exec true']) {
+    for (const splice of ['return 0', 'exec true', 'exit $?']) {
       const stmts = logicalLinesOf(splice + '\n' + run).flatMap((l) =>
         statementsOf(l),
       );
