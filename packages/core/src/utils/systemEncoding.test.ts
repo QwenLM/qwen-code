@@ -382,6 +382,80 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe('windows-1252');
     });
 
+    it('returns system encoding for non-UTF-8 buffer on CP-866 Windows (before chardet)', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      // CP-866 encoded "Ошибка" — NOT valid UTF-8.
+      const cp866Buf = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
+
+      const result = getCachedEncodingForBuffer(cp866Buf);
+
+      // The system code page is authoritative and consulted before chardet,
+      // which would otherwise guess windows-1252 (wrong for CP-866).
+      expect(result).toBe('cp866');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
+
+    it('consults system encoding before chardet (chardet not called)', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 1252');
+      const buffer = Buffer.from([0x80, 0x81, 0x82]);
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('windows-1252');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
+
+    it('returns utf-8 for valid UTF-8 buffer regardless of CP-866 system encoding', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      const utf8Buf = Buffer.from('Привет', 'utf-8');
+
+      const result = getCachedEncodingForBuffer(utf8Buf);
+
+      expect(result).toBe('utf-8');
+    });
+
+    it('falls back to chardet when system encoding is utf-8 (chcp 65001)', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 65001');
+      mockedChardetDetect.mockReturnValue('ISO-8859-1');
+      const buffer = Buffer.from([0x80, 0x81, 0x82]);
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      // The system encoding is UTF-8, so the `!== 'utf-8'` guard skips it and
+      // chardet classifies the genuinely foreign data.
+      expect(result).toBe('iso-8859-1');
+      expect(mockedChardetDetect).toHaveBeenCalled();
+    });
+
+    it('uses chardet on Linux when system encoding is utf-8', () => {
+      mockedOsPlatform.mockReturnValue('linux');
+      process.env['LANG'] = 'en_US.UTF-8';
+      mockedChardetDetect.mockReturnValue('ISO-8859-1');
+      const buffer = Buffer.from([0x80, 0x81, 0x82]);
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('iso-8859-1');
+      expect(mockedChardetDetect).toHaveBeenCalled();
+    });
+
+    it('caches system encoding across calls (chcp not re-run)', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      // 'chcp' returns 866 on every call; detection must consult it only once.
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      const buffer1 = Buffer.from([0x8e, 0xe9, 0xa8]);
+      const buffer2 = Buffer.from([0xa1, 0xaa, 0xa0]);
+
+      getCachedEncodingForBuffer(buffer1);
+      getCachedEncodingForBuffer(buffer2);
+
+      expect(mockedExecSync).toHaveBeenCalledTimes(1);
+    });
+
     it('should prioritize UTF-8 detection over Windows system encoding', () => {
       mockedOsPlatform.mockReturnValue('win32');
       mockedExecSync.mockReturnValue('Active code page: 936'); // GBK
@@ -569,6 +643,19 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const text = '你好世界 Hello мир';
       const buf = Buffer.from(text, 'utf-8');
       expect(decodeProcessOutput(buf)).toBe(text);
+    });
+
+    it('decodes CP-866 buffer to exact Cyrillic text on CP-866 Windows', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      // "Каталог" in CP-866 — NOT valid UTF-8.
+      const cp866Buf = Buffer.from([0x8a, 0xa0, 0xe2, 0xa0, 0xab, 0xae, 0xa3]);
+
+      const decoded = decodeProcessOutput(cp866Buf);
+
+      // Exact-text oracle: the system code page (cp866) is authoritative, so
+      // detection must not fall to chardet's windows-1252 wrong guess.
+      expect(decoded).toBe('Каталог');
     });
 
     it('returns string input unchanged (setEncoding guard)', () => {

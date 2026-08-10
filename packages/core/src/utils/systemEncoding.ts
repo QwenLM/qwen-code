@@ -72,17 +72,25 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
     return 'utf-8';
   }
 
-  // Substantially invalid UTF-8 — try chardet, then system encoding.
-  const detected = detectEncodingFromBuffer(buffer);
-  if (detected) {
-    return detected;
-  }
-
+  // Substantially invalid UTF-8. On Windows, native CLI tools (cmd.exe,
+  // findstr, dir, icacls) emit text in the OEM code page returned by `chcp`
+  // (e.g. cp866 on Russian Windows). chardet's statistical detection is
+  // unreliable for the short, mostly-ASCII strings CLI output produces —
+  // measured 0/6 for cp866 (it returns windows-1252). The system code page
+  // is authoritative, so consult it first and only fall through to chardet
+  // when the system encoding is UTF-8 or unavailable: a non-UTF-8 buffer on
+  // a UTF-8 system is genuinely foreign data (legacy tool output, a file in
+  // a different encoding) that chardet should classify.
   if (cachedSystemEncoding === undefined) {
     cachedSystemEncoding = getSystemEncoding();
   }
-  if (cachedSystemEncoding) {
+  if (cachedSystemEncoding && cachedSystemEncoding !== 'utf-8') {
     return cachedSystemEncoding;
+  }
+
+  const detected = detectEncodingFromBuffer(buffer);
+  if (detected) {
+    return detected;
   }
 
   // Last resort
