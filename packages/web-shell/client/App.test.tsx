@@ -300,6 +300,7 @@ const {
       latestChatEditorProps: null as ChatEditorTestProps | null,
       latestToastHostElevated: false,
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
+      latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestMessageListProps: null as {
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
@@ -894,8 +895,12 @@ function mockComponent(path: string, exportName: string): void {
 vi.doMock('./components/StatusBar', async () => {
   const React = await import('react');
   return {
-    StatusBar: (props: { tasks?: DaemonSessionMonitorTaskStatus[] }) => {
+    StatusBar: (props: {
+      tasks?: DaemonSessionMonitorTaskStatus[];
+      onOpenTasks?: () => void;
+    }) => {
       testState.latestStatusBarTasks = props.tasks ?? [];
+      testState.latestStatusBarOnOpenTasks = props.onOpenTasks ?? null;
       return React.createElement('div');
     },
   };
@@ -4278,6 +4283,7 @@ beforeEach(() => {
   testState.latestChatEditorProps = null;
   testState.latestToastHostElevated = false;
   testState.latestStatusBarTasks = null;
+  testState.latestStatusBarOnOpenTasks = null;
   testState.latestMessageListProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
@@ -4604,7 +4610,7 @@ describe('App plan todos', () => {
     await flush();
 
     await act(async () => {
-      testState.latestTodoPanelOnOpen?.();
+      testState.latestStatusBarOnOpenTasks?.();
       await Promise.resolve();
     });
 
@@ -4615,6 +4621,26 @@ describe('App plan todos', () => {
         .querySelector('[data-testid="dialog-shell"]')
         ?.getAttribute('data-dialog-title'),
     ).toBe('Background tasks');
+  });
+
+  it('only binds the todo panel entry when session workflow is enabled', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+    ];
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelOnOpen).toBeNull();
+
+    testState.settings = [sessionWorkflowSetting()];
+    rerender();
+    await flush();
+
+    expect(testState.latestTodoPanelOnOpen).not.toBeNull();
   });
 });
 
