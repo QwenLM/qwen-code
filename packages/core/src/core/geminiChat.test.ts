@@ -7414,14 +7414,29 @@ describe('GeminiChat', async () => {
       }
     });
 
+    // Shared transport-cut fixtures. `socketCut` is the single producer of
+    // the retryable socket-failure shape the transport retry gate
+    // classifies, so a classified-shape change has one place to update
+    // (non-retryable shapes are constructed inline on purpose).
+    const socketCut = () =>
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+
+    /** Stream that yields `chunks` and then dies from a socket cut. */
+    function cutAfter(chunks: GenerateContentResponse[]) {
+      return (async function* () {
+        for (const chunk of chunks) yield chunk;
+        throw socketCut();
+      })();
+    }
+
     it('retries retryable transport stream errors and succeeds on a later attempt', async () => {
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
 
         vi.mocked(mockContentGenerator.generateContentStream)
           .mockResolvedValueOnce(
@@ -7475,11 +7490,7 @@ describe('GeminiChat', async () => {
     it('stops retrying retryable transport stream errors after the retry budget is exhausted', async () => {
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
 
         vi.mocked(
           mockContentGenerator.generateContentStream,
@@ -7541,6 +7552,74 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('attributes budget exhaustion correctly when thinking chunks flowed', async () => {
+      // Every attempt yields a thought chunk, so the attempt flags diverge:
+      // streamYieldedChunk is true, streamYieldedContentChunk stays false.
+      // The not-taken log must still say 'exhausted' — pinning the ternary
+      // to the content flag, not the any-chunk flag, for the dominant #7832
+      // shape: repeated socket cuts mid-thinking.
+      vi.useFakeTimers();
+      try {
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(() =>
+          Promise.resolve(
+            cutAfter([
+              {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Still reasoning…', thought: true }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse,
+            ]),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-retry-exhausted-after-thinking',
+        );
+        const events: StreamEvent[] = [];
+        // Same catch-and-assert drain as the zero-chunk exhaustion test:
+        // the rejection settles only after both retry delays elapse.
+        let caughtError: unknown;
+        const collecting = (async () => {
+          try {
+            for await (const event of stream) {
+              events.push(event);
+            }
+          } catch (error) {
+            caughtError = error;
+          }
+        })();
+
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await collecting;
+
+        expect(caughtError).toBeInstanceOf(Error);
+        expect((caughtError as Error).message).toContain('terminated');
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(3);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toHaveLength(2);
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry not taken',
+          expect.objectContaining({
+            retryDecision: 'exhausted',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('does not replay a transport stream error after yielding a chunk', async () => {
       // The replay path stays closed once output has reached callers —
       // re-sending would duplicate it. Recovery goes through the
@@ -7548,11 +7627,7 @@ describe('GeminiChat', async () => {
       // below), which is what the second attempt here is.
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
 
         vi.mocked(mockContentGenerator.generateContentStream)
           .mockResolvedValueOnce(
@@ -7628,11 +7703,7 @@ describe('GeminiChat', async () => {
       // duplicate anything the caller saw and must be allowed.
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
 
         vi.mocked(mockContentGenerator.generateContentStream)
           .mockResolvedValueOnce(
@@ -7716,11 +7787,7 @@ describe('GeminiChat', async () => {
       // leaking into the resumed request.
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
 
         vi.mocked(mockContentGenerator.generateContentStream)
           .mockResolvedValueOnce(
@@ -7784,25 +7851,6 @@ describe('GeminiChat', async () => {
       }
     });
 
-    // Shared transport-cut fixtures — used by the function-call cut test
-    // below and by the 'transport stream continuation' suite. A single
-    // producer for the error shape the transport retry gate classifies,
-    // so a change to the retryable-code handling has one place to update.
-    const socketCut = () =>
-      Object.assign(new TypeError('terminated'), {
-        cause: Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        }),
-      });
-
-    /** Stream that yields `chunks` and then dies from a socket cut. */
-    function cutAfter(chunks: GenerateContentResponse[]) {
-      return (async function* () {
-        for (const chunk of chunks) yield chunk;
-        throw socketCut();
-      })();
-    }
-
     it('attributes a blocked replay to delivered content when a function call was cut', async () => {
       // A cut after a functionCall part closes both recovery paths: the
       // delivered functionCall is non-thought output (a replay would
@@ -7862,11 +7910,7 @@ describe('GeminiChat', async () => {
     it('retries a transport stream error after yielding only tool preparation metadata', async () => {
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
         const preparationResponse = {
           candidates: [{ content: { parts: [] } }],
         } as unknown as GenerateContentResponse;
@@ -9463,11 +9507,7 @@ describe('GeminiChat', async () => {
     it('surfaces an abort fired during the transport retry delay without retrying again', async () => {
       vi.useFakeTimers();
       try {
-        const transportError = Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
+        const transportError = socketCut();
         const abortController = new AbortController();
 
         vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
