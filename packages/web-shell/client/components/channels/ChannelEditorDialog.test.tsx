@@ -42,6 +42,55 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'senderPolicy',
+      label: 'Sender Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'sessionScope',
+      label: 'Session Scope',
+      kind: 'enum',
+      required: true,
+      default: 'user',
+      options: [
+        { value: 'user', label: 'Per user and chat' },
+        { value: 'chat_thread', label: 'Per chat and thread' },
+        { value: 'single', label: 'One shared session' },
+      ],
+    },
+  ],
+};
+
 const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: DINGTALK.fields.map((field) =>
@@ -163,6 +212,29 @@ function inputByLabel(label: string): HTMLInputElement | null {
   return id ? document.querySelector<HTMLInputElement>(`#${id}`) : null;
 }
 
+function fieldByLabel(label: string): HTMLElement | null {
+  const labels = Array.from(document.querySelectorAll('label'));
+  const match = labels.find((item) => item.textContent?.includes(label));
+  return match?.htmlFor
+    ? document.querySelector<HTMLElement>(`#${match.htmlFor}`)
+    : null;
+}
+
+async function selectOption(label: string, optionLabel: string) {
+  const trigger = fieldByLabel(label);
+  expect(trigger).not.toBeNull();
+  await act(async () => {
+    trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  const option = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ).find((item) => item.textContent?.trim() === optionLabel);
+  expect(option).toBeDefined();
+  await act(async () => {
+    option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
 function setInputValue(input: HTMLInputElement, value: string) {
   Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -247,6 +319,63 @@ describe('ChannelEditorDialog', () => {
         type: 'dingtalk',
         clientId: 'ding-client-id',
         senderPolicy: 'pairing',
+      },
+      secrets: {
+        clientSecret: {
+          operation: 'replace',
+          value: 'ding-client-secret',
+        },
+      },
+    });
+  });
+
+  it('submits sender and group allowlists in their runtime config shapes', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, onSave });
+
+    const name = inputByLabel('Instance name');
+    const clientId = inputByLabel('Client ID');
+    const clientSecret = inputByLabel('Client Secret');
+    await act(async () => {
+      setInputValue(name!, 'release-bot');
+      setInputValue(clientId!, 'ding-client-id');
+      setInputValue(clientSecret!, 'ding-client-secret');
+    });
+
+    await selectOption('Direct message policy', 'Allowlist');
+    const allowedUsers = inputByLabel('Allowed user IDs');
+    expect(allowedUsers).not.toBeNull();
+    await act(async () => {
+      setInputValue(allowedUsers!, 'staff-a, staff-b');
+    });
+
+    await selectOption('Group policy', 'Allowlist');
+    const allowedGroups = inputByLabel('Allowed group IDs');
+    expect(allowedGroups).not.toBeNull();
+    await act(async () => {
+      setInputValue(allowedGroups!, 'group-a, group-b');
+    });
+
+    expect(document.body.textContent).toContain('Session');
+    await selectOption('Session scope', 'Per chat and thread');
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('release-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'dingtalk',
+        clientId: 'ding-client-id',
+        senderPolicy: 'allowlist',
+        allowedUsers: ['staff-a', 'staff-b'],
+        groupPolicy: 'allowlist',
+        sessionScope: 'chat_thread',
+        groups: { 'group-a': {}, 'group-b': {} },
       },
       secrets: {
         clientSecret: {

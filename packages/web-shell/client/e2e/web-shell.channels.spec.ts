@@ -47,6 +47,48 @@ test('creates and deletes a typed Channel configuration', async ({
             required: true,
             envResolvable: true,
           },
+          {
+            key: 'senderPolicy',
+            label: 'Sender Policy',
+            kind: 'enum',
+            required: true,
+            default: 'pairing',
+            options: [
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'allowedUsers',
+            label: 'Allowed Users',
+            kind: 'string-list',
+          },
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'sessionScope',
+            label: 'Session Scope',
+            kind: 'enum',
+            required: true,
+            default: 'user',
+            options: [
+              { value: 'user', label: 'Per user and chat' },
+              { value: 'chat_thread', label: 'Per chat and thread' },
+              { value: 'single', label: 'One shared session' },
+            ],
+          },
         ],
       },
       {
@@ -103,6 +145,8 @@ test('creates and deletes a typed Channel configuration', async ({
   await page.getByLabel('Instance name').fill('release-bot');
   await page.getByLabel('Client ID (AppKey)').fill('ding-client-id');
   await page.getByLabel('Client Secret (AppSecret)').fill('ding-client-secret');
+  await page.getByLabel('Session scope').click();
+  await page.getByRole('option', { name: 'Per chat and thread' }).click();
   await page.getByRole('button', { name: 'Save' }).click();
 
   await expect(
@@ -125,6 +169,8 @@ test('creates and deletes a typed Channel configuration', async ({
             type: 'dingtalk',
             clientId: 'ding-client-id',
             senderPolicy: 'pairing',
+            groupPolicy: 'disabled',
+            sessionScope: 'chat_thread',
           },
           secrets: {
             clientSecret: {
@@ -208,7 +254,49 @@ test('creates and deletes a typed Channel configuration', async ({
         body: { senderId: 'user-42' },
       }),
     ]);
-  await page.getByRole('button', { name: 'Close' }).click();
+
+  await page.getByLabel('Direct message policy').click();
+  await page.getByRole('option', { name: 'Allowlist' }).click();
+  await page.getByLabel('Allowed user IDs').fill('staff-a, staff-b');
+  await page.getByLabel('Group policy').click();
+  await page.getByRole('option', { name: 'Allowlist' }).click();
+  await page.getByLabel('Allowed group IDs').fill('group-a, group-b');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Edit DingTalk' }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'PUT' &&
+          request.path.endsWith('/channels/release-bot'),
+      ),
+    )
+    .toHaveLength(2);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' &&
+        request.path.endsWith('/channels/release-bot'),
+    )[1],
+  ).toEqual(
+    expect.objectContaining({
+      body: {
+        expectedRevision: '2',
+        config: {
+          type: 'dingtalk',
+          clientId: 'ding-client-id',
+          senderPolicy: 'allowlist',
+          allowedUsers: ['staff-a', 'staff-b'],
+          groupPolicy: 'allowlist',
+          sessionScope: 'chat_thread',
+          groups: { 'group-a': {}, 'group-b': {} },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      },
+    }),
+  );
 
   await page.getByRole('button', { name: 'Delete release-bot' }).click();
   const confirmation = page.getByRole('alertdialog');
@@ -224,7 +312,7 @@ test('creates and deletes a typed Channel configuration', async ({
     )
     .toEqual([
       expect.objectContaining({
-        body: { expectedRevision: '2' },
+        body: { expectedRevision: '3' },
       }),
     ]);
 });

@@ -2585,6 +2585,7 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
+  'channels.editor.section.session': 'Session',
   'channels.editor.section.access': 'Access policy',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
@@ -2664,6 +2665,35 @@ const EN: Messages = {
   'channels.editor.secret.placeholder': (v) => `Enter ${v?.label ?? 'secret'}`,
   'channels.editor.secret.clearHint':
     'This credential will be removed when you save.',
+  'channels.editor.field.shared.senderPolicy': 'Direct message policy',
+  'channels.editor.field.shared.senderPolicy.description':
+    'Choose who can start a direct conversation with this Channel.',
+  'channels.editor.field.shared.senderPolicy.option.pairing': 'Pairing',
+  'channels.editor.field.shared.senderPolicy.option.allowlist': 'Allowlist',
+  'channels.editor.field.shared.senderPolicy.option.open': 'Open',
+  'channels.editor.field.shared.allowedUsers': 'Allowed user IDs',
+  'channels.editor.field.shared.allowedUsers.description':
+    'Comma-separated stable user IDs that can access the Channel without pairing.',
+  'channels.editor.field.shared.groupPolicy': 'Group policy',
+  'channels.editor.field.shared.groupPolicy.description':
+    'Choose which group conversations can use this Channel.',
+  'channels.editor.field.shared.groupPolicy.option.disabled': 'Disabled',
+  'channels.editor.field.shared.groupPolicy.option.pairing': 'Pairing',
+  'channels.editor.field.shared.groupPolicy.option.allowlist': 'Allowlist',
+  'channels.editor.field.shared.groupPolicy.option.open': 'Open',
+  'channels.editor.field.shared.allowedGroupIds': 'Allowed group IDs',
+  'channels.editor.field.shared.allowedGroupIds.description':
+    'Comma-separated stable chat or repository IDs allowed to use this Channel.',
+  'channels.editor.field.shared.allowedGroupIds.placeholder':
+    'group-a, group-b',
+  'channels.editor.field.shared.sessionScope': 'Session scope',
+  'channels.editor.field.shared.sessionScope.description':
+    'Choose how conversations share persistent agent context.',
+  'channels.editor.field.shared.sessionScope.option.user': 'Per user and chat',
+  'channels.editor.field.shared.sessionScope.option.chat_thread':
+    'Per chat and thread',
+  'channels.editor.field.shared.sessionScope.option.single':
+    'One shared session',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -5258,6 +5288,7 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
+  'channels.editor.section.session': '会话策略',
   'channels.editor.section.access': '准入策略',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
@@ -5334,6 +5365,34 @@ const ZH: Messages = {
   'channels.editor.secret.clear': '清除',
   'channels.editor.secret.placeholder': (v) => `请输入${v?.label ?? '密钥'}`,
   'channels.editor.secret.clearHint': '保存后将移除此凭据。',
+  'channels.editor.field.shared.senderPolicy': '私聊策略',
+  'channels.editor.field.shared.senderPolicy.description':
+    '选择哪些用户可以通过私聊使用此频道。',
+  'channels.editor.field.shared.senderPolicy.option.pairing': '配对',
+  'channels.editor.field.shared.senderPolicy.option.allowlist': '白名单',
+  'channels.editor.field.shared.senderPolicy.option.open': '开放',
+  'channels.editor.field.shared.allowedUsers': '允许的用户 ID',
+  'channels.editor.field.shared.allowedUsers.description':
+    '用英文逗号分隔稳定用户 ID；这些用户无需配对即可访问频道。',
+  'channels.editor.field.shared.groupPolicy': '群聊策略',
+  'channels.editor.field.shared.groupPolicy.description':
+    '选择哪些群聊可以使用此频道。',
+  'channels.editor.field.shared.groupPolicy.option.disabled': '禁用',
+  'channels.editor.field.shared.groupPolicy.option.pairing': '配对',
+  'channels.editor.field.shared.groupPolicy.option.allowlist': '白名单',
+  'channels.editor.field.shared.groupPolicy.option.open': '开放',
+  'channels.editor.field.shared.allowedGroupIds': '允许的群聊 ID',
+  'channels.editor.field.shared.allowedGroupIds.description':
+    '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',
+  'channels.editor.field.shared.allowedGroupIds.placeholder':
+    'group-a, group-b',
+  'channels.editor.field.shared.sessionScope': '会话范围',
+  'channels.editor.field.shared.sessionScope.description':
+    '选择不同对话如何共享持久化的智能体上下文。',
+  'channels.editor.field.shared.sessionScope.option.user': '按用户和会话',
+  'channels.editor.field.shared.sessionScope.option.chat_thread':
+    '按会话和话题',
+  'channels.editor.field.shared.sessionScope.option.single': '整个频道共享',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',

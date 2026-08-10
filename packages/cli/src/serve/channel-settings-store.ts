@@ -144,7 +144,7 @@ function assertSharedField(key: string, value: unknown): boolean {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
-    sessionScope: new Set(['user', 'thread', 'single']),
+    sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
     blockStreaming: new Set(['on', 'off']),
   };
@@ -166,6 +166,32 @@ function assertSharedField(key: string, value: unknown): boolean {
       value.some((item) => typeof item !== 'string')
     ) {
       throw invalidConfig(`Channel field "${key}" must be a string array.`);
+    }
+    return true;
+  }
+  if (key === 'groups') {
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${key}" must be an object.`);
+    }
+    for (const [groupId, groupConfig] of Object.entries(value)) {
+      if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
+        throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
+      }
+      for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
+        const valid =
+          (nestedKey === 'requireMention' &&
+            typeof nestedValue === 'boolean') ||
+          (nestedKey === 'dispatchMode' &&
+            ['collect', 'steer', 'followup'].includes(String(nestedValue))) ||
+          (nestedKey === 'groupHistoryLimit' &&
+            typeof nestedValue === 'number' &&
+            Number.isFinite(nestedValue));
+        if (!valid) {
+          throw invalidConfig(
+            `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
+          );
+        }
+      }
     }
     return true;
   }

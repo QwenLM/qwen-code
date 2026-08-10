@@ -52,6 +52,7 @@ import { ChannelPairingRequests } from './ChannelPairingRequests';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  hasDescriptorGroupPolicy,
   hasDescriptorSenderPolicy,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
@@ -91,6 +92,20 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     action_prompt_template:
       'channels.editor.field.gitlab.action_prompt_template',
   },
+};
+
+const SHARED_ACCESS_FIELD_KEYS = new Set([
+  'senderPolicy',
+  'allowedUsers',
+  'groupPolicy',
+]);
+const SHARED_SESSION_FIELD_KEYS = new Set(['sessionScope']);
+
+const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
+  senderPolicy: 'channels.editor.field.shared.senderPolicy',
+  allowedUsers: 'channels.editor.field.shared.allowedUsers',
+  groupPolicy: 'channels.editor.field.shared.groupPolicy',
+  sessionScope: 'channels.editor.field.shared.sessionScope',
 };
 
 export interface ChannelEditorDialogProps {
@@ -198,6 +213,17 @@ export function ChannelEditorDialog({
   const [submitError, setSubmitError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const accessFields = descriptor.fields.filter((field) =>
+    SHARED_ACCESS_FIELD_KEYS.has(field.key),
+  );
+  const sessionFields = descriptor.fields.filter((field) =>
+    SHARED_SESSION_FIELD_KEYS.has(field.key),
+  );
+  const credentialFields = descriptor.fields.filter(
+    (field) =>
+      !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
+      !SHARED_SESSION_FIELD_KEYS.has(field.key),
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -207,18 +233,39 @@ export function ChannelEditorDialog({
   }, [descriptor, instance, open]);
 
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
-    const key = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    const key =
+      FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
+      SHARED_FIELD_LABEL_KEYS[field.key];
     return key ? t(key) : field.label;
   };
 
   const fieldDescription = (field: DaemonChannelConfigFieldDescriptor) => {
-    const labelKey = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    const labelKey =
+      FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
+      SHARED_FIELD_LABEL_KEYS[field.key];
     if (labelKey) {
       const descKey = `${labelKey}.description`;
       const translated = t(descKey);
       if (translated !== descKey) return translated;
     }
     return field.description;
+  };
+
+  const fieldOptionLabel = (
+    field: DaemonChannelConfigFieldDescriptor,
+    value: string,
+    fallback: string,
+  ) => {
+    const labelKeys = [
+      FIELD_LABEL_KEYS[descriptor.type]?.[field.key],
+      SHARED_FIELD_LABEL_KEYS[field.key],
+    ].filter((key): key is string => Boolean(key));
+    for (const labelKey of labelKeys) {
+      const optionKey = `${labelKey}.option.${value}`;
+      const translated = t(optionKey);
+      if (translated !== optionKey) return translated;
+    }
+    return fallback;
   };
 
   const validationMessage = (
@@ -443,7 +490,7 @@ export function ChannelEditorDialog({
             <SelectContent>
               {field.options?.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
-                  {option.label}
+                  {fieldOptionLabel(field, option.value, option.label)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -611,8 +658,17 @@ export function ChannelEditorDialog({
               <h3 className={styles.sectionHeading}>
                 {t('channels.editor.section.credentials')}
               </h3>
-              {descriptor.fields.map(renderField)}
+              {credentialFields.map(renderField)}
             </section>
+
+            {sessionFields.length > 0 ? (
+              <section className={styles.section}>
+                <h3 className={styles.sectionHeading}>
+                  {t('channels.editor.section.session')}
+                </h3>
+                {sessionFields.map(renderField)}
+              </section>
+            ) : null}
 
             {(() => {
               const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);
@@ -620,16 +676,27 @@ export function ChannelEditorDialog({
                 ? String(draft.values['senderPolicy'] ?? '')
                 : draft.senderPolicy;
               const showRadioGroup = !descriptorPolicy;
-              const descriptorGroupPolicy = descriptor.fields.some(
-                (field) => field.key === 'groupPolicy',
-              );
+              const descriptorGroupPolicy =
+                hasDescriptorGroupPolicy(descriptor);
               const effectiveGroupPolicy = descriptorGroupPolicy
                 ? String(draft.values['groupPolicy'] ?? '')
                 : String(instance?.config.groupPolicy ?? '');
               const showPairing =
                 effectivePolicy === 'pairing' ||
                 effectiveGroupPolicy === 'pairing';
-              if (!showRadioGroup && !showPairing) return null;
+              const visibleAccessFields = accessFields.filter(
+                (field) =>
+                  field.key !== 'allowedUsers' ||
+                  effectivePolicy === 'allowlist' ||
+                  effectivePolicy === 'pairing',
+              );
+              if (
+                !showRadioGroup &&
+                visibleAccessFields.length === 0 &&
+                !showPairing
+              ) {
+                return null;
+              }
               return (
                 <section className={styles.section}>
                   <h3 className={styles.sectionHeading}>
@@ -677,6 +744,30 @@ export function ChannelEditorDialog({
                         </p>
                       ) : null}
                     </>
+                  ) : null}
+                  {visibleAccessFields.map(renderField)}
+                  {effectiveGroupPolicy === 'allowlist' ? (
+                    <FieldShell
+                      id={`${formId}-allowedGroupIds`}
+                      label={t('channels.editor.field.shared.allowedGroupIds')}
+                      description={t(
+                        'channels.editor.field.shared.allowedGroupIds.description',
+                      )}
+                    >
+                      <Input
+                        id={`${formId}-allowedGroupIds`}
+                        value={draft.allowedGroupIds}
+                        placeholder={t(
+                          'channels.editor.field.shared.allowedGroupIds.placeholder',
+                        )}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            allowedGroupIds: event.target.value,
+                          }))
+                        }
+                      />
+                    </FieldShell>
                   ) : null}
                   {showPairing ? (
                     instance?.config.senderPolicy === 'pairing' ||

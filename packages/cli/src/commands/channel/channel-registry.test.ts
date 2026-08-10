@@ -654,6 +654,7 @@ describe('channel registry', () => {
     const plugin: ChannelPlugin = {
       channelType: 'valid-optional-required-object',
       displayName: 'valid-optional-required-object',
+      defaultSessionScope: 'thread',
       management: {
         fields: [
           {
@@ -686,6 +687,16 @@ describe('channel registry', () => {
       (candidate) => candidate.type === 'valid-optional-required-object',
     );
     expect(entry?.manageable).toBe(true);
+    expect(
+      entry?.fields.find((field) => field.key === 'sessionScope'),
+    ).toMatchObject({
+      default: 'chat_thread',
+      options: [
+        { value: 'user' },
+        { value: 'chat_thread' },
+        { value: 'single' },
+      ],
+    });
   });
 
   it('only marks the manually configurable built-in types as manageable', async () => {
@@ -718,8 +729,45 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
+      const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(
+        fields
+          ?.find((field) => field.key === 'senderPolicy')
+          ?.options?.map((option) => option.value),
+      ).toEqual(['pairing', 'allowlist', 'open']);
+      expect(fields).toContainEqual(
+        expect.objectContaining({
+          key: 'allowedUsers',
+          kind: 'string-list',
+        }),
+      );
+      expect(
+        fields
+          ?.find((field) => field.key === 'groupPolicy')
+          ?.options?.map((option) => option.value),
+      ).toEqual(['disabled', 'pairing', 'allowlist', 'open']);
+      expect(
+        fields?.find((field) => field.key === 'sessionScope'),
+      ).toMatchObject({
+        kind: 'enum',
+        required: true,
+        default: 'user',
+        options: [
+          { value: 'user' },
+          { value: 'chat_thread' },
+          { value: 'single' },
+        ],
+      });
+    }
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(
+        fields?.filter((field) => field.key === 'senderPolicy'),
+      ).toHaveLength(1);
+      expect(
+        fields?.filter((field) => field.key === 'groupPolicy'),
+      ).toHaveLength(1);
       expect(fields).toContainEqual(
         expect.objectContaining({
           key: 'groupPolicy',
@@ -745,6 +793,16 @@ describe('channel registry', () => {
           kind: 'string-list',
         }),
       );
+      expect(
+        fields?.filter((field) => field.key === 'sessionScope'),
+      ).toHaveLength(1);
+      expect(
+        fields?.find((field) => field.key === 'sessionScope'),
+      ).toMatchObject({
+        kind: 'enum',
+        required: true,
+        default: 'chat_thread',
+      });
     }
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,

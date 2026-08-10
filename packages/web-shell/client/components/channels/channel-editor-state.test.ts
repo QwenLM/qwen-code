@@ -43,6 +43,55 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'senderPolicy',
+      label: 'Sender Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'sessionScope',
+      label: 'Session Scope',
+      kind: 'enum',
+      required: true,
+      default: 'user',
+      options: [
+        { value: 'user', label: 'Per user and chat' },
+        { value: 'chat_thread', label: 'Per chat and thread' },
+        { value: 'single', label: 'One shared session' },
+      ],
+    },
+  ],
+};
+
 function configuredInstance(): DaemonChannelInstanceSnapshot {
   return {
     name: 'release-bot',
@@ -114,6 +163,94 @@ describe('Channel editor state', () => {
       secrets: {
         clientSecret: { operation: 'preserve' },
       },
+    });
+  });
+
+  it('serializes sender and group allowlists in the runtime config shapes', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS) as ReturnType<
+      typeof createChannelEditorDraft
+    > & { allowedGroupIds?: string };
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.values.senderPolicy = 'allowlist';
+    draft.values.allowedUsers = 'staff-a, staff-b';
+    draft.values.groupPolicy = 'allowlist';
+    draft.values.sessionScope = 'chat_thread';
+    draft.allowedGroupIds = 'group-a, group-b';
+    draft.secrets.clientSecret = {
+      operation: 'replace',
+      value: 'ding-client-secret',
+    };
+
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'revision-access')
+        .config,
+    ).toEqual({
+      type: 'dingtalk',
+      clientId: 'ding-client-id',
+      senderPolicy: 'allowlist',
+      allowedUsers: ['staff-a', 'staff-b'],
+      groupPolicy: 'allowlist',
+      sessionScope: 'chat_thread',
+      groups: {
+        'group-a': {},
+        'group-b': {},
+      },
+    });
+  });
+
+  it('migrates the deprecated thread scope to chat_thread when editing', () => {
+    const instance = configuredInstance();
+
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+
+    expect(draft.values.sessionScope).toBe('chat_thread');
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-session-scope',
+        instance,
+      ).config.sessionScope,
+    ).toBe('chat_thread');
+  });
+
+  it('changes group allowlist membership without losing wildcard or retained group settings', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        senderPolicy: 'allowlist',
+        allowedUsers: ['staff-a'],
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { requireMention: false },
+          'group-a': { dispatchMode: 'collect' },
+          'group-removed': { requireMention: true },
+        },
+      },
+    };
+    const draft = createChannelEditorDraft(
+      DINGTALK_WITH_ACCESS,
+      instance,
+    ) as ReturnType<typeof createChannelEditorDraft> & {
+      allowedGroupIds?: string;
+    };
+
+    expect(draft.allowedGroupIds).toBe('group-a, group-removed');
+    draft.allowedGroupIds = 'group-a, group-new';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-groups',
+        instance,
+      ).config.groups,
+    ).toEqual({
+      '*': { requireMention: false },
+      'group-a': { dispatchMode: 'collect' },
+      'group-new': {},
     });
   });
 

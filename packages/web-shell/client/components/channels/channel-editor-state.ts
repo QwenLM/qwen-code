@@ -24,6 +24,7 @@ export interface ChannelEditorDraft {
   values: Record<string, string | boolean>;
   secrets: Record<string, ChannelSecretDraft>;
   senderPolicy: ChannelSenderPolicy;
+  allowedGroupIds: string;
 }
 
 export type ChannelEditorValidationCode =
@@ -49,8 +50,22 @@ export function hasDescriptorSenderPolicy(
   return descriptor.fields.some((f) => f.key === 'senderPolicy');
 }
 
+export function hasDescriptorGroupPolicy(
+  descriptor: DaemonChannelTypeDescriptor,
+): boolean {
+  return descriptor.fields.some((f) => f.key === 'groupPolicy');
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function configuredGroupIds(instance?: DaemonChannelInstanceSnapshot): string {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return '';
+  return Object.keys(groups)
+    .filter((groupId) => groupId !== '*')
+    .join(', ');
 }
 
 function initialFieldValue(
@@ -74,8 +89,13 @@ function initialFieldValue(
     return '';
   }
   if (field.kind === 'enum') {
+    if (field.key === 'sessionScope' && value === 'thread') {
+      return 'chat_thread';
+    }
     if (typeof value === 'string' && value) return value;
-    return instance ? '' : (field.default ?? field.options?.[0]?.value ?? '');
+    return instance && field.key !== 'sessionScope'
+      ? ''
+      : (field.default ?? field.options?.[0]?.value ?? '');
   }
   return typeof value === 'string' ? value : '';
 }
@@ -109,6 +129,7 @@ export function createChannelEditorDraft(
         : instance
           ? ''
           : 'pairing',
+    allowedGroupIds: configuredGroupIds(instance),
   };
 }
 
@@ -244,6 +265,41 @@ function assignField(
   }
 }
 
+function splitList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function assignGroups(
+  config: Record<string, unknown>,
+  allowedGroupIds: string,
+  instance?: DaemonChannelInstanceSnapshot,
+): void {
+  const previous = instance?.config['groups'];
+  const previousGroups = isRecord(previous) ? previous : {};
+  const groups: Record<string, unknown> = {};
+  if (isRecord(previousGroups['*'])) {
+    groups['*'] = previousGroups['*'];
+  }
+  for (const groupId of splitList(allowedGroupIds)) {
+    if (groupId === '*') continue;
+    groups[groupId] = isRecord(previousGroups[groupId])
+      ? previousGroups[groupId]
+      : {};
+  }
+  if (Object.keys(groups).length > 0) {
+    config['groups'] = groups;
+  } else {
+    delete config['groups'];
+  }
+}
+
 export function buildChannelUpsertRequest(
   descriptor: DaemonChannelTypeDescriptor,
   draft: ChannelEditorDraft,
@@ -271,6 +327,9 @@ export function buildChannelUpsertRequest(
   }
   if (!hasDescriptorSenderPolicy(descriptor)) {
     config['senderPolicy'] = draft.senderPolicy;
+  }
+  if (hasDescriptorGroupPolicy(descriptor)) {
+    assignGroups(config, draft.allowedGroupIds, instance);
   }
   return { expectedRevision, config, secrets };
 }

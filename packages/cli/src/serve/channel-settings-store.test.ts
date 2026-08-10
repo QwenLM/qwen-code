@@ -398,6 +398,17 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
     },
     {
+      label: 'invalid group allowlist entry',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        groups: { 'group-1': { dispatchMode: 'invalid' } },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
       label: 'string-list with non-string items',
       config: {
         type: 'management-validation-test',
@@ -459,7 +470,12 @@ describe('WorkspaceChannelSettingsStore', () => {
         mode: 'safe',
         senderPolicy: 'open',
         groupPolicy: 'pairing',
+        sessionScope: 'chat_thread',
         allowedUsers: ['user-1'],
+        groups: {
+          '*': { requireMention: false },
+          'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+        },
         groupHistoryLimit: 25,
         blockStreaming: 'on',
         identity: { id: 'ops', displayName: 'Ops' },
@@ -481,7 +497,12 @@ describe('WorkspaceChannelSettingsStore', () => {
       mode: 'safe',
       senderPolicy: 'open',
       groupPolicy: 'pairing',
+      sessionScope: 'chat_thread',
       allowedUsers: ['user-1'],
+      groups: {
+        '*': { requireMention: false },
+        'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+      },
       groupHistoryLimit: 25,
       blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
