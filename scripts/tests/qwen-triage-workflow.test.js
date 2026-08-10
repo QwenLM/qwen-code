@@ -5949,6 +5949,23 @@ describe('triage job budget', () => {
       out: 'triage_timeout_minutes=600',
       warned: true,
     });
+    // The guard counts SIGNIFICANT digits: leading zeros are decoration,
+    // so a padded 60 passes through untouched instead of tripping the
+    // ceiling branch, and an all-zero value is still 0 → floor
+    expect(runBudget('000000000000000000060')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    expect(runBudget('0'.repeat(22))).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: true,
+    });
+    // ...and padding must not defeat the wrap guard either: 19
+    // significant digits still clamp to the ceiling
+    expect(runBudget('000' + '9'.repeat(19))).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
     // every malformed shape the review enumerated falls back and NAMES the
     // variable, so the operator's run log points at the knob, not fromJSON
     for (const bad of ['60 minutes', '1h', '6O', '60.5', '"60"']) {
