@@ -246,7 +246,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       writeFileSync(join(dir, 'cap.png'), 'old run');
       writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
       writeFileSync(join(dir, 'cap.holder-ready'), '');
-      await withStdio(() =>
+      const { stderr } = await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
           cwd: undefined,
@@ -260,6 +260,11 @@ describe('capture-tui without tmux (probe seam)', () => {
         } as never),
       );
       expect(process.exitCode).toBe(3);
+      // The REASON, so the gate this pins is the marker compile and not
+      // whichever gate happens to refuse first: without it, deleting or
+      // hoisting that gate leaves the run refusing elsewhere — still exit
+      // 3, still cleared, still green.
+      expect(stderr).toContain('not a valid regex');
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
@@ -573,7 +578,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(process.platform === 'win32')(
     'refuses an unwritable MANIFEST path too, not just the .ans',
     async () => {
       // The probe loop covers both paths; dropping manifestPath from it
@@ -632,6 +637,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         '--cwd',
       ],
       ['settle bound', { settleMs: -1 }, '--settle-ms'],
+      ['timeout bound', { timeoutMs: -1 }, '--timeout-ms'],
     ] as ReadonlyArray<readonly [string, Record<string, unknown>, string]>) {
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-boundstale-'));
       try {
@@ -700,8 +706,18 @@ describe('capture-tui without tmux (probe seam)', () => {
       }
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-fifo-'));
       try {
-        spawnSync('mkfifo', [join(dir, 'cap.json')]);
-        if (!existsSync(join(dir, 'cap.json'))) return; // no mkfifo here
+        const mkfifo = spawnSync('mkfifo', [join(dir, 'cap.json')]);
+        // A bare `return` here reported PASSED on a lane without mkfifo —
+        // spawnSync does not throw for an absent binary, it hands back an
+        // ENOENT error object — so the only pin against the blocking
+        // manifest read went green while testing nothing. Fail loudly
+        // instead: this suite's lanes all have it, and a lane that does not
+        // should say so rather than quietly drop the coverage.
+        expect(
+          mkfifo.error ?? null,
+          'mkfifo is unavailable — this pin cannot run here',
+        ).toBeNull();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
         const driver = join(dir, 'driver-fifo.mts');
         writeFileSync(
           driver,
@@ -792,15 +808,16 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(process.platform === 'win32')(
     'refuses a READ-ONLY file at an artifact path before the capture window',
     async () => {
       // The sibling write probe proves the DIRECTORY writable, not the
       // artifact paths. A mode-0444 (or foreign-owned, the shape a shared
       // CI stage leaves) .ans passed every gate and refused only at the
       // final write — after the whole settle/timeout window and a render,
-      // with the pane text produced and thrown away. Skipped as root, who
-      // writes through the mode bits.
+      // with the pane text produced and thrown away. Not skipped as root: the gate
+      // is occupancy, not permission — a pure lstat — so the mode bits
+      // never enter it and a root lane must exercise it like any other.
       probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-roartifact-'));
       try {
@@ -3107,7 +3124,12 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // never blocks — so this fake discriminates by SHAPE: fd 0 must be the
     // /dev/null character device, or it fails the way real freeze does.
     await withFakeFreeze(
-      '#!/bin/sh\nif [ ! -c /dev/stdin ]; then echo "ERROR No input" >&2; exit 1; fi\nprintf x > "$5"\nexit 0\n',
+      // The property is stdin being /dev/null SPECIFICALLY, not "some
+      // character device": measured against freeze v0.2.2, a pty is a
+      // character device and hangs it indefinitely, while a regular file
+      // sends it into file mode — both would have satisfied a `-c` test
+      // while breaking the render. Compare the device itself.
+      '#!/bin/sh\nif [ ! -c /dev/stdin ] || [ -t 0 ]; then echo "ERROR No input" >&2; exit 1; fi\nprintf x > "$5"\nexit 0\n',
       () => run(),
     );
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
