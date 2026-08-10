@@ -374,7 +374,18 @@ export function budgetGapDisclosures(finalText: string): string[] {
     }
     raw = stripWrappers(raw.trim()).trim();
     const normalized = raw.replace(/[.!…,;:\s]+$/, '').trim();
-    if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(normalized)) {
+    // A placeholder does not stop being one inside parentheses: #8388's
+    // posted body disclosed `(none — all planned checks completed)` as a
+    // gap because the leading `(` defeated the leading-token match.
+    const unparenthesized =
+      normalized.startsWith('(') && normalized.endsWith(')')
+        ? normalized.slice(1, -1).trim()
+        : normalized;
+    if (
+      normalized.length === 0 ||
+      PLACEHOLDER_GAP_RE.test(normalized) ||
+      PLACEHOLDER_GAP_RE.test(unparenthesized)
+    ) {
       continue;
     }
     const key = normalized.toLowerCase();

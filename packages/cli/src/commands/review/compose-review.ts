@@ -239,6 +239,115 @@ function withMarker(line: string): string {
   return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
 
+/** The plan's PR identity, when it names one — the base for comment anchors. */
+interface PrIdentity {
+  ownerRepo: string;
+  prNumber: string;
+}
+
+function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
+  if (!planPath) return null;
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      ownerRepo?: unknown;
+      prNumber?: unknown;
+    };
+    const ownerRepo =
+      typeof plan?.ownerRepo === 'string' &&
+      /^[\w.-]+\/[\w.-]+$/.test(plan.ownerRepo)
+        ? plan.ownerRepo
+        : null;
+    const prNumber = isPositivePrNumber(plan?.prNumber)
+      ? String(plan.prNumber)
+      : null;
+    return ownerRepo && prNumber ? { ownerRepo, prNumber } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `comment 3733696855` in a model-written unresolved entry is a bare number
+ * the PR page cannot navigate; with the plan's PR identity it becomes the
+ * anchor GitHub already serves — review-thread comments under
+ * `#discussion_r`, issue-level ones under `#issuecomment`. An entry that
+ * already carries a markdown link is left alone: the model linked it itself,
+ * and rewriting inside its link text would corrupt it.
+ */
+function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
+  if (!pr || text.includes('](')) return text;
+  const base = `https://github.com/${pr.ownerRepo}/pull/${pr.prNumber}`;
+  return text.replace(
+    /\b(issue-level )?comment (\d{6,})\b/g,
+    (_m, issueLevel: string | undefined, id: string) =>
+      issueLevel
+        ? `[issue-level comment ${id}](${base}#issuecomment-${id})`
+        : `[comment ${id}](${base}#discussion_r${id})`,
+  );
+}
+
+/**
+ * The unresolved-existing-Critical block, as a Markdown list instead of a
+ * space-joined paragraph: #8388's posted body ran 31 of these together in
+ * one unreadable wall. Entries sharing the exact reason after their first
+ * ` — ` collapse into one marked group that states the reason once and
+ * lists the subjects — the same repetition-killing move the not-reviewed
+ * sentences already make. Nothing is dropped: every subject and every
+ * distinct reason still renders, because erasing one is how a review
+ * approves the very thing it is asking about. The Chinese half carries a
+ * count and a pointer instead of duplicating the untranslatable English
+ * list — on #8388 that duplication alone doubled the body.
+ */
+function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+  const parsed = cannotTell.map((raw) => {
+    const line = linkifyCommentRefs(
+      raw.startsWith(CRITICAL_PREFIX)
+        ? raw.slice(CRITICAL_PREFIX.length).trim()
+        : raw,
+      pr,
+    );
+    const idx = line.indexOf(' — ');
+    return idx === -1
+      ? { head: line, reason: null }
+      : { head: line.slice(0, idx), reason: line.slice(idx + 3) };
+  });
+  // Grouped on the exact reason text, in first-appearance order. A reasonless
+  // entry stays its own item — there is nothing to share.
+  interface Group {
+    reason: string | null;
+    heads: string[];
+  }
+  const groups: Group[] = [];
+  const byReason = new Map<string, Group>();
+  for (const p of parsed) {
+    const existing = p.reason === null ? undefined : byReason.get(p.reason);
+    if (existing) {
+      existing.heads.push(p.head);
+      continue;
+    }
+    const group: Group = { reason: p.reason, heads: [p.head] };
+    groups.push(group);
+    if (p.reason !== null) byReason.set(p.reason, group);
+  }
+  const lines: string[] = [];
+  for (const { reason, heads } of groups) {
+    if (heads.length === 1) {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+      );
+    } else {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
+        ...heads.map((head) => `  - ${head}`),
+      );
+    }
+  }
+  return {
+    en: `Unresolved, please confirm:\n\n${lines.join('\n')}`,
+    zh: `未决，请确认：共 ${cannotTell.length} 条（原文未翻译，列表见上方英文部分）。`,
+  };
+}
+
 // The input arrives as JSON a model wrote, and the skill tells it to omit
 // fields that do not apply — so absence is normal and means zero/empty. What
 // must never pass is a PRESENT field of the wrong shape: `undefined + 1` is
@@ -1195,14 +1304,7 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [
-          {
-            en: `Unresolved, please confirm: ${cannotTell
-              .map((l) => withMarker(l))
-              .join(' ')}`,
-            zh: `未决，请确认：${cannotTell.map((l) => withMarker(l)).join(' ')}`,
-          },
-        ];
+      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
@@ -1428,6 +1530,13 @@ function composeReviewBody(
     });
   }
 
+  // Clauses 1–4 are the verdict: short sentences that read as one opener
+  // paragraph. Everything after — unresolved Criticals, disclosures, body
+  // blockers — gets a paragraph of its own: #8388's posted body joined all
+  // of it with spaces, 31 unresolved entries and seven disclosures in a
+  // single unreadable wall.
+  const openerCount = clauses.length;
+
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
 
@@ -1458,9 +1567,21 @@ function composeReviewBody(
     clauses.push(...bodyCriticalBlock);
   }
 
+  const openerParts = clauses.slice(0, openerCount);
+  const paragraphs: Bi[] = [
+    ...(openerParts.length > 0
+      ? [
+          {
+            en: openerParts.map((c) => c.en).join(' '),
+            zh: openerParts.map((c) => c.zh).join(' '),
+          },
+        ]
+      : []),
+    ...clauses.slice(openerCount),
+  ];
   return {
     event,
-    body: render(clauses, ' '),
+    body: render(paragraphs, '\n\n'),
     baseEvent,
     cappedBy,
     downgraded,

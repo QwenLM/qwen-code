@@ -2913,7 +2913,7 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(r.body).toContain('没有记录表明它的 brief 到达过任何 agent');
   });
 
-  it('quotes untranslatable caller text as-is in both halves', () => {
+  it('keeps the untranslatable unresolved list in the English half; the Chinese half points at it', () => {
     const r = composeReview({
       suggestionsInline: 1,
       cannotTellCriticals: ['old blocker at a.ts:1 — still reachable?'],
@@ -2922,11 +2922,16 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
       modelId: MODEL,
     });
     expect(r.body).toContain('Unresolved, please confirm:');
-    expect(r.body).toContain('未决，请确认：');
-    // The caller's text, once per half.
+    // The caller's text once, above the fold — the fold carries a count and
+    // a pointer, not a duplicate of the English list (#8388's fold doubled
+    // the body copying 31 untranslated entries verbatim).
     expect(
       r.body.match(/old blocker at a\.ts:1 — still reachable\?/g) ?? [],
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(r.body).toContain('未决，请确认：共 1 条');
+    expect(r.body.indexOf('old blocker at a.ts:1')).toBeLessThan(
+      r.body.indexOf('<details>'),
+    );
   });
 });
 
@@ -4036,5 +4041,128 @@ describe('composeReview — the findings file tag check', () => {
     expect(() =>
       composeReview(base({ findingsPath: 42 as unknown as string })),
     ).toThrow(/findingsPath must be a non-empty string/);
+  });
+});
+
+/**
+ * #8388's posted body ran 31 unresolved existing Criticals and seven
+ * disclosures together in one space-joined paragraph, each entry restating
+ * the same reason, every comment id a bare number, and the Chinese fold
+ * duplicating the whole untranslated wall. These pin the readable shape:
+ * paragraphs, a Markdown list, one reason per group, anchored ids.
+ */
+describe('composeReview — unresolved-Critical rendering (#8388 readability)', () => {
+  it('renders the cannot-tell entries as a Markdown list in its own paragraph', () => {
+    const r = composeReview(
+      base({
+        suggestionsInline: 1,
+        cannotTellCriticals: [
+          'a.ts:1 — full text unfetchable',
+          'b.ts:2 — quarantined by the harness',
+        ],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    // Opener sentences stay one paragraph; the block opens its own.
+    expect(r.body).toContain(
+      'Reviewed. Suggestions are inline.\n\nUnresolved, please confirm:\n\n',
+    );
+    expect(r.body).toContain(
+      '\n- **[Critical]** a.ts:1 — full text unfetchable',
+    );
+    expect(r.body).toContain(
+      '\n- **[Critical]** b.ts:2 — quarantined by the harness',
+    );
+  });
+
+  it('collapses entries sharing the exact reason into one group that says it once', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          'comment one (a.ts) — body truncated; status undetermined',
+          'unique.ts:9 — full text unfetchable',
+          'comment two (b.ts) — body truncated; status undetermined',
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** 2 entries — body truncated; status undetermined:\n' +
+        '  - comment one (a.ts)\n' +
+        '  - comment two (b.ts)',
+    );
+    // The shared reason renders once, not per entry …
+    expect(r.body.match(/body truncated; status undetermined/g)).toHaveLength(
+      1,
+    );
+    // … and the odd one out keeps its own full line, nothing dropped.
+    expect(r.body).toContain(
+      '- **[Critical]** unique.ts:9 — full text unfetchable',
+    );
+  });
+
+  it('links bare comment ids to their GitHub anchors when the plan names the PR', () => {
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '8388';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({
+      cannotTellCriticals: [
+        'comment 3733696855 (capture-tui.test.ts, R10-1) — body truncated',
+        'issue-level comment 5199834809 (author review) — body truncated',
+      ],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+    expect(r.body).toContain(
+      '[issue-level comment 5199834809](https://github.com/QwenLM/qwen-code/pull/8388#issuecomment-5199834809)',
+    );
+  });
+
+  it('leaves comment ids bare when the plan names no PR', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r');
+  });
+
+  it('a budget gap that says "(none …)" is completion, not a gap — dropped', () => {
+    // #8388's body: `Not explored to full depth …: chunk 2: (none — all
+    // planned checks completed)` — the agent reported finishing, and the
+    // disclosure contradicted it.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: (none — all planned checks completed)',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).not.toContain('Not explored to full depth');
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No issues found. LGTM! ✅');
   });
 });

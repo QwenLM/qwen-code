@@ -291,6 +291,8 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: none',
       'Budget gap: None.',
       'Budget gap: None (all checks completed)',
+      'Budget gap: (none — all planned checks completed)',
+      'Budget gap: (None.)',
       'Budget gap: N/A - stayed under budget',
       'Budget gap: nothing skipped',
       'Budget gap: no gaps',
