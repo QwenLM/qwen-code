@@ -2481,7 +2481,7 @@ curl -X DELETE http://127.0.0.1:4170/session/$SID
 # → 204 No Content
 ```
 
-Idempotent: returns `404` for unknown sessions (same `SessionNotFoundError` shape as other routes).
+Idempotent: returns `404` for unknown sessions. The error envelope uses `code: "session_not_found"`; a concurrent close may return `code: "session_closing"`, which clients may treat as the same successful terminal state for this route.
 
 > **`session_closed` event.** SSE subscribers receive a terminal `session_closed` event with `{ sessionId, reason: 'client_close', closedBy?: '<clientId>' }` before the stream ends. SDK reducers treat this identically to `session_died` (sets `alive: false`, clears `pendingPermissions`).
 
