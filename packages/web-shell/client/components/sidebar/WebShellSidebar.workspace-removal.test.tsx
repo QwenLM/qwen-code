@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
@@ -24,6 +25,7 @@ const {
   exportSession,
   exportArchivedSession,
   sessionActions,
+  invalidateSessionCatalog,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
@@ -63,6 +65,7 @@ const {
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
+  const invalidateSessionCatalog = vi.fn();
   return {
     connection: {
       status: 'connected',
@@ -113,6 +116,7 @@ const {
     exportSession,
     exportArchivedSession,
     sessionActions,
+    invalidateSessionCatalog,
   };
 });
 
@@ -123,6 +127,130 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspaceActions: () => workspaceActions,
   useSessions,
 }));
+
+vi.mock('../../session-catalog/session-catalog-hooks', () => {
+  const catalogListeners = new Set<(workspaceCwd: string) => void>();
+  return {
+    useWebShellSessions: (options?: {
+      enabled?: boolean;
+      archiveState?: string;
+      sourceType?: string;
+    }) => {
+      const state = useSessions(options);
+      if (options?.enabled === false) {
+        return { ...state, sessions: [], data: undefined };
+      }
+      return {
+        ...state,
+        data: state.sessions,
+        catalogQuery: {
+          routeKind: 'legacy',
+          workspaceCwd: connection.workspaceCwd,
+          options,
+        },
+      };
+    },
+    useSessionCatalogController: () => ({
+      invalidateWorkspace: (workspaceCwd: string) => {
+        invalidateSessionCatalog(workspaceCwd);
+        for (const listener of catalogListeners) listener(workspaceCwd);
+      },
+      renamed: (workspaceCwd: string) => {
+        for (const listener of catalogListeners) listener(workspaceCwd);
+      },
+    }),
+    useSessionCatalogPolling: () => undefined,
+    useSessionCatalogQuery: (
+      client: typeof workspace.client,
+      query: { workspaceCwd: string; options?: Record<string, unknown> },
+      options: { autoLoad?: boolean; enabled?: boolean },
+    ) => {
+      const [snapshot, setSnapshot] = React.useState({
+        sessions: [] as DaemonSessionSummary[],
+        loading: false,
+        error: undefined as Error | undefined,
+      });
+      const reload = React.useCallback(async () => {
+        const sessions = await client
+          .workspaceByCwd(query.workspaceCwd)
+          .listWorkspaceSessions(query.options);
+        setSnapshot({ sessions, loading: false, error: undefined });
+        return { sessions };
+      }, [client, query.options, query.workspaceCwd]);
+      React.useEffect(() => {
+        if (options.enabled === false || !options.autoLoad) return;
+        void reload().catch((error: Error) => {
+          setSnapshot((current) => ({ ...current, loading: false, error }));
+        });
+      }, [options.autoLoad, options.enabled, reload]);
+      React.useEffect(() => {
+        if (options.enabled === false) return;
+        const listener = (workspaceCwd: string) => {
+          if (workspaceCwd === query.workspaceCwd) void reload();
+        };
+        catalogListeners.add(listener);
+        return () => catalogListeners.delete(listener);
+      }, [options.enabled, query.workspaceCwd, reload]);
+      return { ...snapshot, reload };
+    },
+    useSessionCatalogQueries: (
+      client: typeof workspace.client,
+      queries: Array<{
+        workspaceCwd: string;
+        options?: Record<string, unknown>;
+      }>,
+      options: { autoLoad?: boolean; enabled?: boolean },
+    ) => {
+      const [snapshots, setSnapshots] = React.useState<
+        Array<{
+          page?: { sessions: DaemonSessionSummary[] };
+          loading: boolean;
+          stale: boolean;
+          error?: Error;
+        }>
+      >([]);
+      const reload = React.useCallback(async () => {
+        if (options.enabled === false || !options.autoLoad) {
+          setSnapshots([]);
+          return;
+        }
+        setSnapshots(queries.map(() => ({ loading: true, stale: true })));
+        const next = await Promise.all(
+          queries.map(async (query) => {
+            try {
+              const sessions = await client
+                .workspaceByCwd(query.workspaceCwd)
+                .listWorkspaceSessions(query.options);
+              return { page: { sessions }, loading: false, stale: false };
+            } catch (error) {
+              return {
+                loading: false,
+                stale: true,
+                error:
+                  error instanceof Error ? error : new Error(String(error)),
+              };
+            }
+          }),
+        );
+        setSnapshots(next);
+      }, [client, options.autoLoad, options.enabled, queries]);
+      React.useEffect(() => {
+        void reload();
+      }, [reload]);
+      React.useEffect(() => {
+        if (options.enabled === false) return;
+        const listener = (workspaceCwd: string) => {
+          if (queries.some((query) => query.workspaceCwd === workspaceCwd)) {
+            void reload();
+          }
+        };
+        catalogListeners.add(listener);
+        return () => catalogListeners.delete(listener);
+      }, [options.enabled, queries, reload]);
+      return snapshots;
+    },
+  };
+});
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
@@ -473,6 +601,7 @@ beforeEach(() => {
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
   workspaceActions.addWorkspace.mockReset();
   workspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
+  invalidateSessionCatalog.mockReset();
   active.reload.mockReset();
   active.reload.mockResolvedValue(undefined);
   active.deleteSession.mockReset();
@@ -2312,6 +2441,7 @@ describe('WebShellSidebar workspace removal', () => {
       force: false,
     });
     expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+    expect(invalidateSessionCatalog).toHaveBeenCalledWith('/tmp/danger');
     expect(workspace.refreshCapabilities).toHaveBeenCalled();
   });
 
@@ -2377,7 +2507,7 @@ describe('WebShellSidebar workspace removal', () => {
 });
 
 describe('WebShellSidebar non-primary archive', () => {
-  it('archives a trusted secondary session and reconciles every catalog', async () => {
+  it('archives a trusted secondary session and reconciles its workspace catalogs', async () => {
     useWorkspaceSessionCatalog(async (cwd, options) => {
       if (cwd === '/tmp/other' && options?.archiveState === 'active') {
         return [
@@ -2419,8 +2549,8 @@ describe('WebShellSidebar non-primary archive', () => {
 
     expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
     expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-active']);
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
     expect(
       listWorkspaceSessions.mock.calls.filter(
         ([cwd, options]) =>
@@ -2492,8 +2622,8 @@ describe('WebShellSidebar non-primary archive', () => {
       expect.objectContaining({ message: 'scheduled task restore failed' }),
       'Failed to restore session',
     );
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
     expect(
       listWorkspaceSessions.mock.calls.filter(
         ([cwd, options]) =>
@@ -2541,8 +2671,8 @@ describe('WebShellSidebar non-primary archive', () => {
       expect.objectContaining({ message: 'agent close failed' }),
       'Failed to archive session',
     );
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
     expect(
       listWorkspaceSessions.mock.calls.filter(
         ([cwd, options]) =>
@@ -2574,7 +2704,7 @@ describe('WebShellSidebar non-primary archive', () => {
     );
 
     renderSidebar();
-    await expandWorkspace('project');
+    await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     expect(archiveButtonFor('Primary active')).toBeDefined();
     expect(archiveButtonFor('Secondary active')).toBeUndefined();
@@ -2786,7 +2916,7 @@ describe('WebShellSidebar non-primary archive', () => {
     });
 
     renderSidebar({ onError });
-    await expandWorkspace('project');
+    await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     const primaryArchiveButton = archiveButtonFor('Legacy primary shared');
     const archiveButton = archiveButtonFor('Secondary shared');
@@ -2802,8 +2932,8 @@ describe('WebShellSidebar non-primary archive', () => {
 
     expect(archiveSessionsData).toHaveBeenCalledWith(['shared-session']);
     expect(onError).not.toHaveBeenCalled();
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
   });
 
   it('keeps equal-id archive busy state scoped to its workspace', async () => {
@@ -2836,7 +2966,7 @@ describe('WebShellSidebar non-primary archive', () => {
     );
 
     renderSidebar();
-    await expandWorkspace('project');
+    await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     const secondaryArchive = archiveButtonFor('Secondary pending');
     expect(secondaryArchive).toBeDefined();

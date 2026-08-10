@@ -28,6 +28,8 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
+import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
+import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 
 function cx(...classes: Array<string | false | undefined>): string {
   return classes.filter(Boolean).join(' ');
@@ -132,9 +134,7 @@ export function WorkspaceSection({
   onOpenGitDiff,
   onOpenCommit,
 }: WorkspaceSectionProps) {
-  const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
-  const [loadError, setLoadError] = useState(false);
   const [internalExpanded, setInternalExpanded] = useState(false);
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
     readWorkspaceCollapsedGroupIds(workspace.id),
@@ -164,36 +164,40 @@ export function WorkspaceSection({
     }
   }, [autoExpandKey, controlledExpanded]);
 
-  const loadSessions = useCallback(async () => {
-    if (disabled) return;
-    try {
-      const result = await client
-        .workspaceByCwd(workspace.cwd)
-        .listWorkspaceSessions({
-          pageSize: SESSION_LIST_PAGE_SIZE,
-          archiveState: 'active',
-          ...(sourceMetadataEnabled
-            ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
-            : {}),
-          ...(organizationEnabled
-            ? { view: 'organized' as const, group: 'all' }
-            : {}),
-        });
-      setSessions(result);
-      setLoadError(false);
-    } catch (err) {
-      // Surface connectivity failures so users can distinguish a broken
-      // daemon from genuinely zero sessions.
-      console.warn('[WorkspaceSection] session poll failed:', err);
-      setLoadError(true);
-    }
-  }, [
-    client,
-    disabled,
-    organizationEnabled,
-    sourceMetadataEnabled,
-    workspace.cwd,
-  ]);
+  const sessionsEnabled = renderSessions && !disabled;
+  const sessionsVisible = expanded || Boolean(searchQuery.trim());
+  const sessionsQuery = useMemo<SessionCatalogQuery>(
+    () => ({
+      routeKind: 'qualified',
+      workspaceCwd: workspace.cwd,
+      options: {
+        pageSize: SESSION_LIST_PAGE_SIZE,
+        archiveState: 'active',
+        ...(sourceMetadataEnabled
+          ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
+          : {}),
+        ...(organizationEnabled
+          ? { view: 'organized' as const, group: 'all' }
+          : {}),
+      },
+    }),
+    [organizationEnabled, sourceMetadataEnabled, workspace.cwd],
+  );
+  const sessionsResult = useSessionCatalogQuery(client, sessionsQuery, {
+    autoLoad: true,
+    enabled: sessionsEnabled && sessionsVisible,
+    ...(sessionsVisible && !readOnly ? { pollIntervalMs: 10_000 } : {}),
+  });
+  const sessions = sessionsResult.sessions;
+  const loadError = Boolean(sessionsResult.error);
+
+  useEffect(() => {
+    if (!sessionsResult.error) return;
+    console.warn(
+      `[WorkspaceSection] session poll failed for ${workspace.cwd}:`,
+      sessionsResult.error,
+    );
+  }, [sessionsResult.error, workspace.cwd]);
 
   useEffect(() => {
     if (!renderSessions || disabled || !organizationEnabled) {
@@ -220,22 +224,6 @@ export function WorkspaceSection({
     reloadToken,
     renderSessions,
     workspace.cwd,
-  ]);
-
-  useEffect(() => {
-    if (!renderSessions) return;
-    if (!expanded && !searchQuery.trim()) return;
-    void loadSessions();
-    if (readOnly) return;
-    const timer = setInterval(() => void loadSessions(), 10_000);
-    return () => clearInterval(timer);
-  }, [
-    expanded,
-    loadSessions,
-    readOnly,
-    reloadToken,
-    renderSessions,
-    searchQuery,
   ]);
 
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so

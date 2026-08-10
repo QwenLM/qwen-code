@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
@@ -88,6 +89,64 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     if (options?.group === 'pinned') return pinned;
     return active;
   },
+}));
+
+vi.mock('../../session-catalog/session-catalog-hooks', () => ({
+  useWebShellSessions: (options?: {
+    enabled?: boolean;
+    archiveState?: string;
+    group?: string;
+  }) => {
+    const state =
+      options?.archiveState === 'archived'
+        ? archived
+        : options?.group === 'pinned'
+          ? pinned
+          : active;
+    if (options?.enabled === false) {
+      return { ...state, sessions: [], data: undefined };
+    }
+    return {
+      ...state,
+      data: state.data ?? state.sessions,
+      catalogQuery: {
+        routeKind: 'legacy',
+        workspaceCwd: connection.workspaceCwd,
+        options,
+      },
+    };
+  },
+  useSessionCatalogController: () => ({
+    invalidateWorkspace: vi.fn(),
+    renamed: vi.fn(),
+  }),
+  useSessionCatalogPolling: () => undefined,
+  useSessionCatalogQuery: (
+    client: typeof workspace.client,
+    query: { workspaceCwd: string; options?: Record<string, unknown> },
+    options: { autoLoad?: boolean; enabled?: boolean },
+  ) => {
+    const [snapshot, setSnapshot] = React.useState({
+      sessions: [] as DaemonSessionSummary[],
+      loading: false,
+      error: undefined as Error | undefined,
+    });
+    const reload = React.useCallback(async () => {
+      const sessions = await client
+        .workspaceByCwd(query.workspaceCwd)
+        .listWorkspaceSessions(query.options);
+      setSnapshot({ sessions, loading: false, error: undefined });
+      return { sessions };
+    }, [client, query.options, query.workspaceCwd]);
+    React.useEffect(() => {
+      if (options.enabled === false || !options.autoLoad) return;
+      void reload().catch((error: Error) => {
+        setSnapshot((current) => ({ ...current, loading: false, error }));
+      });
+    }, [options.autoLoad, options.enabled, reload]);
+    return { ...snapshot, reload };
+  },
+  useSessionCatalogQueries: () => [],
 }));
 
 const { I18nProvider } = await import('../../i18n');

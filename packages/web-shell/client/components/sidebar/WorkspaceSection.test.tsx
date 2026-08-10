@@ -34,7 +34,7 @@ const {
       workspaceGitPull: vi
         .fn()
         .mockResolvedValue({ success: true, output: '' }),
-      listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
     }),
   };
   return {
@@ -74,7 +74,7 @@ function makeClient(): DaemonClient {
       workspaceGitPull: vi
         .fn()
         .mockResolvedValue({ success: true, output: '' }),
-      listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
       listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     })),
   } as unknown as DaemonClient;
@@ -202,17 +202,19 @@ describe('WorkspaceSection label', () => {
   });
 
   it('shows the complete read-only session name in a native tooltip', async () => {
-    const listWorkspaceSessions = vi.fn().mockResolvedValue([
-      {
-        sessionId: 'session-1',
-        displayName: 'A very long session name',
-        createdAt: '2026-01-01T00:00:00.000Z',
-      } as DaemonSessionSummary,
-    ]);
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'session-1',
+          displayName: 'A very long session name',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        } as DaemonSessionSummary,
+      ],
+    });
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions,
+        listWorkspaceSessionsPage,
         listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
       })),
     } as unknown as DaemonClient;
