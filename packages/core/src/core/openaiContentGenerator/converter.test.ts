@@ -699,6 +699,24 @@ describe('OpenAIContentConverter', () => {
       expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
     });
 
+    it('rejects an unclosed outer block containing a balanced nested block', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'nested-unclosed',
+            {
+              content: '<thinking><thinking>inner</thinking>outer text',
+            },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('fails closed when a suspicious prefix exceeds the buffer limit', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };

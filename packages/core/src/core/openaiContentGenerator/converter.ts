@@ -1160,7 +1160,10 @@ function classifyContentOnlyThinkingTagPrefix(
   for (const closing of [false, true, false]) {
     const tagLength = consumeTag(rest, closing);
     if (tagLength === null) return 'pending';
-    if (tagLength === undefined) return 'clean';
+    if (tagLength === undefined) {
+      if (!closing) return 'clean';
+      break;
+    }
     rest = rest.slice(tagLength).trimStart();
     // An opening tag followed by ordinary text is only a legitimate literal
     // if a closing tag still balances it later. Without one, the turn is an
