@@ -9,7 +9,6 @@ import {
   AlertCircleIcon,
   ArrowLeftIcon,
   EllipsisVerticalIcon,
-  FolderIcon,
   PencilIcon,
   PlusIcon,
   RadioTowerIcon,
@@ -64,7 +63,6 @@ import {
   EmptyTitle,
 } from '../ui/empty';
 import { Spinner } from '../ui/spinner';
-import { Skeleton } from '../ui/skeleton';
 import {
   Select,
   SelectContent,
@@ -232,6 +230,9 @@ export function ChannelsManagerPage({
         .sort((left, right) => left.name.localeCompare(right.name)),
     [channels],
   );
+  const workspaceName = activeWorkspace
+    ? workspaceLabel(activeWorkspace)
+    : t('channels.workspace.current');
   const channelTypeLabel = useCallback(
     (channel: DaemonChannelInstanceSnapshot) => {
       const type = String(channel.config.type);
@@ -363,407 +364,383 @@ export function ChannelsManagerPage({
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
-        <div className={styles.titleGroup}>
-          <Button
-            variant="ghost"
-            size="icon"
-            className={styles.backButton}
-            onClick={onClose}
-            aria-label={t('channels.action.back')}
-          >
-            <ArrowLeftIcon />
-          </Button>
-          <div className={styles.titleMark} aria-hidden="true">
-            <RadioTowerIcon />
-          </div>
-          <div className={styles.titleCopy}>
-            <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>
-              {t('channels.title')}
-            </h1>
-            <p className={styles.summary}>{t('channels.description')}</p>
-          </div>
-        </div>
-        <div className={styles.headerControls}>
-          {registeredWorkspaces.length > 0 ? (
-            <div className={styles.workspacePicker}>
-              <div className={styles.workspacePickerLabel}>
-                <FolderIcon aria-hidden="true" />
-                <span>{t('channels.workspace.label')}</span>
-              </div>
-              <Select
-                value={selectedManagementWorkspace?.cwd ?? ''}
-                disabled={
-                  Boolean(editor) || loading || busy !== null || deleting
-                }
-                onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
-              >
-                <SelectTrigger
-                  className={styles.workspacePickerTrigger}
-                  aria-label={t('channels.workspace.label')}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {registeredWorkspaces.map((entry) => (
-                    <SelectItem
-                      key={entry.id}
-                      value={entry.cwd}
-                      disabled={!entry.trusted}
-                    >
-                      {workspaceLabel(entry)}
-                      {entry.primary
-                        ? ` · ${t('channels.workspace.primary')}`
-                        : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          ) : null}
-          <Button
-            variant="outline"
-            className={styles.refreshButton}
-            disabled={
-              !supportsManagement ||
-              loading ||
-              Boolean(editor) ||
-              busy !== null ||
-              deleting
-            }
-            onClick={() => void reload()}
-          >
-            {loading ? <Spinner /> : <RefreshCwIcon />}
-            {t('channels.action.refresh')}
-          </Button>
-        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={styles.backButton}
+          onClick={onClose}
+          aria-label={t('channels.action.back')}
+        >
+          <ArrowLeftIcon />
+        </Button>
+        <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>
+          {t('channels.title')}
+        </h1>
       </header>
 
-      {!supportsManagement ? (
-        <Alert>
-          <AlertCircleIcon />
-          <AlertTitle>{t('channels.unsupported.title')}</AlertTitle>
-          <AlertDescription>
-            {t('channels.unsupported.description')}
-          </AlertDescription>
-        </Alert>
-      ) : null}
+      <div className={styles.pageBody}>
+        <p className={styles.intro}>{t('channels.description')}</p>
 
-      {supportsManagement && !workspace.token ? (
-        <Alert>
-          <AlertCircleIcon />
-          <AlertTitle>{t('channels.readOnly.title')}</AlertTitle>
-          <AlertDescription>
-            {t('channels.readOnly.description')}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {loading && instances.length === 0 ? (
-        <div
-          className={styles.loadingState}
-          role="status"
-          aria-label={t('channels.loading')}
-        >
-          {[0, 1].map((index) => (
-            <div key={index} className={styles.loadingCard}>
-              <Skeleton className="size-11 rounded-xl" />
-              <div className="min-w-0 flex-1 space-y-2">
-                <Skeleton className="h-4 w-36 max-w-full" />
-                <Skeleton className="h-3 w-24 max-w-full" />
+        <div className={styles.toolbar}>
+          <p className={styles.count}>
+            {t('channels.summary', {
+              workspace: workspaceName,
+              count: instances.length,
+            })}
+          </p>
+          <div className={styles.toolbarActions}>
+            {registeredWorkspaces.length > 0 ? (
+              <div className={styles.workspacePicker}>
+                <span className={styles.workspacePickerLabel}>
+                  {t('channels.workspace.label')}
+                </span>
+                <Select
+                  value={selectedManagementWorkspace?.cwd ?? ''}
+                  disabled={
+                    Boolean(editor) || loading || busy !== null || deleting
+                  }
+                  onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
+                >
+                  <SelectTrigger
+                    className={styles.workspacePickerTrigger}
+                    aria-label={t('channels.workspace.label')}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {registeredWorkspaces.map((entry) => (
+                      <SelectItem
+                        key={entry.id}
+                        value={entry.cwd}
+                        disabled={!entry.trusted}
+                      >
+                        {workspaceLabel(entry)}
+                        {entry.primary
+                          ? ` · ${t('channels.workspace.primary')}`
+                          : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-              <Skeleton className="h-8 w-20" />
-            </div>
-          ))}
+            ) : null}
+            <Button
+              variant="outline"
+              className={styles.refreshButton}
+              disabled={
+                !supportsManagement ||
+                loading ||
+                Boolean(editor) ||
+                busy !== null ||
+                deleting
+              }
+              onClick={() => void reload()}
+            >
+              {loading ? <Spinner /> : <RefreshCwIcon />}
+              {t('channels.action.refresh')}
+            </Button>
+          </div>
         </div>
-      ) : null}
 
-      {error ? (
-        <Alert variant="destructive">
-          <AlertCircleIcon />
-          <AlertTitle>{t('channels.loadError.title')}</AlertTitle>
-          <AlertDescription>{extractErrorDetail(error)}</AlertDescription>
-          <Button
-            className="mt-2 w-fit"
-            size="sm"
-            variant="outline"
-            onClick={() => void reload()}
+        {!supportsManagement ? (
+          <Alert>
+            <AlertCircleIcon />
+            <AlertTitle>{t('channels.unsupported.title')}</AlertTitle>
+            <AlertDescription>
+              {t('channels.unsupported.description')}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {supportsManagement && !workspace.token ? (
+          <Alert>
+            <AlertCircleIcon />
+            <AlertTitle>{t('channels.readOnly.title')}</AlertTitle>
+            <AlertDescription>
+              {t('channels.readOnly.description')}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {loading && instances.length === 0 ? (
+          <div
+            className={styles.loadingState}
+            role="status"
+            aria-label={t('channels.loading')}
           >
-            {t('channels.action.retry')}
-          </Button>
-        </Alert>
-      ) : null}
+            <Spinner />
+            {t('channels.loading')}
+          </div>
+        ) : null}
 
-      <section className={styles.section} aria-labelledby="configured-channels">
-        <div className={styles.sectionHeader}>
-          <div className={styles.sectionHeadingCopy}>
-            <div className={styles.sectionTitleRow}>
-              <h2 id="configured-channels" className={styles.sectionTitle}>
-                {t('channels.configured')}
-              </h2>
-              <Badge variant="secondary" className={styles.sectionCount}>
-                {instances.length}
-              </Badge>
-            </div>
+        {error ? (
+          <Alert variant="destructive">
+            <AlertCircleIcon />
+            <AlertTitle>{t('channels.loadError.title')}</AlertTitle>
+            <AlertDescription>{extractErrorDetail(error)}</AlertDescription>
+            <Button
+              className="mt-2 w-fit"
+              size="sm"
+              variant="outline"
+              onClick={() => void reload()}
+            >
+              {t('channels.action.retry')}
+            </Button>
+          </Alert>
+        ) : null}
+
+        <section
+          className={styles.section}
+          aria-labelledby="configured-channels"
+        >
+          <div className={styles.sectionHeader}>
+            <h2 id="configured-channels" className={styles.sectionTitle}>
+              {t('channels.configured')}
+            </h2>
             <p className={styles.sectionDescription}>
               {t('channels.configured.description')}
             </p>
           </div>
-        </div>
-        {!loading && !error && instances.length === 0 ? (
-          <Empty className={styles.emptyState}>
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <RadioTowerIcon />
-              </EmptyMedia>
-              <EmptyTitle>{t('channels.empty.title')}</EmptyTitle>
-              <EmptyDescription>
-                {t('channels.empty.description')}
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        ) : null}
-        {instances.length > 0 ? (
-          <div className={styles.channelGrid}>
-            {instances.map((channel) => {
-              const descriptor = descriptorFor(channel);
-              const runtimeError =
-                actionErrors[channel.name] ?? channel.runtime.lastError;
-              const canRestart =
-                channel.runtime.state !== 'stopped' &&
-                channel.runtime.state !== 'error';
-              return (
-                <Card
-                  key={channel.name}
-                  size="sm"
-                  className={styles.channelCard}
-                >
-                  <CardHeader className={styles.channelHeader}>
-                    <div className={styles.channelIdentity}>
-                      <span
-                        className={styles.platformMark}
-                        data-platform={String(channel.config.type)}
-                        aria-hidden="true"
-                      >
-                        {PLATFORM_MARKS[String(channel.config.type)] ??
-                          channelTypeLabel(channel)[0]?.toUpperCase() ??
-                          '?'}
-                      </span>
-                      <div className={styles.channelIdentityCopy}>
-                        <CardTitle className={styles.channelNameRow}>
-                          <span className={styles.channelName}>
-                            {channel.name}
-                          </span>
-                          <Badge
-                            variant={badgeVariant(channel.runtime.state)}
-                            className={styles.runtimeBadge}
-                            data-runtime-state={channel.runtime.state}
-                          >
-                            <span className={styles.runtimeDot} />
-                            {t(STATUS_KEYS[channel.runtime.state])}
-                          </Badge>
-                        </CardTitle>
-                        <CardDescription className={styles.channelType}>
-                          {channelTypeLabel(channel)}
-                        </CardDescription>
-                      </div>
-                    </div>
-                    <CardAction className={styles.cardActionGroup}>
-                      {renderPrimaryAction(channel)}
-                      {descriptor ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={!canManage || busy !== null || !snapshot}
-                          aria-label={t('channels.action.editNamed', {
-                            name: channel.name,
-                          })}
-                          onClick={() =>
-                            setEditor({
-                              workspaceCwd: activeWorkspaceCwd!,
-                              descriptor,
-                              instance: channel,
-                            })
-                          }
+          {!loading && !error && instances.length === 0 ? (
+            <Empty className={styles.emptyState}>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <RadioTowerIcon />
+                </EmptyMedia>
+                <EmptyTitle>{t('channels.empty.title')}</EmptyTitle>
+                <EmptyDescription>
+                  {t('channels.empty.description')}
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : null}
+          {instances.length > 0 ? (
+            <div className={styles.channelGrid}>
+              {instances.map((channel) => {
+                const descriptor = descriptorFor(channel);
+                const runtimeError =
+                  actionErrors[channel.name] ?? channel.runtime.lastError;
+                const canRestart =
+                  channel.runtime.state !== 'stopped' &&
+                  channel.runtime.state !== 'error';
+                return (
+                  <Card
+                    key={channel.name}
+                    size="sm"
+                    className={styles.channelCard}
+                  >
+                    <CardHeader className={styles.channelHeader}>
+                      <div className={styles.channelIdentity}>
+                        <span
+                          className={styles.platformMark}
+                          aria-hidden="true"
                         >
-                          <PencilIcon />
-                          {t('channels.action.edit')}
-                        </Button>
-                      ) : null}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
+                          {PLATFORM_MARKS[String(channel.config.type)] ??
+                            channelTypeLabel(channel)[0]?.toUpperCase() ??
+                            '?'}
+                        </span>
+                        <div className={styles.channelIdentityCopy}>
+                          <CardTitle className={styles.channelNameRow}>
+                            <span className={styles.channelName}>
+                              {channel.name}
+                            </span>
+                            <Badge
+                              variant={badgeVariant(channel.runtime.state)}
+                              className={styles.runtimeBadge}
+                              data-runtime-state={channel.runtime.state}
+                            >
+                              {t(STATUS_KEYS[channel.runtime.state])}
+                            </Badge>
+                          </CardTitle>
+                          <CardDescription className={styles.channelMeta}>
+                            <span>{channelTypeLabel(channel)}</span>
+                            <span aria-hidden="true">·</span>
+                            <span>
+                              {t(
+                                STATUS_DESCRIPTION_KEYS[channel.runtime.state],
+                              )}
+                            </span>
+                          </CardDescription>
+                        </div>
+                      </div>
+                      <CardAction className={styles.cardActionGroup}>
+                        {renderPrimaryAction(channel)}
+                        {descriptor ? (
                           <Button
-                            size="icon-sm"
+                            size="sm"
                             variant="ghost"
                             disabled={!canManage || busy !== null || !snapshot}
-                            aria-label={t('channels.action.moreNamed', {
+                            aria-label={t('channels.action.editNamed', {
                               name: channel.name,
                             })}
+                            onClick={() =>
+                              setEditor({
+                                workspaceCwd: activeWorkspaceCwd!,
+                                descriptor,
+                                instance: channel,
+                              })
+                            }
                           >
-                            {busy?.name === channel.name &&
-                            busy.action === 'restart' ? (
-                              <Spinner />
-                            ) : (
-                              <EllipsisVerticalIcon />
-                            )}
+                            <PencilIcon />
+                            {t('channels.action.edit')}
                           </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="min-w-40">
-                          <DropdownMenuGroup>
-                            {canRestart ? (
-                              <DropdownMenuItem
-                                onSelect={() =>
-                                  void runAction(channel, 'restart', () =>
-                                    restart(channel.name),
-                                  )
-                                }
-                              >
-                                <RotateCwIcon data-icon="inline-start" />
-                                {t('channels.action.restart')}
-                              </DropdownMenuItem>
-                            ) : null}
-                            {canRestart ? <DropdownMenuSeparator /> : null}
-                            <DropdownMenuItem
-                              variant="destructive"
-                              aria-label={t('channels.action.deleteNamed', {
+                        ) : null}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              disabled={
+                                !canManage || busy !== null || !snapshot
+                              }
+                              aria-label={t('channels.action.moreNamed', {
                                 name: channel.name,
                               })}
-                              onSelect={() => {
-                                setDeleteError(undefined);
-                                setDeleteTarget({
-                                  workspaceCwd: activeWorkspaceCwd,
-                                  instance: channel,
-                                });
-                              }}
                             >
-                              <Trash2Icon data-icon="inline-start" />
-                              {t('channels.action.delete')}
-                            </DropdownMenuItem>
-                          </DropdownMenuGroup>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </CardAction>
-                  </CardHeader>
-                  <CardContent className={styles.runtimeSummary}>
-                    <span
-                      className={styles.runtimeSignal}
-                      data-runtime-state={channel.runtime.state}
-                      aria-hidden="true"
-                    />
-                    <span>
-                      {t(STATUS_DESCRIPTION_KEYS[channel.runtime.state])}
-                    </span>
-                  </CardContent>
-                  {runtimeError ? (
-                    <CardContent>
-                      <Alert
-                        variant="destructive"
-                        className={styles.errorAlert}
-                      >
-                        <AlertCircleIcon />
-                        <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
-                        <AlertDescription>{runtimeError}</AlertDescription>
-                      </Alert>
-                    </CardContent>
-                  ) : null}
-                  <CardFooter className={styles.channelFooter}>
-                    <label className={styles.startupControl}>
-                      <span className={styles.startupCopy}>
-                        <span className={styles.startupLabel}>
-                          {t('channels.startsWithServe')}
+                              {busy?.name === channel.name &&
+                              busy.action === 'restart' ? (
+                                <Spinner />
+                              ) : (
+                                <EllipsisVerticalIcon />
+                              )}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="min-w-40">
+                            <DropdownMenuGroup>
+                              {canRestart ? (
+                                <DropdownMenuItem
+                                  onSelect={() =>
+                                    void runAction(channel, 'restart', () =>
+                                      restart(channel.name),
+                                    )
+                                  }
+                                >
+                                  <RotateCwIcon data-icon="inline-start" />
+                                  {t('channels.action.restart')}
+                                </DropdownMenuItem>
+                              ) : null}
+                              {canRestart ? <DropdownMenuSeparator /> : null}
+                              <DropdownMenuItem
+                                variant="destructive"
+                                aria-label={t('channels.action.deleteNamed', {
+                                  name: channel.name,
+                                })}
+                                onSelect={() => {
+                                  setDeleteError(undefined);
+                                  setDeleteTarget({
+                                    workspaceCwd: activeWorkspaceCwd,
+                                    instance: channel,
+                                  });
+                                }}
+                              >
+                                <Trash2Icon data-icon="inline-start" />
+                                {t('channels.action.delete')}
+                              </DropdownMenuItem>
+                            </DropdownMenuGroup>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </CardAction>
+                    </CardHeader>
+                    {runtimeError ? (
+                      <CardContent>
+                        <Alert
+                          variant="destructive"
+                          className={styles.errorAlert}
+                        >
+                          <AlertCircleIcon />
+                          <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
+                          <AlertDescription>{runtimeError}</AlertDescription>
+                        </Alert>
+                      </CardContent>
+                    ) : null}
+                    <CardFooter className={styles.channelFooter}>
+                      <label className={styles.startupControl}>
+                        <span className={styles.startupCopy}>
+                          <span className={styles.startupLabel}>
+                            {t('channels.startsWithServe')}
+                          </span>
+                          <span className={styles.startupDescription}>
+                            {t('channels.startsWithServe.description')}
+                          </span>
                         </span>
-                        <span className={styles.startupDescription}>
-                          {t('channels.startsWithServe.description')}
-                        </span>
-                      </span>
-                      <Switch
-                        size="sm"
-                        checked={channel.startsWithServe}
-                        disabled={!canManage || busy !== null || !snapshot}
-                        aria-label={t('channels.action.startWithServeNamed', {
-                          name: channel.name,
-                        })}
-                        onCheckedChange={(enabled) =>
-                          void runAction(channel, 'startup', () =>
-                            setStartup(channel.name, {
-                              expectedRevision: snapshot?.revision ?? '',
-                              enabled,
-                            }),
-                          )
-                        }
-                      />
-                    </label>
-                  </CardFooter>
-                </Card>
-              );
-            })}
-          </div>
-        ) : null}
-      </section>
+                        <Switch
+                          size="sm"
+                          checked={channel.startsWithServe}
+                          disabled={!canManage || busy !== null || !snapshot}
+                          aria-label={t('channels.action.startWithServeNamed', {
+                            name: channel.name,
+                          })}
+                          onCheckedChange={(enabled) =>
+                            void runAction(channel, 'startup', () =>
+                              setStartup(channel.name, {
+                                expectedRevision: snapshot?.revision ?? '',
+                                enabled,
+                              }),
+                            )
+                          }
+                        />
+                      </label>
+                    </CardFooter>
+                  </Card>
+                );
+              })}
+            </div>
+          ) : null}
+        </section>
 
-      {availablePlatforms.length > 0 ? (
-        <section
-          className={`${styles.section} ${styles.platformSection}`}
-          aria-labelledby="channel-platforms"
-        >
-          <div className={styles.sectionHeader}>
-            <div className={styles.sectionHeadingCopy}>
-              <div className={styles.sectionTitleRow}>
-                <h2 id="channel-platforms" className={styles.sectionTitle}>
-                  {t('channels.availablePlatforms')}
-                </h2>
-                <Badge variant="secondary" className={styles.sectionCount}>
-                  {availablePlatforms.length}
-                </Badge>
-              </div>
+        {availablePlatforms.length > 0 ? (
+          <section
+            className={`${styles.section} ${styles.platformSection}`}
+            aria-labelledby="channel-platforms"
+          >
+            <div className={styles.sectionHeader}>
+              <h2 id="channel-platforms" className={styles.sectionTitle}>
+                {t('channels.availablePlatforms')}
+              </h2>
               <p className={styles.sectionDescription}>
                 {t('channels.availablePlatforms.description')}
               </p>
             </div>
-          </div>
-          <div className={styles.platformGrid}>
-            {availablePlatforms.map((platform) => (
-              <button
-                key={platform.type}
-                type="button"
-                className={styles.platformCard}
-                data-platform={platform.type}
-                data-testid={`channel-platform-${platform.type}`}
-                disabled={!canManage || !snapshot}
-                aria-label={t('channels.platform.configureNamed', {
-                  platform: platform.displayName,
-                })}
-                onClick={() =>
-                  setEditor({
-                    workspaceCwd: activeWorkspaceCwd!,
-                    descriptor: platform,
-                  })
-                }
-              >
-                <span
-                  className={styles.platformMark}
-                  data-platform={platform.type}
-                  aria-hidden="true"
+            <div className={styles.platformGrid}>
+              {availablePlatforms.map((platform) => (
+                <button
+                  key={platform.type}
+                  type="button"
+                  className={styles.platformCard}
+                  data-testid={`channel-platform-${platform.type}`}
+                  disabled={!canManage || !snapshot}
+                  aria-label={t('channels.platform.configureNamed', {
+                    platform: platform.displayName,
+                  })}
+                  onClick={() =>
+                    setEditor({
+                      workspaceCwd: activeWorkspaceCwd!,
+                      descriptor: platform,
+                    })
+                  }
                 >
-                  {PLATFORM_MARKS[platform.type] ??
-                    platform.displayName[0]?.toUpperCase() ??
-                    '?'}
-                </span>
-                <span className={styles.platformCopy}>
-                  <span className={styles.platformName}>
-                    {platform.displayName}
+                  <span className={styles.platformMark} aria-hidden="true">
+                    {PLATFORM_MARKS[platform.type] ??
+                      platform.displayName[0]?.toUpperCase() ??
+                      '?'}
                   </span>
-                  <span className={styles.platformHint}>
-                    {t('channels.platform.add')}
+                  <span className={styles.platformCopy}>
+                    <span className={styles.platformName}>
+                      {platform.displayName}
+                    </span>
+                    <span className={styles.platformHint}>
+                      {t('channels.platform.add')}
+                    </span>
                   </span>
-                </span>
-                <span className={styles.platformAction} aria-hidden="true">
-                  <PlusIcon />
-                </span>
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
+                  <span className={styles.platformAction} aria-hidden="true">
+                    <PlusIcon />
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </div>
 
       {editor ? (
         <ChannelEditorDialog
