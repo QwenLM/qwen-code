@@ -696,7 +696,7 @@ export class GeminiClient {
     return this.getChat().getHistoryFunctionResponseIds();
   }
 
-  private clearProxySchemaPresentationsAfterHistoryMutation(reason: string) {
+  clearProxySchemaPresentationsAfterHistoryMutation(reason: string): void {
     debugLogger.debug(
       `[DEFERRED_TOOL_CALL] clear proxy schema presentations after ${reason}`,
     );

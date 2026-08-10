@@ -420,6 +420,7 @@ describe('Session', () => {
     stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
     setHistory: ReturnType<typeof vi.fn>;
     truncateHistory: ReturnType<typeof vi.fn>;
+    clearProxySchemaPresentationsAfterHistoryMutation: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
@@ -602,6 +603,7 @@ describe('Session', () => {
       ),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
+      clearProxySchemaPresentationsAfterHistoryMutation: vi.fn(),
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
@@ -8849,8 +8851,6 @@ describe('Session', () => {
       });
 
       it('clears deferred proxy presentations when the chat stream auto-compresses', async () => {
-        const clearProxySchemaPresentations = vi.fn();
-        Object.assign(mockToolRegistry, { clearProxySchemaPresentations });
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           (async function* () {
             yield {
@@ -8869,7 +8869,12 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'hello' }],
         });
 
-        expect(clearProxySchemaPresentations).toHaveBeenCalledOnce();
+        // The paired client-level clear covers both the registry's
+        // presentations and the client's pending resumed presentations;
+        // a registry-only clear here was the fail-open review finding.
+        expect(
+          mockGeminiClient.clearProxySchemaPresentationsAfterHistoryMutation,
+        ).toHaveBeenCalledExactlyOnceWith('acp-chat-compressed');
       });
 
       it('labels the notice as screenshot-triggered when triggerReason is image_overflow', async () => {

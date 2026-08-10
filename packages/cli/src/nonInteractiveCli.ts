@@ -1607,6 +1607,7 @@ export async function runNonInteractive(
         responseParts: Part[];
         repeatedDuplicateProviderToolCall: boolean;
         terminateTurn: boolean;
+        deliveredPresentations: DeferredToolPresentation[];
       };
 
       const processToolCallBatch = async (
@@ -1673,6 +1674,7 @@ export async function runNonInteractive(
             responseParts: [],
             repeatedDuplicateProviderToolCall: true,
             terminateTurn: false,
+            deliveredPresentations: [],
           };
         }
 
@@ -2147,37 +2149,71 @@ export async function runNonInteractive(
             finalizedParts.some(
               (part, partIndex) => part !== response.responseParts[partIndex],
             );
+          const status =
+            statusByResponse.get(response) ??
+            (response.error ? 'error' : 'success');
+          // Status-based gate (mirrors the scheduler's canonical
+          // `call.status !== 'success'` gate): an error- or
+          // cancellation-classified response never carries presentations,
+          // even if one ever sets `error: undefined`.
           const deliveredPresentations =
-            responseChanged || response.error
+            responseChanged || status !== 'success'
               ? undefined
               : response.deferredToolPresentations;
           toolResponseParts.push(...finalizedParts);
           chatRecordingService?.recordToolResult?.(finalizedParts, {
             callId: request.callId,
-            status:
-              statusByResponse.get(response) ??
-              (response.error ? 'error' : 'success'),
+            status,
             resultDisplay: response.resultDisplay,
             error: response.error,
             errorType: response.errorType,
             deferredToolPresentations: deliveredPresentations,
             executionStatus: response.executionStatus,
           });
-          if (!response.error && deliveredPresentations) {
+          if (deliveredPresentations) {
             deferredToolPresentations.push(...deliveredPresentations);
           }
-        }
-
-        for (const presentation of deferredToolPresentations) {
-          config.getToolRegistry().markProxySchemaPresented(presentation);
         }
 
         return {
           responseParts: toolResponseParts,
           repeatedDuplicateProviderToolCall: false,
           terminateTurn,
+          // Committed by the caller only once the carrying send proves the
+          // schema-bearing context reached the provider (or the parts cross
+          // the active-history boundary via a direct addHistory). Committing
+          // here — before the carrying sendMessageStream — would leave the
+          // mark in place when a UserPromptSubmit hook blocks that send.
+          deliveredPresentations: deferredToolPresentations,
         };
       };
+
+      // Presentations staged by a tool batch are committed only once the
+      // carrying send proves the provider accepted the schema-bearing
+      // context — the same fail-closed gate the interactive path applies via
+      // onContextAccepted. A hook-blocked or otherwise undelivered send
+      // drops the presentations instead of authorizing deferred calls
+      // against a schema the model never saw.
+      let pendingDeferredToolPresentations: DeferredToolPresentation[] = [];
+      const commitDeferredToolPresentations = (
+        presentations: DeferredToolPresentation[],
+      ): void => {
+        if (presentations.length === 0) return;
+        const toolRegistry = config.getToolRegistry();
+        for (const presentation of presentations) {
+          toolRegistry.markProxySchemaPresented(presentation);
+        }
+      };
+      // Mirrors the interactive path's provider-event whitelist: only
+      // provider-produced output proves the request context was accepted;
+      // hook blocks, limits, retries, and compression events can all be
+      // emitted locally before the request reaches the provider.
+      const provesContextAcceptance = (type: GeminiEventType): boolean =>
+        type === GeminiEventType.Content ||
+        type === GeminiEventType.Thought ||
+        type === GeminiEventType.ToolCallRequest ||
+        type === GeminiEventType.Finished ||
+        type === GeminiEventType.Citation;
 
       let currentPromptId = prompt_id;
       while (true) {
@@ -2239,6 +2275,9 @@ export async function runNonInteractive(
         }
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
+        const carriedPresentations = pendingDeferredToolPresentations;
+        pendingDeferredToolPresentations = [];
+        let carriedPresentationsCommitted = false;
         const apiStartTime = Date.now();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
@@ -2268,6 +2307,13 @@ export async function runNonInteractive(
         adapter.startAssistantMessage();
 
         for await (const event of responseStream) {
+          if (
+            !carriedPresentationsCommitted &&
+            provesContextAcceptance(event.type)
+          ) {
+            commitDeferredToolPresentations(carriedPresentations);
+            carriedPresentationsCommitted = true;
+          }
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode
             // doesn't leave an unterminated message_start when a budget /
@@ -2343,6 +2389,7 @@ export async function runNonInteractive(
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
             terminateTurn,
+            deliveredPresentations,
           } = await processToolCallBatch(
             toolCallRequests,
             (override) => {
@@ -2382,6 +2429,10 @@ export async function runNonInteractive(
               role: 'user',
               parts: toolResponseParts,
             });
+            // The tool results cross the active-history boundary here
+            // without a carrying send, so commit the batch's presentations
+            // directly — mirrors the interactive goal-termination path.
+            commitDeferredToolPresentations(deliveredPresentations);
             await config.getChatRecordingService?.()?.flush();
             await finishGoalTurn(activeGoalTurn);
             activeGoalTurn = undefined;
@@ -2403,6 +2454,7 @@ export async function runNonInteractive(
           if (!shouldFinalizeTurn) {
             currentMessages = [{ role: 'user', parts: toolResponseParts }];
             hasUnsentToolResponse = true;
+            pendingDeferredToolPresentations.push(...deliveredPresentations);
           }
         }
         if (shouldFinalizeTurn) {
@@ -2548,12 +2600,16 @@ export async function runNonInteractive(
             let itemMessages: Content[] = [
               { role: 'user', parts: [{ text: item.modelText }] },
             ];
+            let itemPendingPresentations: DeferredToolPresentation[] = [];
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
 
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
+              const itemCarriedPresentations = itemPendingPresentations;
+              itemPendingPresentations = [];
+              let itemCarriedPresentationsCommitted = false;
               const itemApiStartTime = Date.now();
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
@@ -2575,6 +2631,13 @@ export async function runNonInteractive(
               adapter.startAssistantMessage();
 
               for await (const event of itemStream) {
+                if (
+                  !itemCarriedPresentationsCommitted &&
+                  provesContextAcceptance(event.type)
+                ) {
+                  commitDeferredToolPresentations(itemCarriedPresentations);
+                  itemCarriedPresentationsCommitted = true;
+                }
                 if (abortController.signal.aborted) {
                   // Pair the startAssistantMessage() above so stream-json
                   // mode doesn't leave an unterminated message_start, then
@@ -2641,6 +2704,7 @@ export async function runNonInteractive(
                 const {
                   responseParts: itemToolResponseParts,
                   repeatedDuplicateProviderToolCall,
+                  deliveredPresentations: itemDeliveredPresentations,
                 } = await processToolCallBatch(
                   itemToolCallRequests,
                   (override) => {
@@ -2672,6 +2736,7 @@ export async function runNonInteractive(
                   return;
                 }
                 itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
+                itemPendingPresentations.push(...itemDeliveredPresentations);
               } else {
                 break;
               }

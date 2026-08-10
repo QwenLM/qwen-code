@@ -426,12 +426,48 @@ class ToolSearchInvocation extends BaseToolInvocation<
       ? batchBudget
       : this.config.getTruncateToolOutputThreshold();
     if (
-      presentations.length === 0 ||
       !Number.isFinite(budget) ||
       budget <= 0 ||
       llmContent.length <= budget
     ) {
       return undefined;
+    }
+
+    if (presentations.length === 0) {
+      // Subagent/teammate contexts load every schema as directly declared, so
+      // the direct-declaration escape hatch below has no presentations to
+      // convert. Refuse the oversized batch instead of emitting an unbounded
+      // inline frame, and name the loaded schemas so the model can retry in
+      // smaller batches.
+      const atomicOversizedNames: string[] = [];
+      const retryNames: string[] = [];
+      for (const schema of schemas) {
+        if (!schema.name) continue;
+        if (formatFunctionSchemaBlocks([schema]).length > budget) {
+          atomicOversizedNames.push(schema.name);
+        } else {
+          retryNames.push(schema.name);
+        }
+      }
+      let message =
+        'Error: the requested schemas exceeded the inline output budget and were not returned.';
+      if (retryNames.length > 0) {
+        message += ` Request these tools individually or in a smaller batch: ${retryNames.join(', ')}.`;
+      }
+      if (atomicOversizedNames.length > 0) {
+        message += ` These schemas exceed the budget even when requested alone: ${atomicOversizedNames.join(', ')}.`;
+      }
+      if (missing.length > 0) {
+        message += `\n\nNot found: ${missing.join(', ')}`;
+      }
+      if (truncated.length > 0) {
+        message += `\n\nTruncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+      }
+      return {
+        llmContent: message,
+        returnDisplay: 'Schema batch exceeded budget',
+        error: { message },
+      };
     }
 
     const registry = this.config.getToolRegistry();

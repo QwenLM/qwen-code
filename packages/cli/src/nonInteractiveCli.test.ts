@@ -6148,6 +6148,65 @@ describe('runNonInteractive', () => {
     }
   });
 
+  it('does not commit deferred presentations when a hook blocks the carrying send', async () => {
+    setupMetricsMock();
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    Object.assign(mockToolRegistry, { markProxySchemaPresented });
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'search-call',
+            name: ToolNames.TOOL_SEARCH,
+            response: { output: '<functions>...</functions>' },
+          },
+        },
+      ],
+      deferredToolPresentations: [
+        { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+      ],
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'search-call',
+              name: ToolNames.TOOL_SEARCH,
+              args: { query: 'cron' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-blocked-send',
+            },
+          },
+        ]),
+      )
+      // The carrying send of the schema-bearing tool result is blocked by a
+      // UserPromptSubmit hook: no provider output ever proves acceptance, so
+      // the schema never reaches history. The presentation must fail closed
+      // (stay uncommitted) instead of authorizing a later deferred call
+      // against a schema the model never saw.
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.UserPromptSubmitBlocked,
+            value: { reason: 'blocked by hook', originalPrompt: '' },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Create a cron job',
+      'prompt-blocked-send',
+    );
+
+    expect(markProxySchemaPresented).not.toHaveBeenCalled();
+  });
+
   it('records deferred calls with the normalized target identity', async () => {
     setupMetricsMock();
     const emitToolResult = vi.fn();

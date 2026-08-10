@@ -147,6 +147,9 @@ function createMockConfig(
         getHistory?: () => unknown[];
         setHistory?: (h: unknown[]) => void;
       };
+      clearProxySchemaPresentationsAfterHistoryMutation?: (
+        reason: string,
+      ) => void;
     } | null;
     clearContextOnIdle?: {
       clearContextMinutes: number;
@@ -164,6 +167,7 @@ function createMockConfig(
             getHistory: () => [],
             setHistory: vi.fn(),
           }),
+          clearProxySchemaPresentationsAfterHistoryMutation: vi.fn(),
         }
       : overrides.geminiClient;
   return {
@@ -1413,13 +1417,15 @@ describe('MemoryPressureMonitor', () => {
               getHistoryShallow: () => toolHistory,
               setHistory,
             }),
+            clearProxySchemaPresentationsAfterHistoryMutation:
+              clearPresentations,
           },
           fileReadCache: {
             clear: clearCache,
             evictNotAccessedSince: vi.fn().mockReturnValue(0),
           },
           toolRegistry: {
-            clearProxySchemaPresentations: clearPresentations,
+            clearProxySchemaPresentations: vi.fn(),
           },
           clearContextOnIdle: {
             clearContextMinutes: 60,
@@ -1435,10 +1441,10 @@ describe('MemoryPressureMonitor', () => {
 
       expect(setHistory).toHaveBeenCalled();
       expect(clearCache).toHaveBeenCalled();
-      // Idle compaction bypasses GeminiClient.setHistory, so it must clear
-      // deferred-tool proxy presentations itself (fail closed on any
-      // history mutation).
-      expect(clearPresentations).toHaveBeenCalled();
+      // Idle compaction bypasses GeminiClient.setHistory, so it must run
+      // the same paired clear (registry + pending resumed presentations)
+      // every other history mutation runs — fail closed on any mutation.
+      expect(clearPresentations).toHaveBeenCalledWith('idle-compact-history');
       const compacted = setHistory.mock.calls[0][0] as Content[];
       // microcompactHistory blanks old tool responses with a cleared message
       // rather than removing entries — verify some were blanked.

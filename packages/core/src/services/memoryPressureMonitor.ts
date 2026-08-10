@@ -742,10 +742,14 @@ export class MemoryPressureMonitor extends EventEmitter {
             this.coreConfig.getFileReadCache().clear();
             // This path bypasses GeminiClient.setHistory, so it must honor
             // the "any history mutation clears deferred-tool proxy
-            // presentations" invariant itself. Microcompaction cannot blank
+            // presentations" invariant itself — via the same paired clear
+            // (registry presentations + pending resumed presentations) the
+            // client-level mutation paths run. Microcompaction cannot blank
             // tool_search results today, but clearing keeps the idle path
             // fail-closed if that ever changes.
-            this.coreConfig.getToolRegistry().clearProxySchemaPresentations();
+            client.clearProxySchemaPresentationsAfterHistoryMutation(
+              'idle-compact-history',
+            );
             const m = result.meta;
             debugLogger.debug(
               `[COMPACT_HISTORY] cleared ${m.toolsCleared} tool result(s) ` +

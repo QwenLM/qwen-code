@@ -5268,11 +5268,19 @@ export class Session implements SessionContext {
       },
       promptId,
     );
-    const toolRegistry = this.config.getToolRegistry();
     const responseStream = (async function* () {
       for await (const event of rawResponseStream) {
         if (event.type === StreamEventType.COMPRESSED) {
-          toolRegistry.clearProxySchemaPresentations();
+          // This wrapper consumes GeminiChat's raw stream directly, so it
+          // never passes through GeminiClient.sendMessageStream's history
+          // mutation handling. Run the same paired clear every other mutation
+          // runs: a registry-only clear would leave pending resumed
+          // presentations alive to drain via a later setTools() with
+          // fingerprint-only validation, authorizing schemas that this
+          // compression removed from active history.
+          geminiClient.clearProxySchemaPresentationsAfterHistoryMutation(
+            'acp-chat-compressed',
+          );
         }
         yield event;
       }

@@ -1143,6 +1143,55 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent).length).toBeLessThan(500);
   });
 
+  it('refuses oversized subagent batches instead of emitting unbounded inline schemas', async () => {
+    // Subagent/teammate contexts load every schema as directly declared
+    // (presentations stay empty), and tool_search is exempt from scheduler
+    // truncation, so the budget guard must still cap the batch — otherwise a
+    // disabled batch budget lets unbounded schema text enter context.
+    registry.registerTool(
+      new MockTool({
+        name: 'subagent_small',
+        description: 'a'.repeat(200),
+        shouldDefer: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: 'subagent_oversized',
+        description: 'b'.repeat(2000),
+        shouldDefer: true,
+      }),
+    );
+    vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(
+      Number.POSITIVE_INFINITY,
+    );
+    vi.spyOn(config, 'getTruncateToolOutputThreshold').mockReturnValue(500);
+    const setTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({ setTools } as never);
+
+    const result = await runWithAgentContext('agent-1', () =>
+      new ToolSearchTool(config)
+        .build({ query: 'select:subagent_small,subagent_oversized' })
+        .execute(new AbortController().signal),
+    );
+
+    expect(setTools).not.toHaveBeenCalled();
+    expect(result.error?.message).toContain(
+      'exceeded the inline output budget',
+    );
+    expect(String(result.llmContent)).toContain(
+      'Request these tools individually or in a smaller batch: subagent_small',
+    );
+    expect(String(result.llmContent)).toContain(
+      'These schemas exceed the budget even when requested alone: subagent_oversized',
+    );
+    expect(String(result.llmContent)).not.toContain('"name":"subagent_small"');
+    expect(String(result.llmContent)).not.toContain(
+      '"name":"subagent_oversized"',
+    );
+    expect(result.deferredToolPresentations).toBeUndefined();
+  });
+
   it('asks for smaller batches instead of declaring aggregate overflow directly', async () => {
     const first = new MockTool({
       name: 'medium_deferred_a',
