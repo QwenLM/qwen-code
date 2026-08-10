@@ -3732,7 +3732,26 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('applies memoryProjectScope to every runtime without mutating process.env', async () => {
+  it.each([
+    [
+      'defaults every runtime to workspace project-memory scope',
+      undefined,
+      undefined,
+      'workspace',
+    ],
+    [
+      'applies memoryProjectScope to every runtime without mutating process.env',
+      'workspace',
+      'git-root',
+      'git-root',
+    ],
+    [
+      'preserves the launch environment scope when the option is omitted',
+      'git-root',
+      undefined,
+      'git-root',
+    ],
+  ] as const)('%s', async (_name, launchScope, optionScope, expectedScope) => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-memory-project-scope-')),
     );
@@ -3741,7 +3760,11 @@ describe('runQwenServe runtime startup failures', () => {
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
     const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    if (launchScope === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = launchScope;
+    }
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -3779,7 +3802,9 @@ describe('runQwenServe runtime startup failures', () => {
         hostname: '127.0.0.1',
         mode: 'http-bridge',
         workspace: [primary, secondary],
-        memoryProjectScope: 'git-root',
+        ...(optionScope === undefined
+          ? {}
+          : { memoryProjectScope: optionScope }),
         maxSessions: 1,
         serveWebShell: false,
       },
@@ -3792,9 +3817,9 @@ describe('runQwenServe runtime startup failures', () => {
       for (const runtime of workspaceRegistry?.list() ?? []) {
         expect(
           runtime.env.effectiveEnv?.['QWEN_CODE_MEMORY_PROJECT_SCOPE'],
-        ).toBe('git-root');
+        ).toBe(expectedScope);
       }
-      expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe('workspace');
+      expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe(launchScope);
     } finally {
       if (originalScope === undefined) {
         delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];

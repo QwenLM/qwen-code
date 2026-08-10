@@ -157,7 +157,8 @@ export interface ServeOptions {
    * `workspace` keys memory by the exact registered workspace; `git-root`
    * preserves the legacy behavior that shares memory among workspaces
    * resolved to the same Git root. When omitted,
-   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment.
+   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment before
+   * defaulting to `workspace`.
    */
   memoryProjectScope?: MemoryProjectScope;
   /**

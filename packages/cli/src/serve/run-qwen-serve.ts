@@ -2107,11 +2107,10 @@ async function runQwenServeImpl(
   const launchEnv = { ...process.env };
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    ...(optsIn.memoryProjectScope !== undefined
-      ? {
-          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
-        }
-      : {}),
+    QWEN_CODE_MEMORY_PROJECT_SCOPE:
+      optsIn.memoryProjectScope ??
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] ??
+      'workspace',
   };
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
