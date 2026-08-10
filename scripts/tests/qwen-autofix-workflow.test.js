@@ -7721,6 +7721,11 @@ exit 1
       /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
     );
     expect(pushAndReportStep).toContain('verification predates that merge');
+    // The STALE_BASE_RETRY handoff embeds a rejection written BEFORE the
+    // auto-update; the note un-poisons its framing for the retry agent.
+    expect(reviewAddressReportStep).toContain(
+      'the base has since been auto-updated',
+    );
     // Bounded: the loop gives up after the last attempt instead of spinning.
     // The structural pin connects the guard value to the error exit — a
     // mutation of == 3 to == 4 survives presence-only checks: the loop
@@ -8737,6 +8742,28 @@ exit 1
     });
     expect(staleConflict.split('|')[0]).toBe(NEWEST);
     expect(staleConflict).toContain('Could not produce a passing fix');
+
+    // Pre-existing verdicts pick their remedy from the compare the step
+    // already ran — swapping the two clause bodies must fail here, not ship
+    // a headline prescribing a merge that changes nothing.
+    const preAhead = run(
+      { OUTCOME: 'failed', PREEXISTING: 'true' },
+      { gateRejection: true },
+    );
+    expect(preAhead).toContain('PRE-EXISTING failure');
+    expect(preAhead).toContain('own pre-round code needs attention');
+    expect(preAhead).not.toContain('base update (merge main)');
+    const preBehindConflict = run(
+      {
+        OUTCOME: 'failed',
+        PREEXISTING: 'true',
+        CMP_STATUS_STUB: 'behind',
+        UPDATE_OK_STUB: '0',
+      },
+      { gateRejection: true },
+    );
+    expect(preBehindConflict).toContain('PRE-EXISTING failure');
+    expect(preBehindConflict).toContain('base update (merge main)');
 
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
@@ -11323,6 +11350,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     extraBaselineDiag = false,
     restoreClash = false,
     hugeFail = false,
+    noIdentity = false,
+    trackedDirt = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -11400,6 +11429,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '        if [[ -n "${HEAD_MSG:-}" ]]; then msg="${HEAD_MSG}"; fi',
           '      fi',
           '      echo "stub build FAILED at $head"',
+          '      if [[ "${NO_IDENTITY:-}" == "1" ]]; then',
+          // vite/esbuild shape: a red build with no tsc diagnostic at all.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${TRACKED_DIRT:-}" == "1" ]]; then',
+          // The build rewrites a TRACKED file (the settings-schema shape):
+          // f.txt differs across refs, so an undiscarded rewrite makes the
+          // restore checkout refuse.
+          '        echo dirt > f.txt',
+          '      fi',
           '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
           '      if [[ "${HUGE_FAIL:-}" == "1" ]]; then',
           '        for i in $(seq 1 200); do echo "verbose failure context line $i ****************************************"; done',
@@ -11471,6 +11510,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
             EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
+            NO_IDENTITY: noIdentity ? '1' : '',
+            TRACKED_DIRT: trackedDirt ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
             NOISY_SUCCESS: noisySuccess ? '1' : '',
@@ -11500,6 +11541,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('retryable=true');
+    // The repair agent's only warning that dist/ now holds baseline-built
+    // artifacts — dropped, it burns its budget on phantom dist-consuming
+    // failures.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
     expect(r.outputs).not.toContain('preexisting=true');
     // The A/B genuinely ran — the verdict is measured, not assumed.
     expect(r.stdout).toContain('Baseline A/B');
@@ -11537,23 +11582,67 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('DIFFERENT reason');
   });
 
-  it('rejects WITHOUT retry when the baseline leg breaks the restore', () => {
-    // The baseline run recreates (untracked) a file the branch tracks, so
-    // `git checkout` back refuses — the tree can no longer be trusted. No
-    // pre-existing label (a transient git failure is not a verdict about
-    // the failure's origin) and no retry either: the repair agent works in
-    // this very checkout and performs no git recovery, so on the detached
-    // tree its commit would land on the baseline and be orphaned. The next
-    // round starts clean from the trusted checkout instead.
+  it('crashes verdict-less when the baseline leg breaks the restore (retry, not handoff)', () => {
+    // The baseline run recreates (untracked) a file the branch tracks
+    // (`git restore -- .` touches tracked files only), so the checkout back
+    // refuses — the tree can no longer be trusted, and the repair must not
+    // run in it (its commit would orphan on the detached baseline). But a
+    // transient git-state failure is NOT a verdict either: a plain
+    // outcome=failed is an EVALUATED rejection — the watermark advances and
+    // the item is handed off for good. The gate therefore leaves outcome
+    // UNSET (the report's gate-crashed path retries next scan) while still
+    // writing the detail document so the crash comment explains itself.
     const r = runGate({
       failAt: ['feature', 'origin/feature'],
       restoreClash: true,
     });
     expect(r.status).toBe(1);
-    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('outcome=');
     expect(r.outputs).not.toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('could not restore the verification tree');
+    expect(r.rejection).toContain('could not restore the verification tree');
+  });
+
+  it('short-circuits before the detach when the head has no failure identity', () => {
+    // vite/esbuild/crash failures carry no tsc diagnostic: an empty head
+    // signature fails closed REGARDLESS of the baseline, so the gate must
+    // decide before paying the detach + full baseline re-run + restore.
+    const r = runGate({ failAt: ['feature'], noIdentity: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('no failure identity in the head transcript');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('discards tracked build dirt so a real verdict survives the restore', () => {
+    // The baseline build REWRITES a tracked file (the settings-schema
+    // shape): without the pre-checkout `git restore -- .` the restore
+    // refuses and a clean pre-existing verdict degrades into the
+    // verdict-less crash.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      trackedDirt: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.stdout).not.toContain('could not restore the verification tree');
+  });
+
+  it('caps the LONG-preamble (pre-existing) rejection under the render window', () => {
+    // The short-preamble flood is pinned above; the pre-existing path adds
+    // ~490 bytes of preamble, and the ${#preamble} subtraction is what
+    // keeps THIS document under the cap — a constant would pass the short
+    // case and truncate this one's closing fence.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      hugeFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
   });
 
   it('keeps the full message past the first n (the bracket class ate it)', () => {
