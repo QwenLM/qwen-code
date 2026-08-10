@@ -590,6 +590,7 @@ describe('EditTool', () => {
         old_string: 'old',
         new_string: 'new',
       };
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
 
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
@@ -603,6 +604,9 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ toolWriteOrigin: 'edit' }),
+      );
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
@@ -757,6 +761,7 @@ describe('EditTool', () => {
       (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
         ApprovalMode.AUTO_EDIT,
       );
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
 
@@ -766,6 +771,9 @@ describe('EditTool', () => {
       );
       expect(fs.existsSync(newFilePath)).toBe(true);
       expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ toolWriteOrigin: 'edit' }),
+      );
 
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(/\+Content for the new file\./);

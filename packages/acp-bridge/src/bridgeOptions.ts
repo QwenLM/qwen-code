@@ -261,16 +261,19 @@ export interface BridgeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal (the current unfinished turn). When exceeded, the oldest
-   * journal entries are dropped. Defaults to 10 000. Must be a positive
-   * safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal
+   * (the current unfinished turn). Consecutive compatible text/thought chunks
+   * share bounded entries. When exceeded, the oldest journal entries are
+   * dropped. Defaults to 10 000. Must be a positive safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. When exceeded, the
-   * oldest journal entries are dropped (at least one entry is always kept).
-   * Defaults to 8 MiB. Must be a positive safe integer.
+   * Per-session source-event byte cap on the in-flight live journal (the
+   * current unfinished turn) — accounted from serialized source events even
+   * when compatible chunks share a replay entry. When exceeded, the oldest
+   * journal entries are dropped whole (at least one entry is always kept),
+   * so the retained tail can be much smaller than the cap. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
   /**
