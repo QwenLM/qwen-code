@@ -32,12 +32,15 @@ function temp(): string {
 }
 
 // Several fixtures hold 16k-entry trees; leaking them exhausts a tmpfs
-// /tmp within a handful of runs.
+// /tmp within a handful of runs. Deleting them is tens of thousands of
+// unlinks, which has blown past the default 10s hook timeout on a loaded
+// CI runner — give the teardown the time it needs rather than failing a
+// green suite on cleanup.
 afterAll(() => {
   for (const root of worktrees) {
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 120_000);
 
 function write(path: string, content = ''): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -339,12 +342,15 @@ describe('manifest repository context provider', () => {
   it.each([
     '.git',
     '.next',
+    '.playwright',
     '.turbo',
     'coverage',
     'dist',
     'node_modules',
     'out',
+    'playwright-report',
     'target',
+    'test-results',
   ])(
     'never descends into %s',
     (name) => {

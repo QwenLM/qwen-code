@@ -40,6 +40,7 @@ import {
   taskHasLegacyCondition,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
+import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
@@ -97,8 +98,8 @@ export interface KeepaliveBridge {
   ): unknown;
 }
 
-/** Per-session revive-load timeout: a hung reload must not stall the sweep. */
-const KEEPALIVE_REVIVE_TIMEOUT_MS = 30_000;
+/** Default caller headroom above the bridge's 60-second restore deadline. */
+const KEEPALIVE_REVIVE_TIMEOUT_MS = 70_000;
 /** Per-task spawn timeout: a hung spawnOrAttach must not stall the sweep. */
 const KEEPALIVE_SPAWN_TIMEOUT_MS = 30_000;
 /** Upper bound on the per-session revive backoff, so a permanently-gone session
@@ -257,7 +258,7 @@ export interface StartScheduledTaskKeepaliveOptions {
   cleanupSession?: (sessionId: string) => Promise<unknown>;
   /** How often to heartbeat; must be comfortably under the reaper timeout. */
   intervalMs: number;
-  /** Per-session revive timeout; defaults to KEEPALIVE_REVIVE_TIMEOUT_MS. */
+  /** Per-session revive timeout; values above the JS timer limit disable it. */
   reviveTimeoutMs?: number;
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
@@ -499,9 +500,8 @@ export interface RehydrateResult {
  * its `loadSession` and is skipped rather than aborting the sweep. Distinct
  * session ids only; unbound tasks are ignored (they fire via the lock owner).
  */
-/** Per-session load timeout: one hung `loadSession` (cold start, blocked child
- * spawn, huge replay) must not stall the whole boot sweep. */
-const REHYDRATE_LOAD_TIMEOUT_MS = 30_000;
+/** Default caller headroom above the bridge's 60-second restore deadline. */
+const REHYDRATE_LOAD_TIMEOUT_MS = 70_000;
 /** Max sessions rehydrated at once. Each `loadSession` forks a real agent
  * child, so loading all of them (up to MAX_JOBS = 50) in one shot would spike
  * CPU/memory on boot and, on constrained hosts, hit spawn failures
@@ -512,6 +512,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
   bridge: RehydrateBridge;
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
+  /** Values above the JS timer limit disable the caller-side watchdog. */
   loadTimeoutMs?: number;
   onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
@@ -597,6 +598,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
 
 /** Rejects with a clear error if `p` doesn't settle within `ms`. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  if (ms > MAX_SESSION_RESTORE_TIMEOUT_MS) return p;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`${label} timed out after ${ms}ms`));

@@ -611,6 +611,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         await this.config.getFileSystemService().writeTextFile({
           path: this.params.file_path,
           content: editData.newContent,
+          toolWriteOrigin: 'edit',
           _meta: {
             bom: useBOM,
           },
@@ -619,6 +620,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         await this.config.getFileSystemService().writeTextFile({
           path: this.params.file_path,
           content: editData.newContent,
+          toolWriteOrigin: 'edit',
           _meta: {
             bom: editData.bom,
             encoding: editData.encoding,
