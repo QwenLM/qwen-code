@@ -42,11 +42,11 @@ export function buildTeammatePromptAddendum(
       '3. COLLABORATE: Use send_message for questions, conflicting evidence,',
       '   and useful findings. Include the task id and concrete evidence.',
       '',
-      '4. REPORT RESULTS: Return a concise final answer with findings,',
-      '   evidence, uncertainty, and recommended next action. The runtime',
-      '   forwards it to the leader automatically.',
+      '4. MARK COMPLETE: Call task_update(taskId, status: "completed").',
       '',
-      '5. MARK COMPLETE: Call task_update(taskId, status: "completed").',
+      '5. REPORT RESULTS: Return a concise final answer with findings,',
+      '   evidence, uncertainty, and recommended next action. The runtime',
+      '   forwards it to the leader automatically. This ends your turn.',
     ].join('\n');
   }
 

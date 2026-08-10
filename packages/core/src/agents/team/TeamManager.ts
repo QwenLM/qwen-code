@@ -332,6 +332,8 @@ export class TeamManager {
       const idx = this.teamFile.members.indexOf(member);
       if (idx !== -1) this.teamFile.members.splice(idx, 1);
       this.pendingMessages.delete(agentId);
+      this.pendingFinalReports.delete(agentId);
+      this.explicitLeaderReports.delete(agentId);
       this.lastActivityAt.delete(agentId);
       this.agentIdentities.delete(agentId);
       if (eventBridgeAttached) {
@@ -1547,6 +1549,7 @@ export class TeamManager {
       const text = event.text.trim();
       if (text) {
         this.pendingFinalReports.set(agentId, text);
+        this.explicitLeaderReports.delete(agentId);
       }
     };
 

@@ -1658,6 +1658,55 @@ describe('AgentTool', () => {
         for (const spy of spies) spy.mockRestore();
       }
     });
+
+    it('aborts a named teammate after working_dir validation', async () => {
+      const { GitWorktreeService } = await import(
+        '../../services/gitWorktreeService.js'
+      );
+      const controller = new AbortController();
+      const spies = [
+        vi
+          .spyOn(GitWorktreeService.prototype, 'checkGitAvailable')
+          .mockResolvedValue({ available: true }),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isGitRepository')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRepoTopLevel')
+          .mockResolvedValue('/test/project'),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isRegisteredLinkedWorktree')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRegisteredWorktreeBranch')
+          .mockImplementation(async () => {
+            controller.abort();
+            return { branch: 'writer', headCommit: 'abc123' };
+          }),
+      ];
+      try {
+        const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+        vi.mocked(config.getTeamManager).mockReturnValue({
+          spawnTeammate,
+        } as never);
+
+        const invocation = agentTool.build({
+          description: 'Write',
+          prompt: 'Make the change',
+          subagent_type: 'file-search',
+          name: 'writer',
+          working_dir: '.qwen/tmp/writer',
+        });
+        const result = await invocation.execute(controller.signal);
+
+        expect(spawnTeammate).not.toHaveBeenCalled();
+        expect(partToString(result.llmContent)).toContain(
+          'spawn aborted before "writer" was registered',
+        );
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+    });
   });
 
   describe('nesting depth guard', () => {

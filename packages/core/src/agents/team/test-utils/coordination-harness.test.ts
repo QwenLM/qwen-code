@@ -150,6 +150,35 @@ describe('TeamCoordinationHarness', () => {
       });
     });
 
+    it('forwards final text after an interim leader message', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('worker', {
+        onMessage: async (_message, agent) => {
+          await h.teamManager.sendMessage(
+            'leader',
+            'interim finding',
+            'worker',
+          );
+          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+            subagentId: agent.agentId,
+            round: 1,
+            text: 'final finding',
+            thoughtText: '',
+            timestamp: Date.now(),
+          });
+        },
+      });
+
+      await h.teamManager.sendMessage('worker', 'inspect', 'leader');
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({ text: 'interim finding' }),
+          expect.objectContaining({ text: 'final finding' }),
+        ]);
+      });
+    });
+
     it('sends message from leader to teammate', async () => {
       const h = await createHarness();
       const worker = await h.spawnTeammate('worker');

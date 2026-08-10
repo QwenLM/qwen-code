@@ -4384,6 +4384,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         cwd = resolved.path;
       }
 
+      if (signal?.aborted) {
+        return {
+          llmContent: `Teammate spawn aborted before "${name}" was registered.`,
+          returnDisplay: `Teammate spawn aborted.`,
+          error: { message: 'Aborted.' },
+        };
+      }
+
       await teamManager.spawnTeammate({
         name,
         prompt: this.params.prompt,
