@@ -715,6 +715,10 @@ describe('AskUserQuestion multiple questions', () => {
       '↑↓ select · Enter submit · Esc ignore',
     );
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+    const singleHint = Array.from(container!.querySelectorAll('p')).find(
+      (element) => element.textContent?.includes('Enter submit'),
+    );
+    expect(singleHint?.parentElement).toBe(submitButton()?.parentElement);
     act(() => optionButtons()[2]!.click());
     expect(container!.textContent).toContain('Enter submit · Esc stop editing');
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
@@ -732,6 +736,20 @@ describe('AskUserQuestion multiple questions', () => {
 
     act(() => optionButtons()[2]!.click());
     expect(container!.textContent).toContain('Enter next · Esc stop editing');
+  });
+
+  it('does not advertise the global submit shortcut on the last question', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(container!.textContent).toContain(
+      '↑↓ select · Enter submit · Esc ignore',
+    );
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+
+    act(() => optionButtons()[2]!.click());
+    expect(container!.textContent).toContain('Enter submit · Esc stop editing');
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
   });
 
   it('confirms a custom answer with Enter and advances', () => {
@@ -775,6 +793,29 @@ describe('AskUserQuestion multiple questions', () => {
 });
 
 describe('AskUserQuestion multi-select', () => {
+  it('does not advertise the global submit shortcut on a final multi-select question', () => {
+    const requestWithMultiFinal: PermissionRequest = {
+      ...multipleQuestionsRequest,
+      rawInput: {
+        questions: [
+          ...(request.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+          ...(multiRequest.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+        ],
+      },
+    };
+    render(undefined, requestWithMultiFinal);
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(container!.textContent).toContain(
+      'Space toggle · Enter submit · Esc ignore',
+    );
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+  });
+
   it('submits a single multi-select question with Enter without advertising the global shortcut', () => {
     render(undefined, multiRequest);
 
