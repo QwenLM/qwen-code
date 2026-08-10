@@ -310,6 +310,7 @@ function setupAcpTest(
     stderr,
     sessionUpdates,
     permissionRequests,
+    agent,
   };
 }
 
@@ -722,7 +723,7 @@ function setupAcpTest(
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
 
-    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests } =
+    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests, agent } =
       setupAcpTest(rig, {
         permissionHandler: (request) => {
           // Track all permission requests for later verification
@@ -784,22 +785,29 @@ function setupAcpTest(
         if (!(e instanceof Error) || !e.message.includes('timed out')) {
           throw e;
         }
+        // A dead agent also manifests as a timeout. Surface the crash instead
+        // of swallowing it as an acceptable slow-LLM path.
+        if (agent.exitCode !== null || agent.signalCode !== null) {
+          throw e;
+        }
       }
 
       // Poll for mode_update notification after switch_mode, bounded at 5 s.
       // A fixed delay races the slow-LLM path: switch_mode can arrive just
       // after the timeout, and mode_update may land after the wait window.
-      for (let i = 0; i < 20; i++) {
-        await delay(250);
-        const hasSwitchMode = permissionRequests.some(
-          (req) => req.toolCall?.kind === 'switch_mode',
-        );
-        if (!hasSwitchMode) continue;
-        const hasModeUpdate = sessionUpdates.some(
-          (update) => update.update?.sessionUpdate === 'current_mode_update',
-        );
-        if (hasModeUpdate) break;
-      }
+      await rig.poll(
+        () => {
+          const hasSwitchMode = permissionRequests.some(
+            (req) => req.toolCall?.kind === 'switch_mode',
+          );
+          if (!hasSwitchMode) return false;
+          return sessionUpdates.some(
+            (update) => update.update?.sessionUpdate === 'current_mode_update',
+          );
+        },
+        5000,
+        250,
+      );
 
       // Verify: If exit_plan_mode was called, we should have received:
       // 1. A permission request with kind: "switch_mode"
