@@ -32,9 +32,12 @@ import {
 } from './lib/coverage.js';
 import {
   BUDGET_STOP_PHRASE,
+  ROUND_CAP_PHRASE,
   budgetStopDisclosure,
+  roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
+import { MAX_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
 import {
@@ -420,12 +423,22 @@ function composeReviewBody(
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
+      // A round-cap stop and a time-budget stop both cap the verdict, but
+      // read differently and dedup against a different relayed phrase. The
+      // marker's `cause` picks which; an absent cause is a time stop, for
+      // markers written before the cause field existed.
+      const isRoundCap = stop.cause === 'round-cap';
+      const phrase = isRoundCap ? ROUND_CAP_PHRASE : BUDGET_STOP_PHRASE;
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+        if (unreviewed[i].includes(phrase)) {
           unreviewed.splice(i, 1);
         }
       }
-      budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
+      budgetEntry = isRoundCap
+        ? roundCapStopDisclosure(
+            typeof stop.cap === 'number' ? stop.cap : MAX_REVERSE_AUDIT_ROUNDS,
+          )
+        : budgetStopDisclosure(stop.round ?? undefined);
       coverageEntries.push(budgetEntry);
     }
   }
@@ -434,6 +447,19 @@ function composeReviewBody(
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  // Budget-gap disclosures from the coverage report — the checks agents said
+  // their soft tool budget cut short. A DISCLOSURE channel, deliberately not
+  // a cap: these render in the body's "Not reviewed" section mechanically
+  // (so a disclosed gap reaches the author whether or not the orchestrator
+  // relays it), while judging which gaps name an incomplete REQUIRED trace —
+  // and so belong in `unreviewedDimensions`, which caps — stays the
+  // orchestrator's ruling, exactly as the skill's Step 3D writes it. Capping
+  // on every gap here would make the soft ceiling hard: any large diff's
+  // routine budget stop would forbid an Approve the review otherwise earned.
+  const budgetGapNotes: Array<{ agent: string; gaps: string[] }> = [];
+  // Sibling caps MAX_DIMENSIONS and MAX_NOTES bound their lists for the
+  // same reason; this bounds the one budget-gap sentence.
+  const MAX_BUDGET_GAP_LINES = 5;
   // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
   // and fill; pasted literally it parses as a shell redirection. The run KNOWS
   // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
@@ -614,6 +640,7 @@ function composeReviewBody(
             'the read is what proves the review happened',
         );
       }
+      budgetGapNotes.push(...cov.budgetGaps);
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
@@ -1065,6 +1092,41 @@ function composeReviewBody(
       zh: `未审查：${d}。`,
     });
   }
+  // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
+  // review findings shaped this: each gap rides through `mdField` (inline
+  // code neutralizes @-mentions, #123 cross-references, links and any
+  // stray `</details>` an agent quoted — the first path by which raw
+  // sub-agent prose could reach a public PR body); the line is capped like
+  // its siblings (unbounded entries joined into one disclosure drown the
+  // verdict they ride on — and ~50 uncapped agents would break GitHub's
+  // 64 KB body limit and lose the whole POST); each gap carries its
+  // agent's label so N agents stopping on the same trace stay tellable
+  // apart; and a gap the caller already promoted into
+  // `unreviewedDimensions` is dropped here — the capping relay owns it,
+  // and the body must not say it twice in two registers. These are
+  // "stopped at the budget", not "nobody looked": the phrasing must not
+  // claim the stronger gap, and the entries do not join the capping lists.
+  const budgetGapItems: Array<{ agent: string; gap: string }> = [];
+  for (const g of budgetGapNotes) {
+    for (const gap of g.gaps) budgetGapItems.push({ agent: g.agent, gap });
+  }
+  const keptBudgetGaps = budgetGapItems.filter(
+    (it) => !unreviewed.some((d) => d.includes(it.gap)),
+  );
+  if (keptBudgetGaps.length > 0) {
+    const shown = keptBudgetGaps.slice(0, MAX_BUDGET_GAP_LINES);
+    const more = keptBudgetGaps.length - shown.length;
+    const enList =
+      shown.map((it) => `${it.agent}: ${mdField(it.gap)}`).join('; ') +
+      (more > 0 ? `, and ${more} more` : '');
+    const zhList =
+      shown.map((it) => `${it.agent}：${mdField(it.gap)}`).join('；') +
+      (more > 0 ? `，另有 ${more} 条` : '');
+    notReviewedParts.push({
+      en: `Not explored to full depth (tool budget reached): ${enList}.`,
+      zh: `未探索到全部深度（达到工具调用预算）：${zhList}。`,
+    });
+  }
   // Same cause, one sentence: forty-three chunks launched with rewritten
   // prompts are one failure with forty-three subjects, not forty-three
   // paragraphs — a posted body on #7166 was ninety-nine clauses over four
@@ -1247,16 +1309,24 @@ function composeReviewBody(
   }
 
   if (event === 'APPROVE') {
+    // `notReviewedParts` here is exactly the budget-gap disclosures: every
+    // other source of a not-reviewed entry also caps, and a capped run never
+    // reaches this branch. They render on the Approve because they are a
+    // disclosure, not a defect — hiding "stopped at the tool budget" behind
+    // an unqualified LGTM would break the one promise the disclosure channel
+    // makes, that it reaches the author mechanically.
     return {
       event,
       body: render(
         [
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
           ...repositoryContextBlock,
         ],
-        deferredBlock.length ||
+        notReviewedParts.length ||
+          deferredBlock.length ||
           testPlanBlock.length ||
           repositoryContextBlock.length
           ? '\n\n'
@@ -1309,6 +1379,12 @@ function composeReviewBody(
       // them." Nothing nobody read can be certified blocker-free — and neither
       // can a loop that ended with findings no verifier ever ruled on.
       missingReceipts.length === 0 &&
+      // A disclosed budget gap is not a blocker, but "Reviewed — no
+      // blockers." two lines above "Not explored to full depth" is the
+      // opener certifying what the disclosure takes back — the exact
+      // shape the comment below forbids. (A gap the caller promoted into
+      // `unreviewedDimensions` already denies certification above.)
+      keptBudgetGaps.length === 0 &&
       !findingsUnverifiedAtCompose;
     // The opener may not say "Reviewed." over a disclosure set that denies it.
     // #7268's posted body opened exactly that way — "Reviewed. Suggestions are

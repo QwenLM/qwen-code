@@ -511,6 +511,21 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     '--input',
     '-',
   );
+  // GitHub's answer, read best-effort: `id` feeds the bypass-audit receipt
+  // below; `html_url` is the deep link to the review just created, surfaced in
+  // both output channels so the summary the user reads can carry it — without
+  // it, "view what was posted" means hand-assembling a PR URL.
+  let reviewId: number | undefined;
+  let reviewUrl: string | undefined;
+  try {
+    const parsed = JSON.parse(response) as { id?: number; html_url?: string };
+    if (typeof parsed.id === 'number') reviewId = parsed.id;
+    if (typeof parsed.html_url === 'string' && parsed.html_url.trim() !== '') {
+      reviewUrl = parsed.html_url;
+    }
+  } catch {
+    /* response metadata only — the post itself succeeded */
+  }
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
@@ -525,7 +540,6 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   // add this one, dedupe, write back. Best-effort: a receipt failure must
   // never fail a review that DID post.
   try {
-    const reviewId = (JSON.parse(response) as { id?: number }).id;
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath);
@@ -542,7 +556,8 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
-      '.',
+      '.' +
+      (reviewUrl ? ` ${reviewUrl}` : ''),
   );
   writeStdoutLine(
     JSON.stringify(
@@ -551,6 +566,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,
       2,

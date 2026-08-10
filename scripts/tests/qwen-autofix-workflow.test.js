@@ -3276,7 +3276,7 @@ describe('qwen-autofix workflow', () => {
     // no-op, a skip-labeled add refuses, and a fork refuses — neither posts
     // a toggle.
     const toggle = workflow.match(
-      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n {14}gh pr edit "\$\{PR\}" --repo "\$\{REPO\}" --remove-label "\$\{TAKEOVER_LABEL\}"\n[\s\S]*?\n {10}fi)/,
+      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/[\s\S]*?\n {10}fi)/,
     )?.[1];
     expect(toggle).toBeTruthy();
     const runToggle = ({
@@ -3288,6 +3288,8 @@ describe('qwen-autofix workflow', () => {
       state = 'OPEN',
       base = 'main',
       author = 'fork-owner',
+      postFails = '',
+      deleteFails = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3305,7 +3307,14 @@ describe('qwen-autofix workflow', () => {
             '#!/bin/bash',
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
-            `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
+            // Label mutations are REST gh api calls (gh pr edit's
+            // projectCards lookup errors on older gh builds); record them.
+            // The TOGGLE_*_FAILS knobs make the matching call exit 1 with
+            // the knob value on stderr (like a real gh HTTP error), pinning
+            // the block's two failure policies instead of the stub
+            // universally exiting 0.
+            `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3314,7 +3323,16 @@ describe('qwen-autofix workflow', () => {
         writeFileSync(join(dir, 'writes.log'), '');
         const stdout = execFileSync(
           'bash',
-          ['-c', `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`],
+          // -eo pipefail like the runner's bash default: the replay must
+          // reproduce the step's failure semantics — the engage POST is
+          // deliberately loud, and plain `bash -c` would swallow its exit
+          // status.
+          [
+            '-eo',
+            'pipefail',
+            '-c',
+            `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
+          ],
           {
             env: {
               ...process.env,
@@ -3327,6 +3345,8 @@ describe('qwen-autofix workflow', () => {
               TAKEOVER_COMMAND: '@qwen-code /takeover',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
+              TOGGLE_POST_FAILS: postFails,
+              TOGGLE_DELETE_FAILS: deleteFails,
             },
             encoding: 'utf8',
           },
@@ -3336,6 +3356,14 @@ describe('qwen-autofix workflow', () => {
           log: stdout,
           writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
         };
+      } catch (error) {
+        // A throwing replay must stay INSPECTABLE: the engage arm's whole
+        // ordering claim (no public ack for an unlabeled PR) lives in what
+        // was written BEFORE the failure, and the finally below deletes it.
+        error.writes = existsSync(join(dir, 'writes.log'))
+          ? readFileSync(join(dir, 'writes.log'), 'utf8')
+          : '';
+        throw error;
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -3345,22 +3373,33 @@ describe('qwen-autofix workflow', () => {
     // (#7999, #8002), so the user-visible ack cannot depend on that
     // round-trip. In-repo PRs get no fork note.
     const addAbsent = runToggle({ cmd: 'add' });
-    expect(addAbsent.writes).toContain('EDIT pr edit 7165');
-    expect(addAbsent.writes).toContain('--add-label');
+    expect(addAbsent.writes).toContain(
+      'API api -X POST repos/QwenLM/qwen-code/issues/7165/labels',
+    );
+    // Idempotent create precedes the POST: the REST add would otherwise
+    // silently create a missing label with a random color.
+    expect(addAbsent.writes).toContain('LABEL-CREATE label create');
+    expect(addAbsent.writes.indexOf('LABEL-CREATE')).toBeLessThan(
+      addAbsent.writes.indexOf('API api -X POST'),
+    );
+    expect(addAbsent.writes).toContain('labels[]=autofix/takeover');
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, label untouched.
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
-    expect(rearm.writes).not.toContain('EDIT');
+    expect(rearm.writes).not.toContain('API');
     expect(rearm.log).toContain('re-armed');
-    // remove + present → label removed.
+    // remove + present → label removed, through the URI-encoded path segment
+    // (real jq runs in the substitution, so the %2F is the executed truth).
     const removePresent = runToggle({
       cmd: 'remove',
       labels: ['autofix/takeover'],
     });
-    expect(removePresent.writes).toContain('--remove-label');
+    expect(removePresent.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // Release acks directly too — the exact mirror of the engage side: a
     // loud add next to a mute stop re-creates the lost-event ambiguity on
     // the release side (and fork/non-main releases have no other ack path
@@ -3390,14 +3429,14 @@ describe('qwen-autofix workflow', () => {
     // skip present vetoes engagement — refusal comment, never a toggle.
     const skipBlocked = runToggle({ cmd: 'add', labels: ['autofix/skip'] });
     expect(skipBlocked.writes).toContain('COMMENT');
-    expect(skipBlocked.writes).not.toContain('EDIT');
+    expect(skipBlocked.writes).not.toContain('API');
     // Fork WITHOUT allow-edits refuses with the actionable ask, never
     // toggling; fork WITH allow-edits is fully manageable and toggles.
     const forkRefused = runToggle({ cmd: 'add', fork: true, canModify: false });
     expect(forkRefused.writes).toContain('COMMENT');
-    expect(forkRefused.writes).not.toContain('EDIT');
+    expect(forkRefused.writes).not.toContain('API');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
-    expect(forkManaged.writes).toContain('--add-label');
+    expect(forkManaged.writes).toContain('labels[]=autofix/takeover');
     // Fork label events carry no secrets, so no other job could ever ack a
     // fork engage — the command's own ack is the ONLY one, and it sets the
     // expectation that the first round comes from the next scheduled scan.
@@ -3417,7 +3456,7 @@ describe('qwen-autofix workflow', () => {
     // nothing ever manages it) — the command refuses with the adoption ask.
     const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
     expect(forkGhost.writes).toContain('COMMENT');
-    expect(forkGhost.writes).not.toContain('EDIT');
+    expect(forkGhost.writes).not.toContain('API');
     expect(forkGhost.log).toContain('below write');
     // Release is NEVER blocked by engage-side fork requirements: stop on an
     // allow-edits-revoked fork still removes the label.
@@ -3427,7 +3466,9 @@ describe('qwen-autofix workflow', () => {
       canModify: false,
       labels: ['autofix/takeover'],
     });
-    expect(forkStop.writes).toContain('--remove-label');
+    expect(forkStop.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // Fork unlabeled events carry no secrets, so this is the ONLY possible
     // release ack for a fork — it must post here.
     expect(forkStop.writes).toContain('<!-- takeover-ack released -->');
@@ -3436,7 +3477,7 @@ describe('qwen-autofix workflow', () => {
     const stacked = runToggle({ cmd: 'add', base: 'feat/base-pr' });
     expect(stacked.writes).toContain('<!-- takeover-ack base-refused -->');
     expect(stacked.writes).toContain('`feat/base-pr`');
-    expect(stacked.writes).not.toContain('EDIT');
+    expect(stacked.writes).not.toContain('API');
     // …but a stop on a non-main PR PROCEEDS: removing a stuck label is
     // harmless and matches the latest intent (previously dropped, leaving a
     // manually-applied label with no command able to remove it).
@@ -3445,7 +3486,9 @@ describe('qwen-autofix workflow', () => {
       base: 'feat/base-pr',
       labels: ['autofix/takeover'],
     });
-    expect(stackedStop.writes).toContain('--remove-label');
+    expect(stackedStop.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // A non-main release never reaches the ack job (route ignores it), so
     // the command's own ack is the only voice here too.
     expect(stackedStop.writes).toContain('<!-- takeover-ack released -->');
@@ -3453,6 +3496,46 @@ describe('qwen-autofix workflow', () => {
     const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
     expect(closed.writes.trim()).toBe('');
     expect(closed.log).toContain('no longer an open PR');
+    // Failure policies, pinned like the pr-self-report-label suite: the
+    // engage POST is deliberately LOUD — under the runner's -e a failing
+    // apply aborts the step BEFORE the engage ack, so no comment can claim
+    // "engaged" for an unlabeled PR. The throw alone does not pin the
+    // ORDER (an ack posted before a failing POST also throws) — the
+    // captured writes must show no engage ack ever landed.
+    let engageFailure;
+    try {
+      runToggle({ cmd: 'add', postFails: 'HTTP 500' });
+    } catch (error) {
+      engageFailure = error;
+    }
+    expect(engageFailure).toBeTruthy();
+    expect(engageFailure.writes).not.toContain('takeover-ack engaged');
+    // The release DELETE tolerates the 404 race (a concurrent removal
+    // already reached the end state): the release ack still posts, no
+    // warning.
+    const releaseRace = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 404: Not Found',
+    });
+    expect(releaseRace.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
+    expect(releaseRace.writes).toContain('takeover-ack released');
+    expect(releaseRace.log).not.toContain('::warning::');
+    // Any other DELETE failure must not drop the release ack either — a
+    // later `/takeover stop` retries the removal — but it MUST warn:
+    // masked, the ack reads "released" while the loop keeps managing the
+    // PR.
+    const releaseFailed = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 500',
+    });
+    expect(releaseFailed.writes).toContain('takeover-ack released');
+    expect(releaseFailed.log).toContain('::warning::');
+    expect(releaseFailed.log).toContain('removal failed');
+    expect(releaseFailed.log).toContain('HTTP 500');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -4428,9 +4511,11 @@ exit 1
     expect(cmdBranch).toBeTruthy();
     expect(cmdBranch).not.toContain('DO_REVIEW=true');
     expect(cmdBranch).toContain('TAKEOVER_CMD="${CMD}"');
-    // The toggle job is presence-aware and PAT-verified.
+    // The toggle job is presence-aware and PAT-verified. Label mutations
+    // are REST — on older gh builds `gh pr edit` exits 1 on its projectCards
+    // lookup.
     expect(workflow).toMatch(
-      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?--add-label "\$\{TAKEOVER_LABEL\}"[\s\S]*?--remove-label "\$\{TAKEOVER_LABEL\}"/,
+      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?-f "labels\[\]=\$\{TAKEOVER_LABEL\}"[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\//,
     );
     // No other command surface exists.
     expect(workflow).not.toContain('pull_request_review_comment');
@@ -5116,10 +5201,10 @@ exit 1
     );
   });
 
-  it('switches to Critical-only feedback after ten change rounds', () => {
-    // ROUND counts change-producing rounds, so 9 still starts the tenth
-    // suggestion-capable change while 10 starts the first Critical-only round.
-    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '10'");
+  it('switches to Critical-only feedback after five change rounds', () => {
+    // ROUND counts change-producing rounds, so 4 still starts the fifth
+    // suggestion-capable change while 5 starts the first Critical-only round.
+    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '5'");
     expect(workflow).not.toContain('TAKEOVER_CRITICAL_ONLY_AFTER_ROUND');
     expect(prepareBranchAndFeedbackStep).toContain(
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
@@ -5133,12 +5218,12 @@ exit 1
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=10\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(9)).toBe('false');
-    expect(modeAt(10)).toBe('true');
+    expect(modeAt(4)).toBe('false');
+    expect(modeAt(5)).toBe('true');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and

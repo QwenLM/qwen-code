@@ -134,7 +134,7 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
 const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
 const mockExtractCommandRules = vi.hoisted(() => vi.fn());
 vi.mock('../utils/shellAstParser.js', () => ({
-  isShellCommandReadOnlyAST: mockIsShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory: mockIsShellCommandReadOnlyAST,
   extractCommandRules: mockExtractCommandRules,
 }));
 

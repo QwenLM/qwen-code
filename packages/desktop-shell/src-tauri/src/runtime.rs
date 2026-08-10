@@ -41,7 +41,12 @@ impl DesktopRuntime {
         self.id
     }
 
-    pub fn start(app: &AppHandle, workspace: &Path, log_path: &Path) -> Result<Self, String> {
+    pub fn start(
+        app: &AppHandle,
+        workspace: &Path,
+        log_path: &Path,
+        on_spawned: impl FnOnce(Arc<Mutex<Option<GroupChild>>>, Arc<AtomicBool>),
+    ) -> Result<Self, String> {
         let id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         let layout = RuntimeLayout::resolve(app)?;
         // Callers pass a workspace already resolved by resolve_workspace.
@@ -85,17 +90,20 @@ impl DesktopRuntime {
         );
         capture_stderr(stderr, Arc::clone(&failure_output), log);
 
-        let base_url =
-            match wait_for_listening(&mut child, listen_receiver, &token, &failure_output) {
-                Ok(url) => url,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            };
+        // Share the child before blocking on startup so a concurrent stop
+        // (app exit, restart, or a newer start) can kill an in-flight daemon
+        // instead of orphaning it in its own process group.
         let child = Arc::new(Mutex::new(Some(child)));
         let stopping = Arc::new(AtomicBool::new(false));
+        on_spawned(Arc::clone(&child), Arc::clone(&stopping));
+
+        let base_url = match wait_for_listening(&child, listen_receiver, &token, &failure_output) {
+            Ok(url) => url,
+            Err(error) => {
+                stop_runtime_handle(&child);
+                return Err(error);
+            }
+        };
         monitor_runtime(app.clone(), id, Arc::clone(&child), Arc::clone(&stopping));
 
         Ok(Self {
@@ -109,18 +117,15 @@ impl DesktopRuntime {
 
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
-        let child = match self.child.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        if let Some(mut child) = child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        stop_runtime_handle(&self.child);
     }
 
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     pub fn authenticated_web_url(&self) -> Url {
@@ -288,6 +293,19 @@ fn stop_runtime_child(child: &mut GroupChild) {
     let _ = child.wait();
 }
 
+// Kills and reaps the child behind a shared startup/runtime handle. The
+// `Option::take` makes concurrent stops (pending stop vs `DesktopRuntime::stop`)
+// idempotent: whichever runs first owns the kill.
+pub(crate) fn stop_runtime_handle(child: &Mutex<Option<GroupChild>>) {
+    let taken = match child.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    if let Some(mut child) = taken {
+        stop_runtime_child(&mut child);
+    }
+}
+
 fn append_log(log: &Mutex<File>, stream: &str, line: &str) {
     let mut log = match log.lock() {
         Ok(guard) => guard,
@@ -358,22 +376,51 @@ fn parse_listening_url(line: &str) -> Option<Url> {
     }
 }
 
+enum StartupChildState {
+    Running,
+    Exited(String),
+    // A concurrent stop took the child out of the shared handle while startup
+    // was still in flight.
+    Stopped,
+}
+
+fn startup_child_state(child: &Mutex<Option<GroupChild>>) -> Result<StartupChildState, String> {
+    let mut guard = match child.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(process) = guard.as_mut() else {
+        return Ok(StartupChildState::Stopped);
+    };
+    match process.try_wait() {
+        Ok(Some(status)) => Ok(StartupChildState::Exited(status.to_string())),
+        Ok(None) => Ok(StartupChildState::Running),
+        Err(error) => Err(format!("Failed to inspect bundled runtime: {error}")),
+    }
+}
+
 fn wait_for_listening(
-    child: &mut GroupChild,
+    child: &Mutex<Option<GroupChild>>,
     listen_receiver: std::sync::mpsc::Receiver<Url>,
     token: &str,
     failure_output: &Mutex<String>,
 ) -> Result<Url, String> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("Failed to inspect bundled runtime: {error}"))?
-        {
-            return Err(startup_error(
-                &format!("Bundled runtime exited with status {status}."),
-                failure_output,
-            ));
+        match startup_child_state(child)? {
+            StartupChildState::Running => {}
+            StartupChildState::Exited(status) => {
+                return Err(startup_error(
+                    &format!("Bundled runtime exited with status {status}."),
+                    failure_output,
+                ));
+            }
+            StartupChildState::Stopped => {
+                return Err(startup_error(
+                    "Runtime startup was stopped before the daemon was ready.",
+                    failure_output,
+                ));
+            }
         }
         match listen_receiver.recv_timeout(HEALTH_RETRY_INTERVAL) {
             Ok(url) => return wait_for_health(child, url, token, deadline, failure_output),
@@ -395,7 +442,7 @@ fn wait_for_listening(
 }
 
 fn wait_for_health(
-    child: &mut GroupChild,
+    child: &Mutex<Option<GroupChild>>,
     base_url: Url,
     token: &str,
     deadline: Instant,
@@ -414,14 +461,20 @@ fn wait_for_health(
         .build()
         .into();
     while Instant::now() < deadline {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("Failed to inspect bundled runtime: {error}"))?
-        {
-            return Err(startup_error(
-                &format!("Bundled runtime exited with status {status}."),
-                failure_output,
-            ));
+        match startup_child_state(child)? {
+            StartupChildState::Running => {}
+            StartupChildState::Exited(status) => {
+                return Err(startup_error(
+                    &format!("Bundled runtime exited with status {status}."),
+                    failure_output,
+                ));
+            }
+            StartupChildState::Stopped => {
+                return Err(startup_error(
+                    "Runtime startup was stopped before the daemon was ready.",
+                    failure_output,
+                ));
+            }
         }
         let response = agent
             .get(health_url.as_str())
@@ -477,9 +530,13 @@ mod tests {
         append_failure_output, parse_listening_url, resolve_workspace, runtime_arguments,
         DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
+    #[cfg(unix)]
+    use super::{stop_runtime_handle, wait_for_listening};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::sync::Arc;
     use std::sync::Mutex;
     use url::Url;
 
@@ -606,5 +663,53 @@ mod tests {
             output.lock().expect("output").len(),
             FAILURE_OUTPUT_LIMIT - 1
         );
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleep(seconds: &str) -> command_group::GroupChild {
+        use command_group::CommandGroup;
+        std::process::Command::new("sleep")
+            .arg(seconds)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .group_spawn()
+            .expect("spawn sleep")
+    }
+
+    // A pending stop (app exit / restart while startup is still in flight)
+    // must reap the child it took from the shared handle.
+    #[cfg(unix)]
+    #[test]
+    fn pending_stop_reaps_a_child_taken_from_the_shared_handle() {
+        let handle = Arc::new(Mutex::new(Some(spawn_sleep("30"))));
+        let started = std::time::Instant::now();
+        stop_runtime_handle(&handle);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "stop blocked, so the child was not killed"
+        );
+        assert!(handle.lock().expect("handle").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_listening_reports_a_stop_during_startup() {
+        let handle = Arc::new(Mutex::new(Some(spawn_sleep("30"))));
+        let failure_output = Mutex::new(String::new());
+        let (_listen_sender, listen_receiver) = std::sync::mpsc::channel::<Url>();
+        let stopper = Arc::clone(&handle);
+        let stopper_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            stop_runtime_handle(&stopper);
+        });
+
+        let error = wait_for_listening(&handle, listen_receiver, "token", &failure_output)
+            .expect_err("startup should fail when stopped in flight");
+        assert!(
+            error.contains("stopped before the daemon was ready"),
+            "unexpected startup error: {error}"
+        );
+        stopper_thread.join().expect("stopper thread joins");
     }
 }
