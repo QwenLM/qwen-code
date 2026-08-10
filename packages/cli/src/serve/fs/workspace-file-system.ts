@@ -2232,7 +2232,7 @@ async function atomicWriteTextResolvedFile(
   input: AtomicWriteTextInput,
 ): Promise<AtomicWriteTextOutcome> {
   const buf = await encodeTextFileContentAsync(
-    input.target as string,
+    input.target,
     input.content,
     buildWriteMeta(input.meta),
   );
@@ -2257,13 +2257,13 @@ async function atomicWriteTextResolvedFile(
  * reservation, precondition checks, generation gating, and publication.
  */
 async function atomicPublishResolvedFile(input: {
-  target: ResolvedPath;
+  target: string;
   buf: Buffer;
   mode: WriteMode;
   expectedHash?: ContentHash;
   assertGenerationOpen?: () => void;
 }): Promise<AtomicWriteTextOutcome> {
-  const target = input.target as string;
+  const target = input.target;
   const parent = path.dirname(target);
   const parentStat = await fsp.lstat(parent);
   // Defense-in-depth against a parent-symlink swap. A full fix requires
