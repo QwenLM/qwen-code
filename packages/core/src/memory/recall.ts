@@ -226,18 +226,27 @@ export function selectRelevantAutoMemoryDocuments(
 function selectModelCandidateDocuments(
   query: string,
   docs: ScannedAutoMemoryDocument[],
+  recentTools: readonly string[],
 ): ScannedAutoMemoryDocument[] {
+  const eligible = docs.filter(
+    (doc) => !isActiveToolUsageMemory(doc, recentTools),
+  );
   const lexical = selectRelevantAutoMemoryDocuments(
     query,
-    docs,
+    eligible,
     MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE,
   );
   const selected = new Set(lexical.map((doc) => doc.filePath));
-  const recent = docs
+  const recent = eligible
     .filter((doc) => !selected.has(doc.filePath))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, MAX_MODEL_CANDIDATE_DOCS - lexical.length);
-  return [...lexical, ...recent];
+  const reservedRecent = recent.slice(0, RECENT_MODEL_CANDIDATE_RESERVE);
+  return [
+    ...reservedRecent,
+    ...lexical,
+    ...recent.slice(reservedRecent.length),
+  ];
 }
 
 function truncateBody(body: string): string {
@@ -326,11 +335,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       return [];
     }),
   ]);
-  // Project-level docs come first as a soft hint to the model-based
-  // selector and, in the heuristic fallback (`selectRelevantAutoMemoryDocuments`),
-  // as the stable-sort tie-breaker — matching the PR's "project shadows
-  // user" precedence. The model selector ranks by its own judgement so
-  // this ordering is advisory there, not enforced.
+  // Project-level docs come first as the stable tie-break when later ranking
+  // keys match.
   const docs = filterExcludedAutoMemoryDocuments(
     [...projectDocs, ...userDocs],
     options.excludedFilePaths,
@@ -359,7 +365,11 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
 
   if (options.config) {
     try {
-      const modelCandidates = selectModelCandidateDocuments(query, docs);
+      const modelCandidates = selectModelCandidateDocuments(
+        query,
+        docs,
+        options.recentTools ?? [],
+      );
       const selectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
         options.config,
         query,

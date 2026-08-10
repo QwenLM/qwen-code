@@ -432,15 +432,25 @@ describe('auto-memory relevant recall', () => {
   });
 
   it('bounds model candidates while retaining lexical and recent documents', async () => {
-    const recentDocs = Array.from({ length: 230 }, (_, index) => ({
+    const lexicalDocs = Array.from({ length: 200 }, (_, index) => ({
       ...memoryDoc(
-        `candidate-${String(index).padStart(3, '0')}.md`,
+        `lexical-${String(index).padStart(3, '0')}.md`,
         'reference',
-        `General memory ${index}`,
-        'Unrelated historical context',
+        `Overflow memory ${index}`,
+        'Matching historical context',
         '',
       ),
-      mtimeMs: 230 - index,
+      mtimeMs: 0,
+    }));
+    const recentDocs = Array.from({ length: 20 }, (_, index) => ({
+      ...memoryDoc(
+        `recent-${String(index).padStart(2, '0')}.md`,
+        'reference',
+        `General memory ${index}`,
+        'Unrelated recent context',
+        '',
+      ),
+      mtimeMs: 20 - index,
     }));
     const lexicalTarget = {
       ...memoryDoc(
@@ -453,6 +463,7 @@ describe('auto-memory relevant recall', () => {
       mtimeMs: 0,
     };
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+      ...lexicalDocs,
       ...recentDocs,
       lexicalTarget,
     ]);
@@ -470,9 +481,8 @@ describe('auto-memory relevant recall', () => {
     const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
       .mock.calls[0]![2];
     expect(modelCandidates).toHaveLength(200);
-    expect(modelCandidates[0]).toBe(lexicalTarget);
-    expect(modelCandidates).toContain(lexicalTarget);
-    expect(modelCandidates).toContain(recentDocs[0]);
+    expect(modelCandidates.slice(0, 20)).toEqual(recentDocs);
+    expect(modelCandidates[20]).toBe(lexicalTarget);
     expect(result.selectedDocs).toEqual([lexicalTarget]);
   });
 
@@ -504,8 +514,16 @@ describe('auto-memory relevant recall', () => {
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
       activeToolDocs,
     );
-    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
-      new Error('selector failed'),
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
+      async (_config, _query, candidates) => {
+        expect(candidates.map((doc) => doc.filePath)).not.toContain(
+          '/tmp/ata-tool.md',
+        );
+        expect(candidates.map((doc) => doc.filePath)).toContain(
+          '/tmp/ata-gotcha.md',
+        );
+        throw new Error('selector failed');
+      },
     );
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
