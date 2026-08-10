@@ -4483,6 +4483,11 @@ jobs:
           # raised, with no ::warning:: anywhere in that loop. 60000 rejects
           # every minutes-shaped value (1..999) and every 0/000, which the
           # bare regex admitted while the message claimed positivity.
+          # Hand-maintained sibling of the triage-budget sanitize step in
+          # qwen-triage.yml's authorize job; the failure modes deliberately
+          # differ (this one clamps garbage to the ceiling, that one falls
+          # back to the default), so a boundary-bug fix in one must be
+          # re-derived in the other.
           BUDGET_CAP_MS=7200000
           BUDGET_FLOOR_MS=60000
           if [[ ! "${QWEN_TIMEOUT_MS}" =~ ^[0-9]{1,8}$ ]] ||
