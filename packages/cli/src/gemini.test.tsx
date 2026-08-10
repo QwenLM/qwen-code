@@ -26,6 +26,7 @@ import {
   createNonInteractivePromptId,
   main,
   registerLspHotReload,
+  setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './gemini.js';
@@ -35,10 +36,11 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLineSafe = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
@@ -157,7 +159,7 @@ vi.mock('./utils/sandbox.js', () => ({
 
 vi.mock('./utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
-  writeStderrLineSafe: vi.fn(),
+  writeStderrLineSafe: mockWriteStderrLineSafe,
   writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
 }));
@@ -267,6 +269,76 @@ function withLspDisabledConfig<T extends object>(
     ...config,
   };
 }
+
+describe('setupUncaughtExceptionHandler', () => {
+  it('restores terminal state before leaving the alternate screen', () => {
+    const originalListeners = new Set(process.listeners('uncaughtException'));
+    const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      'isTTY',
+    );
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-uncaught-'));
+
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    const getDebugLogPathSpy = vi
+      .spyOn(Storage, 'getDebugLogPath')
+      .mockReturnValue(join(tempDir, 'debug.log'));
+    const writeSpy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+
+    try {
+      setupUncaughtExceptionHandler({
+        getSessionId: () => 'test-session-id',
+      } as Config);
+      const handler = process
+        .listeners('uncaughtException')
+        .find((listener) => !originalListeners.has(listener));
+
+      expect(handler).toBeTypeOf('function');
+      mockRunTerminalTeardown.mockClear();
+      mockWriteStderrLineSafe.mockClear();
+      writeSpy.mockClear();
+      handler?.(new Error('render failed'), 'uncaughtException');
+
+      expect(mockRunTerminalTeardown).toHaveBeenCalledTimes(1);
+      expect(writeSpy).toHaveBeenNthCalledWith(1, '\x1b[?1049l');
+      expect(mockRunTerminalTeardown.mock.invocationCallOrder[0]).toBeLessThan(
+        writeSpy.mock.invocationCallOrder[0],
+      );
+      expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+        expect.stringContaining('render failed'),
+      );
+      expect(processExitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      for (const listener of process.listeners('uncaughtException')) {
+        if (!originalListeners.has(listener)) {
+          process.removeListener('uncaughtException', listener);
+        }
+      }
+      for (const listener of originalListeners) {
+        if (!process.listeners('uncaughtException').includes(listener)) {
+          process.on('uncaughtException', listener);
+        }
+      }
+      getDebugLogPathSpy.mockRestore();
+      processExitSpy.mockRestore();
+      writeSpy.mockRestore();
+      if (stdoutDescriptor) {
+        Object.defineProperty(process.stdout, 'isTTY', stdoutDescriptor);
+      } else {
+        delete (process.stdout as { isTTY?: boolean }).isTTY;
+      }
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
@@ -2348,6 +2420,92 @@ describe('gemini.tsx main function kitty protocol', () => {
       processExitSpy.mockRestore();
     },
   );
+
+  it('keeps signal guards installed during non-signal cleanup', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const actions: string[] = [];
+    const installedSignals = new Set<string>();
+    const signals = new Set(['SIGHUP', 'SIGINT', 'SIGTERM']);
+    let signalCleanup: (() => void) | undefined;
+    let signalHandlersInstalled = false;
+
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi
+      .spyOn(process, 'on')
+      .mockImplementation(
+        (
+          eventName: string | symbol,
+          listener: (...args: unknown[]) => void,
+        ) => {
+          if (typeof eventName === 'string' && signals.has(eventName)) {
+            actions.push(`on:${eventName}`);
+            installedSignals.add(eventName);
+            signalHandlersInstalled = installedSignals.size === signals.size;
+            return process;
+          }
+          return realProcessOn(
+            eventName as string,
+            listener as (...args: unknown[]) => void,
+          );
+        },
+      );
+    const realRemoveListener = process.removeListener.bind(process);
+    const removeListenerSpy = vi
+      .spyOn(process, 'removeListener')
+      .mockImplementation(
+        (
+          eventName: string | symbol,
+          listener: (...args: unknown[]) => void,
+        ) => {
+          if (typeof eventName === 'string' && signals.has(eventName)) {
+            actions.push(`remove:${eventName}`);
+            return process;
+          }
+          return realRemoveListener(
+            eventName as string,
+            listener as (...args: unknown[]) => void,
+          );
+        },
+      );
+    const registerCleanupMock = vi.mocked(cleanupModule.registerCleanup);
+    registerCleanupMock.mockReset();
+    registerCleanupMock.mockImplementation((cleanup) => {
+      if (signalHandlersInstalled && !signalCleanup) {
+        signalCleanup = cleanup;
+      }
+      return vi.fn();
+    });
+
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    try {
+      await main();
+      expect(signalCleanup).toBeTypeOf('function');
+
+      actions.length = 0;
+      signalCleanup?.();
+
+      expect(actions).toEqual([
+        'on:SIGHUP',
+        'on:SIGINT',
+        'on:SIGTERM',
+        'remove:SIGHUP',
+        'remove:SIGTERM',
+        'remove:SIGINT',
+      ]);
+    } finally {
+      registerCleanupMock.mockReset();
+      processOnSpy.mockRestore();
+      removeListenerSpy.mockRestore();
+    }
+  });
 
   it('rejects --json-schema when running in interactive (TUI) mode', async () => {
     // The synthetic structured_output tool only terminates the run inside

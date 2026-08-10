@@ -216,6 +216,7 @@ export function setupUncaughtExceptionHandler(config: Config) {
       // Best-effort: if the debug dir doesn't exist yet or the disk is
       // full, the stderr output below is the fallback record.
     }
+    runTerminalTeardown();
     // In VP / alternate-screen mode, stderr is written to the alternate
     // buffer which is discarded on teardown. Leave the alternate screen
     // *before* writing the error so the user actually sees it. Guard on
@@ -294,19 +295,27 @@ const SIGINT_RERAISE_IGNORE_MS = 50;
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   let cleanupStarted = false;
   let lastSigintAt = 0;
+  let swallowSignalHandlersInstalled = false;
 
   const swallowSignalDuringCleanup = () => {};
+  const installSwallowSignalHandlers = () => {
+    if (swallowSignalHandlersInstalled) {
+      return;
+    }
+    swallowSignalHandlersInstalled = true;
+    process.on('SIGHUP', swallowSignalDuringCleanup);
+    process.on('SIGINT', swallowSignalDuringCleanup);
+    process.on('SIGTERM', swallowSignalDuringCleanup);
+  };
 
   const beginExit = (signal: InteractiveExitSignal) => {
     if (cleanupStarted) {
       return;
     }
     cleanupStarted = true;
+    installSwallowSignalHandlers();
     runTerminalTeardown();
     restoreRawMode(wasRaw);
-    process.on('SIGHUP', swallowSignalDuringCleanup);
-    process.on('SIGINT', swallowSignalDuringCleanup);
-    process.on('SIGTERM', swallowSignalDuringCleanup);
 
     void runExitCleanup()
       .catch((error) => {
@@ -345,6 +354,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   process.on('SIGINT', handleSigint);
 
   return () => {
+    installSwallowSignalHandlers();
     process.removeListener('SIGHUP', handleSighup);
     process.removeListener('SIGTERM', handleSigterm);
     process.removeListener('SIGINT', handleSigint);
