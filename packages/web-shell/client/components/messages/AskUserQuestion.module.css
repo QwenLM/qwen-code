@@ -329,6 +329,13 @@
   border-bottom-color: var(--agent-blue-500);
 }
 
+.shortcuts {
+  margin: 12px 0 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;

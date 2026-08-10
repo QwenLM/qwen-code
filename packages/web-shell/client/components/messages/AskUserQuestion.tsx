@@ -71,7 +71,11 @@ export function AskUserQuestion({
   // "Other" trigger that reveals the custom input.
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const customRef = useRef<HTMLButtonElement | null>(null);
+  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
   const selectedIdxRef = useRef<number | null>(selectedIdx);
+  const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({});
+  const focusAfterQuestionChangeRef = useRef(false);
+  const focusCustomTriggerAfterEditRef = useRef(false);
   selectedIdxRef.current = selectedIdx;
   const questionTextId = useId();
   const headingId = useId();
@@ -85,8 +89,10 @@ export function AskUserQuestion({
     setCurrentIdx(0);
     // Sync the ref too so the focus effect (which runs in this same commit on a
     // new request) reads the fresh index, not the previous request's selection.
-    selectedIdxRef.current = firstQuestion?.options.length ? 0 : null;
-    setSelectedIdx(firstQuestion?.options.length ? 0 : null);
+    const firstSelectedIdx = firstQuestion ? 0 : null;
+    selectedIdxByQuestionRef.current = { 0: firstSelectedIdx };
+    selectedIdxRef.current = firstSelectedIdx;
+    setSelectedIdx(firstSelectedIdx);
     setAnswers(
       firstQuestion && !firstQuestion.multiSelect && firstQuestion.options[0]
         ? { 0: firstQuestion.options[0].label }
@@ -103,6 +109,26 @@ export function AskUserQuestion({
 
   const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
+
+  const hasAnswer = (i: number): boolean => {
+    const question = questions[i];
+    if (!question) return false;
+    if (question.multiSelect) {
+      return (selectedMulti[i] || []).length > 0 || !!customInputs[i];
+    }
+    return !!answers[i] || !!customInputs[i];
+  };
+
+  const canSubmit = questions.every((_, i) => hasAnswer(i));
+
+  const rememberSelectedIndex = useCallback(
+    (idx: number | null) => {
+      selectedIdxByQuestionRef.current[currentIdx] = idx;
+      selectedIdxRef.current = idx;
+      setSelectedIdx(idx);
+    },
+    [currentIdx],
+  );
 
   const buildResult = useCallback((): Record<string, string> => {
     const result: Record<string, string> = {};
@@ -237,8 +263,7 @@ export function AskUserQuestion({
   const chooseOption = useCallback(
     (idx: number) => {
       if (!current) return;
-      selectedIdxRef.current = idx;
-      setSelectedIdx(idx);
+      rememberSelectedIndex(idx);
       if (idx === current.options.length) {
         focusCustomInput();
         return;
@@ -246,7 +271,14 @@ export function AskUserQuestion({
       if (isMulti) handleToggle(idx);
       else handleSelectOption(idx);
     },
-    [current, isMulti, focusCustomInput, handleToggle, handleSelectOption],
+    [
+      current,
+      isMulti,
+      focusCustomInput,
+      handleToggle,
+      handleSelectOption,
+      rememberSelectedIndex,
+    ],
   );
 
   // Move the selection to a specific option index, keeping focus, the roving
@@ -258,8 +290,7 @@ export function AskUserQuestion({
   const selectIndex = useCallback(
     (idx: number) => {
       if (!current) return;
-      selectedIdxRef.current = idx;
-      setSelectedIdx(idx);
+      rememberSelectedIndex(idx);
       if (idx === current.options.length) {
         customRef.current?.focus();
         if (!isMulti) {
@@ -275,7 +306,7 @@ export function AskUserQuestion({
         if (!isMulti) handleSelectOption(idx);
       }
     },
-    [current, currentIdx, isMulti, handleSelectOption],
+    [current, currentIdx, isMulti, handleSelectOption, rememberSelectedIndex],
   );
 
   const moveSelection = useCallback(
@@ -290,20 +321,126 @@ export function AskUserQuestion({
     [current, selectIndex],
   );
 
-  // Focus-scoped keyboard nav (fires only while focus is inside this question):
-  // arrows/j/k move between options and the "Other" row, Home/End jump to the
-  // ends, digits pick by position, Escape ignores. Enter/Space activate the
-  // focused control natively; the custom <input> keeps its own arrow/caret keys
-  // (guarded by isEditableTarget above).
+  const getSelectedIndexForQuestion = useCallback(
+    (questionIdx: number): number | null => {
+      if (Object.hasOwn(selectedIdxByQuestionRef.current, questionIdx)) {
+        return selectedIdxByQuestionRef.current[questionIdx] ?? null;
+      }
+      const question = questions[questionIdx];
+      if (!question) return null;
+      if (customInputs[questionIdx]) return question.options.length;
+      if (!question.multiSelect) {
+        const answer = answers[questionIdx];
+        const answerIdx = question.options.findIndex(
+          (option) => option.label === answer,
+        );
+        if (answerIdx >= 0) return answerIdx;
+      }
+      return 0;
+    },
+    [answers, customInputs, questions],
+  );
+
+  const selectQuestion = useCallback(
+    (nextIdx: number) => {
+      const question = questions[nextIdx];
+      if (!question) return;
+      const nextSelectedIdx = getSelectedIndexForQuestion(nextIdx);
+      selectedIdxByQuestionRef.current[nextIdx] = nextSelectedIdx;
+      selectedIdxRef.current = nextSelectedIdx;
+      setSelectedIdx(nextSelectedIdx);
+      setCustomFocused(false);
+      focusAfterQuestionChangeRef.current = true;
+      setCurrentIdx(nextIdx);
+
+      if (question.multiSelect) {
+        setSelectedMulti((prev) =>
+          (prev[nextIdx] || []).length > 0 || customInputs[nextIdx]
+            ? prev
+            : question.options[0]
+              ? { ...prev, [nextIdx]: [question.options[0].label] }
+              : prev,
+        );
+        return;
+      }
+      setAnswers((prev) =>
+        prev[nextIdx] || customInputs[nextIdx] || !question.options[0]
+          ? prev
+          : { ...prev, [nextIdx]: question.options[0].label },
+      );
+    },
+    [customInputs, getSelectedIndexForQuestion, questions],
+  );
+
+  const handlePrevious = useCallback(() => {
+    if (currentIdx <= 0) return;
+    selectQuestion(currentIdx - 1);
+  }, [currentIdx, selectQuestion]);
+
+  const handleNext = useCallback(() => {
+    if (currentIdx >= questions.length - 1) return;
+    selectQuestion(currentIdx + 1);
+  }, [currentIdx, questions.length, selectQuestion]);
+
+  const advanceQuestion = useCallback(() => {
+    setCustomFocused(false);
+    if (currentIdx < questions.length - 1) {
+      selectQuestion(currentIdx + 1);
+      return;
+    }
+    submitButtonRef.current?.focus();
+  }, [currentIdx, questions.length, selectQuestion]);
+
+  useEffect(() => {
+    if (!focusAfterQuestionChangeRef.current || !current) return;
+    focusAfterQuestionChangeRef.current = false;
+    const idx = selectedIdxRef.current ?? 0;
+    if (idx === current.options.length) customRef.current?.focus();
+    else optionRefs.current[idx]?.focus();
+  }, [current, currentIdx]);
+
+  useEffect(() => {
+    if (customFocused || !focusCustomTriggerAfterEditRef.current) return;
+    focusCustomTriggerAfterEditRef.current = false;
+    customRef.current?.focus();
+  }, [customFocused]);
+
+  const handleCustomInputKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+      if (e.ctrlKey || e.metaKey) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        focusCustomTriggerAfterEditRef.current = true;
+        setCustomFocused(false);
+      } else if (e.key === 'Enter' && (customInputs[currentIdx] || '').trim()) {
+        e.preventDefault();
+        e.stopPropagation();
+        advanceQuestion();
+      }
+    },
+    [advanceQuestion, currentIdx, customInputs],
+  );
+
+  // Panel-wide Escape and submit shortcuts stay consistent across controls;
+  // option navigation remains scoped to the roving-tabindex option group.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        if (canSubmit && !submitting) {
+          e.preventDefault();
+          handleSubmit();
+        }
+        return;
+      }
       if (isEditableTarget(e.target)) return;
-      // Only react when focus is on an option (a roving-tabindex button or the
-      // "Other" trigger) — not on the action buttons (Submit/Previous/Next) or
-      // the collapse toggle. Otherwise a digit / j-k / Escape pressed while
-      // focused there would silently pick an option or cancel the question; when
-      // collapsed the options aren't even rendered, so the toggle is the only
-      // focusable element and must not trigger any of this.
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleCancel();
+        return;
+      }
       if (!(e.target as HTMLElement).closest('[data-web-shell-ask-option]')) {
         return;
       }
@@ -321,9 +458,14 @@ export function AskUserQuestion({
       } else if (e.key === 'End') {
         e.preventDefault();
         selectIndex(total - 1);
-      } else if (e.key === 'Escape') {
+      } else if (e.key === 'Enter') {
         e.preventDefault();
-        handleCancel();
+        const idx = selectedIdxRef.current ?? 0;
+        if (idx === current.options.length && !customInputs[currentIdx]) {
+          chooseOption(idx);
+        } else {
+          advanceQuestion();
+        }
       } else if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1;
         if (idx < total) {
@@ -332,7 +474,19 @@ export function AskUserQuestion({
         }
       }
     },
-    [current, moveSelection, selectIndex, handleCancel, chooseOption],
+    [
+      advanceQuestion,
+      canSubmit,
+      chooseOption,
+      current,
+      currentIdx,
+      customInputs,
+      handleCancel,
+      handleSubmit,
+      moveSelection,
+      selectIndex,
+      submitting,
+    ],
   );
 
   // Pull focus to the current option (or the custom input while editing) when
@@ -356,49 +510,21 @@ export function AskUserQuestion({
 
   if (questions.length === 0) return null;
 
-  // Check which questions have answers
-  const hasAnswer = (i: number): boolean => {
-    const q = questions[i];
-    if (!q) return false;
-    if (q.multiSelect) {
-      return (selectedMulti[i] || []).length > 0 || !!customInputs[i];
-    }
-    return !!answers[i] || !!customInputs[i];
-  };
-
-  const canSubmit = questions.every((_, i) => hasAnswer(i));
   const displayIdx = Math.min(currentIdx, questions.length - 1);
-  const selectQuestion = (nextIdx: number) => {
-    const question = questions[nextIdx];
-    setCurrentIdx(nextIdx);
-    setCustomFocused(false);
-    if (!question?.options.length) {
-      setSelectedIdx(null);
-      return;
-    }
-    setSelectedIdx(0);
-    if (question.multiSelect) {
-      setSelectedMulti((prev) =>
-        (prev[nextIdx] || []).length > 0 || customInputs[nextIdx]
-          ? prev
-          : { ...prev, [nextIdx]: [question.options[0].label] },
-      );
-      return;
-    }
-    setAnswers((prev) =>
-      prev[nextIdx] || customInputs[nextIdx]
-        ? prev
-        : { ...prev, [nextIdx]: question.options[0].label },
-    );
-  };
-  const handlePrevious = () => {
-    if (currentIdx <= 0) return;
-    selectQuestion(currentIdx - 1);
-  };
-  const handleNext = () => {
-    if (currentIdx >= questions.length - 1) return;
-    selectQuestion(currentIdx + 1);
-  };
+  const isLastQuestion = currentIdx === questions.length - 1;
+  const shortcutHint = customFocused
+    ? t('askUser.shortcuts.input')
+    : isMulti
+      ? t(
+          isLastQuestion
+            ? 'askUser.shortcuts.multiFinal'
+            : 'askUser.shortcuts.multiNext',
+        )
+      : t(
+          isLastQuestion
+            ? 'askUser.shortcuts.optionsFinal'
+            : 'askUser.shortcuts.optionsNext',
+        );
 
   return (
     <div
@@ -406,7 +532,7 @@ export function AskUserQuestion({
         variant === 'floating' ? styles.floating : ''
       } ${collapsed ? styles.collapsed : ''}`}
       data-web-shell-ask-panel
-      role="alertdialog"
+      role="dialog"
       aria-label={localizeToolDisplayName('ask_user_question', t)}
       // aria-labelledby wins over aria-label, so when expanded name the dialog
       // with BOTH the tool name and the question (otherwise the tool-name
@@ -522,7 +648,7 @@ export function AskUserQuestion({
                       aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
                       disabled={submitting}
                       onClick={() => chooseOption(i)}
-                      onFocus={() => setSelectedIdx(i)}
+                      onFocus={() => rememberSelectedIndex(i)}
                     >
                       <span className={styles.pointer} aria-hidden="true">
                         {isActive ? '›' : ' '}
@@ -592,8 +718,11 @@ export function AskUserQuestion({
                           // let it bubble to the row's onClick and re-trigger the
                           // option choice.
                           onClick={(e) => e.stopPropagation()}
-                          onFocus={() => setSelectedIdx(current.options.length)}
+                          onFocus={() =>
+                            rememberSelectedIndex(current.options.length)
+                          }
                           onBlur={() => setCustomFocused(false)}
+                          onKeyDown={handleCustomInputKeyDown}
                           autoFocus
                         />
                       ) : (
@@ -616,7 +745,9 @@ export function AskUserQuestion({
                               : undefined
                           }
                           disabled={submitting}
-                          onFocus={() => setSelectedIdx(current.options.length)}
+                          onFocus={() =>
+                            rememberSelectedIndex(current.options.length)
+                          }
                         >
                           {customInputs[currentIdx] ||
                             t('askUser.typePlaceholder')}
@@ -628,6 +759,7 @@ export function AskUserQuestion({
               </div>
             </>
           ) : null}
+          <p className={styles.shortcuts}>{shortcutHint}</p>
           <div className={styles.actions}>
             <button
               type="button"
@@ -659,9 +791,11 @@ export function AskUserQuestion({
             )}
             <button
               type="button"
+              ref={submitButtonRef}
               className={`${styles.button} ${styles.submitButton}`}
               disabled={submitting || !canSubmit}
               aria-busy={submitting}
+              aria-keyshortcuts="Control+Enter Meta+Enter"
               onClick={handleSubmit}
             >
               {submitting ? (
