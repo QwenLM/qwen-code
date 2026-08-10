@@ -7274,6 +7274,7 @@ describe('DaemonSessionProvider', () => {
     const closingError = new DaemonHttpError(
       404,
       {
+        code: 'session_closing',
         error:
           'No session with id "session-b". The session is closing; retry after close completes',
         sessionId: 'session-b',
@@ -7348,6 +7349,7 @@ describe('DaemonSessionProvider', () => {
       new DaemonHttpError(
         404,
         {
+          code: 'session_closing',
           error:
             'No session with id "session-b". The session is closing; retry after close completes',
           sessionId: 'session-b',
@@ -7385,6 +7387,7 @@ describe('DaemonSessionProvider', () => {
       new DaemonHttpError(
         404,
         {
+          code: 'session_closing',
           error:
             'No session with id "session-b". The session is closing; retry after close completes',
           sessionId: 'session-b',

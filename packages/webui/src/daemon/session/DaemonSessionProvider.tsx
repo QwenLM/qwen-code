@@ -2372,10 +2372,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad?.sessionId === restoreSessionId &&
             error instanceof DaemonHttpError &&
             error.status === 404 &&
-            typeof errorBody?.['error'] === 'string' &&
-            errorBody['error'].endsWith(
-              'The session is closing; retry after close completes',
-            )
+            errorBody?.['code'] === 'session_closing'
           ) {
             reconnectAttempt += 1;
             const reconnectConfig = reconnectConfigRef.current;
@@ -2551,7 +2548,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
-          error: `Reconnecting in ${delayMs}ms`,
         }));
         await delay(delayMs, abort.signal);
       }

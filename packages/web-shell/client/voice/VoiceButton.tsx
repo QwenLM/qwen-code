@@ -350,7 +350,7 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    if (isConnecting || isRecording) stop();
+    stop();
   };
 
   const handlePointerCancel = (
@@ -363,7 +363,7 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    if (isConnecting || isRecording) abort();
+    abort();
   };
 
   const label = isRecording

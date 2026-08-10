@@ -662,25 +662,12 @@ describe('VoiceButton', () => {
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
-  it('stops a hold that is released while connecting', async () => {
-    const { root, container } = mount(false);
+  it('stops a hold released before the connecting render commits', async () => {
+    const { container } = mount(false);
     await flush();
-    let button = container.querySelector('button');
+    const button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
     pointer(button, 'pointerdown');
-
-    mocks.capture.status = 'connecting';
-    act(() => {
-      root.render(
-        <VoiceButton
-          disabled={false}
-          onInsert={() => {}}
-          target={legacyTarget}
-        />,
-      );
-    });
-    button = container.querySelector('button');
-    if (!button) throw new Error('VoiceButton did not render');
     pointer(button, 'pointerup');
 
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
