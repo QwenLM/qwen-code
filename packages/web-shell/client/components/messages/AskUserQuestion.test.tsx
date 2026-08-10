@@ -522,6 +522,43 @@ describe('AskUserQuestion accessibility', () => {
     });
   });
 
+  it('restores option navigation with arrows from another dialog control', () => {
+    render(undefined);
+    const submit = submitButton()!;
+    submit.focus();
+
+    pressKey(submit, 'ArrowDown');
+
+    expect(document.activeElement).toBe(optionButtons()[0]);
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('true');
+
+    pressKey(optionButtons()[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(optionButtons()[1]);
+  });
+
+  it('keeps keyboard navigation scoped after clicking dialog content', () => {
+    render(undefined);
+    const panel = container!.querySelector<HTMLElement>(
+      '[data-web-shell-ask-panel]',
+    )!;
+    const questionText = Array.from(panel.querySelectorAll('p')).find(
+      (element) => element.textContent === 'Pick a color',
+    )!;
+
+    act(() => {
+      questionText.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(panel);
+
+    pressKey(panel, 'ArrowDown');
+    expect(document.activeElement).toBe(optionButtons()[0]);
+
+    pressKey(optionButtons()[0]!, 'ArrowDown');
+    expect(document.activeElement).toBe(optionButtons()[1]);
+  });
+
   it('submits a custom answer for a single question with Enter', () => {
     render();
     act(() => optionButtons()[2]!.click());
@@ -684,6 +721,21 @@ describe('AskUserQuestion multiple questions', () => {
     expect(document.activeElement).toBe(restoredOptions[1]);
   });
 
+  it('moves between questions with horizontal arrows from an option', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(container!.textContent).toContain('← previous · ↑↓ select');
+    pressKey(optionButtons()[0]!, 'ArrowLeft');
+
+    expect(container!.textContent).toContain('Pick a color');
+    expect(container!.textContent).not.toContain('← previous');
+
+    pressKey(optionButtons()[0]!, 'ArrowRight');
+    expect(container!.textContent).toContain('Pick a size');
+    expect(container!.textContent).not.toContain('→ next');
+  });
+
   it('submits directly when Enter is pressed on the last question', () => {
     render(undefined, multipleQuestionsRequest);
     pressKey(optionButtons()[0]!, 'Enter');
@@ -707,7 +759,7 @@ describe('AskUserQuestion multiple questions', () => {
     });
   });
 
-  it('does not submit incomplete answers with Command/Ctrl+Enter', () => {
+  it('submits incomplete answers with Command/Ctrl+Enter', () => {
     render(undefined, multipleQuestionsRequest);
 
     const event = pressKey(optionButtons()[0]!, 'Enter', {
@@ -716,14 +768,32 @@ describe('AskUserQuestion multiple questions', () => {
     });
 
     expect(event.defaultPrevented).toBe(true);
-    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
+      '0': 'Red',
+      '1': '',
+    });
+  });
+
+  it('associates global shortcuts with their action buttons', () => {
+    render();
+
+    const ignore = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Ignore',
+    )!;
+    expect(ignore.getAttribute('aria-keyshortcuts')).toBe('Escape');
+    expect(ignore.dataset.shortcut).toBe('Esc');
+
+    const submit = submitButton()!;
+    expect(submit.getAttribute('aria-keyshortcuts')).toBe(
+      'Control+Enter Meta+Enter',
+    );
+    expect(submit.dataset.shortcut).toMatch(/^(Ctrl↵|⌘↵)$/);
   });
 
   it('shows contextual keyboard hints', () => {
     render();
-    expect(container!.textContent).toContain(
-      '↑↓ select · Enter submit · Esc ignore',
-    );
+    expect(container!.textContent).toContain('↑↓ select · Enter submit');
+    expect(container!.textContent).not.toContain('Esc ignore');
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
     const singleHint = Array.from(container!.querySelectorAll('p')).find(
       (element) => element.textContent?.includes('Enter submit'),
@@ -739,22 +809,21 @@ describe('AskUserQuestion multiple questions', () => {
     container = null;
 
     render(undefined, multipleQuestionsRequest);
-    expect(container!.textContent).toContain(
-      '↑↓ select · Enter next · Esc ignore',
-    );
-    expect(container!.textContent).toContain('⌘/Ctrl+Enter submit');
+    expect(container!.textContent).toContain('↑↓ select · Enter next');
+    expect(container!.textContent).not.toContain('Esc ignore');
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
 
     act(() => optionButtons()[2]!.click());
     expect(container!.textContent).toContain('Enter next · Esc stop editing');
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
   });
 
   it('describes Enter as editing when the empty custom row is focused', () => {
     render();
     pressKey(optionButtons()[0]!, 'End');
 
-    expect(container!.textContent).toContain(
-      '↑↓ select · Enter edit · Esc ignore',
-    );
+    expect(container!.textContent).toContain('↑↓ select · Enter edit');
+    expect(container!.textContent).not.toContain('Esc ignore');
     expect(container!.textContent).not.toContain('Enter submit');
 
     pressKey(optionButtons()[2]!, 'Enter');
@@ -783,9 +852,8 @@ describe('AskUserQuestion multiple questions', () => {
     render(undefined, multipleQuestionsRequest);
     pressKey(optionButtons()[0]!, 'Enter');
 
-    expect(container!.textContent).toContain(
-      '↑↓ select · Enter submit · Esc ignore',
-    );
+    expect(container!.textContent).toContain('↑↓ select · Enter submit');
+    expect(container!.textContent).not.toContain('Esc ignore');
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
 
     act(() => optionButtons()[2]!.click());
@@ -852,7 +920,7 @@ describe('AskUserQuestion multi-select', () => {
     pressKey(optionButtons()[0]!, 'Enter');
 
     expect(container!.textContent).toContain(
-      'Space toggle · Enter submit · Esc ignore',
+      '↑↓ move · Space select/deselect · Enter select & submit',
     );
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
   });
@@ -861,10 +929,9 @@ describe('AskUserQuestion multi-select', () => {
     render(undefined, multiRequest);
 
     expect(container!.textContent).toContain(
-      'Space toggle · Enter submit · Esc ignore',
+      '↑↓ move · Space select/deselect · Enter select & submit',
     );
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
-    act(() => optionButtons()[0]!.click());
     pressKey(optionButtons()[0]!, 'Enter');
 
     expect(onConfirm).toHaveBeenCalledWith('req-multi', 'submit', {
@@ -882,7 +949,7 @@ describe('AskUserQuestion multi-select', () => {
     const opts = optionButtons();
     expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[0]!.tabIndex).toBe(0);
-    expect(submitButton()!.disabled).toBe(true);
+    expect(submitButton()!.disabled).toBe(false);
     expect(opts[0]!.hasAttribute('aria-checked')).toBe(false);
     expect(opts[0]!.getAttribute('role')).not.toBe('radio');
   });
@@ -908,7 +975,7 @@ describe('AskUserQuestion multi-select', () => {
     const opts = optionButtons();
     expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[0]!.tabIndex).toBe(0);
-    expect(submitButton()!.disabled).toBe(true);
+    expect(submitButton()!.disabled).toBe(false);
   });
 
   it('toggles options and submits the joined selection', () => {
@@ -966,6 +1033,31 @@ describe('AskUserQuestion multi-select', () => {
     expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
   });
 
+  it('keeps mouse focus changes separate from multi-select state', () => {
+    render(undefined, multiRequest);
+    const options = optionButtons();
+
+    act(() => {
+      options[1]!.focus();
+      options[1]!.click();
+    });
+    act(() => {
+      options[2]!.focus();
+      options[2]!.click();
+    });
+
+    expect(options[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
+
+    act(() => {
+      options[1]!.focus();
+      options[1]!.click();
+    });
+
+    expect(options[1]!.getAttribute('aria-pressed')).toBe('false');
+    expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('uses Enter to advance without toggling the selected option', () => {
     const requestWithNextQuestion: PermissionRequest = {
       ...multipleQuestionsRequest,
@@ -995,5 +1087,70 @@ describe('AskUserQuestion multi-select', () => {
     ).find((button) => button.textContent === 'previous')!;
     act(() => previous.click());
     expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('selects an unselected option with Enter before advancing', () => {
+    const requestWithNextQuestion: PermissionRequest = {
+      ...multipleQuestionsRequest,
+      rawInput: {
+        questions: [
+          ...(multiRequest.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+          ...(request.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+        ],
+      },
+    };
+    render(undefined, requestWithNextQuestion);
+
+    expect(container!.textContent).toContain(
+      '↑↓ move · Space select/deselect · Enter select & next',
+    );
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+    expect(container!.textContent).not.toContain('Esc ignore');
+    expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('false');
+
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(container!.textContent).toContain('Pick a color');
+    const previous = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'previous')!;
+    act(() => previous.click());
+    expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('submits from the final multi-select question when an earlier answer is missing', () => {
+    const requestWithMultiFinal: PermissionRequest = {
+      ...multipleQuestionsRequest,
+      rawInput: {
+        questions: [
+          ...(request.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+          ...(multiRequest.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+        ],
+      },
+    };
+    render(undefined, requestWithMultiFinal);
+
+    pressKey(optionButtons()[0]!, 'End');
+    act(() => {
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent === 'next')!
+        .click();
+    });
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
+      '0': '',
+      '1': 'Option A',
+    });
+    expect(submitButton()!.disabled).toBe(true);
   });
 });

@@ -47,6 +47,11 @@ export function AskUserQuestion({
   variant = 'inline',
   keyboardActive = true,
 }: AskUserQuestionProps) {
+  const submitShortcutLabel =
+    typeof navigator !== 'undefined' &&
+    /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? '')
+      ? '⌘↵'
+      : 'Ctrl↵';
   const { t } = useI18n();
   const questions = useMemo(
     () =>
@@ -105,17 +110,6 @@ export function AskUserQuestion({
   const current = questions[currentIdx];
   const isMulti = current?.multiSelect ?? false;
 
-  const hasAnswer = (i: number): boolean => {
-    const question = questions[i];
-    if (!question) return false;
-    if (question.multiSelect) {
-      return (selectedMulti[i] || []).length > 0 || !!customInputs[i];
-    }
-    return !!answers[i] || !!customInputs[i];
-  };
-
-  const canSubmit = questions.every((_, i) => hasAnswer(i));
-
   const rememberSelectedIndex = useCallback(
     (idx: number | null) => {
       selectedIdxByQuestionRef.current[currentIdx] = idx;
@@ -125,22 +119,27 @@ export function AskUserQuestion({
     [currentIdx],
   );
 
-  const buildResult = useCallback((): Record<string, string> => {
-    const result: Record<string, string> = {};
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i];
-      if (!q) continue;
-      if (q.multiSelect) {
-        const multi = selectedMulti[i] || [];
-        const custom = customInputs[i];
-        const all = custom ? [...multi, custom] : multi;
-        result[String(i)] = all.join(', ');
-      } else {
-        result[String(i)] = answers[i] || customInputs[i] || '';
+  const buildResult = useCallback(
+    (
+      multiSelections: Record<number, string[]> = selectedMulti,
+    ): Record<string, string> => {
+      const result: Record<string, string> = {};
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        if (!q) continue;
+        if (q.multiSelect) {
+          const multi = multiSelections[i] || [];
+          const custom = customInputs[i];
+          const all = custom ? [...multi, custom] : multi;
+          result[String(i)] = all.join(', ');
+        } else {
+          result[String(i)] = answers[i] || customInputs[i] || '';
+        }
       }
-    }
-    return result;
-  }, [questions, selectedMulti, customInputs, answers]);
+      return result;
+    },
+    [questions, selectedMulti, customInputs, answers],
+  );
 
   const submitDecision = useCallback(
     async (
@@ -168,16 +167,19 @@ export function AskUserQuestion({
     [onConfirm, onError, request.id, t],
   );
 
-  const handleSubmit = useCallback(() => {
-    if (submittedRef.current) return;
-    const submitOption = request.options.find((o) => o.kind === 'allow_once');
-    if (!submitOption) {
-      const message = t('askUser.submitOptionUnavailable');
-      onError(new Error(message), message);
-      return;
-    }
-    void submitDecision(submitOption.id, buildResult());
-  }, [buildResult, onError, request.options, submitDecision, t]);
+  const handleSubmit = useCallback(
+    (submittedAnswers?: Record<string, string>) => {
+      if (submittedRef.current) return;
+      const submitOption = request.options.find((o) => o.kind === 'allow_once');
+      if (!submitOption) {
+        const message = t('askUser.submitOptionUnavailable');
+        onError(new Error(message), message);
+        return;
+      }
+      void submitDecision(submitOption.id, submittedAnswers ?? buildResult());
+    },
+    [buildResult, onError, request.options, submitDecision, t],
+  );
 
   const handleCancel = useCallback(() => {
     if (submittedRef.current) return;
@@ -372,21 +374,17 @@ export function AskUserQuestion({
     selectQuestion(currentIdx + 1);
   }, [currentIdx, questions.length, selectQuestion]);
 
-  const advanceQuestion = useCallback(() => {
-    setCustomFocused(false);
-    if (currentIdx < questions.length - 1) {
-      selectQuestion(currentIdx + 1);
-      return;
-    }
-    if (canSubmit && !submitting) handleSubmit();
-  }, [
-    canSubmit,
-    currentIdx,
-    handleSubmit,
-    questions.length,
-    selectQuestion,
-    submitting,
-  ]);
+  const advanceQuestion = useCallback(
+    (submittedAnswers?: Record<string, string>) => {
+      setCustomFocused(false);
+      if (currentIdx < questions.length - 1) {
+        selectQuestion(currentIdx + 1);
+        return;
+      }
+      if (!submitting) handleSubmit(submittedAnswers);
+    },
+    [currentIdx, handleSubmit, questions.length, selectQuestion, submitting],
+  );
 
   useEffect(() => {
     if (!focusAfterQuestionChangeRef.current || !current) return;
@@ -420,16 +418,14 @@ export function AskUserQuestion({
     [advanceQuestion, currentIdx, customInputs],
   );
 
-  // Panel-wide Escape and submit shortcuts stay consistent across controls;
+  // Panel-wide action shortcuts stay consistent across controls;
   // option navigation remains scoped to the roving-tabindex option group.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        if (canSubmit && !submitting) {
-          handleSubmit();
-        }
+        if (!submitting) handleSubmit();
         return;
       }
       if (isEditableTarget(e.target)) return;
@@ -438,12 +434,29 @@ export function AskUserQuestion({
         handleCancel();
         return;
       }
-      if (!(e.target as HTMLElement).closest('[data-web-shell-ask-option]')) {
+      const isOptionTarget = (e.target as HTMLElement).closest(
+        '[data-web-shell-ask-option]',
+      );
+      if (!isOptionTarget) {
+        if (
+          !collapsed &&
+          current &&
+          (e.key === 'ArrowDown' || e.key === 'ArrowUp')
+        ) {
+          e.preventDefault();
+          selectIndex(selectedIdxRef.current ?? 0);
+        }
         return;
       }
       if (!current) return;
       const total = current.options.length + 1;
-      if (e.key === 'ArrowDown' || e.key === 'j') {
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handlePrevious();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleNext();
+      } else if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
         moveSelection(1);
       } else if (e.key === 'ArrowUp' || e.key === 'k') {
@@ -461,6 +474,19 @@ export function AskUserQuestion({
         if (idx === current.options.length && !customInputs[currentIdx]) {
           chooseOption(idx);
         } else {
+          if (isMulti && idx < current.options.length) {
+            const label = current.options[idx].label;
+            const selected = selectedMulti[currentIdx] || [];
+            if (!selected.includes(label)) {
+              const nextSelectedMulti = {
+                ...selectedMulti,
+                [currentIdx]: [...selected, label],
+              };
+              setSelectedMulti(nextSelectedMulti);
+              advanceQuestion(buildResult(nextSelectedMulti));
+              return;
+            }
+          }
           advanceQuestion();
         }
       } else if (e.key >= '1' && e.key <= '9') {
@@ -473,14 +499,19 @@ export function AskUserQuestion({
     },
     [
       advanceQuestion,
-      canSubmit,
+      buildResult,
       chooseOption,
+      collapsed,
       current,
       currentIdx,
       customInputs,
       handleCancel,
+      handleNext,
+      handlePrevious,
       handleSubmit,
+      isMulti,
       moveSelection,
+      selectedMulti,
       selectIndex,
       submitting,
     ],
@@ -515,7 +546,7 @@ export function AskUserQuestion({
     !customFocused &&
     selectedIdx === current.options.length &&
     !customInputs[currentIdx];
-  const shortcutHint = isEmptyCustomTrigger
+  const contextualShortcutHint = isEmptyCustomTrigger
     ? t('askUser.shortcuts.customTrigger')
     : customFocused
       ? t(
@@ -540,6 +571,10 @@ export function AskUserQuestion({
                 ? 'askUser.shortcuts.optionsFinal'
                 : 'askUser.shortcuts.optionsNext',
           );
+  const shortcutHint =
+    currentIdx > 0 && !customFocused
+      ? `${t('askUser.shortcuts.previous')} · ${contextualShortcutHint}`
+      : contextualShortcutHint;
 
   return (
     <div
@@ -548,12 +583,20 @@ export function AskUserQuestion({
       } ${collapsed ? styles.collapsed : ''}`}
       data-web-shell-ask-panel
       role="dialog"
+      tabIndex={-1}
       aria-label={localizeToolDisplayName('ask_user_question', t)}
       // aria-labelledby wins over aria-label, so when expanded name the dialog
       // with BOTH the tool name and the question (otherwise the tool-name
       // context is dropped). The tool-name span is display:none but accname
       // still uses a directly-referenced hidden element's text.
       aria-labelledby={collapsed ? undefined : `${headingId} ${questionTextId}`}
+      onMouseDown={(e) => {
+        const target = e.target as HTMLElement;
+        if (isEditableTarget(target) || target.closest('button, a[href]')) {
+          return;
+        }
+        e.currentTarget.focus();
+      }}
       onKeyDown={handleKeyDown}
     >
       {/* Header line like CLI */}
@@ -782,6 +825,8 @@ export function AskUserQuestion({
               type="button"
               className={styles.ignoreButton}
               disabled={submitting}
+              aria-keyshortcuts="Escape"
+              data-shortcut="Esc"
               onClick={handleCancel}
             >
               {t('askUser.ignore')}
@@ -809,10 +854,11 @@ export function AskUserQuestion({
             <button
               type="button"
               className={`${styles.button} ${styles.submitButton}`}
-              disabled={submitting || !canSubmit}
+              disabled={submitting}
               aria-busy={submitting}
               aria-keyshortcuts="Control+Enter Meta+Enter"
-              onClick={handleSubmit}
+              data-shortcut={submitShortcutLabel}
+              onClick={() => handleSubmit()}
             >
               {submitting ? (
                 <>

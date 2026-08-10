@@ -561,20 +561,19 @@ const EN: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
-  'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit · Esc ignore',
-  'askUser.shortcuts.optionsNext':
-    '↑↓ select · Enter next · Esc ignore · ⌘/Ctrl+Enter submit',
-  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit · Esc ignore',
+  'askUser.shortcuts.previous': '← previous',
+  'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
+  'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
+  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit',
   'askUser.shortcuts.multiSingle':
-    '↑↓ select · Space toggle · Enter submit · Esc ignore',
+    '↑↓ move · Space select/deselect · Enter select & submit',
   'askUser.shortcuts.multiNext':
-    '↑↓ select · Space toggle · Enter next · Esc ignore · ⌘/Ctrl+Enter submit',
+    '↑↓ move · Space select/deselect · Enter select & next',
   'askUser.shortcuts.multiFinal':
-    '↑↓ select · Space toggle · Enter submit · Esc ignore',
-  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit · Esc ignore',
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit',
   'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
-  'askUser.shortcuts.inputNext':
-    'Enter next · Esc stop editing · ⌘/Ctrl+Enter submit',
+  'askUser.shortcuts.inputNext': 'Enter next · Esc stop editing',
   'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
@@ -3395,20 +3394,19 @@ const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
-  'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交 · Esc 忽略',
-  'askUser.shortcuts.optionsNext':
-    '↑↓ 选择 · Enter 下一题 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
-  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交 · Esc 忽略',
+  'askUser.shortcuts.previous': '← 上一步',
+  'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
+  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交',
   'askUser.shortcuts.multiSingle':
-    '↑↓ 选择 · Space 切换 · Enter 提交 · Esc 忽略',
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
   'askUser.shortcuts.multiNext':
-    '↑↓ 选择 · Space 切换 · Enter 下一题 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并下一步',
   'askUser.shortcuts.multiFinal':
-    '↑↓ 选择 · Space 切换 · Enter 提交 · Esc 忽略',
-  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑 · Esc 忽略',
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑',
   'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
-  'askUser.shortcuts.inputNext':
-    'Enter 下一题 · Esc 退出编辑 · ⌘/Ctrl+Enter 提交',
+  'askUser.shortcuts.inputNext': 'Enter 下一步 · Esc 退出编辑',
   'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
