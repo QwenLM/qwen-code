@@ -104,8 +104,15 @@ export function AddWorkspaceDialog({
           setSuggestions(result.suggestions);
           setHostSep(result.sep || '/');
           setHighlight(-1);
+          // document.activeElement retargets to the shadow host in
+          // shadow-DOM portal mode; read focus from the input's own root.
           if (
-            inputRef.current === document.activeElement &&
+            (
+              inputRef.current?.getRootNode() as
+                | Document
+                | ShadowRoot
+                | undefined
+            )?.activeElement === inputRef.current &&
             (openOnResult || listOpenRef.current)
           ) {
             setListOpen(result.suggestions.length > 0);

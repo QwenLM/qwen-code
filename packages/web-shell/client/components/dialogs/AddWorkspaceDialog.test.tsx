@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
+import { WebShellPortalRootContext } from '../../portalRoot';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -354,6 +355,44 @@ describe('AddWorkspaceDialog', () => {
       });
 
       expect(listbox()).toBeNull();
+    });
+
+    it('opens suggestions for a focused input in a shadow-DOM portal root', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      const host = document.createElement('div');
+      document.body.append(host);
+      container = host;
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const portalRoot = document.createElement('div');
+      shadowRoot.append(portalRoot);
+      const dialogContainer = document.createElement('div');
+      shadowRoot.append(dialogContainer);
+      root = createRoot(dialogContainer);
+      act(() => {
+        root!.render(
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+            <I18nProvider language="en">
+              <AddWorkspaceDialog
+                onClose={vi.fn()}
+                onAdd={vi.fn()}
+                onSuggest={onSuggest}
+              />
+            </I18nProvider>
+          </WebShellPortalRootContext.Provider>,
+        );
+      });
+
+      const shadowInput = shadowRoot.querySelector<HTMLInputElement>(
+        '#add-workspace-path',
+      )!;
+      // document.activeElement retargets to the shadow host in this mode.
+      expect(shadowRoot.activeElement).toBe(shadowInput);
+      expect(document.activeElement).toBe(host);
+
+      typeInto(shadowInput, '/home/me/co');
+      await settle();
+
+      expect(shadowRoot.querySelector('[role="listbox"]')).not.toBeNull();
     });
 
     it('leaves the path unchanged when the system picker is cancelled', async () => {
