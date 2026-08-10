@@ -688,6 +688,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreSessionId !== undefined &&
       restoreSessionId === sessionRef.current?.sessionId &&
       sessionRef.current === skipNextCleanupDetachSessionRef.current;
+    const effectPendingSessionLoad = pendingSessionLoadRef.current;
     let runnerSession = sessionRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
@@ -2366,6 +2367,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? error.body
               : undefined;
           if (
+            autoReconnect &&
             loadingRequestedSession &&
             pendingLoad?.sessionId === restoreSessionId &&
             error instanceof DaemonHttpError &&
@@ -2583,7 +2585,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
       if (
-        pendingSessionLoadRef.current &&
+        effectPendingSessionLoad !== undefined &&
+        pendingSessionLoadRef.current === effectPendingSessionLoad &&
         (ownsCurrentSession || ownsEmptyState) &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
