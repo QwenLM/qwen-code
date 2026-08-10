@@ -27,14 +27,32 @@ import {
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { escapeXml } from '../utils/xml.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+
+/**
+ * Builds the expected `<output-file>` element with the same
+ * `stripDisplayControlChars` + `escapeXml` pipeline the registry applies.
+ * Expected paths below come from `tmpdir()`, which can legally contain XML
+ * metacharacters (`&` on Windows, `<` on POSIX) or bidi overrides, so
+ * hand-rolling the escaping would make these cases depend on the host's TMPDIR.
+ */
+function expectedOutputFileElement(path: string): string {
+  return `<output-file>${escapeXml(stripDisplayControlChars(path))}</output-file>`;
+}
 
 let tmpDirs: string[] = [];
+let tmpFiles: string[] = [];
 
 afterEach(() => {
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+  for (const file of tmpFiles) {
+    rmSync(file, { force: true });
+  }
   tmpDirs = [];
+  tmpFiles = [];
 });
 
 function makeOutputFile(content: string): string {
@@ -54,19 +72,34 @@ function makeTempDir(): string {
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
 ): ShellTaskRegistration {
+  const shellId = overrides.shellId ?? 's1';
   return {
-    shellId: 's1',
+    shellId,
     command: 'sleep 60',
     cwd: '/tmp',
     status: 'running',
     startTime: 1000,
-    outputPath: '/tmp/s1.output',
     abortController: new AbortController(),
     ...overrides,
+    // Every register/complete/fail/cancel mirrors the entry into a
+    // `<outputPath>.status` sidecar, so the default outputPath decides where
+    // that write lands. A fixed `/tmp/s1.output` pointed every entry in this
+    // file — across tests, across workers, across CI jobs — at the single
+    // path `/tmp/s1.status`. `/tmp` is sticky, so once that file belongs to
+    // another uid the atomic rename fails EPERM, and `renameWithRetrySync`
+    // burns its full 50+100+200ms backoff before the registry swallows the
+    // error. Give each entry its own directory instead: no shared state, and
+    // the sidecar write actually succeeds.
+    outputPath:
+      overrides.outputPath ?? join(makeTempDir(), `shell-${shellId}.output`),
   };
 }
 
 describe('BackgroundShellRegistry', () => {
+  it('gives each entry a unique default outputPath', () => {
+    expect(makeEntry().outputPath).not.toBe(makeEntry().outputPath);
+  });
+
   describe('register / get / getAll', () => {
     it('captures the Todo work-chain owner at registration', () => {
       const reg = new BackgroundShellRegistry();
@@ -282,7 +315,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain(
         '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
-      expect(modelText).toContain(`<output-file>${outputPath}</output-file>`);
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
       expect(meta).toEqual({
         shellId: 'a',
         status: 'completed',
@@ -318,12 +351,13 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      const outputPath = join(makeTempDir(), 'out&err.log');
       reg.register(
         makeEntry({
           shellId: 'a&b',
           command: 'echo "<script>"',
           cwd: '/repo&work',
-          outputPath: '/tmp/out&err.log',
+          outputPath,
         }),
       );
 
@@ -337,9 +371,9 @@ describe('BackgroundShellRegistry', () => {
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
       expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
-      expect(modelText).toContain(
-        '<output-file>/tmp/out&amp;err.log</output-file>',
-      );
+      // Assert the whole element, not just the tail: the temp prefix is
+      // random but the escaping is what this test is about.
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
     });
 
     it('limits output-tail to the retained byte budget', () => {
@@ -387,15 +421,16 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('\uFFFD');
     });
 
-    it('strips control characters from cwd and output-file XML fields', () => {
+    it('strips control and bidi characters from cwd and output-file XML fields', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      const dir = makeTempDir();
       reg.register(
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath: '/tmp/out\x03.log',
+          outputPath: join(dir, 'out\x03\u202e.log'),
         }),
       );
 
@@ -403,10 +438,15 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
-      expect(modelText).toContain('<output-file>/tmp/out.log</output-file>');
+      // Whole element: pins exactly which characters are stripped and that
+      // the rest of the path survives intact.
+      expect(modelText).toContain(
+        expectedOutputFileElement(join(dir, 'out.log')),
+      );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
+      expect(modelText).not.toContain('\u202e');
     });
 
     const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
@@ -457,6 +497,10 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
+      // A dir outputPath gets its `<dir>.status` sidecar as a sibling of
+      // the temp dir, which the dir cleanup above never removes; tracking
+      // it here lets afterEach delete it even if the assertions fail.
+      tmpFiles.push(statusFilePathFor(dir));
       reg.setNotificationCallback(callback);
       reg.register(makeEntry({ shellId: 'a', outputPath: dir }));
 
@@ -669,95 +713,73 @@ describe('BackgroundShellRegistry', () => {
     });
   });
 
-  // Every register/complete in these loop tests also writes the status
-  // sidecar through atomicWriteFileSync, and a loaded CI runner has been
-  // measured spending ~700ms per sidecar write — ~50s for the ~70 writes
-  // of the longest loop, past the 15s default. The explicit timeout buys
-  // the I/O the time it costs; the assertions are unchanged.
-  const SIDECAR_IO_TIMEOUT = 120_000;
   describe('terminal-entry retention cap', () => {
-    it(
-      'retains only a bounded number of terminal entries (oldest by endTime evicted)',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        // Register and complete one more entry than the cap allows. Use
-        // strictly increasing endTimes so eviction order is deterministic.
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
-          reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
-          reg.complete(`s-${i}`, 0, i * 10 + 5);
-        }
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-        // The two oldest (`s-0`, `s-1`) get pruned; the newest survives.
-        expect(reg.get('s-0')).toBeUndefined();
-        expect(reg.get('s-1')).toBeUndefined();
-        expect(reg.get(`s-${MAX_RETAINED_TERMINAL_SHELLS + 1}`)).toBeDefined();
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
+    it('retains only a bounded number of terminal entries (oldest by endTime evicted)', () => {
+      const reg = new BackgroundShellRegistry();
+      // Register and complete one more entry than the cap allows. Use
+      // strictly increasing endTimes so eviction order is deterministic.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
+        reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
+        reg.complete(`s-${i}`, 0, i * 10 + 5);
+      }
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      // The two oldest (`s-0`, `s-1`) get pruned; the newest survives.
+      expect(reg.get('s-0')).toBeUndefined();
+      expect(reg.get('s-1')).toBeUndefined();
+      expect(reg.get(`s-${MAX_RETAINED_TERMINAL_SHELLS + 1}`)).toBeDefined();
+    });
 
-    it(
-      'never evicts running entries even when the cap is exceeded',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        // Register one extra terminal entry beyond the cap, then a single
-        // running entry. The running entry must be retained regardless of
-        // its launch order — pruning a still-running shell would lose the
-        // user's only handle on a live process.
-        reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
-          reg.register(
-            makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
-          );
-          reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
-        }
-        // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS + 1);
-        expect(reg.get('live')?.status).toBe('running');
-        // The oldest terminal entry (lowest endTime) is the one evicted.
-        expect(reg.get('done-0')).toBeUndefined();
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
-
-    it(
-      'prunes after fail() too, not just complete()',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-          reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
-          reg.complete(`done-${i}`, 0, i * 10 + 5);
-        }
-        const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+    it('never evicts running entries even when the cap is exceeded', () => {
+      const reg = new BackgroundShellRegistry();
+      // Register one extra terminal entry beyond the cap, then a single
+      // running entry. The running entry must be retained regardless of
+      // its launch order — pruning a still-running shell would lose the
+      // user's only handle on a live process.
+      reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
         reg.register(
-          makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+          makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
         );
-        reg.fail('overflow', 'boom', overflowStart + 5);
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-        expect(reg.get('done-0')).toBeUndefined();
-        expect(reg.get('overflow')?.status).toBe('failed');
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
+        reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
+      }
+      // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS + 1);
+      expect(reg.get('live')?.status).toBe('running');
+      // The oldest terminal entry (lowest endTime) is the one evicted.
+      expect(reg.get('done-0')).toBeUndefined();
+    });
 
-    it(
-      'prunes after cancel() too, not just complete()',
-      () => {
-        const reg = new BackgroundShellRegistry();
-        for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
-          reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
-          reg.complete(`done-${i}`, 0, i * 10 + 5);
-        }
-        const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
-        reg.register(
-          makeEntry({ shellId: 'overflow', startTime: overflowStart }),
-        );
-        reg.cancel('overflow', overflowStart + 5);
-        expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
-        expect(reg.get('done-0')).toBeUndefined();
-        expect(reg.get('overflow')?.status).toBe('cancelled');
-      },
-      SIDECAR_IO_TIMEOUT,
-    );
+    it('prunes after fail() too, not just complete()', () => {
+      const reg = new BackgroundShellRegistry();
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
+        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.complete(`done-${i}`, 0, i * 10 + 5);
+      }
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      reg.fail('overflow', 'boom', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+      expect(reg.get('overflow')?.status).toBe('failed');
+    });
+
+    it('prunes after cancel() too, not just complete()', () => {
+      const reg = new BackgroundShellRegistry();
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
+        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.complete(`done-${i}`, 0, i * 10 + 5);
+      }
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      reg.cancel('overflow', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+      expect(reg.get('overflow')?.status).toBe('cancelled');
+    });
   });
 
   describe('cancel', () => {
@@ -793,16 +815,8 @@ describe('BackgroundShellRegistry', () => {
     function makeDirEntry(
       overrides: Partial<ShellTaskRegistration> = {},
     ): ShellTaskRegistration & { statusPath: string } {
-      const dir = makeTempDir();
-      const shellId = (overrides.shellId as string) ?? 's1';
-      const entry = makeEntry({
-        outputPath: join(dir, `shell-${shellId}.output`),
-        ...overrides,
-      });
-      return {
-        ...entry,
-        statusPath: join(dir, `shell-${shellId}.status`),
-      };
+      const entry = makeEntry(overrides);
+      return { ...entry, statusPath: statusFilePathFor(entry.outputPath) };
     }
 
     function readStatus(statusPath: string): Record<string, unknown> {
