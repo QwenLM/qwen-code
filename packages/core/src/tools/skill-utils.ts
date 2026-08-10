@@ -8,7 +8,13 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import type { MicrocompactMeta } from '../services/microcompaction/microcompact.js';
+import type { ToolRegistry } from './tool-registry.js';
+import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -276,4 +282,85 @@ export function applySkillAllowedTools(
   for (const rule of allowedTools) {
     permissionManager.addSessionAllowRule(rule);
   }
+}
+
+/**
+ * Duck-typed view of `SkillTool`'s loaded-skill tracking. Kept structural
+ * (mirroring `clearCommand`'s existing duck-typed `clearLoadedSkills` call)
+ * so history-eviction consumers don't need a runtime import of the tool
+ * class.
+ */
+interface LoadedSkillTracker {
+  unloadSkills(names: Iterable<string>): void;
+  clearLoadedSkills(): void;
+}
+
+function getLoadedSkillTracker(
+  toolRegistry: ToolRegistry | undefined,
+): LoadedSkillTracker | undefined {
+  const tool = toolRegistry?.getTool(ToolNames.SKILL);
+  if (tool && 'unloadSkills' in tool && 'clearLoadedSkills' in tool) {
+    return tool as unknown as LoadedSkillTracker;
+  }
+  return undefined;
+}
+
+/**
+ * Sync loaded-skill tracking after a history eviction blanked Skill tool
+ * results. Targeted un-track when every blanked skill was resolved; blanket
+ * clear when any could not be resolved — over-clearing only costs a
+ * duplicated body on the next invoke, while a stale entry leaves that skill
+ * permanently unreloadable behind the dedup guard.
+ *
+ * Shared by pre-send microcompaction, /compress-fast, and the
+ * memory-pressure `compact_history` step (mirrors
+ * `disarmFileReadCacheAfterEviction` for the file-read cache).
+ */
+export function syncSkillEvictions(
+  meta: Pick<MicrocompactMeta, 'evictedSkillNames' | 'unresolvedEvictedSkills'>,
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  if (
+    meta.unresolvedEvictedSkills === 0 &&
+    meta.evictedSkillNames.length === 0
+  ) {
+    return;
+  }
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  if (meta.unresolvedEvictedSkills > 0) {
+    tracker.clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] cleared all loaded-skill tracking after ${logTag} ` +
+        `(${meta.unresolvedEvictedSkills} unresolved blanked skill result(s))`,
+    );
+    return;
+  }
+  tracker.unloadSkills(meta.evictedSkillNames);
+  debugLogger.debug(
+    `[SKILL_TRACKING] un-tracked ${meta.evictedSkillNames.length} ` +
+      `skill(s) after ${logTag}: ${meta.evictedSkillNames.join(', ')}`,
+  );
+}
+
+/**
+ * Blanket-clear loaded-skill tracking. Used by LLM compression
+ * (`tryCompress`), where the summary may or may not retain any given skill
+ * body and no per-skill eviction meta exists.
+ */
+export function clearLoadedSkillTracking(
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  tracker.clearLoadedSkills();
+  debugLogger.debug(
+    `[SKILL_TRACKING] cleared loaded-skill tracking after ${logTag}`,
+  );
 }

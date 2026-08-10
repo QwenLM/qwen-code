@@ -43,6 +43,7 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
+import { MICROCOMPACT_CLEARED_MESSAGE } from '../services/microcompaction/microcompact.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -282,6 +283,168 @@ describe('GeminiChat', async () => {
       ],
     } as unknown as GenerateContentResponse;
   }
+
+  describe('unloadSkillBody (/unskill)', () => {
+    const UNSKILL_PLACEHOLDER =
+      "[Skill 'demo' unloaded via /unskill; invoke the Skill tool again to reload.]";
+
+    const skillHistory = (): Content[] => [
+      { role: 'user', parts: [{ text: 'use the skill' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { id: 's0', name: 'skill', args: { skill: 'demo' } },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 's0',
+              name: 'skill',
+              response: { output: 'skill body content '.repeat(20) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { id: 's1', name: 'skill', args: { skill: 'demo' } },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 's1',
+              name: 'skill',
+              response: {
+                output: 'Skill "demo" is already loaded in context.',
+              },
+            },
+          },
+        ],
+      },
+    ];
+
+    const skillOutputs = (history: Content[]): unknown[] =>
+      history
+        .flatMap((c) => c.parts ?? [])
+        .filter((p) => p.functionResponse)
+        .map((p) => p.functionResponse!.response!['output']);
+
+    it('replaces the body and dedup confirmations with the placeholder and adjusts token count', () => {
+      chat.setHistory(skillHistory());
+      chat.setLastPromptTokenCount(1000);
+
+      const result = chat.unloadSkillBody('demo');
+
+      expect(result.cleared).toBe(true);
+      expect(result.tokensSaved).toBeGreaterThan(0);
+      expect(skillOutputs(chat.getHistory())).toEqual([
+        UNSKILL_PLACEHOLDER,
+        UNSKILL_PLACEHOLDER,
+      ]);
+      expect(chat.getLastPromptTokenCount()).toBeLessThan(1000);
+    });
+
+    it('NOOPs for a skill with no results in history', () => {
+      chat.setHistory(skillHistory());
+
+      const result = chat.unloadSkillBody('other');
+
+      expect(result).toEqual({ cleared: false, tokensSaved: 0 });
+      expect(skillOutputs(chat.getHistory())[0]).toContain(
+        'skill body content',
+      );
+    });
+
+    it('skips results already blanked by microcompaction', () => {
+      const history = skillHistory().slice(0, 3);
+      history[2] = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 's0',
+              name: 'skill',
+              response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+            },
+          },
+        ],
+      };
+      chat.setHistory(history);
+
+      const result = chat.unloadSkillBody('demo');
+
+      expect(result).toEqual({ cleared: false, tokensSaved: 0 });
+      expect(skillOutputs(chat.getHistory())).toEqual([
+        MICROCOMPACT_CLEARED_MESSAGE,
+      ]);
+    });
+  });
+
+  describe('tryCompress loaded-skill tracking', () => {
+    const mockSkillTool = () => ({
+      unloadSkills: vi.fn(),
+      clearLoadedSkills: vi.fn(),
+    });
+
+    it('blanket-clears skill tracking after a COMPRESSED result', async () => {
+      const skillTool = mockSkillTool();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 30_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      await chat.tryCompress('prompt-skill-clear', true);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
+    it('leaves skill tracking untouched on NOOP', async () => {
+      const skillTool = mockSkillTool();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: null,
+        info: {
+          originalTokenCount: 1_000,
+          newTokenCount: 1_000,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+
+      await chat.tryCompress('prompt-skill-noop', true);
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+      expect(skillTool.unloadSkills).not.toHaveBeenCalled();
+    });
+  });
 
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {

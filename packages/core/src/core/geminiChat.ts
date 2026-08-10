@@ -56,6 +56,7 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -94,6 +95,8 @@ import {
 } from '../services/tokenEstimation.js';
 import {
   microcompactHistory,
+  buildCallIdToSkillName,
+  MICROCOMPACT_CLEARED_MESSAGE,
   type MicrocompactMeta,
 } from '../services/microcompaction/microcompact.js';
 import {
@@ -2020,6 +2023,11 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      // The summary may or may not have retained any given skill body, so
+      // blanket-clear the tracking — worst case a surviving body is
+      // re-appended once, while a stale entry would leave the skill
+      // unreloadable behind the dedup guard.
+      clearLoadedSkillTracking(this.config.getToolRegistry(), 'tryCompress');
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
@@ -2131,6 +2139,74 @@ export class GeminiChat {
     this.consecutiveFailures = 0;
 
     return { info, microcompactMeta: mcMeta };
+  }
+
+  /**
+   * Blank a loaded skill's tool results in history (`/unskill`). Replaces
+   * the body (and any dedup confirmations) with a reload-hint placeholder,
+   * then adjusts the tracked prompt token count by the estimated savings.
+   * The caller is responsible for un-tracking the name on the Skill tool so
+   * the dedup guard re-arms and the next invocation reloads the full body.
+   */
+  unloadSkillBody(skillName: string): {
+    cleared: boolean;
+    tokensSaved: number;
+  } {
+    const callIdToSkillName = buildCallIdToSkillName(this.history);
+    const targetIds = new Set<string>();
+    for (const [id, names] of callIdToSkillName) {
+      if (names.includes(skillName)) targetIds.add(id);
+    }
+    if (targetIds.size === 0) {
+      return { cleared: false, tokensSaved: 0 };
+    }
+
+    const placeholder = `[Skill '${skillName}' unloaded via /unskill; invoke the Skill tool again to reload.]`;
+    const beforeEstimate = estimateContentTokens(this.history);
+    let touched = false;
+    const newHistory = this.history.map((content) => {
+      if (content.role !== 'user' || !content.parts) return content;
+      let changed = false;
+      const parts = content.parts.map((part) => {
+        const fr = part.functionResponse;
+        if (!fr?.id || fr.name !== ToolNames.SKILL || !targetIds.has(fr.id)) {
+          return part;
+        }
+        const output = (fr.response as { output?: unknown } | undefined)?.[
+          'output'
+        ];
+        // Skip results an earlier rewrite already blanked — re-blanking
+        // only churns bytes (and prompt cache) for zero savings.
+        if (
+          typeof output === 'string' &&
+          (output === placeholder || output === MICROCOMPACT_CLEARED_MESSAGE)
+        ) {
+          return part;
+        }
+        changed = true;
+        return {
+          functionResponse: { ...fr, response: { output: placeholder } },
+        };
+      });
+      if (!changed) return content;
+      touched = true;
+      return { ...content, parts };
+    });
+
+    if (!touched) {
+      return { cleared: false, tokensSaved: 0 };
+    }
+
+    const afterEstimate = estimateContentTokens(newHistory);
+    const tokensSaved = Math.max(0, beforeEstimate - afterEstimate);
+    this.setHistory(newHistory);
+    if (this.lastPromptTokenCount > 0 && tokensSaved > 0) {
+      const adjusted = Math.max(0, this.lastPromptTokenCount - tokensSaved);
+      this.lastPromptTokenCount = adjusted;
+      this.lastPromptTokenCountIsEstimated = true;
+      this.telemetryService?.setLastPromptTokenCount(adjusted);
+    }
+    return { cleared: true, tokensSaved };
   }
 
   setSystemInstruction(sysInstr: string) {

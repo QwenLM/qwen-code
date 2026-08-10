@@ -3004,6 +3004,70 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
 
+    it('un-tracks skills blanked by pre-send microcompaction', async () => {
+      mockFileReadCacheStub();
+      const unloadSkills = vi.fn();
+      const clearLoadedSkills = vi.fn();
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill' ? { unloadSkills, clearLoadedSkills } : null,
+      );
+
+      // Skill body loaded first, then 5 newer read_file results
+      // (keepRecent=5) push it out of the keep window.
+      const { history } = await makeReadFileResponses(5);
+      const fullHistory: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'mc-skill-0',
+                name: 'skill',
+                args: { skill: 'demo-poem' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'mc-skill-0',
+                name: 'skill',
+                response: { output: 'skill body '.repeat(50) },
+              },
+            },
+          ],
+        },
+        ...history,
+      ];
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(fullHistory),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-skill-sync',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
+    });
+
     it('does not abort the turn when microcompaction cleanup fails', async () => {
       const { markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockImplementation(() => {
@@ -3856,6 +3920,8 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 2,
           evictedReadPaths: [],
+          evictedSkillNames: [],
+          unresolvedEvictedSkills: 0,
           toolsCleared: 3,
           mediaCleared: 0,
           tokensSaved: 800,
@@ -3892,6 +3958,8 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 0,
           evictedReadPaths: [evictedPath],
+          evictedSkillNames: [],
+          unresolvedEvictedSkills: 0,
           toolsCleared: 2,
           mediaCleared: 0,
           tokensSaved: 700,
@@ -3928,6 +3996,8 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 0,
           evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          evictedSkillNames: [],
+          unresolvedEvictedSkills: 0,
           toolsCleared: 1,
           mediaCleared: 0,
           tokensSaved: 600,
@@ -3949,6 +4019,47 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('un-tracks skills blanked by fast compression', async () => {
+      mockFileReadCacheStub();
+      const unloadSkills = vi.fn();
+      const clearLoadedSkills = vi.fn();
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill' ? { unloadSkills, clearLoadedSkills } : null,
+      );
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 400,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [],
+          evictedSkillNames: ['demo-poem'],
+          unresolvedEvictedSkills: 0,
+          toolsCleared: 1,
+          mediaCleared: 0,
+          tokensSaved: 600,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
   });
 

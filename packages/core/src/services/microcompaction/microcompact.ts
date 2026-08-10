@@ -78,6 +78,41 @@ function buildCallIdToFilePath(history: Content[]): Map<string, string[]> {
   return map;
 }
 
+/**
+ * Build a `callId → skill name[]` map for every Skill tool call, mirroring
+ * `buildCallIdToFilePath`: the name lives on the request-side
+ * `functionCall.args.skill`, not on the blanked `functionResponse`, so this
+ * is the only way to recover which skill a cleared body belonged to. Calls
+ * missing an id or skill name are absent (the caller treats that as
+ * unresolvable and falls back to clearing all loaded-skill tracking —
+ * over-clearing only costs a duplicated body on re-invoke, while keeping a
+ * stale entry leaves the skill unrecoverable behind the dedup guard).
+ *
+ * Exported for `/unskill`, which reuses the same pairing to locate a
+ * skill's tool results in history.
+ */
+export function buildCallIdToSkillName(
+  history: Content[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const content of history) {
+    if (content.role !== 'model' || !content.parts) continue;
+    for (const part of content.parts) {
+      const call = part.functionCall;
+      if (!call?.id || call.name !== ToolNames.SKILL) {
+        continue;
+      }
+      const skillName = (call.args as { skill?: unknown } | undefined)?.skill;
+      if (typeof skillName === 'string' && skillName.length > 0) {
+        const existing = map.get(call.id);
+        if (existing) existing.push(skillName);
+        else map.set(call.id, [skillName]);
+      }
+    }
+  }
+  return map;
+}
+
 // --- Trigger evaluation ---
 
 /**
@@ -330,6 +365,18 @@ function getFilePathsForResponse(
   return paths && paths.length > 0 ? [...new Set(paths)] : undefined;
 }
 
+function getSkillNamesForResponse(
+  part: Part | undefined,
+  callIdToSkillName: Map<string, string[]>,
+): string[] | undefined {
+  const response = part?.functionResponse;
+  if (!response?.id || response.name !== ToolNames.SKILL) {
+    return undefined;
+  }
+  const names = callIdToSkillName.get(response.id);
+  return names && names.length > 0 ? [...new Set(names)] : undefined;
+}
+
 function buildPreservedReadRefs(
   history: Content[],
   refs: PartRef[],
@@ -529,6 +576,21 @@ export interface MicrocompactMeta {
    * armed entry would serve a dangling placeholder.
    */
   unresolvedEvictedReads: number;
+  /**
+   * Names of skills whose blanked Skill result dropped the loaded body
+   * from history; the caller un-tracks them so the dedup guard re-arms
+   * and `/context` stops reporting a phantom `active` entry. No
+   * kept-suppression: a body is always older than its dedup
+   * confirmations, so a kept confirmation must not mask the eviction.
+   */
+  evictedSkillNames: string[];
+  /**
+   * Count of blanked Skill results whose skill name could NOT be
+   * recovered. Non-zero means the caller MUST fall back to clearing all
+   * loaded-skill tracking — a stale entry would leave that skill
+   * permanently unreloadable behind the dedup guard.
+   */
+  unresolvedEvictedSkills: number;
 }
 
 /**
@@ -659,6 +721,8 @@ export function microcompactHistory(
 
   const evictedReadPaths = new Set<string>();
   let unresolvedEvictedReads = 0;
+  const evictedSkillNames = new Set<string>();
+  let unresolvedEvictedSkills = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
@@ -668,6 +732,7 @@ export function microcompactHistory(
   if (clearRefs.length > 0) {
     const clearMap = buildClearMap(clearRefs);
     const callIdToFilePath = buildCallIdToFilePath(keptPathHistory);
+    const callIdToSkillName = buildCallIdToSkillName(keptPathHistory);
     const keptFilePaths = buildKeptFilePaths(
       keptPathHistory,
       keptPathRefs,
@@ -708,6 +773,22 @@ export function microcompactHistory(
               }
             } else {
               unresolvedEvictedReads++;
+            }
+          }
+          // Record the blanked skill so the caller un-tracks it from
+          // loadedSkillNames — otherwise the dedup guard keeps returning
+          // "already loaded in context" for a body that no longer exists.
+          if (part.functionResponse.name === ToolNames.SKILL) {
+            const skillNames = getSkillNamesForResponse(
+              part,
+              callIdToSkillName,
+            );
+            if (skillNames && skillNames.length > 0) {
+              for (const n of skillNames) {
+                evictedSkillNames.add(n);
+              }
+            } else {
+              unresolvedEvictedSkills++;
             }
           }
           return {
@@ -786,6 +867,8 @@ export function microcompactHistory(
       tokensSaved,
       evictedReadPaths: [...evictedReadPaths],
       unresolvedEvictedReads,
+      evictedSkillNames: [...evictedSkillNames],
+      unresolvedEvictedSkills,
     },
   };
 }

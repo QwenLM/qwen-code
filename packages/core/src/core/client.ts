@@ -84,6 +84,7 @@ import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
+import { syncSkillEvictions } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -2020,6 +2021,7 @@ export class GeminiClient {
       if (changed) {
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
+        syncSkillEvictions(m, this.config.getToolRegistry(), 'microcompaction');
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -4070,6 +4072,11 @@ export class GeminiClient {
     if (microcompactMeta) {
       await this.disarmFileReadCacheAfterEviction(
         microcompactMeta,
+        'compress-fast',
+      );
+      syncSkillEvictions(
+        microcompactMeta,
+        this.config.getToolRegistry(),
         'compress-fast',
       );
     }
