@@ -1565,12 +1565,15 @@ export function findingsSection(
  * Build one agent's brief and launch prompt, write the brief beside the plan, and
  * return the key and the prompt for the caller to record and print.
  *
- * One body for both callers on purpose: the single-agent path and `--roster` must
- * emit byte-identical prompts for the same agent, because the delivery check
- * compares agents against records — a drift between the two paths would read as a
- * rewritten launch on a run that did everything right.
+ * One body for every caller on purpose: the single-agent path, `--roster` and
+ * `emit-workflow` must emit byte-identical prompts for the same agent, because
+ * the delivery check compares agents against records — a drift between the
+ * paths would read as a rewritten launch on a run that did everything right.
+ * Exported for that reason: a third caller that rebuilt this would be a second
+ * implementation of the invariant, and byte-parity would become something a
+ * test asserts rather than something the code cannot break.
  */
-function buildLaunch(
+export function buildLaunch(
   report: PlanReport,
   planPath: string,
   spec: {
@@ -1712,7 +1715,7 @@ function findingsFileFor(
  * paste to an agent as if the CLI wrote it. Control characters are flattened to
  * spaces, and the separator glyph is stripped so a name cannot imitate one.
  */
-function rosterLabel(req: RequiredAgent): string {
+export function rosterLabel(req: RequiredAgent): string {
   if (req.role === 'chunk') return `chunk ${req.chunk}`;
   // The brief's label already reads `Agent 1a: Line-by-line correctness`; the
   // rebuild hint downstream names roles, so keep the id visible when the label
