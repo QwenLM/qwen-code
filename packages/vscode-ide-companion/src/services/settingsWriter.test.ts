@@ -26,7 +26,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import { AuthType, type ProviderInstallPlan } from '@qwen-code/qwen-code-core';
-import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
+import {
+  CODING_PLAN_ENV_KEY,
+  CodingPlanRegion,
+  getSubscriptionPlanConfig,
+} from './subscriptionPlanDefinitions.js';
 import {
   applyProviderInstallPlanToFile,
   clearPersistedAuth,
@@ -132,19 +136,31 @@ describe('settingsWriter', () => {
     expect(openaiModels.some((m) => m.id === 'user-model')).toBe(true);
   });
 
-  it('preserves CLI-recorded providerMetadata fields when re-syncing coding plan settings', () => {
-    // The CLI records builtinIds/baseUrl/ignoredVersion at install/update
-    // time; a VS Code settings sync (e.g. API key rotation) must refresh
-    // region/version without wiping those fields.
+  it('refreshes template-derived providerMetadata fields when re-syncing coding plan settings', () => {
+    // This sync replaces every Coding Plan model with the region template, so
+    // version/baseUrl/builtinIds must be recomputed from that template — not
+    // carried over from a prior install (possibly a different region). Only
+    // unrelated fields the CLI owns, such as ignoredVersion, are preserved.
+    // Seed a GLOBAL-region snapshot, then write china, so the refresh of
+    // baseUrl/builtinIds is observable (they differ between regions).
+    const globalConfig = getSubscriptionPlanConfig(
+      'coding',
+      CodingPlanRegion.GLOBAL,
+    );
+    const chinaConfig = getSubscriptionPlanConfig(
+      'coding',
+      CodingPlanRegion.CHINA,
+    );
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(
       settingsPath,
       JSON.stringify({
         providerMetadata: {
           'coding-plan': {
-            version: 'cli-recorded-version',
-            baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-            builtinIds: ['model-a', 'model-renamed-away'],
+            version: globalConfig.version,
+            region: CodingPlanRegion.GLOBAL,
+            baseUrl: globalConfig.baseUrl,
+            builtinIds: ['model-renamed-away'],
             ignoredVersion: 'skipped-version',
           },
         },
@@ -161,9 +177,9 @@ describe('settingsWriter', () => {
       settings.providerMetadata as Record<string, Record<string, unknown>>
     )['coding-plan'];
     expect(metadata.region).toBe('china');
-    expect(metadata.version).not.toBe('cli-recorded-version');
-    expect(metadata.baseUrl).toBe('https://coding.dashscope.aliyuncs.com/v1');
-    expect(metadata.builtinIds).toEqual(['model-a', 'model-renamed-away']);
+    expect(metadata.version).toBe(chinaConfig.version);
+    expect(metadata.baseUrl).toBe(chinaConfig.baseUrl);
+    expect(metadata.builtinIds).toEqual(chinaConfig.template.map((m) => m.id));
     expect(metadata.ignoredVersion).toBe('skipped-version');
   });
 

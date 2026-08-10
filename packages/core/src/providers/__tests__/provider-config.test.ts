@@ -711,6 +711,11 @@ import {
   resolveBaseUrl as resolveBaseUrlSrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
   readRecordedBuiltinIds as readRecordedBuiltinIdsSrc,
+  buildInstallPlan as buildInstallPlanSrc,
+  buildProviderTemplate as buildProviderTemplateSrc,
+  computeModelListVersion as computeModelListVersionSrc,
+  getDefaultModelIds as getDefaultModelIdsSrc,
+  getStaleBuiltinIds as getStaleBuiltinIdsSrc,
 } from '../provider-config.js';
 
 describe('resolveBaseUrl edge cases', () => {
@@ -949,5 +954,74 @@ describe('resolveMetadataKey dotted-id guard', () => {
   it("throws when the id contains '.' (would corrupt dotted setValue writes)", () => {
     const config = makeConfig({ id: 'company.ai', models: [{ id: 'm1' }] });
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
+  });
+});
+
+// Pins the headline fix: the stored version must be computed from the
+// built-in template (default models only), NOT from the final model list, so
+// that carrying user-added custom models through an install/update does not
+// make the stored version diverge from the launch-time recomputation. This
+// only discriminates when modelIds != defaults (an editable provider with an
+// extra custom id); with modelIds == defaults the pre-fix computation hashes
+// to the same value.
+describe('stored providerState version is template-derived (headline fix)', () => {
+  it('records version from the default-only template, excluding custom ids from version and builtinIds', () => {
+    const config = makeConfig({ modelsEditable: true });
+    const baseUrl = 'https://api.test.com/v1';
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl,
+      apiKey: 'sk-test',
+      modelIds: [...getDefaultModelIdsSrc(config), 'my-custom-model'],
+    });
+
+    const templateVersion = computeModelListVersionSrc(
+      buildProviderTemplateSrc(config, baseUrl),
+    );
+    const state = plan.providerState?.[`providerMetadata.${config.id}`];
+    expect(state).toEqual({
+      version: templateVersion,
+      baseUrl,
+      builtinIds: getDefaultModelIdsSrc(config),
+    });
+
+    // The custom model is carried into the model list…
+    expect(plan.modelProviders?.[0]?.models.map((m) => m.id)).toContain(
+      'my-custom-model',
+    );
+    // …but must not leak into the stored version or the built-in snapshot:
+    // the stored version differs from a hash over the final model list (which
+    // includes the custom model), and builtinIds excludes the custom id.
+    expect(state?.['version']).not.toBe(
+      computeModelListVersionSrc(plan.modelProviders?.[0]?.models ?? []),
+    );
+    expect(state?.['builtinIds'] as string[]).not.toContain('my-custom-model');
+  });
+});
+
+describe('getStaleBuiltinIds', () => {
+  it('returns recorded ids that are no longer current defaults', () => {
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    const metadata = {
+      [config.id]: { builtinIds: ['a', 'b', 'renamed-away'] },
+    };
+    expect(getStaleBuiltinIdsSrc(config, metadata)).toEqual(['renamed-away']);
+  });
+
+  it('returns [] when nothing is recorded', () => {
+    const config = makeConfig({ models: [{ id: 'a' }] });
+    expect(getStaleBuiltinIdsSrc(config, undefined)).toEqual([]);
+    expect(getStaleBuiltinIdsSrc(config, {})).toEqual([]);
+  });
+
+  it('returns [] when all recorded ids are still current defaults', () => {
+    const config = makeConfig({ models: [{ id: 'a' }, { id: 'b' }] });
+    const metadata = { [config.id]: { builtinIds: ['a', 'b'] } };
+    expect(getStaleBuiltinIdsSrc(config, metadata)).toEqual([]);
+  });
+
+  it('returns [] for providers without static models', () => {
+    const config = makeConfig({ id: 'custom-like', models: undefined });
+    const metadata = { 'custom-like': { builtinIds: ['x'] } };
+    expect(getStaleBuiltinIdsSrc(config, metadata)).toEqual([]);
   });
 });

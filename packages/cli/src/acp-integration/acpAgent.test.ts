@@ -414,6 +414,25 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         : [];
     },
   ),
+  getStaleBuiltinIds: vi.fn(
+    (
+      provider: { id: string; models?: Array<{ id: string }> },
+      providerMetadata: Record<string, unknown> | undefined,
+    ) => {
+      const metadataKey = provider.models ? provider.id : undefined;
+      if (!metadataKey) return [];
+      const record = providerMetadata?.[metadataKey];
+      const builtinIds =
+        record && typeof record === 'object'
+          ? (record as Record<string, unknown>)['builtinIds']
+          : undefined;
+      const recorded = Array.isArray(builtinIds)
+        ? builtinIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      const defaults = new Set(provider.models?.map((model) => model.id) ?? []);
+      return recorded.filter((id) => !defaults.has(id));
+    },
+  ),
   ExtensionManager: vi.fn().mockImplementation(() => ({
     refreshCache: mockExtensionManagerState.refreshCache,
     getLoadedExtensions: vi.fn(() => mockExtensionManagerState.extensions),

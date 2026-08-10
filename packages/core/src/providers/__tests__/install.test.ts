@@ -10,8 +10,13 @@ import type { ModelProvidersConfig } from '../../models/types.js';
 import {
   applyProviderInstallPlan,
   buildInstallPlan,
+  buildProviderTemplate,
+  computeModelListVersion,
   customProvider,
+  deepseekProvider,
   generateCustomEnvKey,
+  getDefaultModelIds,
+  PROVIDER_METADATA_NS,
   ProviderInstallError,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
@@ -394,7 +399,6 @@ describe('applyProviderInstallPlan', () => {
         codingPlan: {
           baseUrl: 'https://coding.example.com/v1',
           version: 'v1',
-          builtinIds: ['model-a', 'model-b'],
         },
       },
     };
@@ -414,10 +418,40 @@ describe('applyProviderInstallPlan', () => {
       'https://coding.example.com/v1',
     );
     expect(adapter.setValue).toHaveBeenCalledWith('codingPlan.version', 'v1');
-    expect(adapter.setValue).toHaveBeenCalledWith('codingPlan.builtinIds', [
-      'model-a',
-      'model-b',
-    ]);
+  });
+
+  it('writes plan-builder-recorded builtinIds/version through the install path', async () => {
+    // Derive the plan from the real plan builder (rather than injecting a
+    // providerState fixture) so this gates resolveProviderState's recording
+    // end-to-end through applyProviderInstallPlan: a regression that stops
+    // attaching builtinIds/version makes this fail. Carrying a custom model
+    // makes it discriminating — the stored version must come from the
+    // default-only template and builtinIds must exclude the custom id.
+    const adapter = createAdapter();
+    const baseUrl = 'https://api.deepseek.com';
+    const plan = buildInstallPlan(deepseekProvider, {
+      baseUrl,
+      apiKey: 'sk-deepseek',
+      modelIds: [...getDefaultModelIds(deepseekProvider), 'my-custom-model'],
+    });
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    const prefix = `${PROVIDER_METADATA_NS}.${deepseekProvider.id}`;
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      `${prefix}.builtinIds`,
+      getDefaultModelIds(deepseekProvider),
+    );
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      `${prefix}.version`,
+      computeModelListVersion(buildProviderTemplate(deepseekProvider, baseUrl)),
+    );
+    expect(adapter.setValue).toHaveBeenCalledWith(`${prefix}.baseUrl`, baseUrl);
+    // The custom model is carried into the written model list…
+    const writtenModels = adapter.setValue.mock.calls.find(
+      ([key]) => key === `modelProviders.${AuthType.USE_OPENAI}`,
+    )?.[1] as Array<{ id: string }> | undefined;
+    expect(writtenModels?.map((m) => m.id)).toContain('my-custom-model');
   });
 
   it('appends models with append merge strategy', async () => {

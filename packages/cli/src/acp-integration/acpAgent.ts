@@ -24,10 +24,10 @@ import {
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
   getScopedEnvContents,
+  getStaleBuiltinIds,
   QwenOAuth2Event,
   qwenOAuth2Events,
   resolveBaseUrl,
-  resolveMetadataKey,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
@@ -51,7 +51,6 @@ import {
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   parseInvocationContext,
   findExistingProviderModels,
-  readRecordedBuiltinIds,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -2087,18 +2086,17 @@ function readExistingProviderConfig(
 
   const advancedConfig = readExistingAdvancedConfig(firstModel);
 
-  // Same classification as the update flow: ids recorded as built-in at the
-  // last install but no longer current defaults are stale built-ins — don't
-  // serialize them, or clients that echo modelIds back on connect would
-  // reinstall what the update cleans up.
-  const defaultIds = new Set(getDefaultModelIds(config));
+  // Same classification as the update flow (via getStaleBuiltinIds): ids
+  // recorded as built-in at the last install but no longer current defaults
+  // are stale built-ins — don't serialize them, or clients that echo modelIds
+  // back on connect would reinstall what the update cleans up.
   const staleBuiltinIds = new Set(
-    readRecordedBuiltinIds(
-      resolveMetadataKey(config),
+    getStaleBuiltinIds(
+      config,
       (settings.merged as Record<string, unknown>)[PROVIDER_METADATA_NS] as
         | Record<string, unknown>
         | undefined,
-    ).filter((id) => !defaultIds.has(id)),
+    ),
   );
 
   return {

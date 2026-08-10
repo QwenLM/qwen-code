@@ -232,16 +232,16 @@ function resolveProviderState(
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
-    // The stored version must be computed from the same input the launch-time
-    // check uses — the built-in template (default models only) — so that
-    // user-added custom models (editable providers) don't make the stored
-    // version permanently diverge from the recomputed currentVersion.
-    // Otherwise "update all" would never clear the prompt for users with
-    // custom models (see #8829 follow-up).
-    const template = buildProviderTemplate(config, baseUrl);
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(template),
+        // The stored version must be computed from the same input the
+        // launch-time check uses — the built-in template (default models
+        // only) — so that user-added custom models (editable providers)
+        // don't make the stored version permanently diverge from the
+        // recomputed currentVersion. Otherwise "update all" would never
+        // clear the prompt for users with custom models (see #8829
+        // follow-up).
+        version: computeProviderTemplateVersion(config, baseUrl),
         baseUrl,
         // Record the built-in ids at install time so a later update can tell
         // stale built-ins (renamed/removed upstream) apart from true
@@ -307,6 +307,23 @@ export function buildInstallPlan(
 
 export function computeModelListVersion(models: ProviderModelConfig[]): string {
   return createHash('sha256').update(JSON.stringify(models)).digest('hex');
+}
+
+/**
+ * Version of a provider's built-in template (default models only).
+ *
+ * Single owned function for the invariant this codebase relies on: the
+ * version stored at install time ({@link resolveProviderState}) and the
+ * currentVersion recomputed at launch (useProviderUpdates) must hash the
+ * same input, or the "update available" prompt never clears. Call sites
+ * must use this instead of composing buildProviderTemplate +
+ * computeModelListVersion by hand.
+ */
+export function computeProviderTemplateVersion(
+  config: ProviderConfig,
+  baseUrl: string,
+): string {
+  return computeModelListVersion(buildProviderTemplate(config, baseUrl));
 }
 
 /**
@@ -428,6 +445,26 @@ export function readRecordedBuiltinIds(
   return Array.isArray(builtinIds)
     ? builtinIds.filter((id): id is string => typeof id === 'string')
     : [];
+}
+
+/**
+ * Single source of truth for the stale-built-in classification: ids recorded
+ * as built-in at the last install that are no longer current defaults
+ * (renamed/removed upstream). Every entry point that decides whether an
+ * installed id is a user custom or a cleanup target (the update-confirm
+ * filter, the update-preview diff, the /auth wizard prefill, the ACP
+ * providers/list serialization) must derive from this function so the
+ * classification cannot drift between copies.
+ */
+export function getStaleBuiltinIds(
+  config: ProviderConfig,
+  providerMetadata: Record<string, unknown> | undefined,
+): string[] {
+  const defaults = new Set(getDefaultModelIds(config));
+  return readRecordedBuiltinIds(
+    resolveMetadataKey(config),
+    providerMetadata,
+  ).filter((id) => !defaults.has(id));
 }
 
 // ---------------------------------------------------------------------------

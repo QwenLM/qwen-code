@@ -342,10 +342,14 @@ export function writeCodingPlanConfig(
   providers[AuthType.USE_OPENAI] = [...planModels, ...nonCodingPlan];
 
   // Coding Plan metadata — write to the providerMetadata namespace that
-  // the CLI now reads from. Remove legacy top-level key if present. Merge
-  // over the existing entry: the CLI records fields this sync doesn't know
-  // about (builtinIds, baseUrl, ignoredVersion) and replacing the object
-  // would wipe them.
+  // the CLI now reads from. Remove legacy top-level key if present. Spread
+  // the existing entry only to keep fields this sync doesn't own (e.g.
+  // ignoredVersion). Every field derived from the template being written —
+  // version, baseUrl, builtinIds — must be recomputed from `planConfig`,
+  // not carried over: this function just replaced every Coding Plan model
+  // with `planConfig.template`, so a stale baseUrl/builtinIds snapshot from
+  // a previous region or template would make the CLI's next update hash the
+  // wrong template and could silently revert a region switch.
   const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
   const existingMetadata =
     providerMetadata['coding-plan'] &&
@@ -356,7 +360,9 @@ export function writeCodingPlanConfig(
   providerMetadata['coding-plan'] = {
     ...existingMetadata,
     region: codingRegion,
+    baseUrl: planConfig.baseUrl,
     version: planConfig.version,
+    builtinIds: planConfig.template.map((m) => m.id),
   };
   delete settings.codingPlan;
 

@@ -226,7 +226,9 @@ describe('useProviderUpdates', () => {
     });
 
     const entry = result.current.providerUpdateRequest?.entries[0];
-    expect(entry?.diff.removed).toContain(staleBuiltinId);
+    // Exactly the stale built-in — user customs and current defaults must
+    // not leak into the removal preview.
+    expect(entry?.diff.removed).toEqual([staleBuiltinId]);
     expect(entry?.diff.currentModelAffected).toBe(true);
     expect(entry?.diff.fallbackModel).toBe(chinaTemplate[0]!.id);
   });
@@ -258,7 +260,11 @@ describe('useProviderUpdates', () => {
     });
 
     const entry = result.current.providerUpdateRequest?.entries[0];
-    expect(entry?.diff.added).toContain(addedModelId);
+    // Exactly the one new model — the already-installed current defaults must
+    // NOT appear as "added" (a legacy install records no builtinIds, so the
+    // comparison set must still include the current defaults).
+    expect(entry?.diff.added).toEqual([addedModelId]);
+    expect(entry?.diff.removed).toEqual([]);
   });
 
   it('preserves user-added custom models when executing an update', async () => {
@@ -356,8 +362,9 @@ describe('useProviderUpdates', () => {
 
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
     const ids = reloaded[AuthType.USE_OPENAI].map((m: { id: string }) => m.id);
-    expect(ids).toContain('my-custom-model');
-    expect(ids).not.toContain(staleBuiltinId);
+    // Exact list, not membership: catches both the stale id surviving and
+    // any default being carried through as a pseudo-custom and duplicated.
+    expect(ids).toEqual([...chinaTemplate.map((m) => m.id), 'my-custom-model']);
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
       `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,

@@ -14,9 +14,9 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
-  buildProviderTemplate,
-  computeModelListVersion,
+  computeProviderTemplateVersion,
   getDefaultModelIds,
+  getStaleBuiltinIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
   readRecordedBuiltinIds,
@@ -180,16 +180,18 @@ function readInstalledOwnedIds(
 function getInstalledOwnedModelIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
-  previousBuiltinIds: string[],
+  staleBuiltinIds: string[],
 ): string[] {
   // Only compare built-in model IDs — user-added custom models should not
   // appear as "removed" in the diff since they were never part of the
-  // provider's built-in list. Ids recorded as built-in at the last install
-  // stay in the comparison so stale built-ins the update drops show up as
-  // removals and the preview matches what confirm actually does.
+  // provider's built-in list. Stale built-ins (recorded at the last install
+  // but dropped since) stay in the comparison so the removals the update
+  // performs show up in the preview and the two never disagree. The set
+  // defaults ∪ stale equals defaults ∪ recorded, because every recorded id
+  // is either still a default or stale.
   const builtinIds = new Set([
     ...getDefaultModelIds(provider),
-    ...previousBuiltinIds,
+    ...staleBuiltinIds,
   ]);
   return readInstalledOwnedIds(settings, provider).filter((id) =>
     builtinIds.has(id),
@@ -201,6 +203,10 @@ function findAllPendingUpdates(
   currentModel: string,
 ): PendingUpdate[] {
   const results: PendingUpdate[] = [];
+  const mergedSettings = settings.merged as Record<string, unknown>;
+  const providerMetadataNs = mergedSettings[PROVIDER_METADATA_NS] as
+    | Record<string, unknown>
+    | undefined;
   for (const provider of ALL_PROVIDERS) {
     const metadataKey = resolveMetadataKey(provider);
     if (!metadataKey) continue;
@@ -209,8 +215,7 @@ function findAllPendingUpdates(
     if (!metadata.version) continue;
 
     const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentTemplate = buildProviderTemplate(provider, baseUrl);
-    const currentVersion = computeModelListVersion(currentTemplate);
+    const currentVersion = computeProviderTemplateVersion(provider, baseUrl);
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
@@ -218,7 +223,7 @@ function findAllPendingUpdates(
     const existingModelIds = getInstalledOwnedModelIds(
       settings,
       provider,
-      metadata.builtinIds ?? [],
+      getStaleBuiltinIds(provider, providerMetadataNs),
     );
     const newModelIds = provider.models!.map((s) => s.id);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
@@ -258,24 +263,29 @@ export function useProviderUpdates(
         // prepend-and-remove-owned merge.
         //
         // Distinguish true user-custom models from stale built-ins that were
-        // renamed/removed upstream (e.g. deepseek-v4-flash → -0731). A model is
-        // "custom" only if it is not a current default AND was not part of the
-        // built-in list at the last install (metadata.builtinIds). Stale
+        // renamed/removed upstream (e.g. deepseek-v4-flash → -0731). A model
+        // is "custom" only if it is not a current default AND was not part of
+        // the built-in list at the last install (metadata.builtinIds). Stale
         // built-ins are dropped so they get cleaned up instead of persisting
         // forever. Installs predating builtinIds recording fall back to []
         // and keep already-stale ids — they cannot be safely distinguished
-        // from user customs.
+        // from user customs. That keep is permanent: this update re-records
+        // builtinIds as the current defaults only, so carried ids are
+        // classified as user customs on every future update as well.
         const defaultIds = getDefaultModelIds(providerCfg);
-        const metadataKey = resolveMetadataKey(providerCfg);
-        const previousBuiltinIds = metadataKey
-          ? (getProviderMetadata(settings, metadataKey).builtinIds ?? [])
-          : [];
+        const mergedSettings = settings.merged as Record<string, unknown>;
+        const staleBuiltinIds = getStaleBuiltinIds(
+          providerCfg,
+          mergedSettings[PROVIDER_METADATA_NS] as
+            | Record<string, unknown>
+            | undefined,
+        );
         const ownedIds = readInstalledOwnedIds(settings, providerCfg);
         const customIds = ownedIds.filter(
-          (id) => !defaultIds.includes(id) && !previousBuiltinIds.includes(id),
+          (id) => !defaultIds.includes(id) && !staleBuiltinIds.includes(id),
         );
-        const droppedStaleBuiltinIds = ownedIds.filter(
-          (id) => !defaultIds.includes(id) && previousBuiltinIds.includes(id),
+        const droppedStaleBuiltinIds = ownedIds.filter((id) =>
+          staleBuiltinIds.includes(id),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
