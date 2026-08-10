@@ -67,7 +67,7 @@ afterEach(() => {
 });
 
 describe('managed Skill mutations', () => {
-  it('installs every downloaded file and refreshes the cache', async () => {
+  it('installs every downloaded file and replaces an existing Skill', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
     const manager = managerFor('pptx');
@@ -118,10 +118,201 @@ describe('managed Skill mutations', () => {
         installedPath,
         'user',
       );
-      expect(manager.refreshCache).toHaveBeenCalledTimes(1);
+
+      downloadSkillMock.mockResolvedValue({
+        skillContent:
+          '---\nname: pptx\ndescription: Updated slide decks\n---\nUpdated\n',
+        files: [
+          {
+            relativePath: 'SKILL.md',
+            content: Buffer.from(
+              '---\nname: pptx\ndescription: Updated slide decks\n---\nUpdated\n',
+            ),
+          },
+        ],
+      });
+      await installManagedSkill(configWith(manager), {
+        skill: {
+          slug: 'pptx',
+          sourceUrl:
+            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+        },
+      });
+
+      await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
+        'Updated slide decks',
+      );
+      await expect(
+        fs.stat(
+          path.join(tempHome, 'skills', 'pptx', 'references', 'editing.md'),
+        ),
+      ).rejects.toThrow();
+      expect(manager.refreshCache).toHaveBeenCalledTimes(2);
     } finally {
       await fs.rm(tempHome, { recursive: true, force: true });
     }
+  });
+
+  it('rejects downloaded file paths outside the staging directory', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const manager = managerFor('pptx');
+    const outsidePath = path.join(tempHome, 'skills', 'evil.md');
+    downloadSkillMock.mockResolvedValue({
+      skillContent: '---\nname: pptx\n---\nBody\n',
+      files: [
+        {
+          relativePath: '../evil.md',
+          content: Buffer.from('unsafe'),
+        },
+      ],
+    });
+
+    try {
+      await expect(
+        installManagedSkill(configWith(manager), {
+          skill: {
+            slug: 'pptx',
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          },
+        }),
+      ).rejects.toThrow('Invalid skill file path');
+      await expect(fs.stat(outsidePath)).rejects.toThrow();
+      expect(manager.refreshCache).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects manifests whose parsed name does not match the slug', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const manager = managerFor('other-name');
+    const config = configWith(manager);
+    downloadSkillMock.mockResolvedValue({
+      skillContent: '---\nname: pptx\n---\nBody\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from('---\nname: pptx\n---\nBody\n'),
+        },
+      ],
+    });
+
+    try {
+      await expect(
+        installManagedSkill(config, {
+          skill: {
+            slug: 'pptx',
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          },
+        }),
+      ).rejects.toThrow('does not match requested slug');
+      await expect(
+        fs.stat(path.join(tempHome, 'skills', 'pptx')),
+      ).rejects.toThrow();
+
+      const { skillDir, skillFile } = await writeSkill(
+        tempHome,
+        'skills',
+        'pptx',
+      );
+      const originalContent = await fs.readFile(skillFile, 'utf8');
+      await expect(
+        deleteManagedSkill(config, { skill: { slug: 'pptx' } }),
+      ).rejects.toThrow('does not match requested slug');
+      await expect(
+        setManagedSkillEnabled(config, {
+          skill: { slug: 'pptx', enabled: false },
+        }),
+      ).rejects.toThrow('does not match requested slug');
+
+      await expect(fs.stat(skillDir)).resolves.toBeDefined();
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(
+        originalContent,
+      );
+      expect(manager.refreshCache).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to delete the global Qwen directory', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillFile = path.join(tempHome, 'SKILL.md');
+    const content = '---\nname: pptx\n---\nBody\n';
+    await fs.writeFile(skillFile, content, 'utf8');
+    const manager = managerFor('pptx');
+    const listSkills = vi
+      .fn()
+      .mockResolvedValue([{ name: 'pptx', filePath: skillFile }]);
+
+    try {
+      await expect(
+        deleteManagedSkill(configWith({ ...manager, listSkills }), {
+          skill: { slug: 'pptx' },
+        }),
+      ).rejects.toThrow('Refusing to delete unexpected skill directory');
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(content);
+      expect(manager.refreshCache).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to update a non-SKILL.md fallback file', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillDir = path.join(tempHome, 'fallback');
+    const skillFile = path.join(skillDir, 'README.md');
+    const content = '---\nname: pptx\n---\nBody\n';
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(skillFile, content, 'utf8');
+    const manager = managerFor('pptx');
+    const listSkills = vi
+      .fn()
+      .mockResolvedValue([{ name: 'pptx', filePath: skillFile }]);
+
+    try {
+      await expect(
+        setManagedSkillEnabled(configWith({ ...manager, listSkills }), {
+          skill: { slug: 'pptx', enabled: false },
+        }),
+      ).rejects.toThrow('Refusing to write to unexpected skill file');
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(content);
+      expect(manager.refreshCache).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unsupported mutation scopes before side effects', async () => {
+    const config = configWith(managerFor('unused'));
+
+    await expect(
+      installManagedSkill(config, {
+        skill: {
+          slug: 'pptx',
+          scope: 'project',
+          sourceUrl:
+            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+        },
+      }),
+    ).rejects.toThrow('Only global skill installation is supported');
+    await expect(
+      deleteManagedSkill(config, {
+        skill: { slug: 'pptx', scope: 'project' },
+      }),
+    ).rejects.toThrow('Only global skill management is supported');
+    await expect(
+      setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: false, scope: 'user' },
+      }),
+    ).rejects.toThrow('Only global or project skill management is supported');
+    expect(downloadSkillMock).not.toHaveBeenCalled();
   });
 
   it('enables, disables, and deletes a global Skill', async () => {

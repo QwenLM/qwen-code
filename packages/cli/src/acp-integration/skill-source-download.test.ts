@@ -108,6 +108,10 @@ describe('fetchAllowedGitHub', () => {
       fetchAllowedGitHub('https://codeload.github.com/a/b/tar.gz/main'),
     ).resolves.toBe(final);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ redirect: 'manual' }),
+    );
   });
 
   it.each(['https://evil.com/x', 'http://raw.githubusercontent.com/x'])(
@@ -158,11 +162,71 @@ describe('fetchAllowedGitHub', () => {
 
 describe('downloadSkill', () => {
   it.each([
-    'http://github.com/owner/repo/blob/main/skills/x/SKILL.md',
-    'https://evil.com/owner/repo/blob/main/skills/x/SKILL.md',
-    'https://github.com.attacker.com/owner/repo/blob/main/SKILL.md',
-  ])('rejects the unsupported source %s', async (sourceUrl) => {
-    await expect(downloadSkill(sourceUrl)).rejects.toThrow();
+    [
+      'http://github.com/owner/repo/blob/main/skills/x/SKILL.md',
+      /must be an HTTPS URL/,
+    ],
+    [
+      'https://evil.com/owner/repo/blob/main/skills/x/SKILL.md',
+      /host is not allowed/,
+    ],
+    [
+      'https://github.com.attacker.com/owner/repo/blob/main/SKILL.md',
+      /host is not allowed/,
+    ],
+  ])('rejects the unsupported source %s', async (sourceUrl, expectedError) => {
+    await expect(downloadSkill(sourceUrl)).rejects.toThrow(expectedError);
+  });
+
+  it('does not fetch a disallowed API-provided download URL', async () => {
+    const directoryUrl =
+      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
+    const disallowedUrl = 'https://evil.com/SKILL.md';
+    const archiveUrl =
+      'https://codeload.github.com/anthropics/skills/tar.gz/main';
+    const archive = makeTarGz(
+      'skills-main/skills/pptx/SKILL.md',
+      '---\nname: pptx\n---\nBody\n',
+    );
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === directoryUrl) {
+        return {
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue([
+            {
+              name: 'SKILL.md',
+              path: 'skills/pptx/SKILL.md',
+              type: 'file',
+              download_url: disallowedUrl,
+            },
+          ]),
+        };
+      }
+      const content = url === archiveUrl ? archive : Buffer.from('unsafe');
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: vi.fn().mockReturnValue(null) },
+        arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(content)),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      downloadSkill(
+        'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+      ),
+    ).resolves.toMatchObject({
+      skillContent: '---\nname: pptx\n---\nBody\n',
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain(
+      disallowedUrl,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      archiveUrl,
+      expect.objectContaining({ redirect: 'manual' }),
+    );
   });
 
   it('downloads every file from a GitHub skill directory', async () => {
