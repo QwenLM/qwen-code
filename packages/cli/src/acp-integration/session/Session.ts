@@ -5302,9 +5302,10 @@ export class Session implements SessionContext {
     }
 
     const chat = this.#getCurrentChat();
-    const userTurnCountBeforeSend = chat
-      .getHistoryShallow()
-      .filter((content) => this.#isUserTextContent(content)).length;
+    const historyBeforeSend = chat.getHistoryShallow?.();
+    const userTurnCountBeforeSend = historyBeforeSend?.filter((content) =>
+      this.#isUserTextContent(content),
+    ).length;
     let responseStream: Awaited<ReturnType<GeminiChat['sendMessageStream']>>;
     try {
       responseStream = await chat.sendMessageStream(
@@ -5322,10 +5323,10 @@ export class Session implements SessionContext {
     } catch (error) {
       if (
         Object.hasOwn(options, 'rewindableUserTurn') &&
-        chat
-          .getHistoryShallow()
-          .filter((content) => this.#isUserTextContent(content)).length >
-          userTurnCountBeforeSend
+        userTurnCountBeforeSend !== undefined &&
+        (chat.getHistoryShallow?.() ?? []).filter((content) =>
+          this.#isUserTextContent(content),
+        ).length > userTurnCountBeforeSend
       ) {
         this.#trackRewindApiUserTurn(options.rewindableUserTurn === true);
       }
@@ -5340,9 +5341,11 @@ export class Session implements SessionContext {
   #trackRewindApiUserTurn(rewindable: boolean): void {
     if (this.rewindApiUserTurns === null) {
       const chat = this.#getCurrentChat();
-      const userTurnCount = chat
-        .getHistoryShallow()
-        .filter((content) => this.#isUserTextContent(content)).length;
+      const history = chat.getHistoryShallow?.();
+      if (!history) return;
+      const userTurnCount = history.filter((content) =>
+        this.#isUserTextContent(content),
+      ).length;
       if (userTurnCount > 1) return;
       this.rewindApiUserTurns = [];
     }
