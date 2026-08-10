@@ -401,8 +401,12 @@ describe('ChannelEditorDialog', () => {
       setInputValue(allowedGroups!, 'group-a, group-b');
     });
 
-    expect(document.body.textContent).toContain('Conversation management');
-    expect(document.body.textContent).toContain(
+    const dialogText = document.body.textContent ?? '';
+    expect(dialogText).toContain('Conversation management');
+    expect(dialogText.indexOf('Conversation management')).toBeLessThan(
+      dialogText.indexOf('Access control'),
+    );
+    expect(dialogText).toContain(
       "The same user's messages continue in one conversation; users stay isolated from each other.",
     );
     await chooseRadioOption('By chat or thread');
