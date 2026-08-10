@@ -103,6 +103,34 @@ describe('OmniUploadCache', () => {
     expect(after.entries[`${SHA}|m|`]).toBeUndefined(); // pruned
   });
 
+  it('findSha256ByUrl reverse-maps a delivered URL to its object hash', async () => {
+    const cache = new OmniUploadCache(root, 47, 'scope-a');
+    await cache.put(SHA, 'm1', 'oss://bucket/key1');
+    await cache.put('b'.repeat(64), 'm1', 'oss://bucket/key2');
+    expect(await cache.findSha256ByUrl('oss://bucket/key1')).toBe(SHA);
+    expect(await cache.findSha256ByUrl('oss://bucket/key2')).toBe(
+      'b'.repeat(64),
+    );
+    expect(await cache.findSha256ByUrl('oss://bucket/unknown')).toBeNull();
+    // Scope-agnostic like invalidateByUrl: the caller knows only the URL.
+    const otherScope = new OmniUploadCache(root, 47, 'scope-b');
+    expect(await otherScope.findSha256ByUrl('oss://bucket/key1')).toBe(SHA);
+  });
+
+  it('findSha256ByUrl still resolves expired entries (the URL was just sent)', async () => {
+    const cache = new OmniUploadCache(root);
+    await cache.put(SHA, 'm', 'oss://bucket/old');
+    const file = path.join(root, 'upload-cache.json');
+    const data = JSON.parse(await fs.readFile(file, 'utf8'));
+    for (const entry of Object.values(data.entries) as Array<{
+      expiresAt: string;
+    }>) {
+      entry.expiresAt = new Date(Date.now() - 1000).toISOString();
+    }
+    await fs.writeFile(file, JSON.stringify(data));
+    expect(await cache.findSha256ByUrl('oss://bucket/old')).toBe(SHA);
+  });
+
   it('invalidateByUrl drops every entry with that URL', async () => {
     const cache = new OmniUploadCache(root);
     await cache.put(SHA, 'm1', 'oss://bucket/shared');

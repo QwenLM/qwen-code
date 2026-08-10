@@ -75,8 +75,12 @@ const TUNABLE_SCHEMA_PROPERTIES = {
   },
   fps: {
     type: 'number',
-    description: 'Output frame rate. Default 10.',
-    minimum: 1,
+    description:
+      'Output frame rate. Fractional rates (e.g. 0.5 = one frame every 2s) are supported. Default 10.',
+    // Fractional floor: the server-side billing of omni video is per
+    // SAMPLED FRAME, so sub-1fps rates are the effective degradation
+    // lever for long clips (reactive server-limit fallback ladder).
+    minimum: 0.01,
   },
   crf: {
     type: 'number',

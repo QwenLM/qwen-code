@@ -117,6 +117,28 @@ export class OmniUploadCache {
   }
 
   /**
+   * Reverse lookup: the object hash behind a delivered oss:// URL.
+   *
+   * Serves the reactive server-limit fallback, which only knows the URL
+   * embedded in the rejected request and must find the local object to
+   * degrade. Scope-agnostic like {@link invalidateByUrl} (the caller
+   * knows the URL, not the endpoint scope that minted it); expired
+   * entries still resolve — the URL was just sent, so the object mapping
+   * is trustworthy even if the cached URL is past its validity horizon.
+   */
+  async findSha256ByUrl(ossUrl: string): Promise<string | null> {
+    return this.file.access<string | null>(null, (entries) => {
+      for (const [k, v] of Object.entries(entries)) {
+        if (v.ossUrl === ossUrl) {
+          const sha256 = k.split('|', 1)[0];
+          if (sha256) return { result: sha256 };
+        }
+      }
+      return { result: null };
+    });
+  }
+
+  /**
    * Drop every entry pointing at a server-side-invalidated URL.
    *
    * Deliberately ignores the `enabled` flag: even for ttlHours-0 users
