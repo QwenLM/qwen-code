@@ -78,6 +78,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
@@ -1298,17 +1299,16 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
-  // region via ink 7 native overflow clipping, and the remount-key bump is a
-  // near-no-op for VP (nothing in the VP render path is keyed by
-  // historyRemountKey; the startup-scoped VP decision is intentionally
-  // restart-only to match Ink's alternateScreen lifetime). refreshStatic must
-  // stay write-free in VP: ordinary callers (Ctrl+O, model change, /clear,
-  // ...) get their visible refresh for free from the state change that
-  // triggered them, and replaying the pre-change frame would flash stale
-  // content. Only the wake/SIGCONT path (wakeRepaint below) does a physical
-  // clear-and-replay, because there the terminal buffer may be stale or
-  // rearranged while Ink both erases with a stale relative count and skips
-  // redraws whose output is unchanged.
+  // region via ink 7 native overflow clipping. The remount-key bump is
+  // write-free but not inert: one-shot <Static> output keyed by it (agent
+  // tab history in AgentChatContent) is only re-emitted on a bump.
+  // refreshStatic must stay write-free in VP: ordinary callers (Ctrl+O,
+  // model change, /clear, ...) get their visible refresh from the state
+  // change that triggered them, and replaying the pre-change frame would
+  // flash stale content. Only the wake/SIGCONT path (wakeRepaint below) does
+  // a physical clear-and-replay, because there the terminal buffer may be
+  // stale or rearranged while Ink both erases with a stale relative count
+  // and skips redraws whose output is unchanged.
   const [useTerminalBuffer] = useState(
     () =>
       initialUseVirtualViewport ??
@@ -1334,14 +1334,27 @@ export const AppContainer = (props: AppContainerProps) => {
   // both erases with a stale relative count and skips redraws whose output
   // is unchanged — so VP repaints by replaying the last frame over a clean
   // viewport (viewport-only: clearTerminal's 3J would destroy scrollback /
-  // Warp history). Static mode uses the ordinary refreshStatic.
-  const wakeRepaint = useCallback(() => {
-    if (useTerminalBuffer) {
-      (repaintViewport ?? (() => stdout.write(ansiEscapes.clearViewport)))();
-    } else {
-      refreshStatic();
-    }
-  }, [useTerminalBuffer, repaintViewport, refreshStatic, stdout]);
+  // Warp history) and bumps the static remount key so one-shot <Static>
+  // history (agent tabs) is re-emitted over the clear. Static mode uses the
+  // ordinary refreshStatic. Selection extracted (buildWakeRepaint) for unit
+  // coverage.
+  const wakeRepaint = useMemo(
+    () =>
+      buildWakeRepaint({
+        isVP: useTerminalBuffer,
+        repaintViewport,
+        clearViewportFallback: () => stdout.write(ansiEscapes.clearViewport),
+        refreshStatic,
+        remountStaticHistory,
+      }),
+    [
+      useTerminalBuffer,
+      repaintViewport,
+      stdout,
+      refreshStatic,
+      remountStaticHistory,
+    ],
+  );
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly

@@ -7,23 +7,27 @@
 import ansiEscapes from 'ansi-escapes';
 
 const ESC = '\u001B[';
-const ERASE_LINE = `${ESC}2K`;
-const CURSOR_UP_ONE = `${ESC}1A`;
+export const ERASE_LINE = `${ESC}2K`;
+export const CURSOR_UP_ONE = `${ESC}1A`;
 const CURSOR_DOWN_ONE = `${ESC}1B`;
-const CURSOR_LEFT = `${ESC}G`;
+export const CURSOR_LEFT = `${ESC}G`;
 
-const MULTILINE_ERASE_LINES_PATTERN = new RegExp(
-  `(?:${escapeRegExp(ERASE_LINE + CURSOR_UP_ONE)})+${escapeRegExp(
-    ERASE_LINE + CURSOR_LEFT,
-  )}`,
-  'g',
-);
+export function createEraseLinesPattern(flags?: string): RegExp {
+  return new RegExp(
+    `(?:${escapeRegExp(ERASE_LINE + CURSOR_UP_ONE)})+${escapeRegExp(
+      ERASE_LINE + CURSOR_LEFT,
+    )}`,
+    flags,
+  );
+}
 
-function escapeRegExp(value: string): string {
+const MULTILINE_ERASE_LINES_PATTERN = createEraseLinesPattern('g');
+
+export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function countOccurrences(value: string, search: string): number {
+export function countOccurrences(value: string, search: string): number {
   let count = 0;
   let index = 0;
 
