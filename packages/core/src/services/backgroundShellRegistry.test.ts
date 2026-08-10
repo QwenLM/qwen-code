@@ -30,26 +30,29 @@ import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
-// EXACTLY what production composes for <output-file>
-// (backgroundShellRegistry.ts renders escapeXml(stripDisplayControlChars(…))).
-// Hand-rolling either half is how this went wrong twice: a
-// single-occurrence `replace` for the `&`, then a single-occurrence one for
-// the control character — each correct only while os.tmpdir() happened to
-// hold nothing the pipeline transforms. Composing the real functions cannot
-// drift from production at all.
-function renderedPath(outputFile: string): string {
-  return escapeXml(stripDisplayControlChars(outputFile));
+/**
+ * Builds the expected `<output-file>` element with the same
+ * `stripDisplayControlChars` + `escapeXml` pipeline the registry applies.
+ * Expected paths below come from `tmpdir()`, which can legally contain XML
+ * metacharacters (`&` on Windows, `<` on POSIX) or bidi overrides, so
+ * hand-rolling the escaping would make these cases depend on the host's TMPDIR.
+ */
+function expectedOutputFileElement(path: string): string {
+  return `<output-file>${escapeXml(stripDisplayControlChars(path))}</output-file>`;
 }
 
 let tmpDirs: string[] = [];
+let tmpFiles: string[] = [];
 
 afterEach(() => {
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+  for (const file of tmpFiles) {
+    rmSync(file, { force: true });
+  }
   tmpDirs = [];
-  // The per-test entry directory goes with them.
-  entryDir = undefined;
+  tmpFiles = [];
 });
 
 function makeOutputFile(content: string): string {
@@ -66,23 +69,6 @@ function makeTempDir(): string {
   return dir;
 }
 
-// Every settle writes a status sidecar next to the entry's outputPath, so
-// the fixture must not point them all at one SHARED path. With the old
-// fixed `/tmp/s1.output`, every entry in a test wrote `/tmp/s1.status` — a
-// path a sticky-bit /tmp shares with every other job on the machine. When
-// that file already belongs to another user, the atomic write's rename
-// answers EPERM and retries with a blocking exponential backoff (50, 100,
-// 200ms), so ONE settle costs ~350ms: measured, 34 of them take 12.3s of a
-// 15s test budget, which is what turned the retention-cap tests into
-// timeouts on shared CI runners while passing everywhere else. A per-run
-// directory keyed by shellId cannot collide with anything.
-let entryDir: string | undefined;
-
-function entryOutputPath(shellId: string): string {
-  entryDir ??= makeTempDir();
-  return join(entryDir, `${shellId}.output`);
-}
-
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
 ): ShellTaskRegistration {
@@ -93,13 +79,27 @@ function makeEntry(
     cwd: '/tmp',
     status: 'running',
     startTime: 1000,
-    outputPath: entryOutputPath(shellId),
     abortController: new AbortController(),
     ...overrides,
+    // Every register/complete/fail/cancel mirrors the entry into a
+    // `<outputPath>.status` sidecar, so the default outputPath decides where
+    // that write lands. A fixed `/tmp/s1.output` pointed every entry in this
+    // file — across tests, across workers, across CI jobs — at the single
+    // path `/tmp/s1.status`. `/tmp` is sticky, so once that file belongs to
+    // another uid the atomic rename fails EPERM, and `renameWithRetrySync`
+    // burns its full 50+100+200ms backoff before the registry swallows the
+    // error. Give each entry its own directory instead: no shared state, and
+    // the sidecar write actually succeeds.
+    outputPath:
+      overrides.outputPath ?? join(makeTempDir(), `shell-${shellId}.output`),
   };
 }
 
 describe('BackgroundShellRegistry', () => {
+  it('gives each entry a unique default outputPath', () => {
+    expect(makeEntry().outputPath).not.toBe(makeEntry().outputPath);
+  });
+
   describe('register / get / getAll', () => {
     it('captures the Todo work-chain owner at registration', () => {
       const reg = new BackgroundShellRegistry();
@@ -315,9 +315,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain(
         '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
-      expect(modelText).toContain(
-        `<output-file>${renderedPath(outputPath)}</output-file>`,
-      );
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
       expect(meta).toEqual({
         shellId: 'a',
         status: 'completed',
@@ -408,9 +406,7 @@ describe('BackgroundShellRegistry', () => {
       reg.complete('bidi', 0, 2000);
 
       const [, modelText] = callback.mock.calls[0];
-      expect(modelText).toContain(
-        `<output-file>${renderedPath(outputPath)}</output-file>`,
-      );
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
       expect(modelText).not.toContain('\u202E');
       expect(modelText).not.toContain('\u2069');
     });
@@ -419,9 +415,6 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
-      // The `&` in the BASENAME is what this test is about; the directory
-      // is the run's own so the settle below writes its status sidecar
-      // somewhere no other job shares.
       const outputPath = join(makeTempDir(), 'out&err.log');
       reg.register(
         makeEntry({
@@ -448,16 +441,9 @@ describe('BackgroundShellRegistry', () => {
       // is the failed shell's error string and renders only on this path.
       expect(modelText).not.toContain('\u202E');
       expect(modelText).not.toContain('\u2069');
-      // Through the SAME pipeline production uses: escapeXml handles all
-      // five metacharacters globally, and a hand-rolled `replace` only
-      // matched the first one — so the expectation was correct only while
-      // os.tmpdir() itself held none of & < > " '. A TMPDIR under an
-      // `o&brien` or `o'brien` directory failed this test with production
-      // behaving correctly (probe-verified), which is the same
-      // "passes here, fails there" dependence this PR exists to remove.
-      expect(modelText).toContain(
-        `<output-file>${renderedPath(outputPath)}</output-file>`,
-      );
+      // Assert the whole element, not just the tail: the temp prefix is
+      // random but the escaping is what this test is about.
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
     });
 
     it('limits output-tail to the retained byte budget', () => {
@@ -505,18 +491,16 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('\uFFFD');
     });
 
-    it('strips control characters from cwd and output-file XML fields', () => {
+    it('strips control and bidi characters from cwd and output-file XML fields', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
-      // The control character in the BASENAME is the subject; the run's own
-      // directory keeps the status sidecar out of a shared path.
-      const outputPath = join(makeTempDir(), 'out\x03.log');
+      const dir = makeTempDir();
       reg.register(
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath,
+          outputPath: join(dir, 'out\x03\u202e.log'),
         }),
       );
 
@@ -524,12 +508,15 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
+      // Whole element: pins exactly which characters are stripped and that
+      // the rest of the path survives intact.
       expect(modelText).toContain(
-        `<output-file>${renderedPath(outputPath)}</output-file>`,
+        expectedOutputFileElement(join(dir, 'out.log')),
       );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
+      expect(modelText).not.toContain('\u202e');
     });
 
     const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
@@ -580,6 +567,10 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
+      // A dir outputPath gets its `<dir>.status` sidecar as a sibling of
+      // the temp dir, which the dir cleanup above never removes; tracking
+      // it here lets afterEach delete it even if the assertions fail.
+      tmpFiles.push(statusFilePathFor(dir));
       reg.setNotificationCallback(callback);
       reg.register(makeEntry({ shellId: 'a', outputPath: dir }));
 
@@ -894,16 +885,8 @@ describe('BackgroundShellRegistry', () => {
     function makeDirEntry(
       overrides: Partial<ShellTaskRegistration> = {},
     ): ShellTaskRegistration & { statusPath: string } {
-      const dir = makeTempDir();
-      const shellId = (overrides.shellId as string) ?? 's1';
-      const entry = makeEntry({
-        outputPath: join(dir, `shell-${shellId}.output`),
-        ...overrides,
-      });
-      return {
-        ...entry,
-        statusPath: join(dir, `shell-${shellId}.status`),
-      };
+      const entry = makeEntry(overrides);
+      return { ...entry, statusPath: statusFilePathFor(entry.outputPath) };
     }
 
     function readStatus(statusPath: string): Record<string, unknown> {

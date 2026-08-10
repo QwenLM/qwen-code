@@ -250,7 +250,7 @@ A daemon **restart** drops all in-memory sessions; clients reconnect and start f
 
 - **Containerized deployment** — Dockerfile, docker-compose, Kubernetes manifests, nginx + TLS reverse proxy, multi-instance token isolation. Defers to v0.16.x once an enterprise pilot is committed; the doc would otherwise rot from no-one-validating.
 - **Cross-host federation / multi-daemon coordination on one host** — one daemon can host multiple registered workspace runtimes, but daemons do not coordinate. Instance-path token keying + stale-token cleanup defer to v0.16.x.
-- **Auto-generated daemon tokens** — alpha is BYO-token. Auto-gen + token-store infrastructure defers to v0.16.x.
+- **General daemon token storage** — `--local-control` generates a fresh token for that process; long-lived deployments remain BYO-token. Persistent token-store infrastructure defers to v0.16.x.
 - **Windows native service** (`nssm`, Service Control Manager wrapper) — for now use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) and follow the systemd section above.
 
 See the [v0.16-alpha known limits](./qwen-serve.md#v016-alpha-known-limits) callout in the main user guide for the full deferred-features list, and [#4175](https://github.com/QwenLM/qwen-code/issues/4175) for the v0.16-alpha rollout tracking issue.
