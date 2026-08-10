@@ -254,8 +254,13 @@ export function launchToolBudget(
  *    disclosures, and a disclosure lost to a bullet is unobservable —
  *    nothing downstream can tell "no gaps" from "gaps we failed to parse".
  */
+// Linear-by-construction, for the same reason the scan is line-based: the
+// bullet's leading whitespace rides INSIDE the optional group (no
+// overlapping `[ \t]*` pair), and the gap capture is greedy to the end of
+// a pre-trimmed line (no lazy-dot vs trailing-whitespace pair) — gap lines
+// carrying long whitespace runs must not stall the parse.
 const BUDGET_GAP_LINE_RE =
-  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*(`?)[*_~]{0,3}(?:budget gap|预算(?:缺口|不足|用尽))[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+?)[ \t]*$/i;
+  /^(?:[ \t]*(?:[-*+]|\d+[.)]))?[ \t]*(`?)[*_~]{0,3}(?:budget gap|预算(?:缺口|不足|用尽))[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+)$/i;
 
 /** A cheap pre-filter so the line walk skips returns with nothing to find. */
 const GAP_HINT_RE = /budget gap|预算(?:缺口|不足|用尽)/i;
@@ -273,27 +278,40 @@ export const INLINE_BUDGET_GAP_RE =
   /(?:budget gap|预算(?:缺口|不足|用尽))[*_~`]{0,3}[ \t]*[:：]/i;
 
 /**
- * Templates and non-answers that must not become gaps someone rules on.
- * Tested against the gap with trailing punctuation stripped, and matched on
- * the LEADING token — `none.`, `None (all checks completed)` and
- * `N/A - stayed under budget` are all the agent saying it has nothing to
- * disclose, and a phantom gap costs real rounds downstream (a chunk that
- * never retires, a body that discloses "None." on an Approve).
+ * Templates and non-answers that must not become gaps someone rules on —
+ * the agent saying it has nothing to disclose. A phantom gap costs real
+ * rounds downstream (a chunk that never retires, a body that discloses
+ * "None." on an Approve), so these shapes are dropped.
+ *
+ * One classifier judges the paren-stripped text, bare and wrapped alike:
+ * #8388's posted body disclosed `(none — all planned checks completed)`
+ * because a leading `(` defeated the match, and a bare-vs-wrapped split
+ * judgment let the two forms diverge on identical content. The vocabulary
+ * lives in this one regex for the same reason.
+ *
+ * The shapes are deliberately NARROW, because the two errors are not
+ * symmetric: dropping a REAL gap certifies work that never happened (the
+ * failure #8388's body shipped), while keeping a placeholder only
+ * over-discloses. Anything outside them survives as a gap:
+ *
+ *  - the brief's own `<the check>` template, and dash-only text — both
+ *    end-anchored, so inner text merely STARTING with them keeps;
+ *  - a bare placeholder token in any trailing punctuation (`none`,
+ *    `None.`, `no gaps`), and `nothing skipped`;
+ *  - the stayed-under-budget idiom (`N/A - stayed under budget`);
+ *  - the completion idiom — token, dash, an "all done" head, then a
+ *    completion word the text ENDS with (`none — all planned checks
+ *    completed`). The head alone is not completion: `none — all 5
+ *    Windows checks failed to start` keeps;
+ *  - a token followed by a parenthesized completion clause (`None (all
+ *    checks completed)`).
+ *
+ * No two quantifiers overlap on whitespace: a placeholder token followed
+ * by a long whitespace run must stay linear (the module header's hazard
+ * note applies — this parse runs on every agent return).
  */
 const PLACEHOLDER_GAP_RE =
-  /^(?:<[^>]*>|none\b.*|n\/a\b.*|nothing\b.*|no (?:gaps?|checks?)\b.*|[-—*_~`]+)$/i;
-
-/**
- * Placeholder shapes allowed INSIDE parentheses, where the leading-token
- * class above is too greedy for the stripped inner text: a real gap can
- * merely START with a placeholder word (`(none of the chunk-2 checks ran —
- * the runner died)`), and dropping it certifies work that never happened.
- * Only the bare token (`(None.)`) and the completion idiom — the token, a
- * dash, then an "all done" word (`(none — all planned checks completed)`) —
- * read as a non-answer there.
- */
-const PAREN_PLACEHOLDER_RE =
-  /^(?:<[^>]*>|[-—*_~`]+|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b\s*(?:[.!…,;:\s]*$|[-—–]\s*(?:all|every|planned|further|no further)\b))/i;
+  /^(?:<[^>]*>$|[-—*_~`]+$|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b(?:[.!…,;:\s]*$|\s+skipped\b[.!…,;:\s]*$|\s*[-—–]\s*(?:stayed\b|(?:all|every|planned|further|no further)\b.*\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*$)|\s*\((?:all|every)\b[^()]*\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*\)\s*$))/i;
 
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;
@@ -339,6 +357,18 @@ function stripWrappers(s: string): string {
   return out;
 }
 
+const TRAILING_GAP_CHAR_RE = /[.!…,;:\s]/;
+
+/** Trailing punctuation/whitespace strip for the normalize and fold keys. */
+function stripTrailingGapChars(s: string): string {
+  // Walked backwards rather than replaced with an end-anchored class run:
+  // that shape backtracks quadratically when a long run fails to reach
+  // the end.
+  let end = s.length;
+  while (end > 0 && TRAILING_GAP_CHAR_RE.test(s.charAt(end - 1))) end--;
+  return s.slice(0, end);
+}
+
 /** Truncate on code points — a slice through a surrogate pair is mojibake. */
 function truncateGap(s: string): string {
   const points = [...s];
@@ -373,8 +403,11 @@ export function budgetGapDisclosures(finalText: string): string[] {
     if (/^[ \t]*>/.test(line)) continue;
     // Sanitized BEFORE matching: U+2028/29 are line terminators to the
     // regex dot, and a gap carrying one would otherwise fail the match and
-    // vanish — silent loss in a channel whose promise is delivery.
-    const m = BUDGET_GAP_LINE_RE.exec(line.replace(DANGEROUS_CHARS_RE, ' '));
+    // vanish — silent loss in a channel whose promise is delivery. The
+    // pre-trim keeps the greedy end-anchored capture's code-span
+    // `endsWith` semantics on lines with trailing whitespace.
+    const sanitized = line.replace(DANGEROUS_CHARS_RE, ' ').trimEnd();
+    const m = BUDGET_GAP_LINE_RE.exec(sanitized);
     if (!m) continue;
     // A line written as a code span (`Budget gap: …`) is only taken when
     // the backtick closes — and then unwrapped with its partner, so a
@@ -385,28 +418,20 @@ export function budgetGapDisclosures(finalText: string): string[] {
       raw = raw.slice(0, -1);
     }
     raw = stripWrappers(raw.trim()).trim();
-    const normalized = raw.replace(/[.!…,;:\s]+$/, '').trim();
-    // A placeholder does not stop being one inside parentheses: #8388's
-    // posted body disclosed `(none — all planned checks completed)` as a
-    // gap because the leading `(` defeated the leading-token match. The
-    // paren strip is judged by the strict shapes only — the greedy
-    // leading-token class would also swallow a real gap that merely starts
-    // with a placeholder word.
+    const normalized = stripTrailingGapChars(raw).trim();
+    // Judged on the paren-stripped text, bare and wrapped alike, by the
+    // one strict classifier — its doc names why the shapes are narrow.
     const unparenthesized =
       normalized.startsWith('(') && normalized.endsWith(')')
         ? normalized.slice(1, -1).trim()
         : normalized;
-    if (
-      normalized.length === 0 ||
-      PLACEHOLDER_GAP_RE.test(normalized) ||
-      (unparenthesized !== normalized &&
-        PAREN_PLACEHOLDER_RE.test(unparenthesized))
-    ) {
+    if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(unparenthesized)) {
       continue;
     }
-    // Folded on the paren-stripped text, so one gap restated with and
-    // without parentheses discloses once.
-    const key = unparenthesized.toLowerCase();
+    // Folded on the paren-stripped text with its OWN trailing punctuation
+    // gone, so one gap restated with and without parentheses — `(auth
+    // flow untested.)` and `auth flow untested` — discloses once.
+    const key = stripTrailingGapChars(unparenthesized).toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     gaps.push(truncateGap(raw));

@@ -294,6 +294,8 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: (none — all planned checks completed)',
       'Budget gap: (None.)',
       'Budget gap: N/A - stayed under budget',
+      'Budget gap: (N/A - stayed under budget)',
+      'Budget gap: none — all planned checks completed',
       'Budget gap: nothing skipped',
       'Budget gap: no gaps',
       'Budget gap:',
@@ -318,6 +320,45 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     ]) {
       expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
     }
+    // A completion HEAD is not a completion: these merely continue with
+    // an "all done" word. Dropping them certifies work that never
+    // happened — the exact failure the paren strip exists to kill.
+    for (const gap of [
+      '(no checks — all deferred to follow-up)',
+      '(nothing — every check crashed)',
+      '(none — all 5 Windows checks failed to start)',
+      '(none — all planned checks completed except the Windows matrix)',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+    // … and inner text merely STARTING with the template/dash shapes is
+    // not a template or a dash run — the classifier is anchored, never
+    // prefix-matching.
+    for (const gap of [
+      '(<integration tests on Windows> runner unavailable)',
+      '(- second-order callers untested)',
+      '(* flaky reruns pending)',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+  });
+
+  it('keeps a REAL gap bare too — one strict judgment for both forms', () => {
+    // The identical gaps without parentheses are the brief's canonical
+    // form; they must survive the same strict shapes, not fall to a
+    // greedier bare-path class.
+    for (const gap of [
+      'none of the chunk-2 checks ran — the runner died',
+      'N/A — the Windows runner was unavailable',
+      'no checks ran on Windows — runner unavailable',
+      'no checks — all deferred to follow-up',
+      'nothing — every check crashed',
+      'none — all 5 Windows checks failed to start',
+      'none — all planned checks completed except the Windows matrix',
+      '<integration tests on Windows> runner unavailable',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
   });
 
   it('folds duplicate disclosures into one gap', () => {
@@ -331,12 +372,20 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
           'Budget gap: Second-order callers',
       ),
     ).toEqual(['second-order callers']);
-    // … whether or not the restatement wraps the gap in parentheses.
+    // … whether or not the restatement wraps the gap in parentheses …
     expect(
       budgetGapDisclosures(
         'Budget gap: auth flow untested\n' + 'Budget gap: (auth flow untested)',
       ),
     ).toEqual(['auth flow untested']);
+    // … and the fold survives sentence punctuation INSIDE the parens —
+    // a parenthesized sentence naturally ends in a period.
+    expect(
+      budgetGapDisclosures(
+        'Budget gap: (auth flow untested.)\n' +
+          'Budget gap: auth flow untested',
+      ),
+    ).toEqual(['(auth flow untested.)']);
   });
 
   it('sanitizes and caps what will reach a terminal and the posted body', () => {
@@ -370,10 +419,18 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     // The previous single multiline regex was measured at 5.8 s on 98 KB
     // of newlines — quadratic backtracking from every line start. The
     // line-based scan has no cross-line class to backtrack over.
-    const pathological = '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000);
+    const pathological =
+      '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000) + ' '.repeat(40_000);
     const t0 = performance.now();
     expect(budgetGapDisclosures(pathological)).toEqual([]);
     expect(performance.now() - t0).toBeLessThan(1000);
+    // The placeholder classifier's own hazard shape — a token followed by
+    // a long whitespace run — must stay linear too; it was measured
+    // quadratic (seconds at 40k spaces) when its quantifiers overlapped.
+    const spaced = `Budget gap: (none${' '.repeat(40_000)}x)`;
+    const t1 = performance.now();
+    expect(budgetGapDisclosures(spaced)).toHaveLength(1);
+    expect(performance.now() - t1).toBeLessThan(1000);
   });
 });
 

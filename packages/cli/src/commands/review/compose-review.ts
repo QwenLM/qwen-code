@@ -266,8 +266,13 @@ function planPrIdentity(plan: unknown): PrIdentity | null {
     prNumber?: unknown;
     host?: unknown;
   };
+  // The character class admits `.`/`..` segments (`../repo`), which mean
+  // something else entirely once they reach the anchor URL's path — the
+  // same rule submit's isRepo applies.
   const ownerRepo =
-    typeof p.ownerRepo === 'string' && OWNER_REPO_RE.test(p.ownerRepo)
+    typeof p.ownerRepo === 'string' &&
+    OWNER_REPO_RE.test(p.ownerRepo) &&
+    p.ownerRepo.split('/').every((s) => s !== '.' && s !== '..')
       ? p.ownerRepo
       : null;
   const prNumber = isPositivePrNumber(p.prNumber) ? String(p.prNumber) : null;
@@ -303,15 +308,25 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
   // GH_HOST — the same effective-host resolution `submit` posts through.
   // Defaulting to github.com 404s a GHE review's anchors, or lands them on
   // a same-named public repo's different PR.
-  const host = resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com';
+  // Normalized before the github.com comparison below: hostnames are
+  // case-insensitive and :443 is the implicit port, so a cased or
+  // port-suffixed variant of the default host (`GH_HOST=GitHub.com`) must
+  // not dodge the short-id floor and link an ordinal `comment 5` into a
+  // dead anchor.
+  const host = (resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com')
+    .toLowerCase()
+    .replace(/:443$/, '');
   const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
   // github.com's comment ids run long, so a short number after "comment"
   // reads likelier as an ordinal; a GHE instance's id space is its own and
   // often short, and the floor would leave the feature inert there.
+  // Case-insensitive: the pipeline's own label is capitalized
+  // (`**Issue-level comment**` in pr-context), and an entry echoing that
+  // casing must still anchor under #issuecomment, not #discussion_r.
   const commentRef =
     host === 'github.com'
-      ? /\b(issue-level )?comment (\d{6,})\b/g
-      : /\b(issue-level )?comment (\d+)\b/g;
+      ? /\b(issue-level )?comment (\d{6,})\b/gi
+      : /\b(issue-level )?comment (\d+)\b/gi;
   return text.replace(
     commentRef,
     (_m, issueLevel: string | undefined, id: string) =>

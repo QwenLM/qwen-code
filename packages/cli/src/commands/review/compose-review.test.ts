@@ -100,6 +100,10 @@ function plan(
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
     repositoryContext?: unknown;
+    /** The PR identity fetch-pr records — anchors and bilingual recovery. */
+    ownerRepo?: string;
+    prNumber?: string;
+    host?: string;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -116,6 +120,9 @@ function plan(
       ...(opts.repositoryContext === undefined
         ? {}
         : { repositoryContext: opts.repositoryContext }),
+      ...(opts.ownerRepo === undefined ? {} : { ownerRepo: opts.ownerRepo }),
+      ...(opts.prNumber === undefined ? {} : { prNumber: opts.prNumber }),
+      ...(opts.host === undefined ? {} : { host: opts.host }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -352,6 +359,9 @@ function coveredPlan(
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
     repositoryContext?: unknown;
+    ownerRepo?: string;
+    prNumber?: string;
+    host?: string;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -4052,6 +4062,20 @@ describe('composeReview — the findings file tag check', () => {
  * paragraphs, a Markdown list, one reason per group, anchored ids.
  */
 describe('composeReview — unresolved-Critical rendering (#8388 readability)', () => {
+  // The github.com anchor assertions ride the effective-host chain's
+  // default; an exported GH_HOST must not leak in — save/delete/restore
+  // it, as every sibling suite whose assertions read the host does.
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    if (savedGhHost !== undefined) {
+      process.env['GH_HOST'] = savedGhHost;
+    } else delete process.env['GH_HOST'];
+  });
+
   it('renders the cannot-tell entries as a Markdown list in its own paragraph', () => {
     const r = composeReview(
       base({
@@ -4101,19 +4125,15 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
   });
 
   it('links bare comment ids to their GitHub anchors when the plan names the PR', () => {
-    const p = coveredPlan();
-    const parsed = JSON.parse(readFileSync(p, 'utf8'));
-    parsed.ownerRepo = 'QwenLM/qwen-code';
-    parsed.prNumber = '8388';
-    writeFileSync(p, JSON.stringify(parsed));
-    const old = new Date(2020, 0, 1);
-    utimesSync(p, old, old);
     const r = composeReview({
       cannotTellCriticals: [
         'comment 3733696855 (capture-tui.test.ts, R10-1) — body truncated',
         'issue-level comment 5199834809 (author review) — body truncated',
       ],
-      planPath: p,
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
       env: ENV,
       modelId: MODEL,
     });
@@ -4167,18 +4187,14 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
   });
 
   it('leaves an already-linked entry untouched — never nests a second link', () => {
-    const p = coveredPlan();
-    const parsed = JSON.parse(readFileSync(p, 'utf8'));
-    parsed.ownerRepo = 'QwenLM/qwen-code';
-    parsed.prNumber = '8388';
-    writeFileSync(p, JSON.stringify(parsed));
-    const old = new Date(2020, 0, 1);
-    utimesSync(p, old, old);
     const r = composeReview({
       cannotTellCriticals: [
         '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855) — body truncated',
       ],
-      planPath: p,
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
       env: ENV,
       modelId: MODEL,
     });
@@ -4236,21 +4252,21 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
       env: ENV,
       modelId: MODEL,
     });
-    expect(r.body).toContain('未决，请确认：共 3 条');
+    // … the count AND the pointer — the fold's whole payload besides the
+    // list it points at.
+    expect(r.body).toContain(
+      '未决，请确认：共 3 条（原文未翻译，列表见上方英文部分）。',
+    );
   });
 
   it("anchors comment ids at the plan's GHE host, short ids included", () => {
-    const p = coveredPlan();
-    const parsed = JSON.parse(readFileSync(p, 'utf8'));
-    parsed.ownerRepo = 'corp/widgets';
-    parsed.prNumber = '12';
-    parsed.host = 'ghe.example.com';
-    writeFileSync(p, JSON.stringify(parsed));
-    const old = new Date(2020, 0, 1);
-    utimesSync(p, old, old);
     const r = composeReview({
       cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
-      planPath: p,
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'corp/widgets',
+        prNumber: '12',
+        host: 'ghe.example.com',
+      }),
       env: ENV,
       modelId: MODEL,
     });
@@ -4260,16 +4276,12 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
   });
 
   it('leaves short ids bare on github.com — ordinals are not anchors', () => {
-    const p = coveredPlan();
-    const parsed = JSON.parse(readFileSync(p, 'utf8'));
-    parsed.ownerRepo = 'QwenLM/qwen-code';
-    parsed.prNumber = '8388';
-    writeFileSync(p, JSON.stringify(parsed));
-    const old = new Date(2020, 0, 1);
-    utimesSync(p, old, old);
     const r = composeReview({
       cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
-      planPath: p,
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
       env: ENV,
       modelId: MODEL,
     });
@@ -4277,5 +4289,115 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
       '- **[Critical]** comment 12345 (a.ts) — body truncated',
     );
     expect(r.body).not.toContain('discussion_r12345');
+  });
+
+  it('reads a cased or :443-suffixed github.com as the default host', () => {
+    // GH_HOST reaches the anchor builder through resolveGhHost; a cased
+    // variant of the default host must not dodge the short-id floor.
+    process.env['GH_HOST'] = 'GitHub.com:443';
+    const r = composeReview({
+      cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 12345 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r12345');
+  });
+
+  it('anchors an Issue-level mention at #issuecomment whatever its casing', () => {
+    // pr-context renders `**Issue-level comment**` capitalized; an entry
+    // echoing that casing must still anchor under #issuecomment, not
+    // #discussion_r — an anchor GitHub cannot resolve.
+    const r = composeReview({
+      cannotTellCriticals: [
+        'Issue-level comment 5199834809 (author review) — body truncated',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[issue-level comment 5199834809](https://github.com/QwenLM/qwen-code/pull/8388#issuecomment-5199834809)',
+    );
+  });
+
+  it('falls back to github.com when the recorded host is not a hostname', () => {
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+        host: 'ghe.example.com/evil',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+    expect(r.body).not.toContain('ghe.example.com/evil');
+  });
+
+  it('leaves ids bare when the recorded ownerRepo is misshapen', () => {
+    // `../repo` rides the character class but is a dot segment — it must
+    // not reach the anchor URL's path.
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: '../repo',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r3733696855');
+  });
+
+  it('anchors at the run-routed host when the plan recorded none', () => {
+    setGhHost('ghe.example.com');
+    try {
+      const r = composeReview({
+        cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+        planPath: coveredPlan(undefined, {
+          ownerRepo: 'corp/widgets',
+          prNumber: '12',
+        }),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.body).toContain(
+        '[comment 12345](https://ghe.example.com/corp/widgets/pull/12#discussion_r12345)',
+      );
+    } finally {
+      setGhHost(undefined);
+    }
+  });
+
+  it('strips a copied **[Critical]** prefix from a cannot-tell entry', () => {
+    // The orchestrator copies blocker lines as the context file renders
+    // them — marker included; the bullet renders it exactly once.
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          '**[Critical]** old blocker (a.ts) — body truncated',
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** old blocker (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('**[Critical]** **[Critical]**');
   });
 });
