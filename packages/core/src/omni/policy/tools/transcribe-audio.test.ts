@@ -15,15 +15,18 @@ import {
   OMNI_TRANSCRIBE_AUDIO_TOOL_NAME,
   OmniTranscribeAudioTool,
   TRANSCRIBE_AUDIO_DEFAULTS,
+  collapseRepetitionDegeneration,
   parseSseTranscript,
 } from './transcribe-audio.js';
 
 const mocks = vi.hoisted(() => ({
   probeMediaMetadata: vi.fn(),
+  runFfmpeg: vi.fn(),
 }));
 
 vi.mock('../../ffmpeg.js', () => ({
   probeMediaMetadata: mocks.probeMediaMetadata,
+  runFfmpeg: mocks.runFfmpeg,
 }));
 
 /** Minimal RIFF/WAVE header so recognition sniffs audio/wav. */
@@ -60,6 +63,59 @@ describe('parseSseTranscript', () => {
 
   it('returns empty string for a body with no content frames', () => {
     expect(parseSseTranscript('data: [DONE]\n')).toBe('');
+  });
+});
+
+describe('collapseRepetitionDegeneration', () => {
+  it('collapses a degenerated tail to a single copy of the unit', () => {
+    const { text, degenerated } = collapseRepetitionDegeneration(
+      'Vi ses. ' + 'Hej! '.repeat(48),
+    );
+    expect(degenerated).toBe(true);
+    expect(text).toBe('Vi ses. Hej!');
+  });
+
+  it('collapses multi-char CJK units', () => {
+    const { text, degenerated } = collapseRepetitionDegeneration(
+      '你好。' + '再见！'.repeat(20),
+    );
+    expect(degenerated).toBe(true);
+    expect(text).toBe('你好。再见！');
+  });
+
+  it('leaves normal prose untouched', () => {
+    const input = '今天天气很好，我们一起去潜水吧。水下三十米，一切都很安静。';
+    expect(collapseRepetitionDegeneration(input)).toEqual({
+      text: input,
+      degenerated: false,
+    });
+  });
+
+  it('does not treat a whitespace run as degeneration', () => {
+    const input = '转写结束' + ' '.repeat(100);
+    expect(collapseRepetitionDegeneration(input)).toEqual({
+      text: input,
+      degenerated: false,
+    });
+  });
+
+  it('requires at least 8 repetitions', () => {
+    const input = '好的，'.repeat(7);
+    expect(collapseRepetitionDegeneration(input).degenerated).toBe(false);
+  });
+
+  it('requires the repeated span to reach 24 chars', () => {
+    // 8 reps but only a 16-char span — too short to count as a loop.
+    const input = 'ab'.repeat(8);
+    expect(collapseRepetitionDegeneration(input).degenerated).toBe(false);
+  });
+
+  it('collapses single-char loops once the span is long enough', () => {
+    const { text, degenerated } = collapseRepetitionDegeneration(
+      '嗯' + '啊'.repeat(30),
+    );
+    expect(degenerated).toBe(true);
+    expect(text).toBe('嗯啊');
   });
 });
 
@@ -143,6 +199,7 @@ describe('OmniTranscribeAudioTool', () => {
       baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
       apiKeyEnv: 'DASHSCOPE_API_KEY',
       maxInputBytes: 10 * 1024 * 1024,
+      chunkSeconds: 180,
     });
   });
 
@@ -320,6 +377,225 @@ describe('OmniTranscribeAudioTool', () => {
     expect(result.error?.message).toBe('transcription timed out after 123ms');
   });
 
+  it('collapses single-shot repetition degeneration and discloses it', async () => {
+    fetchReturnsSse('你好。', '再见！'.repeat(20));
+    const { result } = await run();
+
+    expect(result.error).toBeUndefined();
+    await expect(
+      fs.readFile(path.join(outputDir, 'transcript.txt'), 'utf-8'),
+    ).resolves.toBe('你好。再见！');
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 63s 音频 → 转写文本 6 字，检测到重复退化已截断，语气/音色/非语音信息丢失，识别可能有误',
+    );
+  });
+
+  describe('chunked transcription (duration > chunkSeconds)', () => {
+    /** ffmpeg cut mock: writes the chunk file whose CONTENT is the run's
+     * `-ss` value, so the fetch mock can tell segments apart by decoding
+     * the base64 payload it receives. */
+    const cutWritesSeekTag = (): void => {
+      mocks.runFfmpeg.mockImplementation(async (args: string[]) => {
+        await fs.writeFile(args[args.length - 1], Buffer.from(args[2]));
+        return { code: 0, stderr: '' };
+      });
+    };
+
+    /** Decode the `-ss` seek tag back out of a fetch call's audio payload. */
+    const seekTagOf = (init: RequestInit): string => {
+      const body = JSON.parse(init.body as string);
+      const dataUri = body.messages[0].content[0].input_audio.data as string;
+      return Buffer.from(dataUri.split(',')[1], 'base64').toString();
+    };
+
+    beforeEach(() => {
+      // 400s of audio at the default 180s chunk → 3 segments of 133.333s.
+      probe({ durationMs: 400_000 });
+      cutWritesSeekTag();
+    });
+
+    it('cuts equal 16kHz-mono-AAC segments, transcribes each, and assembles time-labeled lines', async () => {
+      fetchMock.mockImplementation(async (_url: string, init: RequestInit) => ({
+        ok: true,
+        status: 200,
+        text: async () => sse(`片段@${seekTagOf(init)}`),
+      }));
+      const { result, signal } = await run();
+
+      // One cut per segment, seeking to the segment start.
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(3);
+      expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
+        1,
+        [
+          '-y',
+          '-ss',
+          '0.000',
+          '-t',
+          '133.333',
+          '-i',
+          inputPath,
+          '-vn',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '32k',
+          '-ar',
+          '16000',
+          '-ac',
+          '1',
+          path.join(outputDir, 'chunk_0001.m4a'),
+        ],
+        { signal, timeoutMs: expect.any(Number) },
+      );
+      const seeks = mocks.runFfmpeg.mock.calls.map(
+        (call) => (call[0] as string[])[2],
+      );
+      expect(seeks).toEqual(['0.000', '133.333', '266.667']);
+
+      // Every chunk request carries the re-encoded m4a payload.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      for (const call of fetchMock.mock.calls) {
+        const body = JSON.parse((call[1] as RequestInit).body as string);
+        expect(body.messages[0].content[0].input_audio.format).toBe('m4a');
+        expect(body.model).toBe('qwen3.5-omni-plus');
+      }
+
+      expect(result.error).toBeUndefined();
+      await expect(
+        fs.readFile(path.join(outputDir, 'transcript.txt'), 'utf-8'),
+      ).resolves.toBe(
+        '[00:00-02:13] 片段@0.000\n' +
+          '[02:13-04:27] 片段@133.333\n' +
+          '[04:27-06:40] 片段@266.667',
+      );
+      const disclosure = result.artifacts?.[0]?.metadata?.['omniDisclosure'];
+      expect(disclosure).toContain('原 400s 音频 → 分 3 段转写文本');
+      expect(disclosure).not.toContain('段失败');
+
+      // Temporary chunk cuts are cleaned up; only the transcript remains.
+      await expect(fs.readdir(outputDir)).resolves.toEqual(['transcript.txt']);
+    });
+
+    it('uses H:MM:SS ranges for audio of an hour or longer', async () => {
+      probe({ durationMs: 4_882_000 }); // 81:22 film → 28 segments
+      fetchReturnsSse('对白');
+      const { result } = await run();
+
+      expect(result.error).toBeUndefined();
+      const transcript = await fs.readFile(
+        path.join(outputDir, 'transcript.txt'),
+        'utf-8',
+      );
+      expect(transcript).toContain('[0:00:00-0:02:54] 对白');
+      expect(transcript).toContain('[1:18:28-1:21:22] 对白');
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '分 28 段转写文本',
+      );
+    });
+
+    it('marks individual failed segments inline instead of failing the run', async () => {
+      fetchMock.mockImplementation(async (_url: string, init: RequestInit) =>
+        seekTagOf(init).startsWith('133')
+          ? { ok: false, status: 500, text: async () => 'secret detail' }
+          : { ok: true, status: 200, text: async () => sse('还行') },
+      );
+      const { result } = await run();
+
+      expect(result.error).toBeUndefined();
+      const transcript = await fs.readFile(
+        path.join(outputDir, 'transcript.txt'),
+        'utf-8',
+      );
+      expect(transcript).toContain('[02:13-04:27] （该段转写失败：HTTP 500）');
+      expect(transcript).not.toContain('secret detail');
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '（1 段失败）',
+      );
+    });
+
+    it('errors only when EVERY segment failed', async () => {
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: async () => 'boom',
+      });
+      const { result } = await run();
+      expect(result.error?.message).toBe(
+        'transcription failed for all 3 segments (last: HTTP 500)',
+      );
+    });
+
+    it('collapses per-segment repetition degeneration and counts it in the disclosure', async () => {
+      fetchReturnsSse('大家好。', '再见！'.repeat(20));
+      const { result } = await run();
+
+      expect(result.error).toBeUndefined();
+      const transcript = await fs.readFile(
+        path.join(outputDir, 'transcript.txt'),
+        'utf-8',
+      );
+      expect(transcript).toContain('大家好。再见！');
+      expect(transcript).not.toContain('再见！再见！');
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '3 段检测到重复退化已截断',
+      );
+    });
+
+    it('marks segments beyond an exhausted budget instead of starting them', async () => {
+      probe({ durationMs: 720_000 }); // 4 segments — one more than the pool
+      const view: MediaPolicyToolConfigView = {
+        getOmniPolicyToolsSettings: () => ({
+          [OMNI_TRANSCRIBE_AUDIO_TOOL_NAME]: {
+            runtime: { timeoutMs: 60 },
+          },
+        }),
+      };
+      mocks.runFfmpeg.mockImplementation(async (args: string[]) => {
+        // Outlive the whole 60ms budget inside the first wave of cuts.
+        await new Promise((r) => setTimeout(r, 90));
+        await fs.writeFile(args[args.length - 1], Buffer.from('audio'));
+        return { code: 0, stderr: '' };
+      });
+      fetchReturnsSse('还行');
+      const { result } = await run({}, new OmniTranscribeAudioTool(view));
+
+      // Segment 4 was never cut — its budget was gone before it started.
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(3);
+      expect(result.error).toBeUndefined();
+      const transcript = await fs.readFile(
+        path.join(outputDir, 'transcript.txt'),
+        'utf-8',
+      );
+      expect(transcript).toContain(
+        '[09:00-12:00] （该段转写失败：时间预算耗尽）',
+      );
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '（1 段失败）',
+      );
+    });
+
+    it('marks a failed cut with a short message (no ffmpeg stderr leak)', async () => {
+      mocks.runFfmpeg
+        .mockResolvedValueOnce({ code: 187, stderr: 'very long stderr dump' })
+        .mockImplementation(async (args: string[]) => {
+          await fs.writeFile(args[args.length - 1], Buffer.from('audio'));
+          return { code: 0, stderr: '' };
+        });
+      fetchReturnsSse('还行');
+      const { result } = await run();
+
+      expect(result.error).toBeUndefined();
+      const transcript = await fs.readFile(
+        path.join(outputDir, 'transcript.txt'),
+        'utf-8',
+      );
+      expect(transcript).toContain(
+        '[00:00-02:13] （该段转写失败：切片失败（ffmpeg exit 187））',
+      );
+      expect(transcript).not.toContain('very long stderr dump');
+    });
+  });
+
   it.each([
     [
       'relative inputPath',
@@ -340,6 +616,11 @@ describe('OmniTranscribeAudioTool', () => {
       'maxInputBytes below minimum',
       { inputPath: '/tmp/a.wav', outputDir: '/tmp/x', maxInputBytes: 0 },
       /minimum|>= 1/i,
+    ],
+    [
+      'chunkSeconds below minimum',
+      { inputPath: '/tmp/a.wav', outputDir: '/tmp/x', chunkSeconds: 10 },
+      /minimum|>= 30/i,
     ],
   ])('build rejects %s', (_name, params, message) => {
     expect(() => tool.build(params as never)).toThrow(message);
