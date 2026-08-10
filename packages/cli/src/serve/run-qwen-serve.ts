@@ -2109,7 +2109,7 @@ async function runQwenServeImpl(
     ...process.env,
     QWEN_CODE_MEMORY_PROJECT_SCOPE:
       optsIn.memoryProjectScope ??
-      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] ??
+      launchEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] ??
       'workspace',
   };
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
