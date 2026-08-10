@@ -128,6 +128,8 @@ export class DefaultOpenAICompatibleProvider
     // Hybrid-thinking models occasionally bypass the reasoning channel and
     // emit their thinking as literal <think>/<thinking> tags inside content
     // (observed in production on qwen3-class models, issue #6666).
+    // Honored on the streaming path only; non-streaming responses are
+    // not classified.
     return { contentOnlyThinkingTagLeaks: true };
   }
 
