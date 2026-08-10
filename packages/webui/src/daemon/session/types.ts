@@ -506,7 +506,9 @@ export interface PendingSessionLoad {
   id: number;
   sessionId: string;
   mode: 'load' | 'resume' | 'attach';
-  timeout: ReturnType<typeof setTimeout>;
+  timeout?: ReturnType<typeof setTimeout>;
+  /** SDK timeout for load/resume; `0` disables its timer. */
+  requestTimeoutMs?: number;
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;

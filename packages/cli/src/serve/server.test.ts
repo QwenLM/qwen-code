@@ -88,6 +88,8 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  BridgeChannelQuarantinedError,
+  SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
   SessionShellClientRequiredError,
@@ -3522,6 +3524,52 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises the effective session restore timeout', async () => {
+      const defaultResponse = await request(
+        createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(defaultResponse.body.limits.sessionRestoreTimeoutMs).toBe(60_000);
+
+      const raisedResponse = await request(
+        createServeApp(
+          { ...baseOpts, initializeTimeoutMs: 120_000 },
+          undefined,
+          { bridge: fakeBridge() },
+        ),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(raisedResponse.body.limits.sessionRestoreTimeoutMs).toBe(120_000);
+
+      // A tightened startup check must not advertise a sub-default restore
+      // budget — that is the #8678 regression.
+      const flooredResponse = await request(
+        createServeApp(
+          { ...baseOpts, initializeTimeoutMs: 10_000 },
+          undefined,
+          { bridge: fakeBridge() },
+        ),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(flooredResponse.body.limits.sessionRestoreTimeoutMs).toBe(60_000);
+
+      const configuredResponse = await request(
+        createServeApp(
+          { ...baseOpts, sessionRestoreTimeoutMs: 90_000 },
+          undefined,
+          { bridge: fakeBridge() },
+        ),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(configuredResponse.body.limits.sessionRestoreTimeoutMs).toBe(
+        90_000,
+      );
+    });
+
     it('advertises session generation only when every bridge supports it', async () => {
       const supported = await request(
         createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
@@ -11685,6 +11733,91 @@ describe('createServeApp', () => {
         sessionId: 'persisted-race',
         activeAction: 'resume',
         requestedAction: 'load',
+      });
+    });
+
+    it('504 + Retry-After when session restore exceeds its deadline', async () => {
+      const bridge = fakeBridge({
+        loadImpl: async () => {
+          throw new SessionRestoreTimeoutError(
+            'persisted-timeout',
+            'load',
+            60_000,
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-timeout/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(504);
+      // The fence this 504 creates outlives a full budget, so the hint has to
+      // be derived from it rather than the ordinary 5s.
+      expect(res.headers['retry-after']).toBe('60');
+      expect(res.body).toMatchObject({
+        code: 'session_restore_timeout',
+        errorKind: 'restore_timeout',
+        retryable: true,
+        sessionId: 'persisted-timeout',
+        action: 'load',
+        timeoutMs: 60_000,
+      });
+    });
+
+    it('carries the fence reason and backoff on a same-id retry', async () => {
+      // The bridge-side hint has to survive the wire: without this, restoring
+      // the old hardcoded 5s or dropping reason/retryable ships green.
+      const bridge = fakeBridge({
+        loadImpl: async () => {
+          throw new RestoreInProgressError('persisted-fenced', 'load', 'load', {
+            reason: 'awaiting_abandoned_cleanup',
+            retryAfterSeconds: 90,
+          });
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-fenced/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.headers['retry-after']).toBe('90');
+      expect(res.body).toMatchObject({
+        code: 'restore_in_progress',
+        reason: 'awaiting_abandoned_cleanup',
+        retryable: true,
+        sessionId: 'persisted-fenced',
+      });
+    });
+
+    it('503s fresh session work while restore cleanup is quarantined', async () => {
+      const bridge = fakeBridge({
+        resumeImpl: async () => {
+          throw new BridgeChannelQuarantinedError(
+            'restore_settlement_overdue',
+            90,
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-quarantined/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(503);
+      // Quarantine lasts until the channel drains — strictly longer than the
+      // fence — and a fresh-id caller never sees the 409 that would tell it so.
+      expect(res.headers['retry-after']).toBe('90');
+      expect(res.body).toMatchObject({
+        code: 'acp_channel_unavailable',
+        errorKind: 'acp_channel_unavailable',
+        retryable: true,
+        reason: 'restore_settlement_overdue',
+        retryAfterSeconds: 90,
       });
     });
 

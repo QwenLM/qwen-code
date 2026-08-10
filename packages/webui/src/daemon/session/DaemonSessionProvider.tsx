@@ -33,7 +33,11 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
+import {
+  createDaemonSessionActions,
+  getPromptSettledKey,
+  resolveSessionRestoreTimeouts,
+} from './actions.js';
 import {
   eventPromptId,
   findLiveJournalRepairSuffix,
@@ -1070,12 +1074,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               pendingSessionLoadRef.current?.sessionId === targetSessionId
                 ? pendingSessionLoadRef.current
                 : undefined;
+            const restoreRequestTimeoutMs =
+              attemptedLoad?.requestTimeoutMs ??
+              resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
                   restoreSessionId,
                   {
                     workspaceCwd: effectWorkspaceCwd,
+                    timeoutMs: restoreRequestTimeoutMs,
                     ...(historyPaginationSupported &&
                     restoreMode === 'load' &&
                     attemptedLoad?.replaySource !== 'memory' &&
@@ -1091,6 +1099,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     reconnectSessionId,
                     {
                       workspaceCwd: effectWorkspaceCwd,
+                      timeoutMs: restoreRequestTimeoutMs,
                       ...(historyPaginationSupported &&
                       historyPageSizeRef.current !== undefined
                         ? { historyPageSize: historyPageSizeRef.current }
@@ -1152,7 +1161,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               if (pendingSessionLoadRef.current === attemptedLoad) {
                 pendingSessionLoadRef.current = undefined;
-                clearTimeout(attemptedLoad.timeout);
+                if (attemptedLoad.timeout !== undefined) {
+                  clearTimeout(attemptedLoad.timeout);
+                }
                 attemptedLoad.reject(
                   new DOMException('Session load cancelled', 'AbortError'),
                 );
@@ -1202,7 +1213,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
                 if (pendingSessionLoadRef.current === attemptedLoad) {
                   pendingSessionLoadRef.current = undefined;
-                  clearTimeout(attemptedLoad.timeout);
+                  if (attemptedLoad.timeout !== undefined) {
+                    clearTimeout(attemptedLoad.timeout);
+                  }
                   attemptedLoad.reject(
                     new Error(
                       nextSession.replayDegraded === true
@@ -1676,7 +1689,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }));
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoadToResolve.timeout);
+            if (pendingLoadToResolve.timeout !== undefined) {
+              clearTimeout(pendingLoadToResolve.timeout);
+            }
             if (
               skipNextCleanupDetachSessionIdRef.current ===
               activeSession.sessionId
@@ -2342,7 +2357,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               skipNextCleanupDetachSessionIdRef.current = undefined;
             }
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
+            if (pendingLoad.timeout !== undefined) {
+              clearTimeout(pendingLoad.timeout);
+            }
             pendingLoad.reject(error);
           }
           if (isAuthFailure || isTerminal) {
@@ -2504,7 +2521,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadRef.current &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
+        if (pendingSessionLoadRef.current.timeout !== undefined) {
+          clearTimeout(pendingSessionLoadRef.current.timeout);
+        }
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );

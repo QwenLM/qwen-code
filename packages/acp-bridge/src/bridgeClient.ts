@@ -914,6 +914,9 @@ export class BridgeClient implements Client {
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
+    if (this.abandonedRestoreIds.has(params.sessionId)) {
+      return;
+    }
     if (
       !this.ownsSession(params.sessionId) &&
       !this.inFlightRestoreIds.has(params.sessionId)
@@ -1148,22 +1151,21 @@ export class BridgeClient implements Client {
    */
   private readonly tombstonedSessionIds = new Map<string, number>();
 
-  /**
-   * Allow-list of sessionIds currently being restored via
-   * `session/load` / `session/resume`. Bypasses the tombstone check
-   * in `bufferEarlyEvent` so restore-time events for a
-   * previously-closed id flow through to the future
-   * `createSessionEntry -> drainEarlyEvents` call.
-   *
-   * Without this, the tombstone set before a future `load` can clear
-   * it via `drainEarlyEvents` would silently drop legitimate
-   * restore-time events (e.g. MCP discovery budget events firing
-   * during the ACP call window).
-   *
-   * Bridge factory enters the set before awaiting the ACP restore
-   * call and exits on settle (success or failure).
-   */
+  /** Restore ownership for `sessionUpdate` and artifact demultiplexing. */
   private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * Registrations allowed to buffer early extended notifications through an
+   * ordinary close tombstone. This includes restores and caller-supplied-id
+   * spawns, and lasts only until their ACP registration attempt settles.
+   */
+  private readonly inFlightSessionRegistrationIds = new Set<string>();
+
+  /**
+   * Restore ids whose caller timed out while the non-cancellable ACP request
+   * continues.
+   */
+  private readonly abandonedRestoreIds = new Set<string>();
 
   /**
    * Handle child->bridge ACP `extMethod` requests (calls that expect a
@@ -1806,6 +1808,13 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    const notificationSessionId = params['sessionId'];
+    if (
+      typeof notificationSessionId === 'string' &&
+      this.abandonedRestoreIds.has(notificationSessionId)
+    ) {
+      return;
+    }
     if (method === ACTIVE_WORK_NOTIFICATION_METHOD) {
       const snapshot = parseActiveWorkSnapshot(params);
       if (snapshot) {
@@ -2184,6 +2193,9 @@ export class BridgeClient implements Client {
     data: Record<string, unknown>,
     turnScoped = false,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const entry = this.resolveEntry(sessionId);
     const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
@@ -2399,20 +2411,22 @@ export class BridgeClient implements Client {
     sessionId: string,
     frame: Omit<BridgeEvent, 'id' | 'v'>,
   ): void {
+    if (this.abandonedRestoreIds.has(sessionId)) {
+      return;
+    }
     const now = Date.now();
     // Drop frames for ids the bridge has already marked closed/killed.
     // Sweep + check before any other work so a malicious / buggy child
     // can't keep appending post-mortem frames against an old id. Live
-    // ids that re-register (load/resume) clear their tombstone in
-    // `drainEarlyEvents`.
+    // ids that re-register (load/resume or a caller-supplied-id spawn) clear
+    // their tombstone in `drainEarlyEvents`.
     //
-    // Skip the tombstone check for ids currently being restored so a
-    // `close -> load same id` sequence within 60s doesn't lose
-    // restore-time early events.
+    // Skip the tombstone check for ids currently being registered so a
+    // legitimate owner can receive its ACP-call-time extended notifications.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
-      !this.inFlightRestoreIds.has(sessionId)
+      !this.inFlightSessionRegistrationIds.has(sessionId)
     ) {
       writeStderrLine(
         `qwen serve: dropping early extNotification ` +
@@ -2494,7 +2508,32 @@ export class BridgeClient implements Client {
    * failed restore doesn't leave a dangling allow-list entry.
    */
   markRestoreInFlight(sessionId: string): void {
+    this.markSessionRegistrationInFlight(sessionId);
     this.inFlightRestoreIds.add(sessionId);
+  }
+
+  /**
+   * Transfer an id from closed/abandoned ownership to a new registration
+   * attempt before its ACP call starts. The in-flight allow-list is what lets
+   * legitimate early notifications bypass the ordinary close tombstone until
+   * `createSessionEntry` can drain them.
+   */
+  markSessionRegistrationInFlight(sessionId: string): void {
+    this.clearAbandonedRestoreFence(sessionId);
+    this.inFlightSessionRegistrationIds.add(sessionId);
+  }
+
+  /**
+   * Drop the abandoned-restore fence for `sessionId`.
+   *
+   * The fence has no TTL and suppresses session updates, guardrail events,
+   * and child notifications, so it must not outlive the abandoned attempt it
+   * was raised for. The bridge clears it whenever a legitimate owner takes
+   * the id — a new restore, or `createSessionEntry` registering a session
+   * from any other route.
+   */
+  clearAbandonedRestoreFence(sessionId: string): void {
+    this.abandonedRestoreIds.delete(sessionId);
   }
 
   /**
@@ -2505,6 +2544,18 @@ export class BridgeClient implements Client {
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
+    this.clearSessionRegistrationInFlight(sessionId);
+  }
+
+  clearSessionRegistrationInFlight(sessionId: string): void {
+    this.inFlightSessionRegistrationIds.delete(sessionId);
+  }
+
+  markRestoreAbandoned(sessionId: string): void {
+    this.inFlightRestoreIds.delete(sessionId);
+    this.inFlightSessionRegistrationIds.delete(sessionId);
+    this.abandonedRestoreIds.add(sessionId);
+    this.earlyEvents.delete(sessionId);
   }
 
   /**

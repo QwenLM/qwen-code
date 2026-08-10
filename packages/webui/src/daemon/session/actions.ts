@@ -23,6 +23,7 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
+  DaemonCapabilities,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
@@ -51,6 +52,36 @@ import type {
 
 interface RefBox<T> {
   current: T;
+}
+
+const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
+const RESTORE_REQUEST_HEADROOM_MS = 10_000;
+const RESTORE_WATCHDOG_HEADROOM_MS = 15_000;
+const ATTACH_WATCHDOG_TIMEOUT_MS = 30_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+export function resolveSessionRestoreTimeouts(
+  capabilities: DaemonCapabilities | undefined,
+): { requestTimeoutMs: number; watchdogTimeoutMs: number | undefined } {
+  const advertised = capabilities?.limits?.sessionRestoreTimeoutMs;
+  const serverTimeoutMs =
+    typeof advertised === 'number' &&
+    Number.isInteger(advertised) &&
+    advertised > 0
+      ? advertised
+      : DEFAULT_RESTORE_SERVER_TIMEOUT_MS;
+  const requestTimeoutMs = serverTimeoutMs + RESTORE_REQUEST_HEADROOM_MS;
+  const watchdogTimeoutMs = serverTimeoutMs + RESTORE_WATCHDOG_HEADROOM_MS;
+  return {
+    requestTimeoutMs:
+      requestTimeoutMs > MAX_TIMER_DELAY_MS ? 0 : requestTimeoutMs,
+    watchdogTimeoutMs:
+      watchdogTimeoutMs > MAX_TIMER_DELAY_MS ? undefined : watchdogTimeoutMs,
+  };
+}
+
+function clearPendingLoadTimeout(load: PendingSessionLoad): void {
+  if (load.timeout !== undefined) clearTimeout(load.timeout);
 }
 
 export interface CreateDaemonSessionActionsArgs {
@@ -171,7 +202,7 @@ export function createDaemonSessionActions({
       ) {
         skipNextCleanupDetachSessionIdRef.current = undefined;
       }
-      clearTimeout(pendingSessionLoadRef.current.timeout);
+      clearPendingLoadTimeout(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException('Session cleared', 'AbortError'),
       );
@@ -191,7 +222,7 @@ export function createDaemonSessionActions({
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
     if (pendingSessionLoadRef.current) {
-      clearTimeout(pendingSessionLoadRef.current.timeout);
+      clearPendingLoadTimeout(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException(
           `Session ${mode} superseded by a newer request`,
@@ -200,24 +231,37 @@ export function createDaemonSessionActions({
       );
     }
     const loadPromise = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (pendingSessionLoadRef.current?.id === loadId) {
-          pendingSessionLoadRef.current = undefined;
-          reject(
-            dispatchActionError(
-              addNotice,
-              `${capitalize(mode)} session failed`,
-              new Error(`Session ${mode} timed out`),
-              getSessionLoadNoticeOperation(mode),
-            ),
-          );
-        }
-      }, 30_000);
+      const restoreTimeouts = resolveSessionRestoreTimeouts(
+        getConnection().capabilities,
+      );
+      const watchdogTimeoutMs =
+        mode === 'attach'
+          ? ATTACH_WATCHDOG_TIMEOUT_MS
+          : restoreTimeouts.watchdogTimeoutMs;
+      const timeout =
+        watchdogTimeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              if (pendingSessionLoadRef.current?.id === loadId) {
+                pendingSessionLoadRef.current = undefined;
+                reject(
+                  dispatchActionError(
+                    addNotice,
+                    `${capitalize(mode)} session failed`,
+                    new Error(`Session ${mode} timed out`),
+                    getSessionLoadNoticeOperation(mode),
+                  ),
+                );
+              }
+            }, watchdogTimeoutMs);
       pendingSessionLoadRef.current = {
         id: loadId,
         sessionId,
         mode,
         timeout,
+        ...(mode !== 'attach'
+          ? { requestTimeoutMs: restoreTimeouts.requestTimeoutMs }
+          : {}),
         resolve,
         reject,
         ...(signal ? { signal } : {}),
