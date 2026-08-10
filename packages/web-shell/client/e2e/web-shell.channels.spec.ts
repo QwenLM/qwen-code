@@ -335,7 +335,10 @@ test('creates and deletes a typed Channel configuration', async ({
     }),
   );
 
-  await page.getByRole('button', { name: 'Delete release-bot' }).click();
+  await page
+    .getByRole('button', { name: 'More actions for release-bot' })
+    .click();
+  await page.getByRole('menuitem', { name: 'Delete release-bot' }).click();
   const confirmation = page.getByRole('alertdialog');
   await confirmation.getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByText('release-bot', { exact: true })).toHaveCount(0);

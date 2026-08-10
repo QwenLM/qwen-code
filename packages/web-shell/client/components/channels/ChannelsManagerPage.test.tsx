@@ -212,6 +212,9 @@ describe('ChannelsManagerPage', () => {
     await renderPage();
 
     expect(container.textContent).toContain('DingTalk Bot');
+    expect(container.textContent).toContain(
+      'Offline and not receiving messages.',
+    );
     expect(container.textContent).not.toContain('Telegram Bot');
     expect(
       container.querySelectorAll('[data-testid^="channel-platform-"]'),
@@ -368,9 +371,18 @@ describe('ChannelsManagerPage', () => {
   it('deletes a Channel with the current revision', async () => {
     await renderPage();
 
-    const remove = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.getAttribute('aria-label') === 'Delete DingTalk Bot',
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) =>
+        button.getAttribute('aria-label') === 'More actions for DingTalk Bot',
     );
+    await act(async () => {
+      more?.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const remove = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.getAttribute('aria-label') === 'Delete DingTalk Bot');
     await act(async () => {
       remove?.click();
     });
@@ -387,6 +399,37 @@ describe('ChannelsManagerPage', () => {
     expect(channelState.current.remove).toHaveBeenCalledWith('DingTalk Bot', {
       expectedRevision: '1',
     });
+  });
+
+  it('keeps restart in the overflow menu for a running Channel', async () => {
+    channelState.current.channels.ding = channel(
+      'DingTalk Bot',
+      'dingtalk',
+      'connected',
+    );
+    channelState.current.snapshot = {
+      revision: '1',
+      instances: channelState.current.channels,
+    };
+    await renderPage();
+
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) =>
+        button.getAttribute('aria-label') === 'More actions for DingTalk Bot',
+    );
+    await act(async () => {
+      more?.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const restart = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.trim() === 'Restart');
+    await act(async () => {
+      restart?.click();
+    });
+
+    expect(channelState.current.restart).toHaveBeenCalledWith('DingTalk Bot');
   });
 
   it('closes an editor when the selected workspace changes', async () => {

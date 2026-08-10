@@ -8,8 +8,12 @@ import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
+  EllipsisVerticalIcon,
+  FolderIcon,
   PencilIcon,
+  PlusIcon,
   RadioTowerIcon,
+  RefreshCwIcon,
   RotateCwIcon,
   Trash2Icon,
 } from 'lucide-react';
@@ -45,6 +49,14 @@ import {
   CardTitle,
 } from '../ui/card';
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -52,6 +64,7 @@ import {
   EmptyTitle,
 } from '../ui/empty';
 import { Spinner } from '../ui/spinner';
+import { Skeleton } from '../ui/skeleton';
 import {
   Select,
   SelectContent,
@@ -82,6 +95,17 @@ const STATUS_KEYS: Record<DaemonChannelRuntimeState['state'], string> = {
   connected: 'channels.status.connected',
   partial: 'channels.status.partial',
   error: 'channels.status.error',
+};
+
+const STATUS_DESCRIPTION_KEYS: Record<
+  DaemonChannelRuntimeState['state'],
+  string
+> = {
+  stopped: 'channels.statusDescription.stopped',
+  starting: 'channels.statusDescription.starting',
+  connected: 'channels.statusDescription.connected',
+  partial: 'channels.statusDescription.partial',
+  error: 'channels.statusDescription.error',
 };
 
 function badgeVariant(
@@ -208,10 +232,6 @@ export function ChannelsManagerPage({
         .sort((left, right) => left.name.localeCompare(right.name)),
     [channels],
   );
-  const workspaceName = activeWorkspace
-    ? workspaceLabel(activeWorkspace)
-    : t('channels.workspace.current');
-
   const channelTypeLabel = useCallback(
     (channel: DaemonChannelInstanceSnapshot) => {
       const type = String(channel.config.type);
@@ -347,56 +367,75 @@ export function ChannelsManagerPage({
           <Button
             variant="ghost"
             size="icon"
+            className={styles.backButton}
             onClick={onClose}
             aria-label={t('channels.action.back')}
           >
             <ArrowLeftIcon />
           </Button>
+          <div className={styles.titleMark} aria-hidden="true">
+            <RadioTowerIcon />
+          </div>
           <div className={styles.titleCopy}>
             <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>
               {t('channels.title')}
             </h1>
-            <p className={styles.summary}>
-              {t('channels.summary', {
-                workspace: workspaceName,
-                count: instances.length,
-              })}
-            </p>
+            <p className={styles.summary}>{t('channels.description')}</p>
           </div>
         </div>
-        {registeredWorkspaces.length > 0 ? (
-          <div className={styles.workspacePicker}>
-            <span className={styles.workspacePickerLabel}>
-              {t('channels.workspace.label')}
-            </span>
-            <Select
-              value={selectedManagementWorkspace?.cwd ?? ''}
-              disabled={Boolean(editor) || loading || busy !== null || deleting}
-              onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
-            >
-              <SelectTrigger
-                className={styles.workspacePickerTrigger}
-                aria-label={t('channels.workspace.label')}
+        <div className={styles.headerControls}>
+          {registeredWorkspaces.length > 0 ? (
+            <div className={styles.workspacePicker}>
+              <div className={styles.workspacePickerLabel}>
+                <FolderIcon aria-hidden="true" />
+                <span>{t('channels.workspace.label')}</span>
+              </div>
+              <Select
+                value={selectedManagementWorkspace?.cwd ?? ''}
+                disabled={
+                  Boolean(editor) || loading || busy !== null || deleting
+                }
+                onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
               >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {registeredWorkspaces.map((entry) => (
-                  <SelectItem
-                    key={entry.id}
-                    value={entry.cwd}
-                    disabled={!entry.trusted}
-                  >
-                    {workspaceLabel(entry)}
-                    {entry.primary
-                      ? ` · ${t('channels.workspace.primary')}`
-                      : ''}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        ) : null}
+                <SelectTrigger
+                  className={styles.workspacePickerTrigger}
+                  aria-label={t('channels.workspace.label')}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {registeredWorkspaces.map((entry) => (
+                    <SelectItem
+                      key={entry.id}
+                      value={entry.cwd}
+                      disabled={!entry.trusted}
+                    >
+                      {workspaceLabel(entry)}
+                      {entry.primary
+                        ? ` · ${t('channels.workspace.primary')}`
+                        : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+          <Button
+            variant="outline"
+            className={styles.refreshButton}
+            disabled={
+              !supportsManagement ||
+              loading ||
+              Boolean(editor) ||
+              busy !== null ||
+              deleting
+            }
+            onClick={() => void reload()}
+          >
+            {loading ? <Spinner /> : <RefreshCwIcon />}
+            {t('channels.action.refresh')}
+          </Button>
+        </div>
       </header>
 
       {!supportsManagement ? (
@@ -420,9 +459,21 @@ export function ChannelsManagerPage({
       ) : null}
 
       {loading && instances.length === 0 ? (
-        <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Spinner />
-          {t('channels.loading')}
+        <div
+          className={styles.loadingState}
+          role="status"
+          aria-label={t('channels.loading')}
+        >
+          {[0, 1].map((index) => (
+            <div key={index} className={styles.loadingCard}>
+              <Skeleton className="size-11 rounded-xl" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Skeleton className="h-4 w-36 max-w-full" />
+                <Skeleton className="h-3 w-24 max-w-full" />
+              </div>
+              <Skeleton className="h-8 w-20" />
+            </div>
+          ))}
         </div>
       ) : null}
 
@@ -444,13 +495,22 @@ export function ChannelsManagerPage({
 
       <section className={styles.section} aria-labelledby="configured-channels">
         <div className={styles.sectionHeader}>
-          <h2 id="configured-channels" className={styles.sectionTitle}>
-            {t('channels.configured')}
-          </h2>
-          <Badge variant="outline">{instances.length}</Badge>
+          <div className={styles.sectionHeadingCopy}>
+            <div className={styles.sectionTitleRow}>
+              <h2 id="configured-channels" className={styles.sectionTitle}>
+                {t('channels.configured')}
+              </h2>
+              <Badge variant="secondary" className={styles.sectionCount}>
+                {instances.length}
+              </Badge>
+            </div>
+            <p className={styles.sectionDescription}>
+              {t('channels.configured.description')}
+            </p>
+          </div>
         </div>
         {!loading && !error && instances.length === 0 ? (
-          <Empty className="border">
+          <Empty className={styles.emptyState}>
             <EmptyHeader>
               <EmptyMedia variant="icon">
                 <RadioTowerIcon />
@@ -468,81 +528,47 @@ export function ChannelsManagerPage({
               const descriptor = descriptorFor(channel);
               const runtimeError =
                 actionErrors[channel.name] ?? channel.runtime.lastError;
+              const canRestart =
+                channel.runtime.state !== 'stopped' &&
+                channel.runtime.state !== 'error';
               return (
                 <Card
                   key={channel.name}
                   size="sm"
                   className={styles.channelCard}
-                  data-runtime-state={channel.runtime.state}
                 >
-                  <CardHeader>
-                    <div className="min-w-0">
-                      <CardTitle className="flex min-w-0 flex-wrap items-center gap-2">
-                        <span className="truncate">{channel.name}</span>
-                        <Badge variant={badgeVariant(channel.runtime.state)}>
-                          {t(STATUS_KEYS[channel.runtime.state])}
-                        </Badge>
-                      </CardTitle>
-                      <CardDescription>
-                        {channelTypeLabel(channel)}
-                      </CardDescription>
-                    </div>
-                    <CardAction>{renderPrimaryAction(channel)}</CardAction>
-                  </CardHeader>
-                  {runtimeError ? (
-                    <CardContent>
-                      <Alert
-                        variant="destructive"
-                        className={styles.errorAlert}
+                  <CardHeader className={styles.channelHeader}>
+                    <div className={styles.channelIdentity}>
+                      <span
+                        className={styles.platformMark}
+                        data-platform={String(channel.config.type)}
+                        aria-hidden="true"
                       >
-                        <AlertCircleIcon />
-                        <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
-                        <AlertDescription>{runtimeError}</AlertDescription>
-                      </Alert>
-                    </CardContent>
-                  ) : null}
-                  <CardFooter className={styles.channelActions}>
-                    <label className={styles.startupControl}>
-                      <Switch
-                        size="sm"
-                        checked={channel.startsWithServe}
-                        disabled={!canManage || busy !== null || !snapshot}
-                        aria-label={t('channels.action.startWithServeNamed', {
-                          name: channel.name,
-                        })}
-                        onCheckedChange={(enabled) =>
-                          void runAction(channel, 'startup', () =>
-                            setStartup(channel.name, {
-                              expectedRevision: snapshot?.revision ?? '',
-                              enabled,
-                            }),
-                          )
-                        }
-                      />
-                      {t('channels.startsWithServe')}
-                    </label>
-                    <div className={styles.lifecycleActions}>
-                      {channel.runtime.state !== 'stopped' &&
-                      channel.runtime.state !== 'error' ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={!canManage || busy !== null}
-                          onClick={() =>
-                            void runAction(channel, 'restart', () =>
-                              restart(channel.name),
-                            )
-                          }
-                        >
-                          {busy?.name === channel.name &&
-                          busy.action === 'restart' ? (
-                            <Spinner />
-                          ) : (
-                            <RotateCwIcon />
-                          )}
-                          {t('channels.action.restart')}
-                        </Button>
-                      ) : null}
+                        {PLATFORM_MARKS[String(channel.config.type)] ??
+                          channelTypeLabel(channel)[0]?.toUpperCase() ??
+                          '?'}
+                      </span>
+                      <div className={styles.channelIdentityCopy}>
+                        <CardTitle className={styles.channelNameRow}>
+                          <span className={styles.channelName}>
+                            {channel.name}
+                          </span>
+                          <Badge
+                            variant={badgeVariant(channel.runtime.state)}
+                            className={styles.runtimeBadge}
+                            data-runtime-state={channel.runtime.state}
+                          >
+                            <span className={styles.runtimeDot} />
+                            {t(STATUS_KEYS[channel.runtime.state])}
+                          </Badge>
+                        </CardTitle>
+                        <CardDescription className={styles.channelType}>
+                          {channelTypeLabel(channel)}
+                        </CardDescription>
+                      </div>
+                    </div>
+                    <CardAction className={styles.cardActionGroup}>
+                      {renderPrimaryAction(channel)}
                       {descriptor ? (
                         <Button
                           size="sm"
@@ -563,26 +589,109 @@ export function ChannelsManagerPage({
                           {t('channels.action.edit')}
                         </Button>
                       ) : null}
-                      <Button
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            disabled={!canManage || busy !== null || !snapshot}
+                            aria-label={t('channels.action.moreNamed', {
+                              name: channel.name,
+                            })}
+                          >
+                            {busy?.name === channel.name &&
+                            busy.action === 'restart' ? (
+                              <Spinner />
+                            ) : (
+                              <EllipsisVerticalIcon />
+                            )}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="min-w-40">
+                          <DropdownMenuGroup>
+                            {canRestart ? (
+                              <DropdownMenuItem
+                                onSelect={() =>
+                                  void runAction(channel, 'restart', () =>
+                                    restart(channel.name),
+                                  )
+                                }
+                              >
+                                <RotateCwIcon data-icon="inline-start" />
+                                {t('channels.action.restart')}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canRestart ? <DropdownMenuSeparator /> : null}
+                            <DropdownMenuItem
+                              variant="destructive"
+                              aria-label={t('channels.action.deleteNamed', {
+                                name: channel.name,
+                              })}
+                              onSelect={() => {
+                                setDeleteError(undefined);
+                                setDeleteTarget({
+                                  workspaceCwd: activeWorkspaceCwd,
+                                  instance: channel,
+                                });
+                              }}
+                            >
+                              <Trash2Icon data-icon="inline-start" />
+                              {t('channels.action.delete')}
+                            </DropdownMenuItem>
+                          </DropdownMenuGroup>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </CardAction>
+                  </CardHeader>
+                  <CardContent className={styles.runtimeSummary}>
+                    <span
+                      className={styles.runtimeSignal}
+                      data-runtime-state={channel.runtime.state}
+                      aria-hidden="true"
+                    />
+                    <span>
+                      {t(STATUS_DESCRIPTION_KEYS[channel.runtime.state])}
+                    </span>
+                  </CardContent>
+                  {runtimeError ? (
+                    <CardContent>
+                      <Alert
+                        variant="destructive"
+                        className={styles.errorAlert}
+                      >
+                        <AlertCircleIcon />
+                        <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
+                        <AlertDescription>{runtimeError}</AlertDescription>
+                      </Alert>
+                    </CardContent>
+                  ) : null}
+                  <CardFooter className={styles.channelFooter}>
+                    <label className={styles.startupControl}>
+                      <span className={styles.startupCopy}>
+                        <span className={styles.startupLabel}>
+                          {t('channels.startsWithServe')}
+                        </span>
+                        <span className={styles.startupDescription}>
+                          {t('channels.startsWithServe.description')}
+                        </span>
+                      </span>
+                      <Switch
                         size="sm"
-                        variant="ghost"
-                        className="text-destructive hover:text-destructive"
+                        checked={channel.startsWithServe}
                         disabled={!canManage || busy !== null || !snapshot}
-                        aria-label={t('channels.action.deleteNamed', {
+                        aria-label={t('channels.action.startWithServeNamed', {
                           name: channel.name,
                         })}
-                        onClick={() => {
-                          setDeleteError(undefined);
-                          setDeleteTarget({
-                            workspaceCwd: activeWorkspaceCwd,
-                            instance: channel,
-                          });
-                        }}
-                      >
-                        <Trash2Icon />
-                        {t('channels.action.delete')}
-                      </Button>
-                    </div>
+                        onCheckedChange={(enabled) =>
+                          void runAction(channel, 'startup', () =>
+                            setStartup(channel.name, {
+                              expectedRevision: snapshot?.revision ?? '',
+                              enabled,
+                            }),
+                          )
+                        }
+                      />
+                    </label>
                   </CardFooter>
                 </Card>
               );
@@ -592,14 +701,24 @@ export function ChannelsManagerPage({
       </section>
 
       {availablePlatforms.length > 0 ? (
-        <section className={styles.section} aria-labelledby="channel-platforms">
-          <div>
-            <h2 id="channel-platforms" className={styles.sectionTitle}>
-              {t('channels.availablePlatforms')}
-            </h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {t('channels.availablePlatforms.description')}
-            </p>
+        <section
+          className={`${styles.section} ${styles.platformSection}`}
+          aria-labelledby="channel-platforms"
+        >
+          <div className={styles.sectionHeader}>
+            <div className={styles.sectionHeadingCopy}>
+              <div className={styles.sectionTitleRow}>
+                <h2 id="channel-platforms" className={styles.sectionTitle}>
+                  {t('channels.availablePlatforms')}
+                </h2>
+                <Badge variant="secondary" className={styles.sectionCount}>
+                  {availablePlatforms.length}
+                </Badge>
+              </div>
+              <p className={styles.sectionDescription}>
+                {t('channels.availablePlatforms.description')}
+              </p>
+            </div>
           </div>
           <div className={styles.platformGrid}>
             {availablePlatforms.map((platform) => (
@@ -607,6 +726,7 @@ export function ChannelsManagerPage({
                 key={platform.type}
                 type="button"
                 className={styles.platformCard}
+                data-platform={platform.type}
                 data-testid={`channel-platform-${platform.type}`}
                 disabled={!canManage || !snapshot}
                 aria-label={t('channels.platform.configureNamed', {
@@ -619,17 +739,26 @@ export function ChannelsManagerPage({
                   })
                 }
               >
-                <span className={styles.platformMark} aria-hidden="true">
+                <span
+                  className={styles.platformMark}
+                  data-platform={platform.type}
+                  aria-hidden="true"
+                >
                   {PLATFORM_MARKS[platform.type] ??
                     platform.displayName[0]?.toUpperCase() ??
                     '?'}
                 </span>
-                <div className={styles.platformCopy}>
-                  <p className={styles.platformName}>{platform.displayName}</p>
-                  <p className={styles.platformHint}>
-                    {t('channels.platform.configure')}
-                  </p>
-                </div>
+                <span className={styles.platformCopy}>
+                  <span className={styles.platformName}>
+                    {platform.displayName}
+                  </span>
+                  <span className={styles.platformHint}>
+                    {t('channels.platform.add')}
+                  </span>
+                </span>
+                <span className={styles.platformAction} aria-hidden="true">
+                  <PlusIcon />
+                </span>
               </button>
             ))}
           </div>
