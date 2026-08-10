@@ -16,11 +16,15 @@ place.
 PR #8691 has merged. The original transactional prototype in #8824 was closed
 and split: attachment-identity hardening in #8833 has merged, while ordinary and
 controlled cross-session transactions continue in #8882. The design document may
-land before #8882, but the selective-restore implementation must start from
-`main` after #8882's final merge and before checkpoint work. The boundaries are
-distinct: #8691 fences timeouts and late results; #8833 fences stale attachment
-work; on the modern `client_identity` path, #8882 keeps the current UI session
-attached until a fully staged target wins its final
+land before #8882. Development may also begin as a separate stacked Draft branch
+from an exact recorded #8882 head, without modifying or adding selective-restore
+commits to #8882 itself. Record that base head SHA in the implementation PR. The
+selective-restore PR must not land before #8882; once #8882 merges, rebase the
+implementation onto the final `main`, retarget the PR, review only the selective
+diff, and rerun the transactional regression suite before checkpoint work. The
+boundaries are distinct: #8691 fences timeouts and late results; #8833 fences
+stale attachment work; on the modern `client_identity` path, #8882 keeps the
+current UI session attached until a fully staged target wins its final
 identity/environment/lifecycle/deadline checks and commits; selective restore
 removes the leased mode's duplicate full read and reduces reconstruction,
 materialization, and replay cost but does not replace transactional commit
@@ -99,10 +103,11 @@ index machinery.
 - Making restore proportional only to the JSONL tail. That is the checkpoint
   follow-up.
 - Implementing transactional WebUI session switching. #8833 owns attachment
-  identity and #8882 owns the restore/stage/guarded-commit boundary; #8882 must
-  land first. This design does not change attach, detach, or WebUI commit
-  ownership, including its legacy detach-first fallback when `client_identity`
-  is explicitly unavailable.
+  identity and #8882 owns the restore/stage/guarded-commit boundary. A stacked
+  implementation may depend on an exact recorded #8882 head, but #8882 must land
+  before the selective-restore PR. This design does not change attach, detach,
+  or WebUI commit ownership, including its legacy detach-first fallback when
+  `client_identity` is explicitly unavailable.
 - Changing TUI `--resume`, `--continue`, session export, archive reads, fork, or
   branch behavior.
 - Changing the standalone legacy `qwen/session/loadUpdates` extension or the
@@ -549,6 +554,21 @@ also includes action, response/stream replay mode, and `hideInheritedHistory`.
 Only identical discriminated shapes coalesce. Omitted versus explicit page size,
 or two different explicit limits, returns the existing `restore_in_progress`
 conflict instead of receiving the first request's replay page.
+
+#8882's outer WebUI transition coordinator must use the same request-equivalence
+boundary before a restore reaches the bridge. Snapshot the operation and
+effective page size when the intent is created, and include the resulting
+`load/all`, `load/recent(limit)`, or `resume/none` shape in the intent key in
+addition to normalized session and workspace identity. The current target-only
+behavior must not coalesce `load` with `resume`, or two loads with different
+effective page sizes. Exactly identical target and replay shapes may still share
+one public intent. A newer non-identical shape follows #8882's existing
+supersede-and-serialize lifecycle, including best-effort retirement of an
+obsolete raw target; do not add a second coordinator or a generic caller-owned
+shape matrix. This correction belongs in #8882 while it is open. If #8882 merges
+first, land the correction as a narrow prerequisite follow-up from final `main`
+and rebase the selective branch onto it; do not make selective restore own the
+transaction coordinator's equivalence bug.
 
 Normalize the restore shape at bridge ingress before live-entry lookup, capacity
 admission, or in-flight coalescing. When `historyPageSize` is meaningful, validate
@@ -1232,6 +1252,9 @@ behavior rather than inventing a new fallback.
   successful adoption changes transcript, connection, metadata, and ownership
   atomically. Its explicitly unsupported-capability fallback retains the legacy
   detach-first behavior.
+- #8882 coordinator tests prove that identical target/mode/page shapes coalesce,
+  while `load` versus `resume` and unequal effective page sizes serialize as
+  distinct intents and never reuse another request's replay result.
 
 ### E2E and benchmark
 
@@ -1440,14 +1463,16 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 ## Rollout and follow-ups
 
 The design document may land before its remaining implementation prerequisite.
-#8691 and #8833 are merged; the selective-restore implementation lands after
-#8882's transactional switching, followed by the durable checkpoint. #8883 and
-the later PR3c/PR3d ownership slices are not prerequisites for this bounded
-hydration path. Keep selective restore as one end-to-end implementation PR,
-using reviewable commits for the phases below; do not land an unused projection
-API or a partial early-paging step. `historyPageSize` cannot bound
-pre-materialization I/O without the consumer projection, and the writer-lease
-path's post-acquisition read remains authoritative.
+#8691 and #8833 are merged. Selective development may use a separate Draft
+stacked on an exact recorded #8882 head, but the implementation lands only after
+#8882's transactional switching and a final rebase to `main`, followed by the
+durable checkpoint. #8883 and the later PR3c/PR3d ownership slices are not
+prerequisites for this bounded hydration path. Keep selective restore as one
+end-to-end implementation PR, using reviewable commits for the phases below; do
+not land an unused projection API or a partial early-paging step.
+`historyPageSize` cannot bound pre-materialization I/O without the consumer
+projection, and the writer-lease path's post-acquisition read remains
+authoritative.
 
 After selective restore:
 

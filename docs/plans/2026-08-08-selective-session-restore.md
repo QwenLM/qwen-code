@@ -14,6 +14,13 @@ checkpoint. #8824 was superseded by this split series. #8883's legacy watchdog
 retry fix and the later PR3c/PR3d resync/repair and branch-adoption slices are not
 prerequisites for this bounded-hydration implementation.
 
+Development may begin on a separate Draft branch stacked from an exact recorded
+#8882 head. Do not add selective commits to #8882 itself, and do not merge or
+present the implementation as independent of that base. Record the base head SHA
+in the implementation PR. After #8882 lands, rebase onto the final `main`,
+retarget the implementation PR, inspect the selective-only diff, and rerun all
+transactional switching regressions before the implementation can land.
+
 Implement selective restore as one end-to-end daemon fix. Reviewable commits may
 follow the phases below, but do not merge an intermediate PR that only removes a
 pre-lease load or moves `historyPageSize`: the post-lease read remains
@@ -180,6 +187,16 @@ consumer, and returns the requested replay semantics.
   `none` replay plus action, response/stream mode, and inherited-history policy.
   Coalesce only identical shapes; omitted versus explicit page size and unequal
   recent limits return `restore_in_progress`.
+- Align #8882's outer WebUI transition coordinator with the same equivalence
+  boundary. Capture the operation and effective page size when creating an
+  intent, and include `load/all`, `load/recent(limit)`, or `resume/none` in its
+  key beside normalized session/workspace identity. Identical shapes may still
+  coalesce. Load versus resume or unequal effective limits must remain distinct
+  and use the existing supersede/serialize and stale-target retirement path,
+  rather than reusing another request's replay. Land this correction in #8882
+  while it is open. If #8882 merges first, use a narrow prerequisite follow-up
+  from final `main` and rebase the selective branch onto that fix; do not leave
+  the coordinator correction owned by the selective implementation PR.
 - Normalize the restore shape at bridge ingress before live lookup, admission,
   or coalescing. Validate a meaningful response-load `historyPageSize` with the
   same integer range as REST and ACP; streamed load and resume normalize to their
@@ -344,13 +361,15 @@ consumer, and returns the requested replay semantics.
   receive post-resume updates, including available-command refresh. None may
   collect historical replay frames. Generic load and branch clients retain
   their explicit replay behavior.
-- After #8882 merges, start from `main` containing its final implementation and
-  run its transactional integration coverage with selective-restore 409, 413,
-  timeout/504, cancellation, and staging failures on the modern
-  `client_identity` path. Assert the committed session-id and workspace-cwd
-  source tuple remains attached and usable, and successful adoption changes
-  transcript, connection, metadata, and ownership atomically. Preserve #8882's
-  legacy detach-first behavior when that capability is explicitly absent.
+- A Draft implementation may start from an exact recorded #8882 head. After
+  #8882 merges, rebase and retarget to `main` containing its final implementation,
+  review the selective-only diff, and run its transactional integration coverage
+  with selective-restore 409, 413, timeout/504, cancellation, and staging
+  failures on the modern `client_identity` path. Assert the committed session-id
+  and workspace-cwd source tuple remains attached and usable, and successful
+  adoption changes transcript, connection, metadata, and ownership atomically.
+  Preserve #8882's legacy detach-first behavior when that capability is
+  explicitly absent.
 - Run `npm run build && npm run typecheck` from the repository root.
 - Record a benchmark-only full-loader baseline and run the selective projection
   on 64 KiB, 1 MiB, and 4 MiB fixtures under the same runtime. Report absolute
@@ -377,9 +396,11 @@ consumer, and returns the requested replay semantics.
 
 - [x] #8691 has landed.
 - [x] #8833 attachment-identity hardening has landed.
-- [ ] #8882 transactional WebUI session switching has landed with green CI and
-      maintainer approval, and the implementation branch starts from `main`
-      containing its final attach lifecycle.
+- [ ] A Draft implementation may be stacked on an exact recorded #8882 head,
+      but #8882 transactional WebUI session switching has landed with green CI
+      and maintainer approval before selective restore merges. The implementation
+      is then rebased and retargeted to `main` containing its final attach
+      lifecycle, and its selective-only diff is reviewed again.
 - [ ] Projection acquisition, runtime-consumer migration, and old-loader removal
       ship as one end-to-end implementation; no intermediate production PR leaves
       an unused projection or removes the post-lease authoritative read without
@@ -505,6 +526,10 @@ consumer, and returns the requested replay semantics.
 - [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
       limits, none, action, stream/response mode, and inherited-history policy;
       only identical shapes share a restore and its typed result.
+- [ ] #8882's outer coordinator also snapshots and keys the effective replay
+      shape: identical target/mode/page requests coalesce, while load versus
+      resume and unequal page sizes remain distinct and never reuse another
+      request's replay result.
 - [ ] Bridge ingress rejects invalid/non-finite/out-of-range page sizes before
       live lookup or coalescing when the field is meaningful. Streamed load and
       resume ignore the field consistently for warm and cold Sessions. The
