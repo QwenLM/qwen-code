@@ -46,6 +46,7 @@ import {
 } from './text-cursor.js';
 import {
   canonicalizeWorkspaces,
+  hasSuspiciousPathPattern,
   resolveWithinWorkspace,
   type Intent,
   type ResolvedPath,
@@ -217,6 +218,17 @@ export interface RequestContext extends AuditContext {
   ownerSessionId?: string;
 }
 
+/** Host-only write input after the bridge adapter validates tool provenance. */
+export interface SameHostToolTextWriteRequest {
+  path: string;
+  content: string;
+  meta?: {
+    bom?: boolean;
+    encoding?: string;
+    lineEnding?: 'crlf' | 'lf';
+  };
+}
+
 /**
  * Public boundary type. Routes consume this via the
  * factory's `forRequest(ctx)` so audit context is automatically
@@ -283,6 +295,11 @@ export interface WorkspaceFileSystem {
 export interface WorkspaceFileSystemFactory {
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
   assertCanWrite(): void;
+  /** Optional so existing custom factories remain workspace-only by default. */
+  writeSameHostToolText?(
+    ctx: RequestContext,
+    request: SameHostToolTextWriteRequest,
+  ): Promise<void>;
 }
 
 export interface CreateWorkspaceFileSystemFactoryDeps {
@@ -352,24 +369,196 @@ export function createWorkspaceFileSystemFactory(
   const lowFs = new StandardFileSystemService();
   const pathLocks = deps.pathLocks ?? new PathMutexRegistry();
 
+  const forRequest = (ctx: RequestContext): WorkspaceFileSystem =>
+    new WorkspaceFileSystemImpl({
+      primaryWorkspace,
+      workspaces,
+      trusted: deps.trusted,
+      audit,
+      ctx,
+      lowFs,
+      pathLocks,
+      generationGuard: deps.generationGuard,
+    });
+
   return {
     assertCanWrite() {
       deps.generationGuard?.assertOpen();
       assertTrustedForIntent(deps.trusted, 'write');
     },
-    forRequest(ctx) {
-      return new WorkspaceFileSystemImpl({
-        primaryWorkspace,
-        workspaces,
-        trusted: deps.trusted,
-        audit,
-        ctx,
-        lowFs,
-        pathLocks,
-        generationGuard: deps.generationGuard,
-      });
+    forRequest,
+    async writeSameHostToolText(ctx, request) {
+      try {
+        deps.generationGuard?.assertOpen();
+      } catch (err) {
+        throw recordSameHostToolWriteDenied(audit, ctx, request.path, err);
+      }
+
+      let resolved: ResolvedPath;
+      try {
+        resolved = await resolveWithinWorkspace(
+          request.path,
+          workspaces.map((workspace) => workspace.path),
+          'write',
+        );
+        deps.generationGuard?.assertOpen();
+      } catch (err) {
+        if (
+          !(err instanceof FsError && err.kind === 'path_outside_workspace')
+        ) {
+          throw recordSameHostToolWriteDenied(audit, ctx, request.path, err);
+        }
+        try {
+          await writeSameHostToolTextOutsideWorkspace({
+            request,
+            trusted: deps.trusted,
+            audit,
+            ctx,
+            pathLocks,
+            generationGuard: deps.generationGuard,
+          });
+          return;
+        } catch (outsideErr) {
+          throw recordSameHostToolWriteDenied(
+            audit,
+            ctx,
+            request.path,
+            outsideErr,
+          );
+        }
+      }
+
+      try {
+        await forRequest(ctx).writeTextOverwrite(resolved, request.content);
+      } catch (err) {
+        if (isWorkspaceGenerationClosedError(err)) {
+          recordSameHostToolWriteDenied(audit, ctx, request.path, err);
+        }
+        throw err;
+      }
     },
   };
+}
+
+interface SameHostToolTextWriteDeps {
+  request: SameHostToolTextWriteRequest;
+  trusted: boolean;
+  audit: AuditPublisher;
+  ctx: RequestContext;
+  pathLocks: PathMutexRegistry;
+  generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+}
+
+async function writeSameHostToolTextOutsideWorkspace(
+  deps: SameHostToolTextWriteDeps,
+): Promise<void> {
+  const start = performance.now();
+  deps.generationGuard?.assertOpen();
+  assertTrustedForIntent(deps.trusted, 'write');
+  enforceWriteSize(Buffer.byteLength(deps.request.content, 'utf-8'));
+  const target = await resolveSameHostToolWriteTarget(deps.request.path);
+  await deps.pathLocks.runExclusive(target, async () => {
+    deps.generationGuard?.assertOpen();
+    const meta = mergeWriteMeta(undefined, deps.request.meta ?? {});
+    const content =
+      meta.bom && deps.request.content.charCodeAt(0) === 0xfeff
+        ? deps.request.content.slice(1)
+        : deps.request.content;
+    const result = await atomicWriteTextResolvedFile({
+      target,
+      content,
+      mode: 'overwrite',
+      meta,
+      assertGenerationOpen: () => deps.generationGuard?.assertOpen(),
+    });
+    deps.audit.recordAccess(deps.ctx, {
+      intent: 'write',
+      absolute: target,
+      durationMs: performance.now() - start,
+      sizeBytes: result.sizeBytes,
+    });
+  });
+}
+
+async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
+  if (!path.isAbsolute(input)) {
+    throw new FsError(
+      'path_outside_workspace',
+      `same-host external tool write requires an absolute path: ${input}`,
+    );
+  }
+  if (hasSuspiciousPathPattern(input)) {
+    throw new FsError(
+      'path_outside_workspace',
+      `path contains suspicious pattern: ${input}`,
+    );
+  }
+
+  let leaf: Awaited<ReturnType<typeof fsp.lstat>>;
+  try {
+    leaf = await fsp.lstat(input);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw err;
+    }
+    const parent = await fsp.realpath(path.dirname(input));
+    const parentStat = await fsp.lstat(parent);
+    if (!parentStat.isDirectory()) {
+      throw new FsError(
+        'parse_error',
+        `parent path is not a directory: ${parent}`,
+      );
+    }
+    return path.join(parent, path.basename(input));
+  }
+
+  if (leaf.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path is a symlink and cannot be overwritten: ${input}`,
+      { hint: 'resolve the target explicitly before writing' },
+    );
+  }
+  if (!leaf.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${input}`);
+  }
+  const canonical = await fsp.realpath(input);
+  const canonicalStat = await fsp.lstat(canonical);
+  if (!canonicalStat.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `canonical path is not a regular file: ${canonical}`,
+    );
+  }
+  assertSameFile(leaf, canonicalStat, input, 'write');
+  return canonical;
+}
+
+function isWorkspaceGenerationClosedError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    error.code === 'workspace_generation_closed'
+  );
+}
+
+function recordSameHostToolWriteDenied(
+  audit: AuditPublisher,
+  ctx: RequestContext,
+  input: string,
+  error: unknown,
+): Error {
+  const fsError = wrapAsFsError(error);
+  audit.recordDenied(ctx, {
+    intent: 'write',
+    input,
+    errorKind: fsError.kind,
+    hint: fsError.hint,
+    message: fsError.message,
+  });
+  return isWorkspaceGenerationClosedError(error) && error instanceof Error
+    ? error
+    : fsError;
 }
 
 interface WorkspaceRoot {
@@ -1338,7 +1527,7 @@ export function isContentHash(value: unknown): value is ContentHash {
 }
 
 interface AtomicWriteTextInput {
-  target: ResolvedPath;
+  target: string;
   content: string;
   mode: WriteMode;
   expectedHash?: ContentHash;
