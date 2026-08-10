@@ -10828,6 +10828,29 @@ exit 1
     });
   });
 
+  it('flags a recoverable stream-json API error even when qwen exits zero', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 429 quota exceeded]\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        '[API Error: 429 quota exceeded]',
+      );
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+      expect(
+        readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+      ).toBe('transient');
+    });
+  });
+
   it('does not flag a non-API subprocess failure for retry', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');

@@ -406,7 +406,24 @@ const result = await runQwen(options, prompt);
 // timeout) so the leak warning and the removal itself settle before this
 // process exits and the next step inspects the host.
 if (result.sandboxRemoval) await result.sandboxRemoval;
-if (result.error || result.signal || result.status !== 0) {
+const missingOutputs = missing(options.workdir, spec.outputs);
+const presentOutputs = spec.outputs.filter(
+  (name) => !missingOutputs.includes(name),
+);
+const hasOutputVerdict = spec.anyOutput
+  ? presentOutputs.length > 0
+  : missingOutputs.length === 0;
+const apiErrorWithoutVerdict =
+  result.status === 0 &&
+  result.apiError &&
+  !hasOutputVerdict &&
+  !existsSync(file(options.workdir, 'failure.md'));
+if (
+  result.error ||
+  result.signal ||
+  result.status !== 0 ||
+  apiErrorWithoutVerdict
+) {
   const detail = result.error
     ? result.error.message
     : result.idleTimedOut
@@ -415,7 +432,9 @@ if (result.error || result.signal || result.status !== 0) {
         ? `timeout (${QWEN_TIMEOUT_MS}ms)`
         : result.signal
           ? `signal ${result.signal}`
-          : `status ${String(result.status)}`;
+          : apiErrorWithoutVerdict
+            ? 'recoverable API error without an agent verdict'
+            : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
     if (result.loopDetected) {
       writeFailure(
@@ -474,7 +493,7 @@ if (result.error || result.signal || result.status !== 0) {
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
     );
   }
-  process.exit(result.status ?? 1);
+  process.exit(result.status === 0 ? 1 : (result.status ?? 1));
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
@@ -487,10 +506,6 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
   process.exit(0);
 }
 
-const missingOutputs = missing(options.workdir, spec.outputs);
-const presentOutputs = spec.outputs.filter(
-  (name) => !missingOutputs.includes(name),
-);
 if (spec.exclusiveOutput && presentOutputs.length > 1) {
   const message = `Autofix agent wrote mutually exclusive output files: ${presentOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
