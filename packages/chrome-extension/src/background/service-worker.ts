@@ -181,6 +181,7 @@ async function connect(): Promise<void> {
     scheduleReconnect();
     return;
   }
+  if (socket) shutdownCdpBridge();
   socket = ws;
 
   ws.onopen = () => {

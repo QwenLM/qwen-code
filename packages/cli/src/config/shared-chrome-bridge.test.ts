@@ -80,6 +80,21 @@ describe('isAutoConnectChromeDevToolsServer', () => {
     ).toBe(false);
   });
 
+  it('ignores adapter-name substrings in unrelated commands and packages', () => {
+    expect(
+      isAutoConnectChromeDevToolsServer('recorder', {
+        command: 'chrome-devtools-mcp-recorder',
+        args: ['--autoConnect'],
+      }),
+    ).toBe(false);
+    expect(
+      isAutoConnectChromeDevToolsServer('fork', {
+        command: 'npx',
+        args: ['my-chrome-devtools-mcp-fork', '--autoConnect'],
+      }),
+    ).toBe(false);
+  });
+
   it('ignores non-stdio servers', () => {
     expect(
       isAutoConnectChromeDevToolsServer('chrome-devtools', {
@@ -266,6 +281,23 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
       command: 'npx',
       args: ['-y', 'some-fs-server'],
     });
+  });
+
+  it('leaves approval-gated server configs literal', async () => {
+    const { config, setMcpServers } = configStub({
+      'chrome-devtools': { ...AUTO_CONNECT_SERVER, scope: 'project' },
+    });
+    const fetchImpl = vi.fn();
+
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      {},
+      () => {},
+      fetchImpl,
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(setMcpServers).not.toHaveBeenCalled();
   });
 
   it('preserves settings servers hidden by the allow-list', async () => {

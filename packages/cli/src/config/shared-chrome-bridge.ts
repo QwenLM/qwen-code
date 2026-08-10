@@ -21,7 +21,11 @@
  * Chrome's per-connection consent dialog and how to enable the shared bridge.
  */
 
-import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import {
+  isGatedMcpScope,
+  type Config,
+  type MCPServerConfig,
+} from '@qwen-code/qwen-code-core';
 import { QWEN_CODE_SERVE_ENV } from './acp-channel-fallback.js';
 import { QWEN_DAEMON_URL_ENV } from '../serve/channel-worker-env.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -80,8 +84,10 @@ export function isAutoConnectChromeDevToolsServer(
   const matchesAdapter =
     name === CHROME_DEVTOOLS_SERVER_NAME ||
     /(^|[\\/])chrome-devtools-mcp(\.(cmd|exe|js))?$/.test(command) ||
-    command.includes('chrome-devtools-mcp') ||
-    args.some((arg) => arg.includes('chrome-devtools-mcp'));
+    args.some(
+      (arg) =>
+        arg === 'chrome-devtools-mcp' || arg.startsWith('chrome-devtools-mcp@'),
+    );
   if (!matchesAdapter) return false;
   const hasExplicitEndpoint = args.some(
     (a) => a === '--wsEndpoint' || a.startsWith('--wsEndpoint='),
@@ -172,8 +178,10 @@ export async function maybeRouteChromeDevToolsViaDaemonBridge(
 
     const servers = config.getSettingsMcpServers();
     if (!servers) return;
-    const candidates = Object.entries(servers).filter(([name, cfg]) =>
-      isAutoConnectChromeDevToolsServer(name, cfg),
+    const candidates = Object.entries(servers).filter(
+      ([name, cfg]) =>
+        !isGatedMcpScope(cfg.scope) &&
+        isAutoConnectChromeDevToolsServer(name, cfg),
     );
     if (candidates.length === 0) return;
 
