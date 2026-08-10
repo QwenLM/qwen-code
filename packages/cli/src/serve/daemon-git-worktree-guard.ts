@@ -1950,7 +1950,10 @@ async function evaluateCommandWithCwd(
             expandShellLocals(token, shellLocals),
           );
           // The program word is unreadable, so it may be `ln`: record its
-          // operands as possibly re-pointed (`X=ln; $X -s <out>/.git .git`).
+          // operands as possibly re-pointed. A `.git` among them redirects
+          // discovery for everything after it; an ordinary one still has to
+          // be recorded, or a later `git -C <that path>` is validated against
+          // what the path pointed at before the command replaced it.
           for (const operand of expanded) {
             if (operand.text.startsWith('-') || operand.dynamic) continue;
             if (trackedCwd === undefined) {
@@ -1959,6 +1962,7 @@ async function evaluateCommandWithCwd(
             }
             const resolved = path.resolve(trackedCwd, operand.text);
             if (path.basename(resolved) === '.git') scope.relink.gitDir = true;
+            else relinkedTargets.push(resolved);
           }
           if (
             analysis.state.unresolved ||

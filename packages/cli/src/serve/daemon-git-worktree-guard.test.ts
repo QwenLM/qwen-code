@@ -1294,6 +1294,20 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
+  // A dynamic program word may be `ln`, and an ordinary target it re-points
+  // is just as invalidating as a `.git` one.
+  it.each([
+    () =>
+      `rm -rf src && X=ln; $X -s ${outsideRepo} src && git -C src reset --hard`,
+    () => `X=ln; $X -s ${outsideRepo} nested && git -C nested reset --hard`,
+  ])('denies Git after a dynamic relinker re-points its path %#', async (b) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(b()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
   // Git discovers its repository by walking up even with no relocation.
   it('denies a planted gitfile at the session root', async () => {
     const decoyRoot = path.join(temporaryRoot, 'decoy-session');
