@@ -199,6 +199,12 @@ export interface RunStallResilientOptions {
   signal?: AbortSignal;
   /** For the abandoned-error message. */
   label?: string;
+  /**
+   * Optional detail appended to the abandoned error when all attempts stall
+   * out. The production dispatch names every attempt's agent id here so the
+   * per-attempt transcripts it leaves behind stay pairable with the error.
+   */
+  abandonedDetail?: () => string | undefined;
 }
 
 /**
@@ -215,7 +221,7 @@ export async function runStallResilient<T>(
   attemptFn: StallAttemptFn<T>,
   opts: RunStallResilientOptions,
 ): Promise<T> {
-  const { stallMs, signal, label } = opts;
+  const { stallMs, signal, label, abandonedDetail } = opts;
 
   // Watchdog disabled: single raw attempt, parent signal threaded straight
   // through (no per-attempt controller needed).
@@ -256,9 +262,11 @@ export async function runStallResilient<T>(
         continue;
       }
       if (watchdog.stalled()) {
+        const detail = abandonedDetail?.();
         throw new Error(
           `agent "${label ?? 'workflow-agent'}" stalled on all ` +
-            `${MAX_STALL_ATTEMPTS} attempts (no progress for ${stallMs}ms each).`,
+            `${MAX_STALL_ATTEMPTS} attempts (no progress for ${stallMs}ms each).` +
+            (detail ? ` ${detail}` : ''),
         );
       }
       throw err;

@@ -1759,6 +1759,82 @@ describe('createProductionDispatch', () => {
         .map((l) => JSON.parse(l) as Record<string, unknown>);
     }
 
+    // Override-path dispatch routes through SubagentManager.createAgentHeadless
+    // rather than AgentHeadless.create, so exercising the transcript there
+    // needs a config that merges the subagent-manager stub with the
+    // transcript methods (the override-path suite's fakeConfigWithMgr has no
+    // getProjectRoot, so attach throws there and is swallowed). The stub's
+    // execute emits a tool-call pair on the emitter the stall wrapper
+    // forwards into createAgentHeadless.
+    function overrideTranscriptConfig(
+      resolveName: (name: string) => string | null,
+    ): Config {
+      return {
+        storage: { getProjectDir: () => projectDir },
+        getSessionId: () => SESSION,
+        getProjectRoot: () => projectDir,
+        getCliVersion: () => '0.0.0-test',
+        getSubagentManager: () => ({
+          findSubagentByName: async (name: string) => {
+            const canonical = resolveName(name);
+            return canonical === null
+              ? null
+              : {
+                  name: canonical,
+                  description: 'stub subagent',
+                  systemPrompt: 'You are a stub.',
+                  level: 'builtin',
+                };
+          },
+          createAgentHeadless: async (
+            _subagentConfig: unknown,
+            _runtimeContext: unknown,
+            options?: { eventEmitter?: unknown },
+          ) => ({
+            subagent: {
+              execute: async () => {
+                const ee = options?.eventEmitter as
+                  | AgentEventEmitter
+                  | undefined;
+                ee?.emit(AgentEventType.TOOL_CALL, {
+                  subagentId: 'workflow-agent',
+                  round: 1,
+                  callId: 'call-override-1',
+                  name: 'glob',
+                  args: { pattern: '**/*.ts' },
+                  description: 'find files',
+                  timestamp: Date.now(),
+                });
+                ee?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+                  subagentId: 'workflow-agent',
+                  round: 1,
+                  responses: [
+                    {
+                      callId: 'call-override-1',
+                      responseParts: [
+                        {
+                          functionResponse: {
+                            id: 'call-override-1',
+                            name: 'glob',
+                            response: { output: 'src/index.ts' },
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                  timestamp: Date.now(),
+                });
+              },
+              getFinalText: () => 'override-output',
+              getTerminateMode: () => nextTerminateMode.value,
+              getExecutionSummary: () => ({ outputTokens: 0 }),
+            },
+            dispose: async () => {},
+          }),
+        }),
+      } as unknown as Config;
+    }
+
     it('writes one transcript per dispatch, opening with the launch prompt', async () => {
       const dispatch = createProductionDispatch(transcriptConfig());
       await dispatch('review the diff', { label: 'reviewer' });
@@ -1777,6 +1853,10 @@ describe('createProductionDispatch', () => {
       expect(first['agentId']).toBe(created[0]!.agentId);
       expect(first['agentName']).toBe('reviewer');
       expect(first['sessionId']).toBe(SESSION);
+      // The audit annotations the feature exists to carry — un-pinned, a
+      // rebuild of the attach options could drop them without a red test.
+      expect(first['cwd']).toBe(projectDir);
+      expect(first['version']).toBe('0.0.0-test');
       // The prompt is written at attach time, before the model has produced
       // anything — which is what makes it evidence the agent cannot revise.
       expect(
@@ -1911,6 +1991,131 @@ describe('createProductionDispatch', () => {
         'headless-said:still works',
       );
       expect(transcriptFiles()).toHaveLength(0);
+    });
+
+    // Both fallback branches set: the script-chosen label must win over the
+    // model-authored agentType, or the transcript-to-script-line name
+    // matching the attach comment promises breaks. agentType forces the
+    // override path, so this also exercises the fallback chain there.
+    it('records the label over agentType when both are set', async () => {
+      const config = overrideTranscriptConfig((name) =>
+        name.toLowerCase() === 'explore' ? 'Explore' : null,
+      );
+      const dispatch = createProductionDispatch(config);
+      await dispatch('review the diff', {
+        label: 'reviewer',
+        agentType: 'Explore',
+      });
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['agentName']).toBe('reviewer');
+    });
+
+    it('falls back to the constant agentName when neither option is set', async () => {
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('plain run', {});
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['agentName']).toBe('workflow-agent');
+    });
+
+    // One attach point covers both dispatch paths — the override path must
+    // produce the same record shape through the emitter the stall wrapper
+    // forwards into createAgentHeadless: launch prompt first, tool calls
+    // pairable by callId.
+    it('records override-path dispatches through the same attach point', async () => {
+      const config = overrideTranscriptConfig((name) =>
+        name.toLowerCase() === 'explore' ? 'Explore' : null,
+      );
+      const dispatch = createProductionDispatch(config);
+      await dispatch('find foo', { agentType: 'Explore', label: 'e' });
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      const records = recordsOf(files[0]);
+      const first = records[0];
+      expect(first['type']).toBe('user');
+      expect(first['agentName']).toBe('e');
+      expect(
+        (first['message'] as { parts: Array<{ text?: string }> }).parts[0].text,
+      ).toBe('find foo');
+
+      const call = records.find((r) =>
+        (
+          r['message'] as { parts?: Array<{ functionCall?: unknown }> }
+        )?.parts?.some((p) => p.functionCall !== undefined),
+      );
+      const result = records.find((r) => r['type'] === 'tool_result');
+      expect(call).toBeDefined();
+      expect(result).toBeDefined();
+      expect(
+        (
+          (
+            call!['message'] as {
+              parts: Array<{ functionCall?: { id?: string } }>;
+            }
+          ).parts[0].functionCall as { id: string } | undefined
+        )?.id,
+      ).toBe('call-override-1');
+      expect((result!['toolCallResult'] as { callId: string }).callId).toBe(
+        'call-override-1',
+      );
+    });
+
+    // Subagent resolution is case-insensitive, and the Agent tool records
+    // the canonical SubagentConfig name — a lowercase model-authored
+    // agentType must land on the same canonical name or the two launch
+    // paths split any reader joining on agentName.
+    it('records the canonical subagent name when only agentType is set', async () => {
+      const config = overrideTranscriptConfig((name) =>
+        name.toLowerCase() === 'explore' ? 'Explore' : null,
+      );
+      const dispatch = createProductionDispatch(config);
+      await dispatch('review X', { agentType: 'explore' });
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['agentName']).toBe('Explore');
+    });
+
+    // The stall-abandoned outcome is the one failure mode that leaves
+    // multiple transcripts behind; the terminal error must name every
+    // attempt's id or the files cannot be paired with the failure.
+    it('names every attempt id in the stall-abandoned error', async () => {
+      nextExecuteHook.value = async (emitter, signal) => {
+        nextTerminateMode.value = 'CANCELLED';
+        emitter.emit(AgentEventType.ROUND_START, {
+          subagentId: 'workflow-agent',
+          round: 1,
+          promptId: 'prompt-1',
+          timestamp: Date.now(),
+        });
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+      };
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      let caught: unknown;
+      try {
+        await dispatch('stall forever', { label: 'staller', stallMs: 20 });
+      } catch (error) {
+        caught = error;
+      }
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(3);
+      expect(String(caught)).toMatch(/stalled on all 3 attempts/);
+      for (const file of files) {
+        const id = path.basename(file, '.jsonl').slice('agent-'.length);
+        expect(String(caught)).toContain(id);
+      }
     });
   });
 

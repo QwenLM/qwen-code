@@ -399,15 +399,18 @@ export function createProductionDispatch(
     const stallMs = resolveStallMs(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
+    const attemptIds: string[] = [];
     return runStallResilient(
       async (attemptSignal, emitter) => {
         // Minted here rather than inside the dispatch so this attempt's
         // transcript is named for the same id the dispatch reports in its
-        // terminal error — and so the writer is attached to the emitter
+        // terminal error — when the stall wrapper abandons, its error names
+        // every attempt's id — and so the writer is attached to the emitter
         // BEFORE any agent event can fire on it.
         const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+        attemptIds.push(workflowAgentId);
         const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
-        const detachTranscript = attachDispatchTranscript(
+        const detachTranscript = await attachDispatchTranscript(
           config,
           workflowAgentId,
           prompt,
@@ -433,6 +436,7 @@ export function createProductionDispatch(
         stallMs,
         signal,
         label: typeof opts.label === 'string' ? opts.label : undefined,
+        abandonedDetail: () => `Attempt ids: ${attemptIds.join(', ')}.`,
       },
     );
   };
@@ -442,8 +446,10 @@ export function createProductionDispatch(
  * Attach the harness's own per-subagent transcript to one dispatch.
  *
  * Workflow subagents were the only agents in the product that left no record.
- * `attachJsonlTranscriptWriter` has exactly one other caller — the Agent tool
- * (foreground and background) — while workflow dispatch goes straight to
+ * `attachJsonlTranscriptWriter` has three other callers — the Agent tool
+ * (foreground and background) and the background-agent resume path, which is
+ * the only consumer of the writer's append/parent-uuid resume options —
+ * while workflow dispatch goes straight to
  * `AgentHeadless.create` / `createAgentHeadless`, so nothing landed in
  * `<projectDir>/subagents/<sessionId>/`. Everything that reads that directory
  * to answer "what did this agent actually do" was blind on the workflow path:
@@ -468,13 +474,13 @@ export function createProductionDispatch(
  * writer itself opens its fd lazily, so a dispatch that produces no record
  * materializes no file.
  */
-function attachDispatchTranscript(
+async function attachDispatchTranscript(
   config: Config,
   workflowAgentId: string,
   prompt: string,
   opts: WorkflowAgentOpts,
   emitter: AgentEventEmitter,
-): () => void {
+): Promise<() => void> {
   let cleanup: (() => void) | undefined;
   try {
     const sessionId = config.getSessionId();
@@ -486,6 +492,11 @@ function attachDispatchTranscript(
     const label = typeof opts.label === 'string' ? opts.label.trim() : '';
     const agentType =
       typeof opts.agentType === 'string' ? opts.agentType.trim() : '';
+    const agentName = label
+      ? label
+      : agentType
+        ? await canonicalSubagentName(config, agentType)
+        : 'workflow-agent';
     ({ cleanup } = attachJsonlTranscriptWriter(
       emitter,
       getAgentJsonlPath(
@@ -495,7 +506,7 @@ function attachDispatchTranscript(
       ),
       {
         agentId: workflowAgentId,
-        agentName: label || agentType || 'workflow-agent',
+        agentName,
         sessionId,
         cwd: projectRoot,
         version: config.getCliVersion() || 'unknown',
@@ -522,6 +533,31 @@ function attachDispatchTranscript(
       );
     }
   };
+}
+
+/**
+ * Subagent resolution is case-insensitive, so a model-authored `agentType`
+ * can differ in case from the canonical `SubagentConfig.name` the Agent tool
+ * records for the same definition. Resolve so transcripts from both launch
+ * paths join on `agentName`; fall back to the raw string when resolution is
+ * unavailable — the name is best-effort audit metadata.
+ */
+async function canonicalSubagentName(
+  config: Config,
+  agentType: string,
+): Promise<string> {
+  try {
+    const resolved = await config
+      .getSubagentManager()
+      .findSubagentByName(agentType);
+    return resolved?.name || agentType;
+  } catch (error) {
+    debugLogger.warn(
+      `[workflow] transcript agentName resolution failed for ` +
+        `${sanitizeForErrorMessage(agentType)}: ${error}`,
+    );
+    return agentType;
+  }
 }
 
 /**
