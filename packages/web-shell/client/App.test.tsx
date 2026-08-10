@@ -301,6 +301,7 @@ const {
       onDismissFollowup: vi.fn(),
     },
     testState: {
+      ownerVersion: 0,
       prompt: 'hello',
       inputAnnotations: undefined as DaemonInputAnnotation[] | undefined,
       promptImages: undefined as
@@ -392,51 +393,60 @@ const {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
-  useActions: () => mockSessionActions,
-  useConnection: () => mockConnection,
-  useDaemonFollowupSuggestion: () => ({
-    followupState: null,
-    clear: mockFollowup.clear,
-    onAcceptFollowup: mockFollowup.onAcceptFollowup,
-    onDismissFollowup: mockFollowup.onDismissFollowup,
-  }),
-  useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
-  usePromptStatus: () => 'idle',
-  useSettings: () => ({
-    settings: testState.settings,
-    setValue: settingsSetValue,
-    reload: settingsReload,
-    loading: false,
-  }),
-  useProviders: () => ({
-    providers: [],
-    current: undefined,
-    loading: false,
-    error: undefined,
-    reload: vi.fn().mockResolvedValue(undefined),
-  }),
-  useStreamingState: () => testState.streamingState,
-  useTranscriptBlocks: () => testState.blocks,
-  useTranscriptHistory: () => ({
-    hasMore: false,
-    loading: false,
-    capacityReached: false,
-    paginationError: false,
-    loadMore: vi.fn(),
-    release: vi.fn(),
-  }),
-  useTranscriptStore: () => mockStore,
-  useWorkspace: () => mockWorkspace,
-  useWorkspaceActions: () => mockWorkspaceActions,
-  useMcp: () => mockMcp,
-  useWorkspaceEventSignals: () => ({
-    artifactsVersion: 0,
-    extensionsVersion: 0,
-  }),
-}));
+vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
+  const ownerGuard = {
+    capture: () => {
+      const ownerVersion = testState.ownerVersion;
+      return { isCurrent: () => testState.ownerVersion === ownerVersion };
+    },
+  };
+  return {
+    DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+    DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
+    useActions: () => mockSessionActions,
+    useConnection: () => mockConnection,
+    useDaemonSessionOwnerGuard: () => ownerGuard,
+    useDaemonFollowupSuggestion: () => ({
+      followupState: null,
+      clear: mockFollowup.clear,
+      onAcceptFollowup: mockFollowup.onAcceptFollowup,
+      onDismissFollowup: mockFollowup.onDismissFollowup,
+    }),
+    useSessionNotices: () => ({ notices: [], dismissNotice: vi.fn() }),
+    usePromptStatus: () => 'idle',
+    useSettings: () => ({
+      settings: testState.settings,
+      setValue: settingsSetValue,
+      reload: settingsReload,
+      loading: false,
+    }),
+    useProviders: () => ({
+      providers: [],
+      current: undefined,
+      loading: false,
+      error: undefined,
+      reload: vi.fn().mockResolvedValue(undefined),
+    }),
+    useStreamingState: () => testState.streamingState,
+    useTranscriptBlocks: () => testState.blocks,
+    useTranscriptHistory: () => ({
+      hasMore: false,
+      loading: false,
+      capacityReached: false,
+      paginationError: false,
+      loadMore: vi.fn(),
+      release: vi.fn(),
+    }),
+    useTranscriptStore: () => mockStore,
+    useWorkspace: () => mockWorkspace,
+    useWorkspaceActions: () => mockWorkspaceActions,
+    useMcp: () => mockMcp,
+    useWorkspaceEventSignals: () => ({
+      artifactsVersion: 0,
+      extensionsVersion: 0,
+    }),
+  };
+});
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
   DaemonHttpError: class DaemonHttpError extends Error {
@@ -4347,6 +4357,7 @@ beforeEach(() => {
   };
   mockConnection.gitBranch = undefined;
   mockConnection.gitStatus = undefined;
+  testState.ownerVersion = 0;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
@@ -6937,6 +6948,59 @@ describe('App session callbacks', () => {
           ?.textContent,
       ).toContain('Real session title');
     });
+  });
+
+  it('does not expose cached metadata after a same-id workspace switch', async () => {
+    mockConnection.displayName = undefined;
+    const sourceStatus = deferred<{
+      workspaceCwd: string;
+      displayName: string;
+    }>();
+    mockWorkspace.client.sessionStatus.mockReturnValueOnce(
+      sourceStatus.promise,
+    );
+    const sourceList = deferred<never[]>();
+    mockWorkspace.client.listWorkspaceSessions.mockReturnValueOnce(
+      sourceList.promise,
+    );
+    const targetStatus = deferred<{ workspaceCwd: string }>();
+    mockWorkspace.client.sessionStatus.mockReturnValueOnce(
+      targetStatus.promise,
+    );
+    const { container, rerender } = renderApp();
+
+    await act(async () => {
+      sourceStatus.resolve({
+        workspaceCwd: '/work/a',
+        displayName: 'Session A title',
+      });
+      sourceList.resolve([]);
+      await Promise.all([sourceStatus.promise, sourceList.promise]);
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="chat-context-header"]')
+          ?.textContent,
+      ).toContain('Session A title');
+    });
+
+    testState.ownerVersion += 1;
+    mockConnection.workspaceCwd = '/work/b';
+    rerender();
+    await flush();
+    rerender();
+
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent,
+    ).not.toContain('Session A title');
+
+    await act(async () => {
+      targetStatus.resolve({ workspaceCwd: '/work/b' });
+      await targetStatus.promise;
+    });
+    await flush();
   });
 
   it('keeps the persistent chat header opt-in for existing integrations', () => {
@@ -9633,6 +9697,9 @@ describe('App session callbacks', () => {
 
   it('discards an automatic recap after switching to an existing session', async () => {
     const { recap, container } = await triggerAutoRecap();
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      testState.ownerVersion += 1;
+    });
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
@@ -9652,8 +9719,36 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it('keeps an automatic recap when an existing-session switch fails', async () => {
+    const { recap } = await triggerAutoRecap();
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('target restore failed'),
+    );
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', { detail: 'session-2' }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Current session recap' });
+      await recap.promise;
+    });
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        source: 'recap',
+        text: expect.stringContaining('Current session recap'),
+      }),
+    ]);
+  });
+
   it('discards an automatic recap after resuming a session by command', async () => {
     const { recap } = await triggerAutoRecap();
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      testState.ownerVersion += 1;
+    });
     await act(async () => {
       testState.latestChatEditorProps?.onSubmit('/resume session-3');
       recap.resolve({
@@ -9663,7 +9758,9 @@ describe('App session callbacks', () => {
       await recap.promise;
     });
 
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3');
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-3', {
+      workspaceCwd: undefined,
+    });
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({ source: 'recap' }),
     ]);
@@ -9763,6 +9860,49 @@ describe('App session callbacks', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('does not finish a same-id workspace switch before commit', async () => {
+    const load = deferred<void>();
+    mockSessionActions.loadSession.mockImplementationOnce(() => {
+      mockConnection.sessionTransition = {
+        phase: 'preparing',
+        operation: 'load',
+        origin: 'action',
+        targetSessionId: 'session-1',
+        targetWorkspaceCwd: '/work/b',
+      };
+      return load.promise;
+    });
+    const { rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: { sessionId: 'session-1', workspaceCwd: '/work/b' },
+        }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.onSubmit('must stay on A')).toBe(
+      false,
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => {
+      mockConnection.workspaceCwd = '/work/b';
+      mockConnection.sessionTransition = undefined;
+      load.resolve();
+      rerender();
+      await load.promise;
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
@@ -11532,6 +11672,30 @@ describe('App session callbacks', () => {
         inputAnnotations: [annotation],
       }),
     );
+  });
+
+  it('does not send a deferred plan prompt into a replacement owner', async () => {
+    const approval = deferred<void>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/plan explain the migration';
+    await clickSubmit(container);
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await act(async () => {
+      approval.resolve();
+      await approval.promise;
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
   });
 
   it('dispatches turn_complete only for the session that was streaming', async () => {
@@ -14481,7 +14645,9 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
-    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2');
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2', {
+      workspaceCwd: undefined,
+    });
   });
 
   it('dispatches rename only after the current session name changes', async () => {
@@ -14668,8 +14834,9 @@ describe('App prompt send failure retry', () => {
   it('keeps an unknown lazy-session admission scoped to its allocated session', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockConnection.sessionId = undefined;
-    mockSessionActions.createSession.mockResolvedValueOnce({
-      sessionId: 'session-created',
+    mockSessionActions.createSession.mockImplementationOnce(async () => {
+      testState.ownerVersion += 1;
+      return { sessionId: 'session-created' };
     });
     const firstSend = deferred<void>();
     mockSessionActions.sendPrompt.mockReturnValueOnce(firstSend.promise);
@@ -14687,8 +14854,8 @@ describe('App prompt send failure retry', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
     });
     const firstSendOptions = mockSessionActions.sendPrompt.mock.calls[0]?.[1];
-    act(() => firstSendOptions?.onAdmissionStarted?.());
     act(() => {
+      firstSendOptions?.onAdmissionStarted?.();
       mockConnection.sessionId = 'session-created';
       rerender();
     });
@@ -15664,22 +15831,103 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     void second;
   });
 
-  it('rejects a bound run when the session switch times out', async () => {
+  it('does not let an old same-target failure clear a newer bound run', async () => {
+    admitOnSend();
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    const firstRestore = deferred<void>();
+    const secondRestore = deferred<void>();
+    mockSessionActions.loadSession
+      .mockReturnValueOnce(firstRestore.promise)
+      .mockReturnValueOnce(secondRestore.promise);
+    let firstError: unknown;
+    let secondSettled = false;
+
+    await act(async () => {
+      void run('first', 'same-target').catch((error) => {
+        firstError = error;
+      });
+      void run('second', 'same-target').then(
+        () => {
+          secondSettled = true;
+        },
+        () => {
+          secondSettled = true;
+        },
+      );
+      await Promise.resolve();
+    });
+    expect((firstError as Error | undefined)?.message).toMatch(/superseded/);
+
+    await act(async () => {
+      firstRestore.reject(new Error('old restore failed'));
+      await Promise.resolve();
+    });
+    expect(secondSettled).toBe(false);
+
+    mockConnection.sessionId = 'same-target';
+    await act(async () => {
+      secondRestore.resolve();
+      rerender();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(secondSettled).toBe(true));
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'second',
+      expect.any(Object),
+    );
+  });
+
+  it('does not apply the catch-up timeout while restore is pending', async () => {
     const { container } = renderApp();
     await flush();
     const run = await openRunHandler(container);
+    const restore = deferred<void>();
+    mockSessionActions.loadSession.mockReturnValueOnce(restore.promise);
     vi.useFakeTimers();
     let err: unknown;
     await act(async () => {
       void run('do the thing', 'never-active').catch((e) => {
         err = e;
       });
-      await Promise.resolve(); // loadSidebarSession resolves; no fire (not current)
+      await Promise.resolve();
     });
     await act(async () => {
       vi.advanceTimersByTime(30_000);
     });
-    expect((err as Error | undefined)?.message).toMatch(/Timed out switching/);
+    expect(err).toBeUndefined();
+    await act(async () => {
+      restore.reject(new Error('restore timed out'));
+      await Promise.resolve();
+    });
+    expect((err as Error | undefined)?.message).toBe('restore timed out');
+  });
+
+  it('starts the 30 second timeout only after commit while catching up', async () => {
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      mockConnection.sessionId = 'bound-session';
+      mockConnection.catchingUp = true;
+    });
+    vi.useFakeTimers();
+    let err: unknown;
+    await act(async () => {
+      void run('do the thing', 'bound-session').catch((error) => {
+        err = error;
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(29_999);
+    });
+    expect(err).toBeUndefined();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect((err as Error | undefined)?.message).toMatch(/session replay/);
   });
 
   it('"create via chat" starts a fresh session and primes the composer', async () => {

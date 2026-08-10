@@ -8,7 +8,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -20,6 +19,7 @@ import {
   subscribePendingPromptEvents,
   subscribePendingPromptVersion,
   useDaemonMidTurnInjected,
+  useDaemonSessionOwnerGuard,
   type DaemonSessionActions,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -43,6 +43,7 @@ interface RefBox<T> {
 
 interface UseQueuedPromptsArgs {
   connected: boolean;
+  writeBlocked?: boolean;
   sessionId?: string;
   clientId?: string;
   /**
@@ -149,6 +150,7 @@ export interface UseQueuedPromptsResult {
 
 export function useQueuedPrompts({
   connected,
+  writeBlocked = false,
   sessionId,
   clientId,
   canMutateMidTurn,
@@ -160,12 +162,30 @@ export function useQueuedPrompts({
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const writeBlockedRef = useRef(writeBlocked);
+  writeBlockedRef.current = writeBlocked;
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const ownerTokenRef = useRef({ sessionId });
-  if (ownerTokenRef.current.sessionId !== sessionId) {
-    ownerTokenRef.current = { sessionId };
+  const ownerTokenRef = useRef({
+    sessionId,
+    snapshot: sessionOwnerGuard.capture(),
+  });
+  if (
+    ownerTokenRef.current.sessionId !== sessionId ||
+    !ownerTokenRef.current.snapshot.isCurrent()
+  ) {
+    ownerTokenRef.current = {
+      sessionId,
+      snapshot: sessionOwnerGuard.capture(),
+    };
   }
+  const ownerToken = ownerTokenRef.current;
+  const isCurrentOwnerTokenRef = useRef(
+    (token: typeof ownerToken) =>
+      ownerTokenRef.current === token && token.snapshot.isCurrent(),
+  );
+  const queuedPromptsOwnerRef = useRef(ownerToken);
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
@@ -204,16 +224,16 @@ export function useQueuedPrompts({
   }, [streamingIdle]);
   latestStreamingStateRef.current = streamingState;
 
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
-  );
+  const visibleQueuedPrompts =
+    queuedPromptsOwnerRef.current === ownerToken ? queuedPrompts : [];
+  const queuedTexts = visibleQueuedPrompts.map((prompt) => prompt.text);
 
   useEffect(() => {
     queuedPromptsRef.current = queuedPrompts;
   }, [queuedPrompts]);
 
   useEffect(() => {
+    queuedPromptsOwnerRef.current = ownerToken;
     queuedPromptsRef.current = [];
     setQueuedPrompts([]);
     completionCallbacksRef.current = new Map();
@@ -232,7 +252,7 @@ export function useQueuedPrompts({
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
-  }, [sessionId]);
+  }, [ownerToken]);
 
   const settleCompletionCallback = useCallback(
     (promptId: string, onComplete: () => void) => {
@@ -347,7 +367,7 @@ export function useQueuedPrompts({
         });
         if (requestSeq !== refreshRequestSeqRef.current) return 'superseded';
         if (
-          ownerTokenRef.current !== ownerToken ||
+          !isCurrentOwnerTokenRef.current(ownerToken) ||
           latestSessionIdRef.current !== targetSessionId
         ) {
           return 'skipped';
@@ -540,7 +560,7 @@ export function useQueuedPrompts({
       expectedOwnerToken = ownerTokenRef.current,
     ): boolean => {
       if (
-        ownerTokenRef.current !== expectedOwnerToken ||
+        !isCurrentOwnerTokenRef.current(expectedOwnerToken) ||
         (targetSessionId !== undefined &&
           latestSessionIdRef.current !== targetSessionId)
       ) {
@@ -798,7 +818,7 @@ export function useQueuedPrompts({
         .then((result) => {
           submitAbortControllersRef.current.delete(submitAbort);
           if (
-            ownerTokenRef.current !== ownerToken ||
+            !isCurrentOwnerTokenRef.current(ownerToken) ||
             latestSessionIdRef.current !== targetSessionId
           ) {
             return;
@@ -920,7 +940,7 @@ export function useQueuedPrompts({
         .catch((error: unknown) => {
           submitAbortControllersRef.current.delete(submitAbort);
           if (
-            ownerTokenRef.current !== ownerToken ||
+            !isCurrentOwnerTokenRef.current(ownerToken) ||
             latestSessionIdRef.current !== targetSessionId
           ) {
             return;
@@ -966,6 +986,7 @@ export function useQueuedPrompts({
 
   const fallbackToPendingPrompt = useCallback(
     (id: number) => {
+      if (writeBlockedRef.current) return;
       const current = queuedPromptsRef.current;
       const index = current.findIndex(
         (prompt) => prompt.id === id && prompt.midTurnState !== undefined,
@@ -1142,7 +1163,7 @@ export function useQueuedPrompts({
           signal: abort.signal,
         })
         .then((result) => {
-          if (ownerTokenRef.current !== ownerToken) return;
+          if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
           const current = queuedPromptsRef.current;
           const index = current.findIndex((item) => item.id === prompt.id);
           if (index === -1) return;
@@ -1220,9 +1241,12 @@ export function useQueuedPrompts({
   ]);
 
   useEffect(() => {
-    if (streamingState !== 'idle') return;
-    midTurnEnqueueAbortRef.current?.abort();
-    midTurnEnqueueAbortRef.current = null;
+    if (streamingState !== 'idle' || writeBlocked) return;
+    const ctrl = midTurnEnqueueAbortRef.current;
+    if (ctrl) {
+      ctrl.abort();
+      midTurnEnqueueAbortRef.current = null;
+    }
     for (const prompt of queuedPromptsRef.current) {
       if (!prompt.midTurnFailedAction) continue;
       const next = queuedPromptsRef.current.filter(
@@ -1262,6 +1286,7 @@ export function useQueuedPrompts({
     };
   }, [
     streamingState,
+    writeBlocked,
     canQueryMidTurn,
     fallbackToPendingPrompt,
     restoreQueuedPromptsToEditor,
@@ -1327,7 +1352,7 @@ export function useQueuedPrompts({
             sessionId: targetSessionId,
           },
         );
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         removingPromptIds.delete(target.serverPromptId);
         if (!result.removed) {
           setQueuedPromptFlags(target.id, {
@@ -1335,7 +1360,7 @@ export function useQueuedPrompts({
             isRemoving: false,
           });
           await refreshPendingPrompts(targetSessionId);
-          if (ownerTokenRef.current !== ownerToken) return false;
+          if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
           reportError(
             new Error('Prompt could not be removed from queue'),
             fallback,
@@ -1344,7 +1369,7 @@ export function useQueuedPrompts({
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
         const refreshResult = await refreshPendingPrompts(targetSessionId);
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         if (refreshResult === 'failed') {
           setQueuedPromptFlags(target.id, {
             isEditing: false,
@@ -1357,14 +1382,14 @@ export function useQueuedPrompts({
         }
         return true;
       } catch (error) {
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         removingPromptIds.delete(target.serverPromptId);
         setQueuedPromptFlags(target.id, {
           isEditing: false,
           isRemoving: false,
         });
         const refreshResult = await refreshPendingPrompts(targetSessionId);
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         if (refreshResult !== 'refreshed') {
           restoreQueuedPrompts([target]);
         }
@@ -1408,7 +1433,7 @@ export function useQueuedPrompts({
           target.midTurnMessageId,
           { sessionId: target.sessionId },
         );
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         const current = queuedPromptsRef.current;
         const latest = current.find((prompt) => prompt.id === target.id);
         if (!latest) return result.removed;
@@ -1456,7 +1481,7 @@ export function useQueuedPrompts({
         setQueuedPrompts(next);
         return true;
       } catch (error) {
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         const latest = queuedPromptsRef.current.find(
           (prompt) => prompt.id === target.id,
         );
@@ -1558,7 +1583,7 @@ export function useQueuedPrompts({
       ) {
         return false;
       }
-      if (ownerTokenRef.current !== ownerToken) return false;
+      if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
       if (target.midTurnMessageId) {
         completionCallbacksRef.current.delete(target.midTurnMessageId);
       }
@@ -1797,7 +1822,7 @@ export function useQueuedPrompts({
       );
 
       if (
-        ownerTokenRef.current !== clearOwnerToken ||
+        !isCurrentOwnerTokenRef.current(clearOwnerToken) ||
         latestSessionIdRef.current !== clearSessionId
       ) {
         return;
@@ -1831,7 +1856,7 @@ export function useQueuedPrompts({
   }, [refreshPendingPrompts, reportError, store, t, sessionActions]);
 
   return {
-    queuedPrompts,
+    queuedPrompts: visibleQueuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
