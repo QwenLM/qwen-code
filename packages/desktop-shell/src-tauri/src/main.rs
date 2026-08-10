@@ -537,8 +537,8 @@ fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
         WebviewUrl::App("local-control.html".into()),
     )
     .title("Qwen Code Local Control")
-    .inner_size(460.0, 720.0)
-    .min_inner_size(420.0, 560.0)
+    .inner_size(440.0, 500.0)
+    .min_inner_size(400.0, 500.0)
     .resizable(false)
     .build()
     .map(|_| ())

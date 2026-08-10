@@ -103,6 +103,13 @@ describe('serve command args', () => {
     expect(parsed['initialize-timeout-ms']).toBe(30000);
   });
 
+  it('parses --session-restore-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync(
+      '--session-restore-timeout-ms 60000',
+    );
+    expect(parsed['session-restore-timeout-ms']).toBe(60000);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
@@ -111,6 +118,11 @@ describe('serve command args', () => {
   it('leaves --initialize-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['initialize-timeout-ms']).toBeUndefined();
+  });
+
+  it('leaves --session-restore-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['session-restore-timeout-ms']).toBeUndefined();
   });
 
   it('defaults external tool guarding to off', () => {

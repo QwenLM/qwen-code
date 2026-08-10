@@ -386,9 +386,9 @@ export function normalizeDaemonEvent(
       // unknown event types, the doubled block-consumption rate
       // accelerated `maxBlocks` trimming of real content. The `debug`
       // shape already carries the event-type as a prefix, so the
-      // status block was redundant. Adapters that want a user-visible
-      // banner can pattern-match on `event.type === 'debug'` and the
-      // text prefix.
+      // status block was redundant. Adapters deciding how to present a
+      // debug block must branch on `debugReason` — the text prefix is
+      // diagnostic wording and changes without notice.
       return normalizeUnrecognizedEvent(event, base);
   }
 }
@@ -401,6 +401,7 @@ function normalizeUnrecognizedEvent(
     {
       ...base,
       type: 'debug',
+      debugReason: 'unrecognized_event',
       text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
     },
   ];
@@ -684,6 +685,7 @@ function normalizeSessionUpdate(
       {
         ...base,
         type: 'debug',
+        debugReason: 'malformed_payload',
         text: `session_update: ${stringifyRedactedJson(event.data)}`,
       },
     ];
@@ -850,6 +852,16 @@ function normalizeSessionUpdate(
         {
           ...base,
           type: 'debug',
+          // `getSessionUpdatePayload` accepts any record, so `kind` is
+          // `undefined` for a payload whose discriminator is missing, empty or
+          // not a string. That is a broken frame, not a kind from a newer
+          // daemon — classifying it as unrecognized would hide the only
+          // diagnostic a malformed `session_update` produces. A whitespace-only
+          // discriminator is truthy but no more usable than an empty one, so
+          // apply the same `trim()` convention `getFirstString` uses.
+          debugReason: kind?.trim()
+            ? 'unrecognized_session_update'
+            : 'malformed_payload',
           text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
         },
       ];
@@ -1139,6 +1151,7 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
+        debugReason: 'malformed_payload',
         text: `permission_request: ${stringifyRedactedJson(event.data)}`,
       },
     ];
@@ -1150,6 +1163,7 @@ function normalizePermissionRequest(
       {
         ...base,
         type: 'debug',
+        debugReason: 'malformed_payload',
         text: `permission_request: ${stringifyRedactedJson(event.data)}`,
       },
     ];
@@ -1183,6 +1197,7 @@ function normalizePermissionResolved(
       {
         ...base,
         type: 'debug',
+        debugReason: 'malformed_payload',
         text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
       },
     ];
@@ -1292,6 +1307,7 @@ function fallbackDebug(
     {
       ...base,
       type: 'debug',
+      debugReason: 'malformed_payload',
       text: `${event.type}: ${reason}`,
     },
   ];
