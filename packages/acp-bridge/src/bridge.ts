@@ -9210,7 +9210,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       if (isClosingOrAuthorizingClose(entry)) {
-        throw new SessionNotFoundError(sessionId, 'The session is closing');
+        throw new SessionNotFoundError(
+          sessionId,
+          'The session is closing; retry after close completes',
+        );
       }
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
