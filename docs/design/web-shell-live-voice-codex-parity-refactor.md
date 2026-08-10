@@ -274,10 +274,10 @@ The complete first-use path is:
    `qwen3.5-omni-plus-realtime` and optionally change the global shortcut.
 3. Turn on Live Voice and confirm that the signed native Host will be
    installed.
-4. The daemon downloads the architecture-matching release from the fixed
-   Qwen Code release origin, verifies its manifest checksum, bundle identity,
-   signature, and Gatekeeper acceptance, installs it atomically in
-   `/Applications`, and launches it.
+4. The daemon downloads the architecture-matching release from the Aliyun OSS
+   mirror, with the fixed Qwen Code GitHub release feed as fallback. It verifies
+   the manifest checksum, bundle identity, signature, and Gatekeeper acceptance,
+   installs it atomically in `/Applications`, and launches it.
 5. The Host guides the user through Microphone, Accessibility, and Screen
    Recording authorization. macOS remains the sole grant authority; the
    application cannot pre-grant or bypass TCC permissions.
