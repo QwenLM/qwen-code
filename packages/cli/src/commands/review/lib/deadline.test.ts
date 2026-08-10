@@ -347,6 +347,50 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     expect(readBudgetStop(p)?.round).toBe(3);
   });
 
+  it('first refusal wins — a later cap write does not flip a same-run budget marker', () => {
+    // The retry-after-refusal misbehavior class: the time gate refuses round
+    // 3, the orchestrator asks for round 4 anyway, the cap gate fires first
+    // (4 > 3) and — without the guard — overwrites the marker. compose-review
+    // would then splice out the wrong relayed entry and post two contradictory
+    // stop disclosures. First-write-wins keeps the marker the audit actually
+    // stopped on.
+    const p = stopPlan();
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+      NOW_MS,
+    );
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    const stop = readBudgetStop(p);
+    expect(stop?.cause).toBeUndefined(); // still the time-budget marker
+    expect(stop?.entry).toBe(
+      'reverse audit — stopped before round 3 by the review time budget',
+    );
+  });
+
+  it('first refusal wins the other way — a later budget write does not flip a cap marker', () => {
+    const p = stopPlan();
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      5,
+      NOW_MS,
+    );
+    const stop = readBudgetStop(p);
+    expect(stop?.cause).toBe('round-cap');
+    expect(stop?.cap).toBe(3);
+  });
+
   it('the dedup phrase travels with the entry it identifies', () => {
     // compose-review dedups the orchestrator's relayed copy by this phrase;
     // a reword of the entry that left the phrase behind would post the

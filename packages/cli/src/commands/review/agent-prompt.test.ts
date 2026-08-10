@@ -3445,6 +3445,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain('2 auditors required this round');
     expect(out).toContain('chunk 13 — retired: dry in rounds 1 and 2');
     expect(out).toContain('certificate final');
+    // Pin the spelled cap number, not just the branch: a hardcoded `5-round
+    // cap leaves` in the note wording would otherwise ship silently and tell
+    // the orchestrator a false cap on exactly the huge-diff runs this targets.
+    expect(out).toContain('3-round cap leaves');
     expect(out).not.toContain('next cold check round 4');
   });
 
@@ -3590,6 +3594,75 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // was never admitted, and must not skew the next admission's estimate.
     expect(readRecordedPrompts(plan).size).toBe(recordsBefore);
     expect(readRoundStamps(plan)).toHaveLength(stampsBefore);
+  });
+
+  it('huge cap: a converged past-cap round exits 5, not the cap — convergence outranks it', () => {
+    // The ordering the PR documents four times (the convergence check runs
+    // BEFORE the round-cap gate) with no test pin: hoisting the cap check
+    // above it survives the whole suite. Round 5 is past the cap of 3, but
+    // its schedule has converged (every chunk twice-dry, odd round → all
+    // skipped), so it must exit 5 CONVERGED with NO marker — not exit 4 at
+    // the cap. History that lands convergence on an odd past-cap round: 13/14
+    // dry in rounds 1-2 (retire at 3), 15 whiffs round 1 then goes dry in
+    // 2-3, so round 3 (odd) builds only 15 and nothing converges before 5.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY }); // 13,14 retired (odd → skipped); only 15 built
+    expect(keysOf(3)).toHaveLength(1);
+
+    const out = runRound(5); // 5 > cap 3, but the schedule has converged
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    // Convergence outranks the cap: no round-cap refusal, no marker written.
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('huge cap: a CONVERGED exit clears a stale same-run round-cap marker', () => {
+    // Retry-after-refusal: round 4 (even) is refused at the cap — every
+    // retired chunk is DUE a cold check, so the schedule is not converged and
+    // 4 > 3 refuses, writing the marker. The orchestrator then asks for round
+    // 5, which converges. Nothing else unlinks budget-stop.json, so without
+    // the converged-branch clear the stale marker caps a verdict that
+    // legitimately converged.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    runRound(4); // even → retired chunks due cold checks → not converged → cap refuses
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+
+    process.exitCode = undefined;
+    const out = runRound(5); // odd → all skipped → converged
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
   });
 
   it('a cold-check-only round is still built, admitted and stamped', () => {

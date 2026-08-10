@@ -826,6 +826,24 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.remediation.join(' ')).not.toContain('reverse audit:');
   });
 
+  it('a round-cap stop does NOT suppress the not-built gap — its rebuild is admitted', () => {
+    // R4-9: the reverseByDesign exemption is time-budget-ONLY. A round-cap
+    // marker with zero reverse-audit records must not suppress the not-built
+    // gap the way a time-budget stop does: the cap gate refuses only
+    // `round > cap`, so the gap's FIX (rebuild `--round 1`) is admitted, and
+    // a local run has no deadline to refuse it at all. Reading the marker
+    // cause-blind would silently drop both the gap and its rebuild
+    // remediation for a run that audited nothing.
+    const plan = coveredPlan([]); // no reverse-audit ran — the not-built shape
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    // The round-cap marker still discloses and caps the verdict…
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    // …but the not-built gap and its rebuild remediation are still owed.
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+  });
+
   it('renders the budget stop bilingually on a Han-description PR', () => {
     // Every sibling structural disclosure carries a zh pair; the budget stop
     // used to ride the caller-prose path and posted English into both halves.
