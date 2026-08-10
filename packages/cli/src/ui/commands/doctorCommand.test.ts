@@ -12,6 +12,7 @@ import * as doctorChecksModule from '../../utils/doctorChecks.js';
 import * as memoryDiagnosticsModule from '../../utils/memoryDiagnostics.js';
 import * as cpuProfilerModule from '../../utils/cpuProfiler.js';
 import { collectMemoryDiagnostics } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 import type { DoctorCheckResult } from '../types.js';
 
 vi.mock('../../utils/doctorChecks.js');
@@ -779,6 +780,158 @@ describe('doctorCommand', () => {
     expect(collectMemoryDiagnostics).toHaveBeenCalledWith({
       sessionId: 'session-123',
       qwenVersion: '0.15.11',
+    });
+  });
+
+  describe('tool result retention', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { output: 'x'.repeat(100) },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { output: 'y'.repeat(40_000) },
+            },
+          },
+        ],
+      },
+    ];
+
+    function contextWithHistory(
+      history: Content[],
+      uiHistory: CommandContext['ui']['history'] = [],
+    ): CommandContext {
+      return createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getSessionId: () => 'test-session',
+            getCliVersion: () => '0.0.0',
+            getGeminiClient: () => ({
+              getHistoryShallow: () => history,
+            }),
+          },
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+          history: uiHistory,
+        },
+      } as unknown as CommandContext);
+    }
+
+    it('should include retention stats in the readable report', async () => {
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain('Tool result retention');
+      expect(content).toContain('Tool results in history: 2');
+      expect(content).toContain('Oversized results (> 30000 chars): 1');
+      expect(content).toContain(
+        'Oversized also in UI history (> 30000 chars): 0 item(s)',
+      );
+      expect(content).toContain(
+        'Oversized also in compression input: yes (shared by reference, no extra copy)',
+      );
+      expect(content).toContain('/compress can reclaim space');
+    });
+
+    it('should detect large outputs duplicated in UI history', async () => {
+      const uiHistory = [
+        { type: 'gemini', text: 'z'.repeat(35_000) },
+        { type: 'info', text: 'short note' },
+      ] as unknown as CommandContext['ui']['history'];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, uiHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain(
+        'Oversized also in UI history (> 30000 chars): 1 item(s)',
+      );
+    });
+
+    it('should include retention stats in --json output', async () => {
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history),
+        '--json',
+      );
+
+      const parsed = JSON.parse(
+        result?.type === 'message' ? result.content : '{}',
+      ) as { toolResultRetention?: Record<string, number> };
+      expect(parsed.toolResultRetention).toMatchObject({
+        toolResultCount: 2,
+        oversizedResultCount: 1,
+        oversizedThresholdChars: 30_000,
+        largeOutputsInUIHistory: 0,
+        presentInCompressionInput: true,
+      });
+      expect(
+        parsed.toolResultRetention?.['largestResultChars'],
+      ).toBeGreaterThan(40_000);
+    });
+
+    it('should include retention stats in the interactive memory report', async () => {
+      const context = createMockCommandContext({
+        executionMode: 'interactive',
+        services: {
+          config: {
+            getSessionId: () => 'test-session',
+            getCliVersion: () => '0.0.0',
+            getGeminiClient: () => ({
+              getHistoryShallow: () => history,
+            }),
+          },
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+        },
+      } as unknown as CommandContext);
+
+      await doctorCommand.action!(context, 'memory');
+
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('Tool result retention'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('should omit the retention section when no chat history is available', async () => {
+      const result = await getMemoryCommand().action!(
+        createMockCommandContext({
+          executionMode: 'non_interactive',
+          ui: {
+            addItem: vi.fn(),
+            setPendingItem: vi.fn(),
+          },
+        } as unknown as CommandContext),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).not.toContain('Tool result retention');
     });
   });
 

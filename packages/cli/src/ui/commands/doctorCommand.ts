@@ -26,7 +26,9 @@ import { getInstallationInfo } from '../../utils/installationInfo.js';
 import { t } from '../../i18n/index.js';
 import {
   collectMemoryDiagnostics,
+  analyzeToolResultRetention,
   type MemoryDiagnostics,
+  type ToolResultRetentionStats,
 } from '@qwen-code/qwen-code-core';
 import { formatMemoryUsage } from '../utils/formatters.js';
 
@@ -111,6 +113,10 @@ export const doctorCommand: SlashCommand = {
       }
 
       let report = formatMemoryDiagnostics(diagnostics);
+      const toolResultRetention = collectToolResultRetention(context);
+      if (toolResultRetention) {
+        report = `${report}\n\n${formatToolResultRetention(toolResultRetention)}`;
+      }
       let messageType: 'info' | 'error' = 'info';
       let heapSnapshotWritten = false;
 
@@ -328,6 +334,8 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
       return;
     }
 
+    const toolResultRetention = collectToolResultRetention(context);
+
     return {
       type: 'message' as const,
       messageType:
@@ -335,8 +343,11 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
           ? ('warning' as const)
           : ('info' as const),
       content: tokens.includes('--json')
-        ? JSON.stringify(diagnostics, null, 2)
-        : formatCoreDiagnostics(diagnostics),
+        ? JSON.stringify({ ...diagnostics, toolResultRetention }, null, 2)
+        : formatCoreDiagnostics(diagnostics) +
+          (toolResultRetention
+            ? `\n\n${formatToolResultRetention(toolResultRetention)}`
+            : ''),
     };
   } catch (error) {
     if (context.abortSignal?.aborted) {
@@ -431,6 +442,67 @@ function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
     risks,
     `recommendation: ${diagnostics.analysis.recommendation}`,
   );
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Tool result retention diagnostics (issue #4184, phase 1)
+// ---------------------------------------------------------------------------
+
+interface ToolResultRetentionReport extends ToolResultRetentionStats {
+  /** UI history items whose rendered text exceeds the oversized threshold. */
+  largeOutputsInUIHistory: number;
+  /** Whether oversized results in live history are fed to compression input. */
+  presentInCompressionInput: boolean;
+}
+
+function collectToolResultRetention(
+  context: CommandContext,
+): ToolResultRetentionReport | null {
+  try {
+    const history = context.services.config
+      ?.getGeminiClient()
+      ?.getHistoryShallow();
+    if (!history) {
+      return null;
+    }
+    const stats = analyzeToolResultRetention(history);
+    const threshold = stats.oversizedThresholdChars;
+    const largeOutputsInUIHistory = (context.ui.history ?? []).filter(
+      (item) =>
+        'text' in item &&
+        typeof item.text === 'string' &&
+        item.text.length > threshold,
+    ).length;
+    return {
+      ...stats,
+      largeOutputsInUIHistory,
+      // Compression reads the live history by reference (getHistoryShallow),
+      // so any oversized result is part of the compression input without an
+      // additional retained copy.
+      presentInCompressionInput: stats.oversizedResultCount > 0,
+    };
+  } catch {
+    // Diagnostics must never break /doctor memory; degrade to "unavailable".
+    return null;
+  }
+}
+
+function formatToolResultRetention(stats: ToolResultRetentionReport): string {
+  const lines = [
+    'Tool result retention',
+    `  Tool results in history: ${stats.toolResultCount}`,
+    `  Total retained: ${stats.totalChars} chars`,
+    `  Largest result: ${stats.largestResultChars} chars`,
+    `  Oversized results (> ${stats.oversizedThresholdChars} chars): ${stats.oversizedResultCount}`,
+    `  Oversized also in UI history (> ${stats.oversizedThresholdChars} chars): ${stats.largeOutputsInUIHistory} item(s)`,
+    `  Oversized also in compression input: ${stats.presentInCompressionInput ? 'yes (shared by reference, no extra copy)' : 'no'}`,
+  ];
+  if (stats.oversizedResultCount > 0) {
+    lines.push(
+      '  Hint: oversized tool results stay in context and tax every later turn; /compress can reclaim space.',
+    );
+  }
   return lines.join('\n');
 }
 

@@ -550,6 +550,7 @@ export {
 export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
+export * from './utils/tool-result-retention.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/modelId.js';
 export * from './utils/runtimeDiagnostics.js';
