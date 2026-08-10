@@ -830,6 +830,11 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  // One-shot announcement of the context files (QWEN.md / context.fileName)
+  // attached to the system prompt, shown alongside the first real prompt so
+  // users can verify discovery (e.g., catch typos in context.fileName)
+  // without digging into debug logs (#5267).
+  const contextFilesAnnouncedRef = useRef(false);
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -1939,6 +1944,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (config.isSafeMode()) {
       config.setUserMemory('');
       config.setGeminiMdFileCount(0);
+      config.setContextFilePaths([]);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry([], config.getWorkingDir()),
       );
@@ -1961,27 +1967,33 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount, conditionalRules, projectRoot } =
-        await loadHierarchicalGeminiMemory(
-          process.cwd(),
-          settings.merged.context?.loadFromIncludeDirectories
-            ? config.getWorkspaceContext().getDirectories()
-            : [],
-          config.getFileService(),
-          config.getExtensionContextFilePaths(),
-          config.isTrustedFolder(),
-          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-          config.getContextRuleExcludes(),
-          {
-            loadReason: 'refresh',
-            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
-              config.getHookSystem(),
-            ),
-          },
-        );
+      const {
+        memoryContent,
+        fileCount,
+        contextFilePaths,
+        conditionalRules,
+        projectRoot,
+      } = await loadHierarchicalGeminiMemory(
+        process.cwd(),
+        settings.merged.context?.loadFromIncludeDirectories
+          ? config.getWorkspaceContext().getDirectories()
+          : [],
+        config.getFileService(),
+        config.getExtensionContextFilePaths(),
+        config.isTrustedFolder(),
+        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+        config.getContextRuleExcludes(),
+        {
+          loadReason: 'refresh',
+          onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+            config.getHookSystem(),
+          ),
+        },
+      );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry(conditionalRules, projectRoot),
       );
@@ -2460,6 +2472,22 @@ export const AppContainer = (props: AppContainerProps) => {
       ) {
         void handleSlashCommand('/quit');
         return;
+      }
+      if (
+        !contextFilesAnnouncedRef.current &&
+        !isSlashCommand(userPromptText)
+      ) {
+        contextFilesAnnouncedRef.current = true;
+        const contextFilePaths = config.getContextFilePaths();
+        if (contextFilePaths.length > 0) {
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `Read context files: ${contextFilePaths.join(', ')}`,
+            },
+            Date.now(),
+          );
+        }
       }
       const recoveredAgentsNotice =
         !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)

@@ -27,9 +27,11 @@ import {
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import * as path from 'node:path';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
@@ -84,7 +86,12 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
     const filePath = match[1]!;
     const content = match[2]!;
     results.push({
-      path: filePath,
+      // Marker paths are CWD-relative; shorten home-dir files to `~/...`
+      // so global memory files don't render as `../../..` chains.
+      path: formatContextFileDisplayPath(
+        path.resolve(process.cwd(), filePath),
+        process.cwd(),
+      ),
       tokens: estimateTokens(content),
     });
   }

@@ -314,6 +314,29 @@ async function readGeminiMdFiles(
   return results;
 }
 
+/**
+ * Renders a context file path for display: relative to the CWD when the
+ * file is inside the CWD tree, otherwise a `~/...` shortcut when the file
+ * lives under the user home (instead of a long `../../..` chain).
+ */
+export function formatContextFileDisplayPath(
+  filePath: string,
+  currentWorkingDirectory: string,
+  userHomePath = homedir(),
+): string {
+  if (!path.isAbsolute(filePath)) {
+    return filePath;
+  }
+  const relativePath = path.relative(currentWorkingDirectory, filePath);
+  if (
+    relativePath.startsWith('..') &&
+    filePath.startsWith(userHomePath + path.sep)
+  ) {
+    return path.join('~', path.relative(userHomePath, filePath));
+  }
+  return relativePath;
+}
+
 function concatenateInstructions(
   instructionContents: GeminiFileContent[],
   // CWD is needed to resolve relative paths for display markers
@@ -338,6 +361,11 @@ function concatenateInstructions(
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
+  /**
+   * Display paths of the loaded context (memory) files, relative to CWD.
+   * Lets callers tell users which files were actually attached (see #5267).
+   */
+  contextFilePaths: string[];
   /** Number of baseline rules injected at session start. */
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
@@ -476,6 +504,7 @@ export async function loadServerHierarchicalMemory(
 
   let combinedInstructions = '';
   let fileCount = 0;
+  let contextFilePaths: string[] = [];
 
   if (filePaths.length > 0) {
     const loadReason = options.loadReason ?? 'session_start';
@@ -502,9 +531,17 @@ export async function loadServerHierarchicalMemory(
       ...getAllGeminiMdFilenames(),
       LOCAL_CONTEXT_FILENAME,
     ]);
-    fileCount = contentsWithPaths.filter((item) =>
+    const memoryItems = contentsWithPaths.filter((item) =>
       memoryFilenames.has(path.basename(item.filePath)),
-    ).length;
+    );
+    fileCount = memoryItems.length;
+    contextFilePaths = memoryItems.map((item) =>
+      formatContextFileDisplayPath(
+        item.filePath,
+        currentWorkingDirectory,
+        userHomePath,
+      ),
+    );
   }
 
   // Load path-based context rules from .qwen/rules/ directories.
@@ -531,6 +568,7 @@ export async function loadServerHierarchicalMemory(
   return {
     memoryContent,
     fileCount,
+    contextFilePaths,
     ruleCount,
     conditionalRules,
     projectRoot: effectiveRoot,
