@@ -472,6 +472,10 @@ describe('ci.yml capture tooling', () => {
     );
     const statementsBetween = (from, to) =>
       installLines.slice(from + 1, to).flatMap((l) => rawStatementsOf(l));
+    // The budget the inner apt bounds must collectively stay under —
+    // when the step-level timeout fires there is no `|| echo`, so a chain
+    // that can outlast it loses the lane its tooling with no annotation.
+    const stepBudget = steps[install]['timeout-minutes'] * 60;
     const branches = [
       {
         name: 'root',
@@ -496,11 +500,22 @@ describe('ci.yml capture tooling', () => {
         installStatements.length,
         `${branch.name} branch: expected exactly one apt-get install`,
       ).toBe(1);
+      // WHICH packages too: the step-wide pin above is satisfied when ONE
+      // branch installs all three and the other installs nothing — and
+      // each branch must install on ITS OWN.
+      for (const pkg of ['tmux', 'zip', 'unzip']) {
+        expect(
+          installStatements.some((s) =>
+            unwrapCommand(s).split(/\s+/).includes(pkg),
+          ),
+          `${branch.name} branch does not install ${pkg}`,
+        ).toBe(true);
+      }
       for (const stmt of installStatements) {
         expect(unwrapCommand(stmt).split(/\s+/), stmt).toContain('-y');
         // The sudo branch runs through sudo, in any of its spellings and
         // behind any other wrapper: `sudo -n apt-get` is the sibling
-        // workflow's convention and `timeout 280 sudo -n apt-get` is what a
+        // workflow's convention and `timeout 140 sudo -n apt-get` is what a
         // bounded install looks like. Requiring sudo FIRST would red both.
         // The root branch must NOT: root lanes may ship no sudo binary, so
         // a sudo-wrapped chain there exits 127, the guard fires, and
@@ -536,6 +551,22 @@ describe('ci.yml capture tooling', () => {
         runsThroughSudo(updateStatements[0]),
         `${branch.name} branch: ${updateStatements[0]} sudo expectation`,
       ).toBe(branch.throughSudo);
+      // Each apt call is wrapped in its OWN timeout — `unwrapCommand`
+      // strips it, so ask the RAW statement — and the branch's bounds
+      // together stay under the step budget, or the guard never runs.
+      let innerTotal = 0;
+      for (const stmt of branch.statements.filter((s) => isAptGet(s))) {
+        const bound = stmt.trim().match(/^timeout\s+(\d+)\s/);
+        expect(
+          bound,
+          `${branch.name} branch: ${stmt} carries no inner bound`,
+        ).not.toBeNull();
+        innerTotal += Number(bound[1]);
+      }
+      expect(
+        innerTotal,
+        `${branch.name} branch: inner bounds outlast the step budget`,
+      ).toBeLessThan(stepBudget);
     }
     // Nothing foreign may sit on the install's chain: only apt-get calls
     // and the guard's echo, so no prefixed command can short-circuit it.
@@ -735,6 +766,22 @@ describe('ci.yml capture tooling', () => {
         expect(guarded, `apt-get reaches no \`|| echo\` guard :: ${line}`).toBe(
           true,
         );
+      }
+      // An annotation the runner never SEES is none at all: piped to a
+      // sink, the echo's stdout never reaches the runner — it parses
+      // workflow commands from stdout only. No statement-level pin can see
+      // the pipe (rawStatementsOf splits on it), so ask the logical line:
+      // the echo must be pipeline-terminal. `||` is not a pipe; the
+      // guard's second `|` satisfies the prefix.
+      if (
+        statementsOf(line).some(
+          (s) => /^echo\b/.test(s) && s.includes('::warning::'),
+        )
+      ) {
+        expect(
+          /(^|\|)\s*echo\b[^|]*$/.test(outsideQuotes(line)),
+          `annotation piped to a sink :: ${line}`,
+        ).toBe(true);
       }
       // EVERY message this step emits is an annotation. Keying on message
       // words pinned the wording, not the annotation: rewording an echo
