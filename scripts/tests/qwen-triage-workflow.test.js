@@ -5859,19 +5859,18 @@ describe('triage job budget', () => {
   // the fallback keeps an unconfigured repo bounded. Both halves pinned so
   // neither the knob nor its default can silently vanish.
   it('is operator-tunable through the sanitized authorize output', () => {
-    // Active lines only: a commented-out timeout line would satisfy a raw
-    // substring check while the job silently inherits GitHub's 360-minute
-    // default — the probe-verified evasion of the first version of this pin.
-    const active = (text) =>
-      text
-        .split('\n')
-        .filter((l) => !l.trimStart().startsWith('#'))
-        .join('\n');
-    expect(active(job('triage'))).toContain(
-      "timeout-minutes: '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}'",
+    // Pinned on the PARSED document, not job-text containment: relocating
+    // either line inside the same job (the output mapping into the budget
+    // step's env:, the job-level timeout-minutes onto a step) kept every
+    // substring match green while the knob silently died — probe-verified
+    // surviving mutations of the substring version. A parsed key also
+    // cannot match a commented-out line.
+    const doc = parse(workflow);
+    expect(doc.jobs.authorize.outputs.triage_timeout_minutes).toBe(
+      '${{ steps.budget.outputs.triage_timeout_minutes }}',
     );
-    expect(active(job('authorize'))).toContain(
-      "triage_timeout_minutes: '${{ steps.budget.outputs.triage_timeout_minutes }}'",
+    expect(doc.jobs.triage['timeout-minutes']).toBe(
+      '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}',
     );
   });
 
@@ -5894,10 +5893,18 @@ describe('triage job budget', () => {
       try {
         const outFile = join(dir, 'out');
         writeFileSync(outFile, '');
-        const res = execFileSync('bash', ['-c', budget.run], {
-          encoding: 'utf8',
-          env: { ...process.env, RAW: raw, GITHUB_OUTPUT: outFile },
-        });
+        // GitHub wraps `shell: bash` steps as `bash --noprofile --norc -eo
+        // pipefail {0}`; makeGhHarness pins the same contract. The script
+        // self-arms `set -euo pipefail`, but only the wrapper's `-e` keeps
+        // the replay fail-fast if a future edit drops that line.
+        const res = execFileSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', budget.run],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, RAW: raw, GITHUB_OUTPUT: outFile },
+          },
+        );
         return {
           out: readFileSync(outFile, 'utf8').trim(),
           warned: res.includes('::warning::'),
