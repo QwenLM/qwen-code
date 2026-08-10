@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {
   cleanupOldFileHistoryBackups,
+  cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
   getCutoffDate,
 } from './cleanup.js';
@@ -251,5 +252,101 @@ describe('cleanupOldSubagentTranscripts', () => {
     expect(r).toEqual({ removed: 1, errors: 0 });
     expect(fs.existsSync(subagentsRoot)).toBe(true);
     expect(fs.readdirSync(subagentsRoot)).toEqual([]);
+  });
+});
+
+describe('cleanupOldOpenAILogs', () => {
+  let logDir: string;
+  let cutoff: Date;
+
+  beforeEach(() => {
+    logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-openai-logs-test-'));
+    cutoff = new Date(Date.now() - 7 * MS_PER_DAY);
+  });
+
+  afterEach(() => {
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  function mkLog(name: string, mtime: Date): string {
+    const p = path.join(logDir, name);
+    fs.writeFileSync(p, '{}');
+    fs.utimesSync(p, mtime, mtime);
+    return p;
+  }
+
+  it('returns zero result when the log dir does not exist', async () => {
+    const r = await cleanupOldOpenAILogs({
+      logDir: path.join(logDir, 'nope'),
+      cutoffDate: cutoff,
+    });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+  });
+
+  it('removes logs whose filename date is older than the cutoff, even with a fresh mtime', async () => {
+    // Filename date is authoritative when parseable: the mtime may have been
+    // touched long after the log was written.
+    const old = mkLog('openai-2026-06-01T10-00-00-000Z_aaa.json', new Date());
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(old)).toBe(false);
+    // The project-local log dir itself is never removed.
+    expect(fs.existsSync(logDir)).toBe(true);
+  });
+
+  it('keeps logs whose filename date is newer than the cutoff', async () => {
+    const recent = new Date(Date.now() - 1 * MS_PER_DAY);
+    const name = `openai-${recent.toISOString().replace(/[:.]/g, '-')}_bbb.json`;
+    const fresh = mkLog(name, recent);
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it('falls back to mtime when the filename has no parseable date', async () => {
+    const old = mkLog(
+      'openai-not-a-date.json',
+      new Date(Date.now() - 30 * MS_PER_DAY),
+    );
+    const fresh = mkLog('openai-also-not-a-date.json', new Date());
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(old)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
+
+  it('uses mtime to disambiguate files dated exactly on the cutoff day', async () => {
+    const cutoffDay = cutoff.toISOString().slice(0, 10);
+    const olderThanCutoff = mkLog(
+      `openai-${cutoffDay}T00-00-00-000Z_old.json`,
+      new Date(cutoff.getTime() - MS_PER_HOUR),
+    );
+    const newerThanCutoff = mkLog(
+      `openai-${cutoffDay}T23-59-59-999Z_new.json`,
+      new Date(cutoff.getTime() + MS_PER_HOUR),
+    );
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(fs.existsSync(olderThanCutoff)).toBe(false);
+    expect(fs.existsSync(newerThanCutoff)).toBe(true);
+  });
+
+  it('ignores non-matching files and directories', async () => {
+    const note = mkLog('notes.txt', new Date(Date.now() - 60 * MS_PER_DAY));
+    const otherLog = mkLog(
+      'openai-logs.txt',
+      new Date(Date.now() - 60 * MS_PER_DAY),
+    );
+    const dirWithMatchingName = path.join(
+      logDir,
+      'openai-2026-06-01T00-00-00-000Z.json',
+    );
+    fs.mkdirSync(dirWithMatchingName);
+
+    const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
+    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(fs.existsSync(note)).toBe(true);
+    expect(fs.existsSync(otherLog)).toBe(true);
+    expect(fs.existsSync(dirWithMatchingName)).toBe(true);
   });
 });

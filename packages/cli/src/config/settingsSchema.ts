@@ -1590,6 +1590,19 @@ const SETTINGS_SCHEMA = {
           'Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.',
         showInDialog: false,
       },
+      openAILogRetentionDays: {
+        type: 'number',
+        label: 'OpenAI Log Retention (days)',
+        category: 'Model',
+        // LoadedSettings._merged is cached without verified setValue→recompute
+        // paths in all UI flows (same rationale as general.cleanupPeriodDays).
+        requiresRestart: true,
+        default: 7,
+        minimum: 0,
+        description:
+          'Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Log files older than this are removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour).',
+        showInDialog: false,
+      },
       generationConfig: {
         type: 'object',
         label: 'Generation Configuration',

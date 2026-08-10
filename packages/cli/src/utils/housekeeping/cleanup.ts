@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdir, stat, rm, rmdir } from 'node:fs/promises';
+import { readdir, stat, rm, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   Storage,
@@ -34,6 +34,12 @@ export interface CleanupOptions {
 export interface SubagentCleanupOptions extends CleanupOptions {
   /** Project-scoped subagents root: `<projectDir>/subagents/`. */
   subagentsRoot: string;
+}
+
+export interface OpenAILogCleanupOptions {
+  cutoffDate: Date;
+  /** Resolved OpenAI log directory (see resolveOpenAILogDir in core). */
+  logDir: string;
 }
 
 // cleanupPeriodDays = 0 means "minimum retention", not "delete everything
@@ -121,6 +127,69 @@ export async function cleanupOldSubagentTranscripts(
     ...opts,
     removeEmptyRoot: false,
   });
+}
+
+// Matches the filenames OpenAILogger writes:
+// `openai-<ISO timestamp>[_<diagnostic suffix>].json` — same predicate the
+// reader side uses (see packages/cli/src/utils/sessionPaths.ts).
+const OPENAI_LOG_FILE_PATTERN = /^openai-.*\.json$/;
+// Fast path: the UTC date embedded in the filename avoids one stat() per
+// file, which matters for users with hundreds of thousands of accumulated
+// logs. Only the boundary day (filename date == cutoff date) still needs an
+// mtime check; unparseable names fall back to mtime as well.
+const OPENAI_LOG_DATE_PATTERN = /^openai-(\d{4}-\d{2}-\d{2})/;
+
+// OpenAI API logs are flat files in a single dir (default
+// `<cwd>/logs/openai/`, or a custom `openAILoggingDir`), so this sweeps
+// files rather than session subdirs. The root dir is never removed: the
+// default location lives inside the user's project checkout.
+export async function cleanupOldOpenAILogs(
+  opts: OpenAILogCleanupOptions,
+): Promise<CleanupResult> {
+  const result: CleanupResult = { removed: 0, errors: 0 };
+
+  let entries;
+  try {
+    entries = await readdir(opts.logDir, { withFileTypes: true });
+  } catch (e) {
+    if (isENOENT(e)) return result;
+    debugLogger.error('readdir failed', e);
+    return result;
+  }
+
+  const files = entries
+    .filter((e) => e.isFile() && OPENAI_LOG_FILE_PATTERN.test(e.name))
+    .map((e) => ({
+      filePath: join(opts.logDir, e.name),
+      filenameDate: OPENAI_LOG_DATE_PATTERN.exec(e.name)?.[1],
+    }));
+
+  const cutoffDay = opts.cutoffDate.toISOString().slice(0, 10);
+
+  for (let i = 0; i < files.length; i += SWEEP_CONCURRENCY) {
+    const batch = files.slice(i, i + SWEEP_CONCURRENCY);
+    await Promise.all(
+      batch.map(async ({ filePath, filenameDate }) => {
+        try {
+          let shouldRemove: boolean;
+          if (filenameDate && filenameDate !== cutoffDay) {
+            shouldRemove = filenameDate < cutoffDay;
+          } else {
+            const s = await stat(filePath);
+            shouldRemove = s.mtime < opts.cutoffDate;
+          }
+          if (shouldRemove) {
+            await unlink(filePath);
+            result.removed++;
+          }
+        } catch (err) {
+          result.errors++;
+          debugLogger.error(`failed to sweep ${filePath}`, err);
+        }
+      }),
+    );
+  }
+  return result;
 }
 
 function isENOENT(e: unknown): boolean {

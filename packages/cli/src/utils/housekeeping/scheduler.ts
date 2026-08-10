@@ -12,10 +12,12 @@ import {
   type Config,
   createDebugLogger,
   getSubagentsRootDir,
+  resolveOpenAILogDir,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   cleanupOldFileHistoryBackups,
+  cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
   getCutoffDate,
 } from './cleanup.js';
@@ -40,6 +42,9 @@ const STARTUP_DELAY_CATCHUP_MS = 60 * 1000;
 
 const FILE_HISTORY_MARKER = '.file-history-cleanup';
 const SUBAGENT_MARKER = '.subagent-cleanup';
+const OPENAI_LOGS_MARKER = '.openai-logs-cleanup';
+// Mirrors the settingsSchema default for model.openAILogRetentionDays.
+const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
 let started = false;
 
@@ -92,6 +97,17 @@ function getSubagentMarkerPath(qwenDir: string, projectDir: string): string {
   return join(qwenDir, `${SUBAGENT_MARKER}-${projectKey}`);
 }
 
+// OpenAI logs live per-CWD by default but become a single shared dir when
+// openAILoggingDir is configured — key the marker on the resolved log dir
+// so both layouts throttle correctly.
+function getOpenAILogsMarkerPath(qwenDir: string, logDir: string): string {
+  const logDirKey = createHash('sha256')
+    .update(logDir)
+    .digest('hex')
+    .slice(0, 16);
+  return join(qwenDir, `${OPENAI_LOGS_MARKER}-${logDirKey}`);
+}
+
 async function runPass(
   config: Config,
   settings: LoadedSettings,
@@ -134,8 +150,8 @@ function scheduleNextPass(config: Config, settings: LoadedSettings): void {
   });
 }
 
-// Serial pipeline of cleanup tasks. Future cleaners (image cache, debug log,
-// paste store) get added here as additional runThrottledOnce calls — no
+// Serial pipeline of cleanup tasks. Future cleaners (image cache, paste
+// store) get added here as additional runThrottledOnce calls — no
 // other plumbing needed.
 async function runHousekeeping(
   config: Config,
@@ -195,6 +211,45 @@ async function runHousekeeping(
       },
     );
   }
+
+  // Sweeps even when enableOpenAILogging is currently off, so residue from
+  // earlier debugging sessions still gets cleaned up. The cutoff uses its
+  // own retention setting: these logs grow far faster than file-history
+  // backups (one JSON file per API call), so sharing cleanupPeriodDays'
+  // 30-day default would retain tens of GB for heavy users.
+  let openaiLogDir: string | undefined;
+  try {
+    openaiLogDir = resolveOpenAILogDir(
+      config.getContentGeneratorConfig().openAILoggingDir ??
+        settings.merged.model?.openAILoggingDir,
+      config.getWorkingDir(),
+    );
+  } catch (err) {
+    debugLogger.error('failed to resolve OpenAI log dir; skipping', err);
+  }
+  if (openaiLogDir) {
+    const logDir = openaiLogDir;
+    const markerPath = getOpenAILogsMarkerPath(qwenDir, logDir);
+    await runThrottledOnce(
+      {
+        name: 'openai-logs-cleanup',
+        markerPath,
+        lockPath: markerPath + '.lock',
+      },
+      async () => {
+        const r = await cleanupOldOpenAILogs({
+          logDir,
+          cutoffDate: getCutoffDate(
+            settings.merged.model?.openAILogRetentionDays ??
+              DEFAULT_OPENAI_LOG_RETENTION_DAYS,
+          ),
+        });
+        debugLogger.debug(
+          `openai-logs: removed=${r.removed} errors=${r.errors}`,
+        );
+      },
+    );
+  }
 }
 
 // Test-only exports — individual underscore-prefixed names matching the
@@ -209,3 +264,4 @@ export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
 export const _getSubagentMarkerPathForTesting = getSubagentMarkerPath;
+export const _getOpenAILogsMarkerPathForTesting = getOpenAILogsMarkerPath;
