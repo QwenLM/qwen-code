@@ -417,7 +417,13 @@ describe('useProviderUpdates', () => {
     expect(process.env[CODING_PLAN_ENV_KEY]).toBe('sk-sp-existing-key');
   });
 
-  it('switches model when previous model is no longer available', async () => {
+  it('does not adopt the provider default when the previous model is gone from the plan', async () => {
+    // Inverted from the pre-#8863 'switches model when previous model is no
+    // longer available': the update path never applies the plan's model
+    // selection, even when the current model is absent from the refreshed
+    // list — a removed built-in the user still sits on is carried into the
+    // plan as a custom entry, so an absent model here means it was never
+    // this provider's to migrate.
     mockConfig.getModel.mockReturnValue('removed-model');
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
@@ -448,11 +454,172 @@ describe('useProviderUpdates', () => {
       expect(mockSettings.setValue).toHaveBeenCalled();
     });
 
-    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'qwen3.5-plus',
-      undefined,
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    const modelWrites = mockSettings.setValue.mock.calls.filter(
+      (call: unknown[]) =>
+        call[1] === 'model.name' || call[1] === 'model.baseUrl',
     );
+    expect(modelWrites).toEqual([]);
+  });
+
+  it('does not rewrite the model selection when the current model belongs to another provider', async () => {
+    // #8863: a template update carries no model-selection intent. When the
+    // user's current model is not one of this provider's models (e.g. a
+    // self-hosted gateway entry), the update must not move them onto this
+    // provider's first built-in model and must not clear model.baseUrl.
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate,
+        {
+          id: 'my-own-model',
+          baseUrl: 'https://my-own-gateway.example.com/v1',
+          envKey: 'MY_OWN_KEY',
+          name: '[Mine] my-own-model',
+        },
+      ],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockSettings.setValue).toHaveBeenCalled();
+    });
+
+    const modelWrites = mockSettings.setValue.mock.calls.filter(
+      (call: unknown[]) =>
+        call[1] === 'model.name' || call[1] === 'model.baseUrl',
+    );
+    expect(modelWrites).toEqual([]);
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a model switch in the update toast when nothing changed', async () => {
+    // #8863 symptom 2: the toast used to read the unchanged runtime model
+    // and announce 'Model switched to "<old model>"' while the overwrite
+    // landed on disk. With the selection untouched there is no switch to
+    // report.
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate,
+        {
+          id: 'my-own-model',
+          baseUrl: 'https://my-own-gateway.example.com/v1',
+          envKey: 'MY_OWN_KEY',
+          name: '[Mine] my-own-model',
+        },
+      ],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalled();
+    });
+
+    const switchToasts = mockAddItem.mock.calls.filter(
+      (call: unknown[]) =>
+        typeof (call[0] as { text?: string })?.text === 'string' &&
+        (call[0] as { text: string }).text.includes('Model switched'),
+    );
+    expect(switchToasts).toEqual([]);
+  });
+
+  it('leaves the model selection alone across a multi-provider batch update', async () => {
+    // #8863 worst case: several providers update in one confirmation and
+    // each executeUpdate used to rewrite model.name in turn, the last
+    // provider in registry order winning. None of them may touch it.
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate,
+        ...tokenTemplate,
+        {
+          id: 'my-own-model',
+          baseUrl: 'https://my-own-gateway.example.com/v1',
+          envKey: 'MY_OWN_KEY',
+          name: '[Mine] my-own-model',
+        },
+      ],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    expect(result.current.providerUpdateRequest!.entries.length).toBe(2);
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockSettings.setValue).toHaveBeenCalled();
+    });
+
+    const modelWrites = mockSettings.setValue.mock.calls.filter(
+      (call: unknown[]) =>
+        call[1] === 'model.name' || call[1] === 'model.baseUrl',
+    );
+    expect(modelWrites).toEqual([]);
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
   });
 
   it('dismisses without persisting when user chooses "later"', async () => {

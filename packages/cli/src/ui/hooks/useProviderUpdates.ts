@@ -251,13 +251,13 @@ export function useProviderUpdates(
         });
         delete installPlan.env;
         const previousModel = config.getModel();
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
-        );
-        if (previousModelStillAvailable) {
-          delete installPlan.modelSelection;
-        }
+        // A template update is not first-time setup and carries no
+        // model-selection intent: never let the refreshed plan move the
+        // user off their current model or clear model.baseUrl. Models this
+        // provider owns are already carried into the plan above (including
+        // removed built-ins the user still sits on), and a model owned by
+        // another provider is not this update's to touch (#8863, #5819).
+        delete installPlan.modelSelection;
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
@@ -282,7 +282,7 @@ export function useProviderUpdates(
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
 
-        if (previousModelStillAvailable && activeModel === previousModel) {
+        if (activeModel === previousModel) {
           addItem(
             {
               type: 'info',
