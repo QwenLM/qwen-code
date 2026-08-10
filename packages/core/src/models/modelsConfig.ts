@@ -46,6 +46,7 @@ const debugLogger = createDebugLogger('ModelsConfig');
 export type OnModelChangeCallback = (
   authType: AuthType,
   requiresRefresh: boolean,
+  context: { sourceWasRuntimeSnapshot: boolean },
 ) => Promise<void>;
 
 /**
@@ -373,6 +374,7 @@ export class ModelsConfig {
     newModel: string,
     metadata?: ModelSwitchMetadata,
   ): Promise<void> {
+    const sourceWasRuntimeSnapshot = Boolean(this.activeRuntimeModelSnapshotId);
     // Special case: qwen-oauth model switch - hot update in place
     // coder-model supports vision capabilities and can be hot-updated
     if (
@@ -394,7 +396,9 @@ export class ModelsConfig {
 
       // Notify Config to update contentGeneratorConfig
       if (this.onModelChange) {
-        await this.onModelChange(AuthType.QWEN_OAUTH, false);
+        await this.onModelChange(AuthType.QWEN_OAUTH, false, {
+          sourceWasRuntimeSnapshot,
+        });
       }
       return;
     }
@@ -422,7 +426,9 @@ export class ModelsConfig {
       this.applyRawModelDerivedDefaults(newModel);
 
       if (this.onModelChange && this.currentAuthType) {
-        await this.onModelChange(this.currentAuthType, true);
+        await this.onModelChange(this.currentAuthType, true, {
+          sourceWasRuntimeSnapshot,
+        });
       }
     } catch (error) {
       this.rollbackToStateSnapshot(rollbackSnapshot);
@@ -576,7 +582,11 @@ export class ModelsConfig {
         : this.checkRequiresRefresh(previousModelId);
 
       if (this.onModelChange) {
-        await this.onModelChange(authType, requiresRefresh);
+        await this.onModelChange(authType, requiresRefresh, {
+          sourceWasRuntimeSnapshot: Boolean(
+            rollbackSnapshot.activeRuntimeModelSnapshotId,
+          ),
+        });
       }
     } catch (error) {
       // Rollback on error
@@ -1384,6 +1394,11 @@ export class ModelsConfig {
         await this.onModelChange(
           runtimeModelSnapshot.authType,
           requiresRefresh,
+          {
+            sourceWasRuntimeSnapshot: Boolean(
+              rollbackSnapshot.activeRuntimeModelSnapshotId,
+            ),
+          },
         );
       }
     } catch (error) {

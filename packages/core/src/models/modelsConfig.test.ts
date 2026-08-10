@@ -1613,7 +1613,9 @@ describe('ModelsConfig', () => {
 
     await modelsConfig.setModel('qwen3.7-max');
 
-    expect(onModelChange).toHaveBeenCalledWith(AuthType.USE_OPENAI, true);
+    expect(onModelChange).toHaveBeenCalledWith(AuthType.USE_OPENAI, true, {
+      sourceWasRuntimeSnapshot: false,
+    });
   });
 
   it('preserves explicitly configured modalities during raw model switches', async () => {

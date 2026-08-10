@@ -1545,6 +1545,8 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private sessionModelSwitchInProgress = false;
+  private unsubscribeModelChange?: () => void;
   private closing = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
@@ -1604,10 +1606,19 @@ export class Session implements SessionContext {
      * a full snapshot; the Session itself keeps no reporting state.
      */
     private readonly onActiveWorkChanged?: () => void,
+    private readonly buildConfigOptions?: (
+      config: Config,
+    ) => SessionConfigOption[],
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     this.syncReasoningSettingsForCurrentModel();
+    this.unsubscribeModelChange = this.config.onModelChange?.(() => {
+      if (this.sessionModelSwitchInProgress) return;
+      void this.#handleObservedModelChange().catch((error) => {
+        debugLogger.debug('observed model change handling failed', error);
+      });
+    });
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -2562,6 +2573,8 @@ export class Session implements SessionContext {
 
   dispose(): void {
     this.disposed = true;
+    this.unsubscribeModelChange?.();
+    this.unsubscribeModelChange = undefined;
     this.closing = true;
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
@@ -7399,6 +7412,42 @@ export class Session implements SessionContext {
     }
   }
 
+  async #handleObservedModelChange(): Promise<void> {
+    this.syncReasoningSettingsForCurrentModel();
+    const configOptions = this.buildConfigOptions?.(this.config);
+    if (configOptions) {
+      await this.sendConfigOptionsUpdate(configOptions);
+    }
+    this.sendModelUpdateNotification();
+  }
+
+  private sendModelUpdateNotification(currentModelId?: string): void {
+    if (!currentModelId) {
+      const after = this.config.getContentGeneratorConfig?.();
+      const effectiveAuthType = after?.authType ?? this.config.getAuthType?.();
+      const effectiveModelId = after?.model ?? this.config.getModel();
+      const activeRuntimeSnapshot =
+        this.config.getActiveRuntimeModelSnapshot?.();
+      currentModelId = getCurrentAcpModelId(
+        buildAcpModelOptions(this.config.getAllConfiguredModels()),
+        activeRuntimeSnapshot?.id ?? effectiveModelId,
+        activeRuntimeSnapshot?.authType ?? effectiveAuthType,
+        activeRuntimeSnapshot
+          ? undefined
+          : this.config.getCurrentModelRegistryBaseUrl?.(),
+      );
+    }
+    void this.client
+      .extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId,
+      })
+      .catch((error) => {
+        debugLogger.debug('model-update extNotification failed', error);
+      });
+  }
+
   /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.
@@ -7448,11 +7497,16 @@ export class Session implements SessionContext {
               : {}),
           }
         : undefined;
-    await this.config.switchModel(
-      selectedAuthType,
-      parsed.modelId,
-      switchOptions,
-    );
+    this.sessionModelSwitchInProgress = true;
+    try {
+      await this.config.switchModel(
+        selectedAuthType,
+        parsed.modelId,
+        switchOptions,
+      );
+    } finally {
+      this.sessionModelSwitchInProgress = false;
+    }
     this.syncReasoningSettingsForCurrentModel();
 
     const after = this.config.getContentGeneratorConfig?.();
@@ -7470,9 +7524,8 @@ export class Session implements SessionContext {
           : this.config.getCurrentModelRegistryBaseUrl?.(),
     );
 
-    // Notify attached clients of an in-session model switch so a
-    // `/model` slash command or plan-mode change reaches the bus (today only
-    // the HTTP `POST /session/:id/model` path publishes `model_switched`).
+    // Notify attached clients of this bridge-driven model switch. Model
+    // changes initiated elsewhere are covered by the Config observer.
     // `current_model_update` is NOT an ACP `SessionUpdate` variant (the type
     // is the external @agentclientprotocol/sdk union, which has
     // `current_mode_update` but not a model equivalent), so this goes over
@@ -7480,16 +7533,7 @@ export class Session implements SessionContext {
     // to `model_switched` and SUPPRESSES it when the bridge itself is driving
     // the change (the HTTP path also flows through this method), avoiding a
     // double publish. Fire-and-forget, matching the MCP-budget extNotification.
-    void this.client
-      .extNotification('qwen/notify/session/model-update', {
-        v: 1,
-        sessionId: this.sessionId,
-        currentModelId: currentAcpModelId,
-      })
-      .catch((error) => {
-        // Advisory only; a failed notification must not fail the model switch.
-        debugLogger.debug('model-update extNotification failed', error);
-      });
+    this.sendModelUpdateNotification(currentAcpModelId);
 
     if (options.persistDefault ?? true) {
       const persistScope = getPersistScopeForModelSelection(this.settings);

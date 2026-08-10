@@ -4859,6 +4859,68 @@ describe('App pre-session reasoning composer', () => {
       effort: { value: 'medium', options: ['low', 'medium', 'xhigh'] },
     });
   });
+
+  it('reports a failed settings reload after persisting reasoning preferences', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.currentModel = 'qwen3.8-max(openai)';
+    (mockConnection as { models: Array<Record<string, unknown>> }).models = [
+      {
+        id: 'qwen3.8-max(openai)',
+        baseModelId: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+        reasoningControls: {
+          thinking: { defaultEnabled: true },
+          effort: {
+            supported: ['low', 'medium', 'xhigh'],
+            default: 'xhigh',
+          },
+        },
+      },
+    ];
+    mockWorkspace.capabilities = {
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+      features: ['session_reasoning_control'],
+    } as typeof mockWorkspace.capabilities;
+    testState.settings = [
+      {
+        key: 'model.reasoningPreferences',
+        type: 'object',
+        label: 'Reasoning preferences',
+        category: 'model',
+        requiresRestart: false,
+        default: {},
+        values: { effective: {}, user: {} },
+      } as DaemonSettingDescriptor,
+    ];
+    settingsReload.mockResolvedValueOnce(undefined);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    renderApp();
+    await flush();
+    const editorProps = testState.latestChatEditorProps as unknown as {
+      onSelectReasoningOption?: (
+        configId: 'thinking' | 'effort',
+        value: string,
+      ) => void;
+    };
+    await act(async () => {
+      editorProps.onSelectReasoningOption?.('thinking', 'off');
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith(
+        '[web-shell]',
+        expect.stringContaining('Workspace settings reload failed'),
+        expect.anything(),
+      );
+    });
+    expect(settingsSetValue).toHaveBeenCalled();
+    expect(settingsReload).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
+  });
 });
 
 describe('App shell command queueing', () => {

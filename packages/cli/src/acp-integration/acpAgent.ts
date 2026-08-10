@@ -11463,10 +11463,9 @@ class QwenAgent implements Agent {
             ) {
               try {
                 await config.switchModel(authType, newModelName);
-                // Mirror Session.setModel: apply the reloaded per-model
-                // reasoning preferences for the new model, then notify
-                // attached clients (config.switchModel publishes no
-                // model-update extNotification of its own).
+                // The long-lived Session can retain an older settings object
+                // after the cache reload replaces it. Apply the freshly loaded
+                // snapshot after the generic model-change observer runs.
                 session.syncReasoningSettingsForCurrentModel(newMerged);
                 await session.sendConfigOptionsUpdate(
                   this.buildConfigOptions(session.getConfig()),
@@ -12124,6 +12123,7 @@ class QwenAgent implements Agent {
       this.connection,
       settings,
       () => this.activeWorkReporter?.notifyChanged(),
+      (currentConfig) => this.buildConfigOptions(currentConfig),
     );
     this.sessions.set(sessionId, session);
     // The Session set itself is part of the snapshot: publish so the daemon

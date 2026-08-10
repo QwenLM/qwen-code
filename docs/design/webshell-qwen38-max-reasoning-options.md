@@ -33,6 +33,9 @@ options for the active model:
 Changes travel through a daemon session config-option mutation and are echoed
 as ACP `config_option_update` notifications. Web clients update their cached
 connection state from both the attach snapshot and live notifications.
+The ACP session also observes Core model changes, so model switches initiated
+by slash commands or workspace reloads re-apply the active model's preferences
+and publish the same config and model notifications as the session API.
 
 The daemon's workspace model catalog carries the same optional capability
 metadata so a composer can render controls before a session exists. Older
@@ -49,7 +52,9 @@ subset before storing it.
 
 Before a live session exists, WebShell merges the selected model's preference
 into the map through the workspace settings API. Once attached, it uses the
-session mutation so the current session and future sessions stay in sync.
+session mutation so the current session and future sessions stay in sync. A
+failed post-write settings reload is surfaced as an update error rather than
+leaving the composer on stale state.
 
 ## UI behavior
 

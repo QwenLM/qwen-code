@@ -8917,13 +8917,17 @@ export function App({
               scope,
               'model.reasoningPreferences',
               updatedPreferences,
-            ).then(() =>
+            ).then(async () => {
               // The write already persisted; a failed reload would otherwise
               // leave the switch rendering a stale position with no error.
-              reloadWorkspaceSettings().catch((error: unknown) => {
-                reportError(error, t('reasoning.updateFailed'));
-              }),
-            );
+              const status = await reloadWorkspaceSettings();
+              if (
+                status === undefined &&
+                (await reloadWorkspaceSettings()) === undefined
+              ) {
+                throw new Error('Workspace settings reload failed');
+              }
+            });
           })();
       void update
         .catch((error: unknown) => {

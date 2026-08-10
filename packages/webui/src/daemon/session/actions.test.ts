@@ -1072,7 +1072,7 @@ describe('createDaemonSessionActions', () => {
   it('does not apply a late model update to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
-    const result = { applied: true };
+    const result = { modelId: 'late-source-model' };
     const deferred = createDeferred<typeof result>();
     source.setModel.mockReturnValueOnce(deferred.promise);
     const { actions, getConnection, replaceConnection, sessionRef } =

@@ -125,6 +125,27 @@ describe('reasoning config options', () => {
     expect(next.reasoning).toBeUndefined();
   });
 
+  it('handles a degraded capabilities envelope when a peer switches models', () => {
+    const next = applyEvent(
+      {
+        status: 'connected',
+        currentModel: 'previous-model',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+        } as DaemonConnectionState['capabilities'],
+      },
+      {
+        v: 1,
+        type: 'model_switched',
+        data: { modelId: 'next-model' },
+      } as DaemonEvent,
+    );
+
+    expect(next.currentModel).toBe('next-model');
+    expect(next.reasoning).toBeUndefined();
+  });
+
   it('preserves the target reasoning update when the model switch event follows it', () => {
     const afterConfigUpdate = applyEvent(
       {

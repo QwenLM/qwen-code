@@ -18097,7 +18097,7 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
-  it('re-syncs reasoning preferences and notifies clients when workspace reload switches models', async () => {
+  it('re-syncs reasoning from freshly reloaded settings when workspace reload switches models', async () => {
     let mergedSettings: Record<string, unknown> = {};
     const settings = {
       get merged() {
@@ -18127,7 +18127,6 @@ describe('sessionLanguage multi-session propagation', () => {
     });
     const syncReasoningSettingsForCurrentModel = vi.fn();
     const sendConfigOptionsUpdate = vi.fn().mockResolvedValue(undefined);
-
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
     vi.mocked(Session).mockImplementation(
@@ -18169,9 +18168,9 @@ describe('sessionLanguage multi-session propagation', () => {
       (cfg as typeof cfg & { switchModel: ReturnType<typeof vi.fn> })
         .switchModel,
     ).toHaveBeenCalledWith('openai', 'qwen3.8-max');
-    expect(syncReasoningSettingsForCurrentModel).toHaveBeenCalled();
-    // config.switchModel publishes no model-update extNotification of its
-    // own; the reload branch must push the refreshed options itself.
+    expect(syncReasoningSettingsForCurrentModel).toHaveBeenCalledWith(
+      mergedSettings,
+    );
     expect(sendConfigOptionsUpdate).toHaveBeenCalledTimes(1);
     const options = sendConfigOptionsUpdate.mock.calls[0]?.[0] ?? [];
     expect(options.map((option: { id: string }) => option.id)).toEqual(

@@ -391,6 +391,7 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let originalProcessGuardMode: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
+  let modelChangeListener: ((model: string) => void) | undefined;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
@@ -555,6 +556,7 @@ describe('Session', () => {
     transcribeVoiceAudioSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
+    modelChangeListener = undefined;
     switchModelSpy = vi
       .fn()
       .mockImplementation(async (authType: AuthType, modelId: string) => {
@@ -665,6 +667,10 @@ describe('Session', () => {
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
+      onModelChange: vi.fn((listener: (model: string) => void) => {
+        modelChangeListener = listener;
+        return vi.fn();
+      }),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -2998,6 +3004,52 @@ describe('Session', () => {
       ).resolves.toBeUndefined();
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [],
+        },
+      });
+    });
+
+    it('syncs and broadcasts model changes initiated outside Session.setModel', async () => {
+      currentModel = 'qwen3.8-max';
+      const observedSettings = {
+        ...mockSettings,
+        merged: {
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': { effort: 'medium' },
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+      session.dispose();
+      session = new Session(
+        'observed-model-session',
+        mockConfig,
+        mockClient,
+        observedSettings,
+        undefined,
+        () => [],
+      );
+      vi.mocked(mockConfig.setReasoningEffort).mockClear();
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockClient.extNotification).mockClear();
+
+      modelChangeListener?.('qwen3.8-max');
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          'qwen/notify/session/model-update',
+          expect.objectContaining({
+            sessionId: 'observed-model-session',
+            currentModelId: 'qwen3.8-max(openai)',
+          }),
+        );
+      });
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith('medium');
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'observed-model-session',
         update: {
           sessionUpdate: 'config_option_update',
           configOptions: [],

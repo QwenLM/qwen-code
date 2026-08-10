@@ -397,9 +397,8 @@ export function updateConnectionFromDaemonEvent(
       if (modelId) {
         setConnection((current) => {
           const supportsReasoningControl =
-            current.capabilities?.features.includes(
-              'session_reasoning_control',
-            );
+            Array.isArray(current.capabilities?.features) &&
+            current.capabilities.features.includes('session_reasoning_control');
           return {
             ...current,
             currentModel: modelId,

@@ -4493,6 +4493,105 @@ describe('Server Config (config.ts)', () => {
       ).toBe('high');
     });
 
+    it('restores the global effort when switching to a same-id runtime snapshot', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        generationConfig: {
+          model: 'coder-model',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          reasoning: { effort: 'high' },
+        },
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        reasoning: { effort: 'high' },
+      } as ContentGeneratorConfig;
+      const modelsConfig = config.getModelsConfig();
+      const snapshotId = '$runtime|qwen-oauth|qwen3.8-max';
+      const runtimeModelSnapshots = (
+        modelsConfig as unknown as {
+          runtimeModelSnapshots: Map<
+            string,
+            {
+              id: string;
+              authType: AuthType;
+              modelId: string;
+              apiKey: string;
+              generationConfig: Partial<ContentGeneratorConfig>;
+              sources: Record<string, never>;
+              createdAt: number;
+            }
+          >;
+        }
+      ).runtimeModelSnapshots;
+      runtimeModelSnapshots.set(snapshotId, {
+        id: snapshotId,
+        authType: AuthType.QWEN_OAUTH,
+        modelId: 'qwen3.8-max',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        generationConfig: {},
+        sources: {},
+        createdAt: Date.now(),
+      });
+
+      await modelsConfig.switchToRuntimeModel(snapshotId);
+
+      expect(config.getActiveRuntimeModelSnapshot()).toBeDefined();
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+
+      (
+        config as unknown as {
+          globalReasoningEffortPreference?: string;
+        }
+      ).globalReasoningEffortPreference = undefined;
+      await modelsConfig.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+
+      expect(config.getActiveRuntimeModelSnapshot()).toBeUndefined();
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBe('high');
+
+      const disabledSnapshotId = '$runtime|qwen-oauth|disabled-model';
+      runtimeModelSnapshots.set(disabledSnapshotId, {
+        id: disabledSnapshotId,
+        authType: AuthType.QWEN_OAUTH,
+        modelId: 'disabled-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        generationConfig: { reasoning: false },
+        sources: {},
+        createdAt: Date.now(),
+      });
+
+      await modelsConfig.switchToRuntimeModel(disabledSnapshotId);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+    });
+
+    it('keeps an effort selection as a preference before auth initializes', () => {
+      const config = new Config(baseParams);
+
+      expect(() => config.setReasoningEffort('high')).not.toThrow();
+      expect(config.getContentGeneratorConfig()).toBeUndefined();
+      expect(config.getReasoningEffortPreference()).toBe('high');
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+    });
+
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
       // Regression for the model-switch path: switchModel() runs
       // applyResolvedModelDefaults() (which overwrites modelsConfig's
@@ -4800,6 +4899,31 @@ describe('Server Config (config.ts)', () => {
       config.setThinkingEnabled(true);
       expect(config.isThinkingEnabled()).toBe(true);
       expect(config.getReasoningEffort()).toBe('medium');
+    });
+
+    it('does not write an effort-only rebuild source while thinking is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'disabled-model',
+          authType: AuthType.USE_GEMINI,
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.USE_GEMINI);
+      delete config.getModelsConfig().getGenerationConfig().reasoning;
+
+      config.setReasoningEffort('high');
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
     });
 
     it('should fire auth_success notification hook when hooks are enabled', async () => {

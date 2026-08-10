@@ -4294,9 +4294,11 @@ export class Config {
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
     if (effort) {
       this.reasoningEffortPreference = effort;
+      const currentModel = this.contentGeneratorConfig?.model;
       if (
         this.getActiveRuntimeModelSnapshot() ||
-        !getModelReasoningControls(this.contentGeneratorConfig.model)
+        !currentModel ||
+        !getModelReasoningControls(currentModel)
       ) {
         this.globalReasoningEffortPreference = effort;
       }
@@ -4329,8 +4331,15 @@ export class Config {
     if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
       applyEffort(runtimeCfg);
     }
-    // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
-    applyEffort(this.modelsConfig?.getGenerationConfig());
+    // Keep the rebuildable source in sync so a later refreshAuth keeps the
+    // tier, except when the live model explicitly disables thinking. In that
+    // state writing an effort-only source would re-enable thinking on refresh.
+    if (
+      this.contentGeneratorConfig &&
+      this.contentGeneratorConfig.reasoning !== false
+    ) {
+      applyEffort(this.modelsConfig?.getGenerationConfig());
+    }
   }
 
   /**
@@ -4547,6 +4556,9 @@ export class Config {
   private async handleModelChange(
     authType: AuthType,
     requiresRefresh: boolean,
+    context: { sourceWasRuntimeSnapshot: boolean } = {
+      sourceWasRuntimeSnapshot: false,
+    },
   ): Promise<void> {
     if (!this.contentGeneratorConfig) {
       return;
@@ -4555,9 +4567,9 @@ export class Config {
     // Unregistered models share the global /effort preference, so preserve it
     // across rebuilds. Registered source models keep independent reasoning
     // state, while registered targets are detected after their config resolves.
-    const previousModelHasReasoningControls = Boolean(
-      getModelReasoningControls(this.contentGeneratorConfig.model),
-    );
+    const previousModelHasReasoningControls =
+      !context.sourceWasRuntimeSnapshot &&
+      Boolean(getModelReasoningControls(this.contentGeneratorConfig.model));
     const priorReasoningEffort = previousModelHasReasoningControls
       ? undefined
       : this.getReasoningEffort();
@@ -4587,9 +4599,13 @@ export class Config {
             this.modelsConfig.isStrictModelProviderSelection(),
         },
       );
+      const targetHasReasoningControls =
+        !this.getActiveRuntimeModelSnapshot() &&
+        Boolean(getModelReasoningControls(config.model));
       const modelScopedReasoningSwitch =
         previousModelHasReasoningControls ||
-        Boolean(getModelReasoningControls(config.model));
+        targetHasReasoningControls ||
+        config.reasoning === false;
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
       // The global preference is captured above and re-applied below. When the
@@ -4611,7 +4627,7 @@ export class Config {
       if (modelScopedReasoningSwitch) {
         this.contentGeneratorConfig.reasoning = config.reasoning;
       }
-      if (getModelReasoningControls(config.model)) {
+      if (targetHasReasoningControls) {
         this.applyRegisteredModelReasoning();
       }
       // Modalities are model-derived: a hot switch between oauth models with
@@ -4658,10 +4674,10 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (!getModelReasoningControls(config.model)) {
+      if (targetHasReasoningControls === false) {
         const globalEffort =
           priorReasoningEffort ?? this.globalReasoningEffortPreference;
-        if (globalEffort) {
+        if (globalEffort && this.contentGeneratorConfig.reasoning !== false) {
           this.setReasoningEffort(globalEffort);
         }
       }
@@ -4679,10 +4695,13 @@ export class Config {
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
-    if (!getModelReasoningControls(this.contentGeneratorConfig.model)) {
+    const targetHasReasoningControls =
+      !this.getActiveRuntimeModelSnapshot() &&
+      Boolean(getModelReasoningControls(this.contentGeneratorConfig.model));
+    if (!targetHasReasoningControls) {
       const globalEffort =
         priorReasoningEffort ?? this.globalReasoningEffortPreference;
-      if (globalEffort) {
+      if (globalEffort && this.contentGeneratorConfig.reasoning !== false) {
         this.setReasoningEffort(globalEffort);
       }
     }
