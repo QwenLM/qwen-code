@@ -5,7 +5,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, stat } from 'node:fs/promises';
+import path from 'node:path';
 import { WebBridgeRegistry } from './web-bridge-registry.js';
 import { WebBridgeService } from './web-bridge-service.js';
 
@@ -431,8 +432,12 @@ describe('WebBridgeService', () => {
         await expect(readFile(filePath, 'utf8')).resolves.toBe(
           'artifact bytes',
         );
+        expect((await stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
+        expect((await stat(filePath)).mode & 0o777).toBe(0o600);
       } finally {
-        if (filePath) await rm(filePath, { force: true });
+        if (filePath) {
+          await rm(path.dirname(filePath), { force: true, recursive: true });
+        }
       }
     },
   );

@@ -4349,6 +4349,7 @@ async function runQwenServeImpl(
           }
           Object.assign(effectiveEnv, nextEnv);
           effectiveEnv['QWEN_RUNTIME_DIR'] = sessionRuntimeBaseDir;
+          applyWebBridgeEnv(effectiveEnv);
         },
       };
     };

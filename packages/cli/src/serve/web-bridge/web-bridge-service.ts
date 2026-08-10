@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { WebBridgeRegistry } from './web-bridge-registry.js';
@@ -269,13 +269,14 @@ export class WebBridgeService {
         : result['format'] === 'jpeg'
           ? 'jpg'
           : 'png';
+    const directory = await mkdtemp(
+      path.join(tmpdir(), 'qwen-webbridge-'),
+    );
     const filePath = path.join(
-      tmpdir(),
-      'qwen-webbridge',
+      directory,
       `${artifactName(result['pageTitle'])}-${Date.now()}.${extension}`,
     );
-    await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, data);
+    await writeFile(filePath, data, { flag: 'wx', mode: 0o600 });
     const { data: _data, dataLength: _dataLength, ...metadata } = result;
     return {
       ...metadata,

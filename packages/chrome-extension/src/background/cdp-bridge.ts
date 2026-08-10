@@ -100,6 +100,7 @@ let attaching = false;
  * would leave a debugger attachment with no live `/cdp` client behind it.
  */
 let releaseRequestedDuringAttach = false;
+let attachGeneration = 0;
 const directEventListeners = new Set<CdpEventListener>();
 const directDetachListeners = new Set<CdpDetachListener>();
 const detachingTabIds = new Set<number>();
@@ -228,6 +229,7 @@ function sendDebuggerCommand(
 
 async function attachTab(tabId: number): Promise<void> {
   if (attachedTabIds.has(tabId)) return;
+  const generation = attachGeneration;
 
   await new Promise<void>((resolve, reject) => {
     chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION, () => {
@@ -242,6 +244,13 @@ async function attachTab(tabId: number): Promise<void> {
       resolve();
     });
   });
+
+  if (generation !== attachGeneration) {
+    await new Promise<void>((resolve) => {
+      chrome.debugger.detach({ tabId }, () => resolve());
+    });
+    throw new Error('released during attach');
+  }
 
   if (attachedTabIds.size === 0) {
     chrome.debugger.onEvent.addListener(onDebuggerEvent);
@@ -356,6 +365,15 @@ async function handleAttach(
   try {
     const tabId = await getActiveTabId();
 
+    if (rawTabId !== null && rawTabId !== tabId) {
+      const previousTabId = rawTabId;
+      rawTabId = null;
+      activeSend = null;
+      if (!directTabIds.has(previousTabId)) {
+        await releaseCdpTab(previousTabId);
+      }
+    }
+
     await attachTab(tabId);
 
     // Best-effort tab metadata for the daemon's synthetic targetInfo.
@@ -450,6 +468,7 @@ async function handleCommand(
  */
 function handleRelease(_frame: CdpReleaseFrame): void {
   console.log(LOG_PREFIX, 'cdp_release received; releasing raw tunnel');
+  if (attaching) releaseRequestedDuringAttach = true;
   const tabId = rawTabId;
   rawTabId = null;
   activeSend = null;
@@ -476,6 +495,7 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
  * the daemon socket closes so a stale attachment doesn't linger. Idempotent.
  */
 export function shutdownCdpBridge(): void {
+  attachGeneration++;
   // A release that races an in-flight handleAttach can't detach a tab the
   // debugger hasn't attached to yet. Record it so handleAttach tears down the
   // moment it finishes wiring up instead of leaving an attachment behind.

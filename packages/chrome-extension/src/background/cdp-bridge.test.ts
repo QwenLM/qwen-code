@@ -369,6 +369,70 @@ describe('CDP bridge', () => {
     );
   });
 
+  it('releases a direct attachment that finishes after shutdown', async () => {
+    const chromeHarness = installChromeHarness({ deferAttach: true });
+    const bridge = await loadBridge();
+
+    const direct = bridge.withCdpTab(7, async () => undefined);
+    await vi.waitFor(() => expect(chromeHarness.attach).toHaveBeenCalledOnce());
+    bridge.shutdownCdpBridge();
+    chromeHarness.finishAttach();
+
+    await expect(direct).rejects.toThrow('released during attach');
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
+  });
+
+  it('honors a raw release while attach is pending', async () => {
+    const chromeHarness = installChromeHarness({ deferAttach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(chromeHarness.attach).toHaveBeenCalledOnce());
+    bridge.handleCdpFrame(frame({ type: 'cdp_release' }), send);
+    chromeHarness.finishAttach();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 1,
+        error: { message: 'released during attach' },
+      }),
+    );
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
+  });
+
+  it('detaches the previous raw tab before attaching a new one', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    (chrome.tabs.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 9 },
+    ]);
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 2 }), send);
+
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
+    expect(chromeHarness.attach).toHaveBeenLastCalledWith(
+      { tabId: 9 },
+      '1.3',
+      expect.any(Function),
+    );
+    bridge.shutdownCdpBridge();
+  });
+
   it('forwards debugger events for the attached tab', async () => {
     const chromeHarness = installChromeHarness();
     const bridge = await loadBridge();
