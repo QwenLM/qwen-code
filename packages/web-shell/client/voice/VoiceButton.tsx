@@ -121,7 +121,6 @@ export function VoiceButton({
   const holdPointerIdRef = useRef<number | null>(null);
   const holdStartedAtRef = useRef(0);
   const ignoreNextClickRef = useRef(false);
-  const tapLatchedRef = useRef(false);
   const targetRef = useRef(target);
   targetRef.current = target;
   const requestGenerationRef = useRef(0);
@@ -314,13 +313,10 @@ export function VoiceButton({
   const canCancel = isRecording || isConnecting;
 
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (voiceGate.mode === 'hold' && event.detail !== 0) {
-      if (ignoreNextClickRef.current) {
-        ignoreNextClickRef.current = false;
-        return;
-      }
-      if (!tapLatchedRef.current) return;
-      tapLatchedRef.current = false;
+    if (voiceGate.mode === 'hold') {
+      const ignore = event.detail !== 0 && ignoreNextClickRef.current;
+      ignoreNextClickRef.current = false;
+      if (ignore) return;
     }
     if (isRecording) {
       stop();
@@ -333,6 +329,7 @@ export function VoiceButton({
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (voiceGate.mode === 'hold') ignoreNextClickRef.current = false;
     if (
       voiceGate.mode !== 'hold' ||
       event.button !== 0 ||
@@ -345,6 +342,7 @@ export function VoiceButton({
     event.preventDefault();
     holdPointerIdRef.current = event.pointerId;
     holdStartedAtRef.current = event.timeStamp;
+    ignoreNextClickRef.current = true;
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -362,10 +360,12 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    ignoreNextClickRef.current = true;
-    tapLatchedRef.current =
-      event.timeStamp - holdStartedAtRef.current < HOLD_THRESHOLD_MS;
-    if (!tapLatchedRef.current) stop();
+    if (
+      event.timeStamp - holdStartedAtRef.current >= HOLD_THRESHOLD_MS &&
+      (isConnecting || isRecording)
+    ) {
+      stop();
+    }
   };
 
   const handlePointerCancel = (
@@ -378,7 +378,7 @@ export function VoiceButton({
       return;
     }
     holdPointerIdRef.current = null;
-    tapLatchedRef.current = false;
+    ignoreNextClickRef.current = false;
     abort();
   };
 
