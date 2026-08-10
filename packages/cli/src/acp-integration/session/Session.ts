@@ -5313,8 +5313,8 @@ export class Session implements SessionContext {
       },
       promptId,
     );
-    if (options.rewindableUserTurn !== undefined) {
-      this.#trackRewindApiUserTurn(options.rewindableUserTurn);
+    if (this.#isUserTextContent({ role: 'user', parts: message })) {
+      this.#trackRewindApiUserTurn(options.rewindableUserTurn === true);
     }
     return { responseStream };
   }
@@ -5324,8 +5324,9 @@ export class Session implements SessionContext {
       const userTurnCount = this.#getCurrentChat()
         .getHistoryShallow()
         .filter((content) => this.#isUserTextContent(content)).length;
-      if (userTurnCount > 1) return;
-      this.rewindApiUserTurns = [];
+      this.rewindApiUserTurns = Array(Math.max(0, userTurnCount - 1)).fill(
+        true,
+      );
     }
     this.rewindApiUserTurns.push(rewindable);
   }
@@ -6282,7 +6283,6 @@ export class Session implements SessionContext {
                     promptId,
                     nextMessage.parts ?? [],
                     ac.signal,
-                    turnCount === 1 ? { rewindableUserTurn: false } : {},
                   );
                 if (!sendResult.responseStream) {
                   this.todoStopGuard.suspend();
@@ -6876,7 +6876,6 @@ export class Session implements SessionContext {
             ],
           };
           const toolLoopState = createDaemonToolLoopState('off');
-          let initialSend = true;
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -6898,7 +6897,6 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
-              initialSend ? { rewindableUserTurn: false } : {},
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
@@ -6913,7 +6911,6 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
-            initialSend = false;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,

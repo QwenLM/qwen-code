@@ -17323,7 +17323,7 @@ describe('Session', () => {
           );
         });
 
-        it('preserves goal feedback alongside an external stop reason', async () => {
+        it('preserves goal feedback without making the stop continuation rewindable', async () => {
           const messageBus = {
             request: vi
               .fn()
@@ -17372,6 +17372,22 @@ describe('Session', () => {
           expect(textParts(continuation.message)).toEqual([
             'External stop hook feedback\nKeep working on the active goal',
           ]);
+
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'follow-up' }],
+          });
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+            { role: 'user', parts: [{ text: 'hello' }] },
+            { role: 'model', parts: [{ text: 'first reply' }] },
+            { role: 'user', parts: continuation.message },
+            { role: 'model', parts: [{ text: 'continuation reply' }] },
+            { role: 'user', parts: [{ text: 'follow-up' }] },
+          ]);
+
+          expect(session.getRewindableUserTurnCount()).toBe(2);
+          expect(session.rewindToTurn(1).apiTruncateIndex).toBe(4);
         });
 
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
