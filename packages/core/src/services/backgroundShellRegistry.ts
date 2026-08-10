@@ -24,33 +24,13 @@ import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_COMMAND_LENGTH = 80;
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
 export const MAX_NOTIFICATION_OUTPUT_TAIL_BYTES = 8192;
-
-/**
- * Strip C0 control characters (except tab) and C1 control characters from
- * terminal/UI display strings. Shell commands and errors are usually
- * user-authored, but this keeps escape sequences out of the visible
- * notification surface if a caller passes unsanitized text.
- */
-function stripDisplayControlChars(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code === 0x09) {
-      out += text[i];
-      continue;
-    }
-    if (code < 0x20) continue;
-    if (code >= 0x80 && code <= 0x9f) continue;
-    out += text[i];
-  }
-  return out;
-}
 
 function stripOutputControlChars(text: string): string {
   let out = '';
