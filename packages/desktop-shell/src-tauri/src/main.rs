@@ -4,12 +4,14 @@ mod desktop_state;
 mod local_control;
 mod runtime;
 
+use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, SettingsStore};
 use local_control::{LocalControlInfo, LocalControlSession};
-use runtime::{resolve_workspace, DesktopRuntime};
+use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
@@ -26,6 +28,11 @@ use url::Url;
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+// Keep the default first-launch workspace aligned with the Electron shell's
+// getDefaultConversationWorkspacePath() in
+// packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
+// relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
+const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,8 +50,26 @@ struct RuntimeStopped {
     status: String,
 }
 
+// A runtime that has spawned but may still be inside DesktopRuntime::start's
+// startup wait. Shares the child handle with the DesktopRuntime it becomes,
+// so a stop during that window kills the in-flight daemon instead of
+// orphaning it in its own process group.
+struct PendingRuntime {
+    generation: u64,
+    child: Arc<Mutex<Option<GroupChild>>>,
+    stopping: Arc<AtomicBool>,
+}
+
+impl PendingRuntime {
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        stop_runtime_handle(&self.child);
+    }
+}
+
 struct ApplicationState {
     runtime: Mutex<Option<DesktopRuntime>>,
+    pending_runtime: Mutex<Option<PendingRuntime>>,
     local_control: Mutex<Option<LocalControlSession>>,
     local_control_menu: MenuItem<tauri::Wry>,
     local_control_off_menu: MenuItem<tauri::Wry>,
@@ -52,6 +77,7 @@ struct ApplicationState {
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
     last_error: Mutex<Option<String>>,
+    last_workspace: Mutex<Option<(PathBuf, bool)>>,
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
@@ -191,6 +217,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     handle.manage(ApplicationState {
         runtime: Mutex::new(None),
+        pending_runtime: Mutex::new(None),
         local_control: Mutex::new(None),
         local_control_menu,
         local_control_off_menu,
@@ -198,15 +225,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         log_path,
         origin,
         last_error: Mutex::new(None),
+        last_workspace: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
     });
 
-    if let Some(workspace) = initial_workspace(&handle) {
-        start_runtime_async(handle.clone(), workspace);
-    } else {
-        let _ = handle.emit("workspace-required", ());
+    match initial_workspace(&handle) {
+        Ok((workspace, create_if_missing)) => {
+            start_runtime_async(handle.clone(), workspace, create_if_missing)
+        }
+        Err(error) => {
+            *lock(&handle.state::<ApplicationState>().last_error) = Some(error.clone());
+            let _ = handle.emit("runtime-failed", error);
+        }
     }
     check_updates_silently(handle.clone());
     spawn_window_state_flusher(handle);
@@ -261,19 +293,19 @@ async fn choose_workspace(
     let workspace = folder
         .into_path()
         .map_err(|error| format!("Failed to read selected workspace: {error}"))?;
-    start_runtime_async(app, workspace.clone());
+    start_runtime_async(app, workspace.clone(), false);
     Ok(Some(workspace.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
 fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
-    let workspace = app
-        .state::<ApplicationState>()
-        .settings
-        .workspace()
-        .ok_or_else(|| "Choose a workspace before starting Qwen Code.".to_string())?;
-    start_runtime_async(app, workspace);
+    let last_workspace = lock(&app.state::<ApplicationState>().last_workspace).clone();
+    let (workspace, create_if_missing) = match last_workspace {
+        Some(workspace) => workspace,
+        None => initial_workspace(&app)?,
+    };
+    start_runtime_async(app, workspace, create_if_missing);
     Ok(())
 }
 
@@ -382,18 +414,28 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
     Ok(())
 }
 
-fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
+fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bool) {
+    stop_runtime(&app);
     let generation = {
         let state = app.state::<ApplicationState>();
+        *lock(&state.last_workspace) = Some((workspace.clone(), create_if_missing));
         let generation = state.start_generation.fetch_add(1, Ordering::SeqCst) + 1;
         state.starting.store(generation, Ordering::SeqCst);
         generation
     };
-    stop_runtime(&app);
     *lock(&app.state::<ApplicationState>().last_error) = None;
     let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ApplicationState>();
+        // Creating the default workspace touches ~/Documents, which can raise
+        // the macOS TCC prompt, so it runs here (off the main thread) instead
+        // of during setup.
+        if create_if_missing {
+            if let Err(error) = ensure_workspace_dir(&workspace) {
+                emit_runtime_failure(&app, generation, error);
+                return;
+            }
+        }
         let canonical = match resolve_workspace(&workspace) {
             Ok(path) => path,
             Err(error) => {
@@ -405,16 +447,33 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
             emit_runtime_failure(&app, generation, error);
             return;
         }
-        match DesktopRuntime::start(&app, &canonical, &state.log_path) {
+        let registered = app.clone();
+        match DesktopRuntime::start(&app, &canonical, &state.log_path, move |child, stopping| {
+            let state = registered.state::<ApplicationState>();
+            let pending = PendingRuntime {
+                generation,
+                child,
+                stopping,
+            };
+            let mut slot = lock(&state.pending_runtime);
+            if state.start_generation.load(Ordering::SeqCst) == generation {
+                *slot = Some(pending);
+            } else {
+                drop(slot);
+                pending.stop();
+            }
+        }) {
             Ok(runtime) => {
                 if state.start_generation.load(Ordering::SeqCst) != generation {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     return;
                 }
                 let origin = match origin_of(runtime.base_url()) {
                     Ok(origin) => origin,
                     Err(error) => {
                         runtime.stop();
+                        clear_pending_runtime(&state, generation);
                         emit_runtime_failure(&app, generation, error);
                         return;
                     }
@@ -422,6 +481,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                 *lock(&state.origin) = Some(origin);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
                         generation,
@@ -431,6 +491,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                 };
                 if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
                         generation,
@@ -438,14 +499,28 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                     );
                     return;
                 }
-                *lock(&state.runtime) = Some(runtime);
-                state
+                let mut runtime_slot = lock(&state.runtime);
+                if state.start_generation.load(Ordering::SeqCst) != generation {
+                    drop(runtime_slot);
+                    runtime.stop();
+                    clear_pending_runtime(&state, generation);
+                    return;
+                }
+                *runtime_slot = Some(runtime);
+                drop(runtime_slot);
+                clear_pending_runtime(&state, generation);
+                if state
                     .starting
                     .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
-                    .ok();
-                let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+                    .is_ok()
+                {
+                    let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+                }
             }
-            Err(error) => emit_runtime_failure(&app, generation, error),
+            Err(error) => {
+                clear_pending_runtime(&state, generation);
+                emit_runtime_failure(&app, generation, error);
+            }
         }
     });
 }
@@ -467,8 +542,26 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 
 fn stop_runtime(app: &AppHandle) {
     stop_local_control(app);
-    if let Some(runtime) = lock(&app.state::<ApplicationState>().runtime).take() {
+    let state = app.state::<ApplicationState>();
+    state.start_generation.fetch_add(1, Ordering::SeqCst);
+    state.starting.store(0, Ordering::SeqCst);
+    let runtime = lock(&state.runtime).take();
+    if let Some(runtime) = runtime {
         runtime.stop();
+    }
+    // Kill any daemon still inside DesktopRuntime::start's startup wait.
+    // Shares the child handle with a live runtime, so the take() inside
+    // stop_runtime_handle keeps this idempotent.
+    let pending = lock(&state.pending_runtime).take();
+    if let Some(pending) = pending {
+        pending.stop();
+    }
+}
+
+fn clear_pending_runtime(state: &ApplicationState, generation: u64) {
+    let mut pending = lock(&state.pending_runtime);
+    if pending.as_ref().map(|runtime| runtime.generation) == Some(generation) {
+        pending.take();
     }
 }
 
@@ -490,10 +583,59 @@ fn set_local_control_menu_state(app: &AppHandle, active: bool) {
     let _ = state.local_control_off_menu.set_enabled(active);
 }
 
-fn initial_workspace(app: &AppHandle) -> Option<PathBuf> {
-    std::env::var_os("QWEN_DESKTOP_WORKSPACE")
+// Resolves the initial workspace and whether it is the derived first-launch
+// default that must be created before starting the runtime. Path resolution
+// only: directory creation happens off the main thread in start_runtime_async
+// because the first touch of ~/Documents can trigger the macOS TCC prompt.
+fn initial_workspace(app: &AppHandle) -> Result<(PathBuf, bool), String> {
+    if let Some(workspace) = std::env::var_os("QWEN_DESKTOP_WORKSPACE") {
+        return Ok((PathBuf::from(workspace), false));
+    }
+    if let Some(workspace) = app.state::<ApplicationState>().settings.workspace() {
+        return Ok((workspace, false));
+    }
+    default_workspace(app)
+}
+
+fn default_workspace(app: &AppHandle) -> Result<(PathBuf, bool), String> {
+    // Matches the Electron shell, where an empty override falls back to the
+    // ~/Documents/Qwen default.
+    let override_dir =
+        default_workspace_override_dir(std::env::var_os("QWEN_DEFAULT_WORKSPACE_DIR"));
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Failed to resolve the home directory: {error}"))?;
+    Ok((
+        default_workspace_path(&home, override_dir.as_deref()),
+        true,
+    ))
+}
+
+// An empty override is treated as unset so the ~/Documents/Qwen default wins,
+// mirroring the Electron shell's `||` fallback.
+fn default_workspace_override_dir(value: Option<OsString>) -> Option<PathBuf> {
+    value
         .map(PathBuf::from)
-        .or_else(|| app.state::<ApplicationState>().settings.workspace())
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn default_workspace_path(home: &Path, override_dir: Option<&Path>) -> PathBuf {
+    match override_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => home.join("Documents").join(DEFAULT_WORKSPACE_DIRECTORY),
+    }
+}
+
+// Creates the default workspace directory. Kept separate from path
+// resolution so it can run off the main thread and be tested on its own.
+fn ensure_workspace_dir(workspace: &Path) -> Result<(), String> {
+    fs::create_dir_all(workspace).map_err(|error| {
+        format!(
+            "Failed to create the default workspace {}: {error}",
+            workspace.display()
+        )
+    })
 }
 
 fn desktop_log_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -662,9 +804,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
+        default_workspace_override_dir, default_workspace_path, ensure_workspace_dir,
         is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
         BOOTSTRAP_URL,
     };
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use url::Url;
 
@@ -683,6 +829,77 @@ mod tests {
             &Url::parse("https://example.com/").expect("external"),
             &origin,
         ));
+    }
+
+    #[test]
+    fn creates_and_reuses_the_default_workspace() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+
+        let workspace = default_workspace_path(&home, None);
+        assert_eq!(workspace, home.join("Documents/Qwen"));
+        ensure_workspace_dir(&workspace).expect("create workspace");
+        ensure_workspace_dir(&workspace).expect("reuse workspace");
+
+        assert!(workspace.is_dir());
+        fs::remove_dir_all(home).expect("cleanup");
+    }
+
+    #[test]
+    fn reports_an_uncreatable_default_workspace() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-error-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(home.join("Documents"), b"not a directory").expect("block Documents");
+
+        let workspace = default_workspace_path(&home, None);
+        assert!(ensure_workspace_dir(&workspace).is_err());
+        fs::remove_dir_all(home).expect("cleanup");
+    }
+
+    #[test]
+    fn treats_an_unset_or_empty_workspace_override_as_absent() {
+        assert_eq!(default_workspace_override_dir(None), None);
+        assert_eq!(default_workspace_override_dir(Some(OsString::new())), None);
+    }
+
+    #[test]
+    fn uses_a_non_empty_workspace_override_verbatim() {
+        let custom = PathBuf::from("/tmp/qwen-custom-workspace");
+        assert_eq!(
+            default_workspace_override_dir(Some(OsString::from(custom.clone()))),
+            Some(custom)
+        );
+    }
+
+    #[test]
+    fn honors_the_default_workspace_directory_override() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-override-home-{}",
+            std::process::id()
+        ));
+        let custom = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-override-target-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&custom);
+        fs::create_dir_all(&home).expect("create home");
+
+        let workspace = default_workspace_path(&home, Some(&custom));
+        assert_eq!(workspace, custom);
+        ensure_workspace_dir(&workspace).expect("create override workspace");
+
+        assert!(custom.is_dir());
+        assert!(!home.join("Documents").exists());
+        fs::remove_dir_all(home).expect("cleanup home");
+        fs::remove_dir_all(custom).expect("cleanup override");
     }
 
     #[test]
