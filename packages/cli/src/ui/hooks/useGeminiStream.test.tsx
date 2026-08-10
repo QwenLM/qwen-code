@@ -9460,7 +9460,6 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await result.current.submitQuery('/remember fact');
       });
-      mockRefreshMemoryInstruction.mockClear();
       return result;
     }
 
