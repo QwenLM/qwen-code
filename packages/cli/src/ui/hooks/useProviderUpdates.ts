@@ -14,7 +14,8 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
-  computeProviderTemplateVersion,
+  buildProviderTemplate,
+  computeModelListVersion,
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
@@ -204,7 +205,8 @@ function findAllPendingUpdates(
     if (!metadata.version) continue;
 
     const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentVersion = computeProviderTemplateVersion(provider, baseUrl);
+    const currentTemplate = buildProviderTemplate(provider, baseUrl);
+    const currentVersion = computeModelListVersion(currentTemplate);
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
@@ -253,9 +255,10 @@ export function useProviderUpdates(
   const migrated = useRef(false);
 
   const executeUpdate = useCallback(
-    async (providerCfg: ProviderConfig, baseUrl?: string) => {
+    async (pending: PendingUpdate) => {
       try {
-        const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        const providerCfg = pending.provider;
+        const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
@@ -268,6 +271,9 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
+        installPlan.providerState![
+          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+        ]!['version'] = pending.currentVersion;
         delete installPlan.env;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
@@ -384,7 +390,7 @@ export function useProviderUpdates(
         setUpdateRequest(undefined);
         if (choice === 'update') {
           for (const p of pendingList) {
-            await executeUpdate(p.provider, p.baseUrl);
+            await executeUpdate(p);
           }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);

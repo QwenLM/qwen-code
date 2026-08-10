@@ -222,7 +222,7 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('preserves user-added custom models when executing an update', async () => {
+  it('persists the template version and preserves custom models', async () => {
     const customModel = {
       id: 'my-custom-model',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
@@ -264,6 +264,11 @@ describe('useProviderUpdates', () => {
         expect.objectContaining({ id: 'my-custom-model' }),
       ]),
     );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
+    );
   });
 
   it('executes update when user confirms with "update"', async () => {
@@ -303,11 +308,6 @@ describe('useProviderUpdates', () => {
       expect(mockSettings.setValue).toHaveBeenCalled();
     });
 
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
-      chinaVersion,
-    );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
       `${PROVIDER_METADATA_NS}.${METADATA_KEY}.baseUrl`,
