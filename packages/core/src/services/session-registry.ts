@@ -131,6 +131,30 @@ function noFollowFlag(): number {
   return fsSync.constants.O_NOFOLLOW ?? 0;
 }
 
+/**
+ * `O_NONBLOCK` is what keeps the *open* from hanging, and it has to be
+ * paired with every read of a registry entry.
+ *
+ * The `isFile()` rejection can only run once `fs.open` has returned, and a
+ * co-tenant who can name `<pid>.json` in the shared directory can make it
+ * a FIFO — a blocking `O_RDONLY` open on one waits for a writer that never
+ * arrives, which hangs `qwen sessions ps`, hangs a session's own startup
+ * registration when the FIFO sits at its PID, and saturates libuv's
+ * four-thread fs pool a few entries in. On the regular files this is
+ * actually for it does nothing.
+ *
+ * Absent on Windows and read at the call site, both for the same reasons
+ * as {@link noFollowFlag}.
+ */
+function nonBlockingFlag(): number {
+  return fsSync.constants.O_NONBLOCK ?? 0;
+}
+
+/** The flags every read of a registry entry opens with. */
+function readEntryFlags(): number {
+  return fsSync.constants.O_RDONLY | noFollowFlag() | nonBlockingFlag();
+}
+
 /** A directory entry's identity, as observed through an open handle. */
 interface EntryIdentity {
   dev: number;
@@ -313,11 +337,20 @@ function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
  * `lstatSync` rather than the async form because `assertCanCommit` is the
  * hook that runs *between* the last check and an irreversible `rename`;
  * an `await` there would reopen the very window this closes.
+ *
+ * `requireFile` is false for the one caller replacing an entry
+ * {@link readRecord} *refused*, where the entry's type is part of what
+ * made it unusable: a planted symlink or a stray directory is precisely
+ * what that write is there to clear, so only the identity is pinned.
  */
-function assertSameEntry(filePath: string, expected: EntryIdentity): void {
+function assertSameEntry(
+  filePath: string,
+  expected: EntryIdentity,
+  requireFile: boolean,
+): void {
   const stat = fsSync.lstatSync(filePath);
   if (
-    !stat.isFile() ||
+    (requireFile && !stat.isFile()) ||
     stat.dev !== expected.dev ||
     stat.ino !== expected.ino
   ) {
@@ -398,46 +431,88 @@ export async function registerSession(
           return false;
         }
 
+        // The entry the replacing write below is allowed to overwrite,
+        // pinned by identity so the commit can refuse a swap. Left
+        // undefined only when nothing could be pinned at all.
+        let replacing:
+          | { entry: EntryIdentity; requireFile: boolean }
+          | undefined = existing
+          ? { entry: existing.entry, requireFile: true }
+          : undefined;
+
         // `existing === null` covers two different situations and only one
         // of them is a free name: nothing is there, or something is there
         // that this code cannot honour (a planted symlink, a truncated
         // write, a future schema). Replacing the second is deliberate and
         // tested; claiming the first has to be exclusive.
-        if (existing === null && !(await entryExists(filePath))) {
-          // Claim the name with an operation the kernel makes exclusive,
-          // rather than reading "absent" and renaming over whatever
-          // arrived in between: two origins sharing `QWEN_HOME` and a PID
-          // number would both see the gap, and the later rename would
-          // silently replace the earlier live record.
-          const outcome = await linkRecordExclusive(filePath, record);
-          if (outcome === 'created') {
-            retiredPids.delete(pid);
-            return true;
+        if (existing === null) {
+          if (!(await entryExists(filePath))) {
+            // Claim the name with an operation the kernel makes exclusive,
+            // rather than reading "absent" and renaming over whatever
+            // arrived in between: two origins sharing `QWEN_HOME` and a PID
+            // number would both see the gap, and the later rename would
+            // silently replace the earlier live record.
+            const outcome = await linkRecordExclusive(filePath, record);
+            if (outcome === 'created') {
+              retiredPids.delete(pid);
+              return true;
+            }
+            // 'taken' — someone claimed it in between. Go round again and
+            // route whatever they wrote through the origin rule above, as
+            // if it had been there before we looked.
+            if (outcome === 'taken') continue;
+            // 'unsupported' — no hard links on this filesystem. Fall
+            // through to the replacing write, which is where this path has
+            // always been; the exclusivity gap is the price of the
+            // filesystem.
+          } else {
+            // Something unusable is there, and `readRecord` discarded its
+            // origin along with the bytes it refused. Being unreadable to
+            // us is not what makes a record ours: a live foreign record
+            // one schema version ahead reaches exactly this branch, and
+            // without the peek it would be clobbered silently, with no
+            // `onOriginConflict` — the outcome the origin rule above
+            // exists to prevent, arrived at by a different route.
+            const unusable = await inspectUnusableEntry(filePath);
+            if (
+              unusable.origin !== null &&
+              !isSameOrigin(
+                unusable.origin,
+                record.machineId,
+                record.pidNamespace,
+              )
+            ) {
+              reportConflict();
+              return false;
+            }
+            // An entry that cannot be attributed at all — unparseable, or
+            // past the read cap, so not something this code ever wrote —
+            // stays replaceable. Refusing it instead would strand
+            // registration permanently on one truncated write, and
+            // registration only ever runs at startup.
+            replacing = unusable.entry
+              ? { entry: unusable.entry, requireFile: false }
+              : undefined;
           }
-          // 'taken' — someone claimed it in between. Go round again and
-          // route whatever they wrote through the origin rule above, as if
-          // it had been there before we looked.
-          if (outcome === 'taken') continue;
-          // 'unsupported' — no hard links on this filesystem. Fall through
-          // to the replacing write, which is where this path has always
-          // been; the exclusivity gap is the price of the filesystem.
         }
 
         // Either a same-origin record is present — the recycled-PID
         // recovery path, where a predecessor died without unregistering —
-        // or hard links are unavailable. Replace it, but commit only if
-        // the directory entry is still the one that was validated.
+        // or an unusable entry is, or hard links are unavailable. Replace
+        // it, but commit only if the directory entry is still the one that
+        // was inspected.
         //
         // `noFollow` keeps a pre-planted `<pid>.json` symlink from
         // redirecting this write (and its forced 0600) to a file outside
         // the registry: the sandbox shares this directory across a trust
         // boundary, so the planting side is not hypothetical.
+        const pinned = replacing;
         await atomicWriteJSON(filePath, record, {
           mode: REGISTRY_FILE_MODE,
           forceMode: true,
           noFollow: true,
-          assertCanCommit: existing
-            ? () => assertSameEntry(filePath, existing.entry)
+          assertCanCommit: pinned
+            ? () => assertSameEntry(filePath, pinned.entry, pinned.requireFile)
             : undefined,
         });
         retiredPids.delete(pid);
@@ -453,6 +528,77 @@ export async function registerSession(
       return false;
     }
   });
+}
+
+/**
+ * What can still be learned about an entry {@link readRecord} refused:
+ * which inode it is, and — when the bytes parse that far — whose origin it
+ * claims.
+ *
+ * Both are things `readRecord` throws away along with the record it
+ * rejects, and both are things the write that replaces it needs: the
+ * identity to pin the commit against a swap, the origin to run the same
+ * rule a *readable* foreign record gets. Neither is load-bearing on its
+ * own — an unknown identity leaves the write unpinned, exactly where it
+ * was before, and an unattributable entry stays replaceable.
+ *
+ * Read through the same capped, non-following, non-blocking handle as
+ * `readRecord`, for the same reasons: a FIFO here would hang startup, and
+ * an unbounded read here would be the same allocation lever.
+ */
+async function inspectUnusableEntry(filePath: string): Promise<{
+  entry: EntryIdentity | null;
+  origin: Pick<SessionRegistryRecord, 'machineId' | 'pidNamespace'> | null;
+}> {
+  let entry: EntryIdentity | null = null;
+  try {
+    const stat = await fs.lstat(filePath);
+    entry = { dev: stat.dev, ino: stat.ino };
+  } catch {
+    return { entry: null, origin: null };
+  }
+
+  let handle: fs.FileHandle;
+  try {
+    handle = await fs.open(filePath, readEntryFlags());
+  } catch {
+    // A symlink (`O_NOFOLLOW` → ELOOP), a directory, a device: nothing
+    // that can carry an origin claim.
+    return { entry, origin: null };
+  }
+  let raw: string | null;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return { entry, origin: null };
+    raw = await readCapped(handle);
+  } catch {
+    return { entry, origin: null };
+  } finally {
+    await handle.close().catch(() => {});
+  }
+  if (raw === null) return { entry, origin: null };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { entry, origin: null };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { entry, origin: null };
+  }
+  const value = parsed as Record<string, unknown>;
+  const machineId = value['machineId'];
+  const pidNamespace = value['pidNamespace'];
+  // Absent reads as `undefined` here, which neither arm accepts — a body
+  // that makes no origin claim has not been attributed.
+  if (
+    (typeof machineId !== 'string' && machineId !== null) ||
+    (typeof pidNamespace !== 'string' && pidNamespace !== null)
+  ) {
+    return { entry, origin: null };
+  }
+  return { entry, origin: { machineId, pidNamespace } };
 }
 
 /** True when any directory entry exists at `filePath`, symlinks included. */
@@ -568,7 +714,8 @@ export async function patchSessionRecord(
           mode: REGISTRY_FILE_MODE,
           forceMode: true,
           noFollow: true,
-          assertCanCommit: () => assertSameEntry(filePath, existing.entry),
+          assertCanCommit: () =>
+            assertSameEntry(filePath, existing.entry, true),
         },
       );
     } catch (error) {
@@ -610,7 +757,7 @@ export async function unregisterSession(
       // pair rather than to the whole validating read — the same binding
       // the write paths get from `assertCanCommit`, minus a primitive the
       // platform does not offer.
-      assertSameEntry(filePath, existing.entry);
+      assertSameEntry(filePath, existing.entry, true);
       await fs.unlink(filePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
@@ -740,7 +887,7 @@ export async function listLiveSessions(
           // itself stale is the only one this may remove, so a co-tenant
           // who swaps a live foreign record into the name after the read
           // does not get it deleted on their behalf.
-          assertSameEntry(filePath, read.entry);
+          assertSameEntry(filePath, read.entry, true);
           await fs.unlink(filePath);
         } catch {
           // Raced with another session's sweep, replaced under us, or not
@@ -764,32 +911,65 @@ export async function listLiveSessions(
  * path still resolves to the inode that was validated (see
  * {@link assertSameEntry}).
  */
+/**
+ * Read at most {@link MAX_RECORD_BYTES} through an already-open handle.
+ * Returns null when the entry holds more than that.
+ *
+ * The `stat.size` check at the call site is a cheap early reject, not the
+ * ceiling. It and a `readFile()` to EOF are two separate observations of
+ * an inode a co-tenant can still be writing to, so an entry that passes
+ * the check at eleven bytes can be grown to hundreds of megabytes before
+ * the read runs — the cap becomes advisory and `qwen sessions ps`, which
+ * examines up to {@link MAX_RECORDS_PER_SCAN} attacker-named candidates
+ * per invocation, turns into a memory-exhaustion lever. Bounding the read
+ * makes what happens after the check irrelevant: the ceiling is enforced
+ * on the bytes this process actually allocates.
+ *
+ * The loop is for short reads, which `read()` is allowed to return at any
+ * point before EOF; the buffer is one byte past the cap so that filling it
+ * is itself the overflow signal.
+ */
+async function readCapped(handle: fs.FileHandle): Promise<string | null> {
+  const buffer = Buffer.alloc(MAX_RECORD_BYTES + 1);
+  let filled = 0;
+  while (filled < buffer.length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      filled,
+      buffer.length - filled,
+      filled,
+    );
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  if (filled > MAX_RECORD_BYTES) return null;
+  return buffer.toString('utf8', 0, filled);
+}
+
 async function readRecord(filePath: string): Promise<ReadRecord | null> {
-  let raw: string;
   let entry: EntryIdentity;
   let handle: fs.FileHandle;
   try {
-    handle = await fs.open(
-      filePath,
-      fsSync.constants.O_RDONLY | noFollowFlag(),
-    );
+    handle = await fs.open(filePath, readEntryFlags());
   } catch {
     return null;
   }
+  let bytes: string | null;
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return null;
     entry = { dev: stat.dev, ino: stat.ino };
-    raw = await handle.readFile('utf8');
+    bytes = await readCapped(handle);
   } catch {
     return null;
   } finally {
     await handle.close().catch(() => {});
   }
+  if (bytes === null) return null;
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(bytes);
   } catch {
     return null;
   }

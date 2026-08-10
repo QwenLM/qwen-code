@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -44,6 +45,33 @@ vi.mock('../utils/process-liveness.js', async (importOriginal) => {
   };
 });
 
+/**
+ * Lets a test reproduce the one state a real attacker produces and a
+ * fixture cannot: an entry whose `fstat` size and whose actual byte count
+ * disagree, because the inode grew between the two. Everything else about
+ * `node:fs/promises` passes straight through.
+ */
+const statSizeLie = vi.hoisted(() => ({ value: null as number | null }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const open: typeof actual.open = async (...args) => {
+    const handle = await actual.open(...args);
+    const realStat = handle.stat.bind(handle);
+    handle.stat = async (options?: Parameters<typeof realStat>[0]) => {
+      const stat = await realStat(options);
+      if (statSizeLie.value === null) return stat;
+      // Prototype-chained rather than spread: `isFile()` and friends live
+      // on `Stats.prototype`, and a spread copy would lose them.
+      return Object.create(stat, {
+        size: { value: statSizeLie.value, enumerable: true },
+      });
+    };
+    return handle;
+  };
+  return { ...actual, default: { ...actual, open }, open };
+});
+
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/session-registry-test';
   return {
@@ -70,6 +98,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  statSizeLie.value = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -91,6 +120,26 @@ async function writeRaw(fileName: string, body: unknown): Promise<string> {
       : JSON.stringify({ machineId: readMachineId(), ...(body as object) });
   await fs.writeFile(filePath, content);
   return filePath;
+}
+
+/**
+ * Fail a hang as a normal assertion rather than as a suite timeout.
+ *
+ * A blocked FIFO open is held by a libuv fs thread that nothing can
+ * cancel, so letting the test time out would take the rest of the file
+ * down with it. Four seconds is far past any honest read of a directory
+ * holding a handful of small files.
+ */
+async function withinFourSeconds<T>(work: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('blocked for over 4s')), 4000);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer!);
+  }
 }
 
 describe('deriveSessionName', () => {
@@ -449,6 +498,107 @@ describe('registerSession', () => {
       }),
     ).toBe(false);
   });
+
+  it('refuses a foreign record it could not parse, instead of clobbering it', async () => {
+    // A record one schema version ahead is rejected by the reader with its
+    // origin thrown away, which lands it on the *replacing* write rather
+    // than the origin gate. Being unreadable to us is not what makes a
+    // record ours: this one is live somewhere else, nothing sweeps a
+    // foreign entry, and registration only runs at startup — so the
+    // clobber would take that session out of discovery for good.
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION + 1,
+      pid: process.pid,
+      procStart: null,
+      pidNamespace: readPidNamespaceId(),
+      machineId: 'another-machine',
+      sessionId: 's-theirs',
+      cwd: '/w/theirs',
+      name: 'theirs-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+    const before = await fs.readFile(filePath, 'utf8');
+
+    const conflicts: Array<{ pid: number; filePath: string }> = [];
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+        onOriginConflict: (info) => conflicts.push(info),
+      }),
+    ).toBe(false);
+
+    expect(await fs.readFile(filePath, 'utf8')).toBe(before);
+    expect(conflicts).toEqual([{ pid: process.pid, filePath }]);
+  });
+
+  it('still replaces an unusable entry that claims this origin', async () => {
+    // The other half of the rule above: a truncated write from a previous
+    // run of *this* session is exactly what the replacing write is for.
+    // Refusing everything unparseable would strand registration on it
+    // permanently.
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION + 1,
+      pidNamespace: readPidNamespaceId(),
+      machineId: readMachineId(),
+    });
+
+    const onOriginConflict = vi.fn();
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+        onOriginConflict,
+      }),
+    ).toBe(true);
+
+    expect(onOriginConflict).not.toHaveBeenCalled();
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      sessionId: 's-ours',
+    });
+  });
+
+  it('replaces an entry whose bytes carry no origin claim at all', async () => {
+    const filePath = await writeRaw(`${process.pid}.json`, 'not json at all');
+
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      sessionId: 's-ours',
+    });
+  });
+
+  // `mkfifo` has no Windows equivalent, and the flag it needs is absent
+  // from `fs.constants` there.
+  it.skipIf(process.platform === 'win32')(
+    'does not hang on a FIFO planted at its own record path',
+    async () => {
+      await fs.mkdir(getSessionRegistryDir(), { recursive: true });
+      execFileSync('mkfifo', [getSessionRecordPath()]);
+
+      // A blocking `O_RDONLY` open on a FIFO waits for a writer that never
+      // comes, and the type check that would reject it cannot run until
+      // the open returns — so startup registration never completes.
+      await expect(
+        withinFourSeconds(
+          registerSession({
+            sessionId: 's1',
+            cwd: '/w/app',
+            kind: 'interactive',
+          }),
+        ),
+      ).resolves.toBe(true);
+      expect((await fs.lstat(getSessionRecordPath())).isFIFO()).toBe(false);
+    },
+  );
 });
 
 describe('patchSessionRecord', () => {
@@ -1184,4 +1334,49 @@ describe('bounding what one enumeration will do', () => {
       ),
     ).toEqual([]);
   });
+
+  it('bounds the bytes it reads even when the size check was told otherwise', async () => {
+    // The size check and a read-to-EOF are two observations of an inode a
+    // co-tenant is still writing to, so the check passing at eleven bytes
+    // says nothing about what the read returns. With up to 512 candidates
+    // per pass and a free retry on every `qwen sessions ps`, an unbounded
+    // read there is a memory-exhaustion lever, not a parse error.
+    //
+    // The padding sits inside an otherwise *valid, live* record on
+    // purpose: garbage would be rejected by the parser either way, and the
+    // cap would look enforced while nothing enforced it.
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: readProcStartToken(process.pid),
+      pidNamespace: readPidNamespaceId(),
+      sessionId: 's-oversized',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+      filler: 'x'.repeat(64 * 1024),
+    });
+    expect((await fs.stat(filePath)).size).toBeGreaterThan(64 * 1024);
+    statSizeLie.value = 11;
+
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+    // Rejected on the byte count, not swept: nothing here proved it dead.
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
+  // `mkfifo` has no Windows equivalent.
+  it.skipIf(process.platform === 'win32')(
+    'does not hang on a FIFO planted among the candidates',
+    async () => {
+      await fs.mkdir(getSessionRegistryDir(), { recursive: true });
+      execFileSync('mkfifo', [getSessionRecordPath(DEAD_PID)]);
+
+      // Under this directory's own threat model a co-tenant names
+      // `<digits>.json` at will, so `mkfifo` there is a one-command hang of
+      // every `qwen sessions ps` on the box — and a handful of them
+      // exhausts libuv's four-thread fs pool for the whole process.
+      await expect(withinFourSeconds(listLiveSessions())).resolves.toEqual([]);
+    },
+  );
 });
