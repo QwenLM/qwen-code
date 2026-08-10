@@ -139,8 +139,14 @@ import type { AuthOverrides } from '../../models/content-generator-config.js';
 // background) starts. Branches don't change within a process under normal
 // use; the transcript annotation is best-effort audit metadata, so a stale
 // value after a user `git checkout` mid-session is acceptable.
+//
+// Exported so the workflow dispatch path (workflow-orchestrator.ts) annotates
+// its transcripts from the SAME cache instead of opening a second one — the
+// whole point of the memo is one `git rev-parse` per cwd per process, and a
+// private copy per launch path would quietly restore the per-launch execSync
+// for workflow subagents.
 const gitBranchCache = new Map<string, string | undefined>();
-function getCachedGitBranch(cwd: string): string | undefined {
+export function getCachedGitBranch(cwd: string): string | undefined {
   if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
   const branch = getGitBranch(cwd);
   gitBranchCache.set(cwd, branch);

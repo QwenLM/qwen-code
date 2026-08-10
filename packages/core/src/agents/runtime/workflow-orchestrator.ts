@@ -46,7 +46,14 @@ import {
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
-import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
+import {
+  getCachedGitBranch,
+  rebuildToolRegistryOnOverride,
+} from '../../tools/agent/agent.js';
+import {
+  attachJsonlTranscriptWriter,
+  getAgentJsonlPath,
+} from '../agent-transcript.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
@@ -394,7 +401,19 @@ export function createProductionDispatch(
     );
     return runStallResilient(
       async (attemptSignal, emitter) => {
+        // Minted here rather than inside the dispatch so this attempt's
+        // transcript is named for the same id the dispatch reports in its
+        // terminal error — and so the writer is attached to the emitter
+        // BEFORE any agent event can fire on it.
+        const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
         const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        const detachTranscript = attachDispatchTranscript(
+          config,
+          workflowAgentId,
+          prompt,
+          opts,
+          emitter,
+        );
         try {
           return await runSingleDispatch(
             config,
@@ -402,9 +421,11 @@ export function createProductionDispatch(
             opts,
             attemptSignal,
             emitter,
+            workflowAgentId,
             onTokens,
           );
         } finally {
+          detachTranscript();
           cleanupApprovalBridge?.();
         }
       },
@@ -414,6 +435,92 @@ export function createProductionDispatch(
         label: typeof opts.label === 'string' ? opts.label : undefined,
       },
     );
+  };
+}
+
+/**
+ * Attach the harness's own per-subagent transcript to one dispatch.
+ *
+ * Workflow subagents were the only agents in the product that left no record.
+ * `attachJsonlTranscriptWriter` has exactly one other caller — the Agent tool
+ * (foreground and background) — while workflow dispatch goes straight to
+ * `AgentHeadless.create` / `createAgentHeadless`, so nothing landed in
+ * `<projectDir>/subagents/<sessionId>/`. Everything that reads that directory
+ * to answer "what did this agent actually do" was blind on the workflow path:
+ * post-mortem of a failed run, cost accounting, and any gate built on tool
+ * calls rather than on the agent's own prose (which is precisely the evidence
+ * an agent cannot forge — a whiffing agent still writes plausible text, but it
+ * makes no tool call).
+ *
+ * One attach point covers both dispatch paths because `runStallResilient`
+ * builds one `AgentEventEmitter` per attempt and hands the same instance to
+ * the fast path and the override path alike.
+ *
+ * Per ATTEMPT, not per `agent()` call: the caller mints one id per attempt,
+ * so a stall retry writes its own transcript rather than appending to the
+ * abandoned one. Three attempts leave three records, each self-describing —
+ * which is what makes a retry legible after the fact instead of looking like
+ * one agent that behaved strangely.
+ *
+ * Best-effort by construction. A transcript is audit metadata; an unwritable
+ * or full disk must not fail a dispatch that would otherwise have succeeded,
+ * so both the attach and the returned cleanup swallow their errors. The
+ * writer itself opens its fd lazily, so a dispatch that produces no record
+ * materializes no file.
+ */
+function attachDispatchTranscript(
+  config: Config,
+  workflowAgentId: string,
+  prompt: string,
+  opts: WorkflowAgentOpts,
+  emitter: AgentEventEmitter,
+): () => void {
+  let cleanup: (() => void) | undefined;
+  try {
+    const sessionId = config.getSessionId();
+    const projectRoot = config.getProjectRoot();
+    // `label` first: it is the identity the script chose and the one the run
+    // shows in progress output, so a reader matching a transcript to a line
+    // of the script has the same name in both places. `agentType` is the
+    // fallback that still says something; the constant is the last resort.
+    const label = typeof opts.label === 'string' ? opts.label.trim() : '';
+    const agentType =
+      typeof opts.agentType === 'string' ? opts.agentType.trim() : '';
+    ({ cleanup } = attachJsonlTranscriptWriter(
+      emitter,
+      getAgentJsonlPath(
+        config.storage.getProjectDir(),
+        sessionId,
+        workflowAgentId,
+      ),
+      {
+        agentId: workflowAgentId,
+        agentName: label || agentType || 'workflow-agent',
+        sessionId,
+        cwd: projectRoot,
+        version: config.getCliVersion() || 'unknown',
+        gitBranch: getCachedGitBranch(projectRoot),
+        // Seeds the first `user` record, written before the model has said
+        // anything — so the transcript states what the agent was asked to do
+        // without a reader needing the script that asked it.
+        initialUserPrompt: prompt,
+      },
+    ));
+  } catch (error) {
+    debugLogger.warn(
+      `[workflow] transcript attach failed for ${workflowAgentId}: ${error}`,
+    );
+    return () => {};
+  }
+  const detach = cleanup;
+  return () => {
+    try {
+      detach();
+    } catch (error) {
+      debugLogger.warn(
+        `[workflow] transcript cleanup failed for ${workflowAgentId}: ${error}`,
+      );
+    }
   };
 }
 
@@ -431,12 +538,17 @@ async function runSingleDispatch(
   opts: WorkflowAgentOpts,
   attemptSignal: AbortSignal,
   emitter: AgentEventEmitter,
+  /**
+   * This attempt's agent id, minted by the caller so the transcript writer
+   * could be attached to `emitter` before the agent exists. Also the id this
+   * function names in its non-GOAL terminal error.
+   */
+  workflowAgentId: string,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
-  const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
   if (

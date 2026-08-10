@@ -7,7 +7,9 @@
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -1708,6 +1710,208 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+  });
+
+  // --- per-dispatch transcript ------------------------------------------
+  //
+  // Workflow subagents were the only agents in the product that left no
+  // record on disk. These cases pin the SHAPE, not just the existence of a
+  // file: a consumer of `<projectDir>/subagents/<sessionId>/` answers "what
+  // did this agent actually do" by reading the launch prompt out of the
+  // first record and pairing functionCall/functionResponse by callId. A file
+  // that exists but carries neither answers nothing.
+  describe('dispatch transcript', () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+      projectDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'wf-tx-'));
+    });
+
+    afterEach(() => {
+      fsSync.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    const SESSION = 'sess-transcript-test';
+
+    function transcriptConfig(): Config {
+      return {
+        storage: { getProjectDir: () => projectDir },
+        getSessionId: () => SESSION,
+        getProjectRoot: () => projectDir,
+        getCliVersion: () => '0.0.0-test',
+      } as unknown as Config;
+    }
+
+    function transcriptFiles(): string[] {
+      const dir = path.join(projectDir, 'subagents', SESSION);
+      if (!fsSync.existsSync(dir)) return [];
+      return fsSync
+        .readdirSync(dir)
+        .filter((f) => f.endsWith('.jsonl'))
+        .map((f) => path.join(dir, f));
+    }
+
+    function recordsOf(file: string): Array<Record<string, unknown>> {
+      return fsSync
+        .readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+    }
+
+    it('writes one transcript per dispatch, opening with the launch prompt', async () => {
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('review the diff', { label: 'reviewer' });
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      // Named for the same id the dispatch reports in its terminal error, so
+      // a failure message leads straight to the record.
+      expect(path.basename(files[0])).toMatch(
+        /^agent-workflow-agent-[0-9a-f]{16}\.jsonl$/,
+      );
+
+      const records = recordsOf(files[0]);
+      const first = records[0];
+      expect(first['type']).toBe('user');
+      expect(first['agentId']).toBe(created[0]!.agentId);
+      expect(first['agentName']).toBe('reviewer');
+      expect(first['sessionId']).toBe(SESSION);
+      // The prompt is written at attach time, before the model has produced
+      // anything — which is what makes it evidence the agent cannot revise.
+      expect(
+        (first['message'] as { parts: Array<{ text?: string }> }).parts[0].text,
+      ).toBe('review the diff');
+    });
+
+    it("records the agent's tool calls, pairable by callId", async () => {
+      nextExecuteHook.value = async (emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'workflow-agent',
+          round: 1,
+          callId: 'call-1',
+          name: 'read_file',
+          args: { absolute_path: '/repo/diff.txt', offset: 0, limit: 40 },
+          description: 'read the diff',
+          timestamp: Date.now(),
+        });
+        emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+          subagentId: 'workflow-agent',
+          round: 1,
+          responses: [
+            {
+              callId: 'call-1',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'read_file',
+                    response: { output: 'diff text' },
+                  },
+                },
+              ],
+            },
+          ],
+          timestamp: Date.now(),
+        });
+      };
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('read it', { label: 'reader' });
+
+      const records = recordsOf(transcriptFiles()[0]);
+      const call = records.find((r) =>
+        (
+          r['message'] as { parts?: Array<{ functionCall?: unknown }> }
+        )?.parts?.some((p) => p.functionCall !== undefined),
+      );
+      const result = records.find((r) => r['type'] === 'tool_result');
+      expect(call).toBeDefined();
+      expect(result).toBeDefined();
+
+      const fc = (
+        call!['message'] as {
+          parts: Array<{
+            functionCall?: { id: string; name: string; args: unknown };
+          }>;
+        }
+      ).parts[0].functionCall!;
+      expect(fc.id).toBe('call-1');
+      expect(fc.name).toBe('read_file');
+      // The args are what let a reader ask "which file, which lines" rather
+      // than only "it called something".
+      expect(fc.args).toEqual({
+        absolute_path: '/repo/diff.txt',
+        offset: 0,
+        limit: 40,
+      });
+      expect((result!['toolCallResult'] as { callId: string }).callId).toBe(
+        'call-1',
+      );
+    });
+
+    // A retried dispatch is two agent runs, and a reader that saw one merged
+    // record could not tell a stall from an agent that behaved oddly. The id
+    // is minted per attempt precisely so each leaves its own file.
+    it('writes a separate transcript for each stall retry attempt', async () => {
+      let attempt = 0;
+      nextExecuteHook.value = async (emitter, signal) => {
+        attempt += 1;
+        if (attempt > 1) {
+          nextTerminateMode.value = 'GOAL';
+          return;
+        }
+        nextTerminateMode.value = 'CANCELLED';
+        emitter.emit(AgentEventType.ROUND_START, {
+          subagentId: 'workflow-agent',
+          round: 1,
+          promptId: 'prompt-1',
+          timestamp: Date.now(),
+        });
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+      };
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('stall once', { label: 'staller', stallMs: 20 });
+
+      expect(attempt).toBe(2);
+      const files = transcriptFiles();
+      expect(files).toHaveLength(2);
+      // Each is self-describing: both carry the launch prompt, so neither is
+      // a fragment that only makes sense beside the other.
+      for (const file of files) {
+        expect(recordsOf(file)[0]['type']).toBe('user');
+      }
+    });
+
+    // The transcript is audit metadata. A dispatch that would have succeeded
+    // must not fail because the record could not be written — which is also
+    // why every other test in this file, whose fakeConfig() has none of the
+    // methods used above, still passes.
+    it('does not fail the dispatch when the transcript cannot be written', async () => {
+      const broken = {
+        storage: {
+          getProjectDir: () => {
+            throw new Error('no project dir');
+          },
+        },
+        getSessionId: () => SESSION,
+        getProjectRoot: () => projectDir,
+        getCliVersion: () => '0.0.0-test',
+      } as unknown as Config;
+
+      const dispatch = createProductionDispatch(broken);
+      await expect(dispatch('still works', { label: 'x' })).resolves.toBe(
+        'headless-said:still works',
+      );
+      expect(transcriptFiles()).toHaveLength(0);
+    });
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
