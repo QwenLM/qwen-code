@@ -344,6 +344,36 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (!el) return;
 
+    // Force-capture Enter + printable keys at the global level so input works
+    // even when the editor's native capture doesn't fire (focus quirks).
+    // preventDefault keeps the focused editor from double-handling the key.
+    if (
+      key.name === 'enter' ||
+      key.name === 'return' ||
+      key.name === 'kpenter'
+    ) {
+      const text = el.plainText.trim();
+      if (text) {
+        el.clear();
+        setTextVersion((v) => v + 1);
+        onSubmit(text);
+        key.preventDefault();
+      }
+      return;
+    }
+    if (
+      !key.ctrl &&
+      !key.meta &&
+      key.sequence &&
+      key.sequence.length >= 1 &&
+      !key.sequence.startsWith('\x1b')
+    ) {
+      el.insertText(key.sequence);
+      setTextVersion((v) => v + 1);
+      key.preventDefault();
+      return;
+    }
+
     if (key.name === 'c' && key.ctrl) {
       // Parity with CLEAR_INPUT: a non-empty buffer is cleared first; the
       // app-level quit only fires on an empty prompt.
