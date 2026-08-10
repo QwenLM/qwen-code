@@ -775,6 +775,93 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.body.split('review time budget').length - 1).toBe(1);
   });
 
+  it("an idle rostered agent does not shadow the caller's relay of the same role", () => {
+    // A whiffed auditor that made zero tool calls lands in `idleAgents`,
+    // named by its brief's publicLabel — the very subject the orchestrator
+    // spells its scoped whiff relay in. The caller-echo prefix filter must
+    // not let the idle entry swallow that relay: the entry explains the
+    // idleness, the relay carries the scope, and the skill's promise is
+    // that such prose renders verbatim. The Step 4/5 floor fails the same
+    // run — its `reverse audit` gap entry shares the subject, so it shares
+    // the exemption.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), launch);
+    transcript('v-reverse_audit', launch, { toolCalls: 0 });
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would relaunch a WORKING reverse auditor over this
+    // fixture's idle one.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — the agent made no tool call: it read nothing.',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+  });
+
+  it("an unopened rostered agent does not shadow the caller's relay of the same role", () => {
+    // The sibling push site: an agent that worked but never opened the diff
+    // is named in the same register, and its entry must not swallow a relay
+    // the caller spelled with its own reason either.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'verify');
+    writeFileSync(brief, 'The verify brief.');
+    const launch =
+      `You are review agent \`verify\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'verify.txt'), launch);
+    transcript('v-verify', launch, { opens: [brief] });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'verification — the findings file was never ruled on',
+      ],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: verification — pointed at diff lines it never opened: ' +
+        'it made tool calls, but none of them read the diff.',
+    );
+    expect(r.body).toContain(
+      'Not reviewed: verification — the findings file was never ruled on.',
+    );
+  });
+
   it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
     // The gate refused round 1, so no reverse-audit record exists. Without
     // the marker the floor would report the absence as a rogue/unlaunched

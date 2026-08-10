@@ -315,6 +315,17 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('keeps a bracket-wrapped gap that names a real check — wrappers and all', () => {
+    // The survival half of the edge-strip, which the negatives above cannot
+    // pin: a drop-if-wrapped mutant passes every negative case yet silently
+    // discloses nothing here, in the channel where a lost gap is
+    // unobservable downstream. The pushed gap keeps `raw`, wrappers
+    // included — that is what makes this assertion discriminate.
+    expect(
+      budgetGapDisclosures('Budget gap: (retry path) the remaining callers'),
+    ).toEqual(['(retry path) the remaining callers']);
+  });
+
   it('folds duplicate disclosures into one gap', () => {
     // An agent commonly states its gap mid-return and restates it in the
     // closing summary — one gap, not two, and duplicates must not consume

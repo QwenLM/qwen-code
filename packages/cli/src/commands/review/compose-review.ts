@@ -415,7 +415,13 @@ function composeReviewBody(
   // dropped every OTHER reverse-audit scope the orchestrator disclosed
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
-  // likeliest.
+  // likeliest. The same holds for every entry named by a role's
+  // publicLabel — idle/unopened agents below, the Step 4/5 floor further
+  // down — so they join one exemption set; a bare subject echo still
+  // dedups. Chunk and internal-subject entries keep the prefix match: a
+  // caller echoing those is pasting the gate's own line (#7188), and the
+  // coverage-derived text wins the collision.
+  const roleLabelEntries = new Set<(typeof coverageEntries)[number]>();
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
@@ -427,6 +433,7 @@ function composeReviewBody(
       }
       budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
       coverageEntries.push(budgetEntry);
+      roleLabelEntries.add(budgetEntry);
     }
   }
   // The fixes for the gaps above, for stderr — never for the body. The gap says
@@ -569,11 +576,16 @@ function composeReviewBody(
         if (!already) uncoverable.push(prefix);
       }
       for (const label of cov.idleAgents) {
-        coverageEntries.push({
+        const entry = {
           subject: label,
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
-        });
+        };
+        coverageEntries.push(entry);
+        // A chunk agent's idle label is `chunk N` and keeps the prefix
+        // dedup; a rostered agent's is a role publicLabel — the caller's
+        // own relay register — and joins the exemption (see above).
+        if (!/^chunk \d+$/.test(label)) roleLabelEntries.add(entry);
       }
       if (cov.idleAgents.length > 0) {
         remediation.push(
@@ -611,14 +623,16 @@ function composeReviewBody(
       // spent its run somewhere else, which on a diff with deletions means it
       // reviewed a file the removed lines are simply not in.
       for (const label of cov.unopenedAgents) {
-        coverageEntries.push({
+        const entry = {
           subject: label,
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
           reasonZh:
             '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
-        });
+        };
+        coverageEntries.push(entry);
+        if (!/^chunk \d+$/.test(label)) roleLabelEntries.add(entry);
       }
       if (cov.unopenedAgents.length > 0) {
         remediation.push(
@@ -718,12 +732,16 @@ function composeReviewBody(
       // Structural, both languages — no boundary is recovered from rendered
       // prose (reparsing was the bug the disclosure entries already fixed).
       for (const gap of verification.gaps) {
-        coverageEntries.push({
+        const entry = {
           subject: gap.subject,
           reason: gap.reason,
           subjectZh: gap.subjectZh,
           reasonZh: gap.reasonZh,
-        });
+        };
+        coverageEntries.push(entry);
+        // Step 4/5 gap subjects are role publicLabels — the exemption
+        // register (see `roleLabelEntries`).
+        roleLabelEntries.add(entry);
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
@@ -1049,15 +1067,15 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
-    // The budget-stop entry never prefix-matches: its relays are already
-    // deduped by the marker phrase above, and letting its `reverse audit`
-    // subject claim the prefix swallowed unrelated reverse-audit scopes the
-    // caller disclosed with their own reasons (a bare subject echo still
-    // dedups).
+    // Role-publicLabel subjects never prefix-match (`roleLabelEntries`):
+    // a relay that begins with one and brings its own reason after the
+    // em-dash is a SCOPE those entries do not explain, and the skill
+    // promises such prose renders verbatim. A bare subject echo still
+    // dedups.
     const echoesCoverage = covEntries.some(
       (e) =>
         d === e.subject ||
-        (e !== budgetEntry && d.startsWith(`${e.subject} — `)),
+        (!roleLabelEntries.has(e) && d.startsWith(`${e.subject} — `)),
     );
     if (!echoesCoverage) callerLeft.push(d);
   }

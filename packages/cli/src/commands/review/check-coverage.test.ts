@@ -923,6 +923,79 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     expect(r.unopenedAgents).toEqual([BRIEFS['verify'].publicLabel]);
   });
 
+  it('keeps the file on a file-scoped rostered label', () => {
+    // A `${role}--${file}` launch is rostered per heavy file; dropping the
+    // file makes N per-file agents of one role read as one repeated line in
+    // the posted body, indistinguishable — the author cannot tell which
+    // file's check stopped. The label keeps the file, the way
+    // `publicRoleLabel` renders these same roles elsewhere. Not `plan()`:
+    // its files are not heavy, so its roster carries no invariant agents
+    // for the label lookup to resolve against.
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 5000,
+        diffLines: 5000,
+        files: [
+          { path: 'src/a.ts', kind: 'source', removedLines: 0, heavy: true },
+          { path: 'src/b.ts', kind: 'source', removedLines: 0, heavy: true },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 100 },
+          { id: 2, startLine: 101, endLine: 200 },
+        ],
+      }),
+    );
+    const d = promptRecordDir(p);
+    mkdirSync(d, { recursive: true });
+    const role = 'invariant-a';
+    const launch = (file: string): string => {
+      const key = `${role}--${file}`;
+      const brief = briefPath(p, key);
+      const prompt =
+        `You are ${key}.\n` +
+        `read_file(file_path="${brief}")\n` +
+        `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+      writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+      return prompt;
+    };
+    transcript('inv-idle-a', launch('src/a.ts'), { calls: 0 });
+    transcript('inv-idle-b', launch('src/b.ts'), { calls: 0 });
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+
+    const r = coverageFromTranscripts(p, ENV);
+    const base = BRIEFS[role].publicLabel;
+    expect(r.idleAgents).toHaveLength(2);
+    expect(r.idleAgents).toContain(`${base} on src/a.ts`);
+    expect(r.idleAgents).toContain(`${base} on src/b.ts`);
+  });
+
+  it('never reads a digest or chunk suffix as a file on a rostered label', () => {
+    // Two-segment keys are not all file-scoped: `verify--<digest>` and
+    // `reverse-audit--chunk-N` are Step 3B/4 plumbing. Only the roster's
+    // per-file requirements carry a file into the label; anything else
+    // keeps the bare publicLabel, so no digest or chunk id reaches the
+    // posted body.
+    const p = plan();
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'verify--abc123def456');
+    const prompt =
+      `You are verify--abc123def456.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(
+      join(d, `${encodeURIComponent('verify--abc123def456')}.txt`),
+      prompt,
+    );
+    transcript('tm-digest', prompt, { calls: 0 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.idleAgents).toEqual([BRIEFS['verify'].publicLabel]);
+  });
+
   it('reports none when nobody disclosed one', () => {
     transcript('a1', good(1), { calls: 3 });
     transcript('a2', good(2), { calls: 2 });

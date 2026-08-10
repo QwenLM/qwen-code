@@ -505,16 +505,27 @@ export function coverageFromTranscripts(
   // publicLabel — the register the posted body renders disclosures in.
   // `null` when the launch matches no built role prompt (a chunk agent's
   // label is already its chunk; anything else keeps the fallback).
-  const gapAgentLabel = (rec: AgentRecord): string | null => {
+  const rosteredLabel = (rec: AgentRecord): string | null => {
     for (const key of built.keys()) {
       const b = builtOf(key);
       if (b === undefined || !wasDeliveredVerbatim(rec.launchPrompt, b)) {
         continue;
       }
       // Record keys carry run suffixes (`reverse-audit--round-N--<digest>`,
-      // `${role}--${file}`); BRIEFS is keyed by the bare role.
+      // `verify--<digest>`); BRIEFS is keyed by the bare role.
       const brief = BRIEFS[key.split('--')[0] as keyof typeof BRIEFS];
-      if (brief?.publicLabel) return brief.publicLabel;
+      if (!brief?.publicLabel) continue;
+      // A file-scoped launch (an invariant agent per heavy file) keeps its
+      // file, resolved through the ROSTER requirement rather than a key
+      // split: only invariant agents are rostered per file, the roster's
+      // key is spelled exactly the way `agent-prompt` records it, and a
+      // split would misread `verify--<digest>` or `reverse-audit--chunk-N`
+      // as file-scoped, leaking a digest or a chunk id onto the PR page.
+      // Without the file, N per-file agents of one role would read as one
+      // repeated line — the author could not tell which file's check
+      // stopped.
+      const req = rosterForRun.find((r) => r.key === key);
+      return (req && publicRoleLabel(req)) || brief.publicLabel;
     }
     return null;
   };
@@ -571,7 +582,12 @@ export function coverageFromTranscripts(
 
   for (const rec of records) {
     const chunk = assignedChunk(rec);
-    const name = label(rec, chunk);
+    // Resolved ONCE, at the single name-derivation point, so every report
+    // category below rides it: the fallback label is the launch prompt's
+    // first line, and a real posted body rendered a disclosure as "You are
+    // review agent `reverse-audit` — Reverse audit agen...:" — the run's
+    // own plumbing, truncated, on a public PR page.
+    const name = rosteredLabel(rec) ?? label(rec, chunk);
 
     // Could this agent have read the diff at all? The prompt is the harness's
     // record of what was asked of it. 23 of 23 real chunk agents were launched
@@ -590,9 +606,7 @@ export function coverageFromTranscripts(
     // is too long. A zero-tool-call agent that merely copied the template must not
     // be credited with a disclosed gap — that is the whiff wearing a costume.
     if (rec.successfulToolCalls === 0) {
-      if (!superseded(rec, chunk)) {
-        idleAgents.push(gapAgentLabel(rec) ?? name);
-      }
+      if (!superseded(rec, chunk)) idleAgents.push(name);
       continue;
     }
 
@@ -667,7 +681,7 @@ export function coverageFromTranscripts(
     // handed both for one agent follows whichever came last.
     if (told.length > 0 && rec.diffToolCalls === 0) {
       if (!rewrittenThisRecord && !superseded(rec, chunk)) {
-        unopenedAgents.push(gapAgentLabel(rec) ?? name);
+        unopenedAgents.push(name);
       }
       continue;
     }
@@ -693,12 +707,7 @@ export function coverageFromTranscripts(
     // mutually supersede every disclosure into silence.
     const gaps = gapsOf(rec);
     if (gaps.length > 0 && !gapsSuperseded(rec, chunk)) {
-      // Named in the AUTHOR's register where the record matches a rostered
-      // launch: the fallback label is the launch prompt's first line, and a
-      // real posted body rendered a disclosure as "You are review agent
-      // `reverse-audit` — Reverse audit agen...:" — the run's own plumbing,
-      // truncated, on a public PR page.
-      budgetGaps.push({ agent: gapAgentLabel(rec) ?? name, gaps });
+      budgetGaps.push({ agent: name, gaps });
     }
 
     // What it was told to read, plus what it demonstrably read. The second
