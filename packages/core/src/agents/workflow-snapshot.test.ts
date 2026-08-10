@@ -19,6 +19,8 @@ import {
   readWorkflowManifest,
   toSnapshot,
   writeWorkflowManifest,
+  acquireWorkflowRunOwnership,
+  WorkflowRunOwnershipError,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   MAX_RETAINED_SNAPSHOTS,
@@ -470,6 +472,148 @@ describe('durable workflow manifests', () => {
       meta: { name: 'demo', description: 'before' },
       result: { nested: { value: 'before' } },
       journal: EMPTY_JOURNAL,
+    });
+  });
+
+  describe('durable run ownership', () => {
+    const owner = (nonce: string) => ({
+      machineId: 'test-host',
+      pid: 4242,
+      nonce,
+      acquiredAt: 1000,
+    });
+
+    /** Put a generation-0 manifest on disk for a run to be claimed. */
+    const seed = async (config: Config, runId: string) => {
+      const t = task({ runId, status: 'running' });
+      await writeWorkflowManifest(config, t, {
+        args: null,
+        journal: { ...EMPTY_JOURNAL },
+        status: 'running',
+      });
+      return t;
+    };
+
+    it('claims a run by advancing its generation', async () => {
+      const config = fakeConfig(projectDir);
+      await seed(config, 'wf_0e1');
+
+      const generation = await acquireWorkflowRunOwnership(
+        config,
+        'wf_0e1',
+        owner('nonce-a'),
+      );
+
+      expect(generation).toBe(1);
+      const manifest = await readWorkflowManifest(config, 'wf_0e1');
+      expect(manifest.generation).toBe(1);
+      expect(manifest.owner).toMatchObject({ nonce: 'nonce-a', pid: 4242 });
+    });
+
+    it('takes over from a previous owner without probing whether it is alive', async () => {
+      // The property that makes this a generation counter and not a lock: a
+      // process that died holding the run leaves a number behind, so the
+      // next one reads it and carries on. No stale-lock policy, no liveness
+      // oracle, nothing for a human to clear.
+      const config = fakeConfig(projectDir);
+      await seed(config, 'wf_0e2');
+      await acquireWorkflowRunOwnership(config, 'wf_0e2', owner('dead'));
+
+      const generation = await acquireWorkflowRunOwnership(
+        config,
+        'wf_0e2',
+        owner('nonce-b'),
+      );
+
+      expect(generation).toBe(2);
+      expect(
+        (await readWorkflowManifest(config, 'wf_0e2')).owner,
+      ).toMatchObject({ nonce: 'nonce-b' });
+    });
+
+    it('refuses a write whose generation the run has moved past', async () => {
+      // Deliberately the *same* owner on both sides. A stranger is already
+      // refused by the nonce check below, so using one here would leave the
+      // generation comparison untested — the mutation that deletes it stays
+      // green. What this pins is the in-process case: two durable writes for
+      // one run overlapping, where the loser must not stamp its older view
+      // over the newer one.
+      const config = fakeConfig(projectDir);
+      const t = await seed(config, 'wf_0e3');
+      const mine = owner('nonce-mine');
+      const claimed = await acquireWorkflowRunOwnership(config, 'wf_0e3', mine);
+      await writeWorkflowManifest(config, t, {
+        args: null,
+        journal: { ...EMPTY_JOURNAL },
+        status: 'pausing',
+        ownership: { owner: mine, expectedGeneration: claimed },
+      });
+
+      await expect(
+        writeWorkflowManifest(config, t, {
+          args: null,
+          journal: { ...EMPTY_JOURNAL },
+          status: 'paused',
+          ownership: { owner: mine, expectedGeneration: claimed },
+        }),
+      ).rejects.toThrow(WorkflowRunOwnershipError);
+
+      // ...and the newer write is intact, not half-overwritten by the loser.
+      const manifest = await readWorkflowManifest(config, 'wf_0e3');
+      expect(manifest.status).toBe('pausing');
+      expect(manifest.generation).toBe(claimed + 1);
+    });
+
+    it('refuses a write from a stranger holding the right generation', async () => {
+      // A takeover that committed and was then rolled back to our number is
+      // indistinguishable from divergence, so the nonce is checked too
+      // rather than trusting the counter alone.
+      const config = fakeConfig(projectDir);
+      const t = await seed(config, 'wf_0e4');
+      await acquireWorkflowRunOwnership(config, 'wf_0e4', owner('nonce-real'));
+
+      await expect(
+        writeWorkflowManifest(config, t, {
+          args: null,
+          journal: { ...EMPTY_JOURNAL },
+          status: 'paused',
+          ownership: { owner: owner('nonce-impostor'), expectedGeneration: 1 },
+        }),
+      ).rejects.toThrow(/owned by another writer/);
+    });
+
+    it('advances the generation on each accepted write', async () => {
+      const config = fakeConfig(projectDir);
+      const t = await seed(config, 'wf_0e5');
+      const mine = owner('nonce-mine');
+      let generation = await acquireWorkflowRunOwnership(
+        config,
+        'wf_0e5',
+        mine,
+      );
+
+      for (const status of ['running', 'pausing', 'paused'] as const) {
+        const written = await writeWorkflowManifest(config, t, {
+          args: null,
+          journal: { ...EMPTY_JOURNAL },
+          status,
+          ownership: { owner: mine, expectedGeneration: generation },
+        });
+        expect(written?.generation).toBe(generation + 1);
+        generation = written!.generation!;
+      }
+
+      expect((await readWorkflowManifest(config, 'wf_0e5')).generation).toBe(4);
+    });
+
+    it('leaves an unclaimed run unstamped', async () => {
+      // A fresh run has no prior writer to lose a race against, so it pays
+      // neither the extra read nor a schema field it cannot use.
+      const config = fakeConfig(projectDir);
+      await seed(config, 'wf_0e6');
+      const manifest = await readWorkflowManifest(config, 'wf_0e6');
+      expect(manifest.generation).toBeUndefined();
+      expect(manifest.owner).toBeUndefined();
     });
   });
 

@@ -13,7 +13,7 @@
  * for caching): a snapshot is the whole-run summary.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   constants as fsConstants,
   type Dirent,
@@ -22,6 +22,7 @@ import {
   lstatSync,
   realpathSync,
 } from 'node:fs';
+import { hostname } from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import type { Storage } from '../config/storage.js';
@@ -102,6 +103,14 @@ export interface WorkflowManifestV2 extends Omit<WorkflowSnapshot, 'status'> {
   journal: JournalCheckpoint;
   canResume: boolean;
   resumeBlockedReason?: string;
+  /**
+   * Monotonic per-run counter. Every durable manifest write increments it,
+   * which makes it the compare-and-swap token: a writer commits N+1 only
+   * while disk still says N. Absent on manifests written before this
+   * existed, which read as generation 0.
+   */
+  generation?: number;
+  owner?: WorkflowRunOwner;
 }
 
 export interface WorkflowRunRecord extends Omit<WorkflowSnapshot, 'status'> {
@@ -117,11 +126,58 @@ export interface WorkflowRunRecord extends Omit<WorkflowSnapshot, 'status'> {
   resumeBlockedReason?: string;
 }
 
+/**
+ * Who is currently allowed to advance a durable run.
+ *
+ * This is deliberately *not* a lock. Nothing here has to be released, and a
+ * process that dies holding it blocks nobody: the next process reads the
+ * manifest, sees whatever generation is on disk, and takes over from there.
+ * What the record buys is (a) a name to put in the error when a second
+ * writer is refused, and (b) a way for a writer to notice it has been
+ * superseded even across a manifest that was copied or restored, where inode
+ * identity no longer means anything.
+ */
+export interface WorkflowRunOwner {
+  /** Best-effort machine name. Diagnostic only — never a trust decision. */
+  machineId: string;
+  pid: number;
+  /** Distinguishes two runs that share a machine and a recycled pid. */
+  nonce: string;
+  acquiredAt: number;
+}
+
+/**
+ * Thrown when a durable write loses the compare-and-swap: something else has
+ * advanced this run since we last committed. Fails the run closed rather
+ * than overwriting, because the two writers' journals have already diverged
+ * and there is no safe merge.
+ */
+export class WorkflowRunOwnershipError extends Error {
+  constructor(
+    readonly runId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WorkflowRunOwnershipError';
+  }
+}
+
+/** The ownership claim a writer presents with each durable manifest write. */
+export interface WorkflowManifestOwnership {
+  owner: WorkflowRunOwner;
+  /**
+   * The generation this writer believes is on disk. The write commits as
+   * `expectedGeneration + 1` and is refused if disk says otherwise.
+   */
+  expectedGeneration: number;
+}
+
 export interface WriteWorkflowManifestOptions {
   args: unknown;
   journal: JournalCheckpoint;
   checkpointAt?: number;
   status?: WorkflowStatus;
+  ownership?: WorkflowManifestOwnership;
 }
 
 /** Project a (terminal) registry entry into a serializable snapshot. */
@@ -472,22 +528,76 @@ export async function writeWorkflowManifest(
     ? `Workflow run is ${status}; terminal runs must be rerun instead of resumed.`
     : undefined;
   const resumeBlockedReason = statusReason ?? args.reason ?? journalReason;
+  // Freeze the task-derived half of the manifest BEFORE the first await.
+  // The caller hands us the live registry entry, in-flight dispatches keep
+  // mutating it across every fs await below, and `projectTask` copies the
+  // entry shallowly — `meta` stays the same object — so only a
+  // serialize/parse round trip actually detaches it. Everything the CAS adds
+  // (`generation`, `owner`) comes from disk or from this process, never from
+  // the entry, so it is safe to merge in afterwards.
+  const frozenBody = JSON.parse(
+    JSON.stringify({
+      ...projectTask(task),
+      status,
+      scriptHash: hashScript(task.script ?? ''),
+      ...(args.value === undefined ? {} : { args: args.value }),
+      checkpointAt: options.checkpointAt ?? Date.now(),
+      journal,
+      canResume: resumeBlockedReason === undefined,
+      ...(resumeBlockedReason ? { resumeBlockedReason } : {}),
+    }),
+  ) as Omit<WorkflowManifestV2, 'schemaVersion' | 'runtimeVersion'>;
+  const guard = await resolveSafeRunDir(storage, task.runId, true);
+  const manifestPath = storage.getWorkflowRunManifestPath(task.runId);
+
+  // The compare-and-swap. Read what is on disk now, refuse if it is not the
+  // generation this writer owns, then pin the commit to the entry we just
+  // read. Read-then-pin is a real CAS rather than a check-then-hope: a
+  // competing writer commits by renaming a new inode over this path, so its
+  // win invalidates our pin and `atomicWriteFile` refuses our rename. The
+  // residual window is the check/rename syscall pair, which is the same
+  // narrowing every other guarded write site here accepts — Node exposes no
+  // renameat2(RENAME_EXCHANGE) to close it.
+  const ownership = options.ownership;
+  let generation = ownership ? ownership.expectedGeneration + 1 : undefined;
+  if (ownership) {
+    const current = await readManifestForOwnership(
+      manifestPath,
+      guard.assertUnchanged,
+    );
+    if (current) {
+      const currentGeneration = current.generation ?? 0;
+      if (currentGeneration !== ownership.expectedGeneration) {
+        throw new WorkflowRunOwnershipError(
+          task.runId,
+          `Workflow run ${task.runId} advanced to generation ${currentGeneration} ` +
+            `while this process held generation ${ownership.expectedGeneration}; ` +
+            `another writer${describeOwner(current.owner)} owns it.`,
+        );
+      }
+      // Same generation but a different claim means a takeover committed and
+      // was itself rolled back to our number, which we cannot distinguish
+      // from divergence. Refuse rather than guess.
+      if (current.owner && current.owner.nonce !== ownership.owner.nonce) {
+        throw new WorkflowRunOwnershipError(
+          task.runId,
+          `Workflow run ${task.runId} is owned by another writer` +
+            `${describeOwner(current.owner)}.`,
+        );
+      }
+      generation = currentGeneration + 1;
+    }
+  }
+
   const manifest: WorkflowManifestV2 = {
     schemaVersion: WORKFLOW_MANIFEST_SCHEMA_VERSION,
     runtimeVersion: WORKFLOW_RUNTIME_VERSION,
-    ...projectTask(task),
-    status,
-    scriptHash: hashScript(task.script ?? ''),
-    ...(args.value === undefined ? {} : { args: args.value }),
-    checkpointAt: options.checkpointAt ?? Date.now(),
-    journal,
-    canResume: resumeBlockedReason === undefined,
-    ...(resumeBlockedReason ? { resumeBlockedReason } : {}),
+    ...frozenBody,
+    ...(generation === undefined ? {} : { generation }),
+    ...(ownership ? { owner: ownership.owner } : {}),
   };
   const serialized = JSON.stringify(manifest, null, 2);
   const frozenManifest = JSON.parse(serialized) as WorkflowManifestV2;
-  const guard = await resolveSafeRunDir(storage, task.runId, true);
-  const manifestPath = storage.getWorkflowRunManifestPath(task.runId);
   const targetGuard = await guardArtifactTarget(
     manifestPath,
     guard.assertUnchanged,
@@ -499,6 +609,134 @@ export async function writeWorkflowManifest(
     assertCanCommit: targetGuard.assertUnchanged,
   });
   return frozenManifest;
+}
+
+function describeOwner(owner: WorkflowRunOwner | undefined): string {
+  return owner ? ` (${owner.machineId} pid ${owner.pid})` : '';
+}
+
+/**
+ * Claim the right to advance a durable run, before any of its work starts.
+ *
+ * Two processes resuming the same run both read generation N and both try to
+ * commit N+1; exactly one rename lands, and the loser gets a
+ * {@link WorkflowRunOwnershipError} *before* it has dispatched anything. That
+ * ordering is the whole point — it is what keeps the duplicate-execution
+ * window free of model calls and tool side effects.
+ *
+ * Taking over from a previous owner is allowed and needs no liveness probe.
+ * A process that died holding the run left a generation number behind, not a
+ * lock, so recovery is "read it and carry on" rather than a stale-lock policy
+ * that has to guess whether the previous holder is coming back.
+ */
+export async function acquireWorkflowRunOwnership(
+  config: Config,
+  runId: string,
+  owner: WorkflowRunOwner,
+): Promise<number> {
+  const storage = config.storage;
+  if (!storage) throw new Error('Workflow storage is unavailable.');
+  const guard = await resolveSafeRunDir(storage, runId, false);
+  const manifestPath = storage.getWorkflowRunManifestPath(runId);
+  const raw = await readRegularFileNoFollow(
+    manifestPath,
+    guard.assertUnchanged,
+  );
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  const currentGeneration = Number.isSafeInteger(parsed['generation'])
+    ? (parsed['generation'] as number)
+    : 0;
+  const generation = currentGeneration + 1;
+  const serialized = JSON.stringify({ ...parsed, generation, owner }, null, 2);
+  const targetGuard = await guardArtifactTarget(
+    manifestPath,
+    guard.assertUnchanged,
+  );
+  try {
+    await atomicWriteFile(manifestPath, serialized, {
+      noFollow: true,
+      mode: 0o600,
+      forceMode: true,
+      assertCanCommit: targetGuard.assertUnchanged,
+    });
+  } catch (error) {
+    // The pin failing here means somebody else committed between our read
+    // and our rename — i.e. we lost the acquisition race. Report it as such
+    // rather than as a generic write failure, because the caller's correct
+    // response is to abandon the resume, not to retry.
+    throw new WorkflowRunOwnershipError(
+      runId,
+      `Workflow run ${runId} was claimed by another writer while this ` +
+        `process was acquiring it: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+    );
+  }
+  return generation;
+}
+
+/** A fresh ownership claim for this process. */
+export function createWorkflowRunOwner(): WorkflowRunOwner {
+  return {
+    machineId: hostname(),
+    pid: process.pid,
+    nonce: randomBytes(8).toString('hex'),
+    acquiredAt: Date.now(),
+  };
+}
+
+/**
+ * Read just the ownership fields off the manifest, tolerating a manifest
+ * that is absent or unreadable.
+ *
+ * Deliberately not `parseManifest`: this runs on the write path, and a
+ * manifest whose *content* is unusable must not stop a writer that owns the
+ * run from replacing it. Only the ownership fields are consulted, and only
+ * when they are well-formed — anything else reads as "no claim on record",
+ * which is the same state a pre-generation manifest is in.
+ */
+async function readManifestForOwnership(
+  manifestPath: string,
+  assertParentUnchanged: () => void,
+): Promise<{ generation?: number; owner?: WorkflowRunOwner } | undefined> {
+  let raw: string;
+  try {
+    raw = await readRegularFileNoFollow(manifestPath, assertParentUnchanged);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const record = parsed as Record<string, unknown>;
+  const generation = record['generation'];
+  const owner = record['owner'] as Record<string, unknown> | undefined;
+  return {
+    ...(Number.isSafeInteger(generation) && (generation as number) >= 0
+      ? { generation: generation as number }
+      : {}),
+    ...(owner &&
+    typeof owner === 'object' &&
+    typeof owner['machineId'] === 'string' &&
+    typeof owner['nonce'] === 'string' &&
+    Number.isSafeInteger(owner['pid'])
+      ? {
+          owner: {
+            machineId: owner['machineId'] as string,
+            pid: owner['pid'] as number,
+            nonce: owner['nonce'] as string,
+            acquiredAt: Number.isSafeInteger(owner['acquiredAt'])
+              ? (owner['acquiredAt'] as number)
+              : 0,
+          },
+        }
+      : {}),
+  };
 }
 
 /**

@@ -22,6 +22,9 @@ import {
 import {
   readWorkflowManifest,
   writeWorkflowManifest,
+  acquireWorkflowRunOwnership,
+  createWorkflowRunOwner,
+  type WorkflowManifestOwnership,
   writeWorkflowSnapshot,
 } from '../workflow-snapshot.js';
 import {
@@ -111,6 +114,10 @@ export class WorkflowRunner {
       ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
       : undefined;
     let resumeReplay: JournalReplay | undefined;
+    // Set only on the resume path: a fresh run has no prior writer to lose a
+    // race against, and stamping generation 1 on it costs a read per write
+    // for a guarantee nothing needs yet.
+    let ownership: WorkflowManifestOwnership | undefined;
     if (options.resumeFromRunId && journal) {
       const manifest = await readWorkflowManifest(config, runId);
       if (!manifest.canResume) {
@@ -134,6 +141,21 @@ export class WorkflowRunner {
           `Workflow run ${runId} args do not match its durable manifest.`,
         );
       }
+      // Claim the run before anything is replayed or dispatched. Two
+      // processes resuming the same run both read this generation and both
+      // try to commit the next one; exactly one rename lands, and the loser
+      // throws here — before a single agent has been dispatched. That
+      // ordering is the point: it keeps the window in which both processes
+      // are "resuming" free of model calls and tool side effects.
+      const owner = createWorkflowRunOwner();
+      ownership = {
+        owner,
+        expectedGeneration: await acquireWorkflowRunOwnership(
+          config,
+          runId,
+          owner,
+        ),
+      };
       resumeReplay = await journal.load(manifest.journal);
     } else if (options.resumeFromRunId && !registry?.get(runId)) {
       throw new Error('Workflow storage is required to resume a run.');
@@ -189,11 +211,17 @@ export class WorkflowRunner {
       source: WorkflowTask | undefined = entry,
     ): Promise<void> => {
       if (!source) return;
-      await writeWorkflowManifest(config, source, {
+      const written = await writeWorkflowManifest(config, source, {
         args: options.args,
         journal: checkpoint,
         status,
+        ...(ownership ? { ownership } : {}),
       });
+      // Each accepted write advances the generation this process owns, so
+      // the next one compare-and-swaps against what it just committed.
+      if (ownership && written?.generation !== undefined) {
+        ownership = { ...ownership, expectedGeneration: written.generation };
+      }
     };
 
     const persistManifestBestEffort = async (
