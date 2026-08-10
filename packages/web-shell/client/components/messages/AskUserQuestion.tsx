@@ -98,11 +98,7 @@ export function AskUserQuestion({
         : {},
     );
     setCustomInputs({});
-    setSelectedMulti(
-      firstQuestion?.multiSelect && firstQuestion.options[0]
-        ? { 0: [firstQuestion.options[0].label] }
-        : {},
-    );
+    setSelectedMulti({});
     setCustomFocused(false);
   }, [questions, request.id]);
 
@@ -356,16 +352,7 @@ export function AskUserQuestion({
       focusAfterQuestionChangeRef.current = true;
       setCurrentIdx(nextIdx);
 
-      if (question.multiSelect) {
-        setSelectedMulti((prev) =>
-          (prev[nextIdx] || []).length > 0 || customInputs[nextIdx]
-            ? prev
-            : question.options[0]
-              ? { ...prev, [nextIdx]: [question.options[0].label] }
-              : prev,
-        );
-        return;
-      }
+      if (question.multiSelect) return;
       setAnswers((prev) =>
         prev[nextIdx] || customInputs[nextIdx] || !question.options[0]
           ? prev

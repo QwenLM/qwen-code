@@ -864,6 +864,7 @@ describe('AskUserQuestion multi-select', () => {
       'Space toggle · Enter submit · Esc ignore',
     );
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+    act(() => optionButtons()[0]!.click());
     pressKey(optionButtons()[0]!, 'Enter');
 
     expect(onConfirm).toHaveBeenCalledWith('req-multi', 'submit', {
@@ -879,23 +880,52 @@ describe('AskUserQuestion multi-select', () => {
 
     // Multi-select options are toggle buttons (aria-pressed), not radios.
     const opts = optionButtons();
-    expect(opts[0]!.getAttribute('aria-pressed')).toBe('true'); // default: first
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
+    expect(opts[0]!.tabIndex).toBe(0);
+    expect(submitButton()!.disabled).toBe(true);
     expect(opts[0]!.hasAttribute('aria-checked')).toBe(false);
     expect(opts[0]!.getAttribute('role')).not.toBe('radio');
+  });
+
+  it('does not select the first option when navigating to a multi-select question', () => {
+    const requestWithMultiSecond: PermissionRequest = {
+      ...multipleQuestionsRequest,
+      rawInput: {
+        questions: [
+          ...(request.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+          ...(multiRequest.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+        ],
+      },
+    };
+    render(undefined, requestWithMultiSecond);
+
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    const opts = optionButtons();
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
+    expect(opts[0]!.tabIndex).toBe(0);
+    expect(submitButton()!.disabled).toBe(true);
   });
 
   it('toggles options and submits the joined selection', () => {
     render(undefined, multiRequest);
     const opts = optionButtons();
-    // First option is selected by default.
-    expect(opts[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(opts[1]!.getAttribute('aria-pressed')).toBe('false');
 
-    // Toggle Option B on, then Option A off.
+    // Toggle Option B on, then Option A on and off.
     act(() => {
       opts[1]!.click();
     });
     expect(opts[1]!.getAttribute('aria-pressed')).toBe('true');
+    act(() => {
+      opts[0]!.click();
+    });
+    expect(opts[0]!.getAttribute('aria-pressed')).toBe('true');
     act(() => {
       opts[0]!.click();
     });
@@ -931,12 +961,12 @@ describe('AskUserQuestion multi-select', () => {
       options[2]!.click();
     });
 
-    expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[0]!.getAttribute('aria-pressed')).toBe('false');
     expect(options[1]!.getAttribute('aria-pressed')).toBe('true');
     expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('uses Space to toggle and Enter to advance without toggling', () => {
+  it('uses Enter to advance without toggling the selected option', () => {
     const requestWithNextQuestion: PermissionRequest = {
       ...multipleQuestionsRequest,
       rawInput: {
@@ -952,6 +982,9 @@ describe('AskUserQuestion multi-select', () => {
     };
     render(undefined, requestWithNextQuestion);
     const first = optionButtons()[0]!;
+    expect(first.getAttribute('aria-pressed')).toBe('false');
+
+    act(() => first.click());
     expect(first.getAttribute('aria-pressed')).toBe('true');
 
     pressKey(first, 'Enter');
