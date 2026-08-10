@@ -242,7 +242,7 @@ describe('installTerminalResizeReflow', () => {
     try {
       stdout.write(eraseLines(10) + frame(60, 10));
       stdout.written.length = 0;
-      repaint();
+      repaint!();
       expect(stdout.written).toEqual([`${ESC}2J${ESC}H` + frame(60, 10)]);
     } finally {
       restore();
@@ -259,7 +259,7 @@ describe('installTerminalResizeReflow', () => {
       stdout.write(eraseLines(10) + frame(60, 10));
       stdout.columns = 80;
       stdout.written.length = 0;
-      repaint();
+      repaint!();
       expect(stdout.written).toEqual([`${ESC}2J${ESC}H`]);
     } finally {
       restore();
@@ -273,7 +273,7 @@ describe('installTerminalResizeReflow', () => {
       { virtualViewport: true },
     );
     try {
-      repaint();
+      repaint!();
       expect(stdout.written).toEqual([`${ESC}2J${ESC}H`]);
     } finally {
       restore();
@@ -292,8 +292,9 @@ describe('installTerminalResizeReflow', () => {
       stdout.emit('resize');
       stdout.write(eraseLines(10));
       expect(stdout.written.at(-1)).toBe(eraseLines(10));
-      handle.repaint();
-      expect(stdout.written).toHaveLength(2); // repaint is a no-op
+      // No repaint: the VP wake path falls back to its bare viewport clear
+      // plus the static remount bump instead of a silent no-op.
+      expect(handle.repaint).toBeUndefined();
       handle.restore();
     } finally {
       vi.unstubAllEnvs();
