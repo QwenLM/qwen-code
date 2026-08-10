@@ -799,6 +799,108 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('routes workspace-qualified file uploads and never falls back to primary', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const data = Buffer.from([1, 2, 3, 4]);
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'blob.bin' })
+        .send(data);
+      expect(res.status).toBe(201);
+      expect(res.body.path).toBe('blob.bin');
+      // Landed in the SECONDARY workspace, not the primary.
+      await expect(
+        fsp.readFile(path.join(h.secondaryCwd, 'blob.bin')),
+      ).resolves.toEqual(data);
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'blob.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+
+    // Untrusted secondary: 403, and nothing is written to primary either.
+    const untrusted = await makeHarness({
+      secondaryTrusted: false,
+      token: 'secret',
+    });
+    try {
+      const res = await request(untrusted.app)
+        .post(
+          `/workspaces/${encodeURIComponent(untrusted.secondaryId)}/file/upload`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'blocked.bin' })
+        .send(Buffer.from('x'));
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+      await expect(
+        fsp.stat(path.join(untrusted.primaryCwd, 'blocked.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects qualified uploads for unknown, draining, and already removed workspaces', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const unknown = await request(h.app)
+        .post('/workspaces/does-not-exist/file/upload')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'a.bin' })
+        .send(Buffer.from('x'));
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.code).toBe('workspace_mismatch');
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'a.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+
+      const secondaryRuntime = h.workspaceRegistry.getByWorkspaceId(
+        h.secondaryId,
+      );
+      expect(secondaryRuntime).toBeDefined();
+      expect(h.workspaceRegistry.beginDrain(secondaryRuntime!)).toBe(true);
+
+      const draining = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'b.bin' })
+        .send(Buffer.from('x'));
+      expect(draining.status).toBe(503);
+      expect(draining.body.code).toBe('workspace_runtime_unavailable');
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'b.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+
+      h.workspaceRegistry.completeDrain(secondaryRuntime!);
+      const removed = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'c.bin' })
+        .send(Buffer.from('x'));
+      expect(removed.status).toBe(400);
+      expect(removed.body.code).toBe('workspace_mismatch');
+      await expect(
+        fsp.stat(path.join(h.primaryCwd, 'c.bin')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes workspace-qualified lifecycle mutations and trust-gates them', async () => {
     const h = await makeHarness({ token: 'secret' });
     try {

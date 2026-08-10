@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { UploadIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
@@ -443,7 +444,13 @@ export function AtMentionPanel({
                     <>
                       <span className={styles.atItemMain}>
                         <span className={styles.atItemLeading}>
-                          {'icon' in row &&
+                          {'item' in row && row.item.kind === 'upload' ? (
+                            <UploadIcon
+                              className={styles.atItemUploadIcon}
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            'icon' in row &&
                             safeIcon &&
                             (row.iconMode === 'image' ? (
                               <img
@@ -465,7 +472,8 @@ export function AtMentionPanel({
                                 title={row.iconTooltip}
                                 aria-hidden="true"
                               />
-                            ))}
+                            ))
+                          )}
                           <span
                             className={styles.atItemLabel}
                             title={row.labelTitle}

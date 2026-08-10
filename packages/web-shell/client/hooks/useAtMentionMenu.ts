@@ -25,7 +25,7 @@ export interface AtMentionProviderView {
 }
 
 export interface AtMentionItem extends WebShellAtItem {
-  kind?: 'insert' | 'directory' | 'mcp-server';
+  kind?: 'insert' | 'directory' | 'mcp-server' | 'upload';
   targetPath?: string;
   serverName?: string;
 }
@@ -172,6 +172,13 @@ export interface UseAtMentionMenuOptions {
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
+  /**
+   * Invoked when the user selects the synthetic "Upload file" item in the
+   * file provider. Receives the directory currently being browsed. The
+   * composer opens a file picker and uploads into that directory. When absent
+   * (upload unsupported), the item is hidden.
+   */
+  onUploadRequest?: (targetDir: string) => void;
 }
 
 const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
@@ -528,6 +535,15 @@ function sanitizeInsertText(raw: string): string {
   return stripped.length > 0 ? stripped : SAFE_DISPLAY_FALLBACK;
 }
 
+/**
+ * Build the composer insert text for a workspace file reference, e.g.
+ * `@path/to/file `. Shared by the @ file provider and the file-upload flow so
+ * both escape identically (filenames with spaces / non-ASCII / `%` are common).
+ */
+export function fileReferenceInsertText(filePath: string): string {
+  return `@${escapeAtReferenceText(sanitizeInsertText(filePath))} `;
+}
+
 function safeDisplayText(raw: string | undefined): string {
   if (raw === undefined) return SAFE_DISPLAY_FALLBACK;
   return sanitizeDisplayText(raw) ?? SAFE_DISPLAY_FALLBACK;
@@ -644,6 +660,7 @@ function createFileProvider(
   getCache: () => BuiltinProviderCache,
   label: string,
   description: string,
+  getUploadItem: () => AtMentionItem | null,
 ): WebShellAtProvider {
   return {
     id: FILE_PROVIDER_ID,
@@ -677,7 +694,11 @@ function createFileProvider(
             insertText: directoryInsertText(dirPath),
             kind: 'insert',
           };
+          // The upload item only shows with an empty entry query (like the
+          // current-directory item) so it never pollutes filtered results.
+          const uploadItem = entryQuery ? null : getUploadItem();
           return [
+            ...(uploadItem ? [uploadItem] : []),
             ...(entryQuery ? [] : [currentDirectoryItem]),
             ...entries.map((entry): AtMentionItem => {
               const path = joinWorkspacePath(dirPath, entry.name);
@@ -701,7 +722,7 @@ function createFileProvider(
                 kind: 'insert',
               };
             }),
-          ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT);
+          ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT + 1);
         } catch (error) {
           if (!signal.aborted) {
             console.warn('Failed to load @ file suggestions', error);
@@ -903,6 +924,7 @@ export function useAtMentionMenu({
   builtinProviders,
   providers = EMPTY_PROVIDERS,
   createInlineTagEffect,
+  onUploadRequest,
 }: UseAtMentionMenuOptions) {
   const { t } = useI18n();
   const [state, setState] = useState<AtMentionMenuState | null>(null);
@@ -926,6 +948,16 @@ export function useAtMentionMenu({
         () => builtinCacheRef.current,
         t('at.category.files'),
         t('at.category.files.description'),
+        () =>
+          onUploadRequest
+            ? {
+                id: 'upload-file',
+                label: t('at.files.upload'),
+                description: t('at.files.upload.description'),
+                kind: 'upload',
+                insertText: '',
+              }
+            : null,
       ),
       createExtensionProvider(
         () => workspaceActionsRef.current,
@@ -950,7 +982,7 @@ export function useAtMentionMenu({
       ...builtinAtProviders,
       ...getRegisteredCustomProviders(providers),
     ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  }, [builtinProviders, providers, t, workspaceActionsRef]);
+  }, [builtinProviders, providers, t, workspaceActionsRef, onUploadRequest]);
   const allProvidersRef = useRef(allProviders);
   allProvidersRef.current = allProviders;
 
@@ -1819,6 +1851,15 @@ export function useAtMentionMenu({
       if (current.selectedProviderId) {
         lastSelectedProviderIdRef.current = current.selectedProviderId;
       }
+      if (item.kind === 'upload') {
+        view.dispatch({
+          changes: { from: current.from, to: current.to, insert: '' },
+          selection: { anchor: current.from },
+        });
+        if (onUploadRequest) onUploadRequest(fileDirectoryRef.current);
+        close();
+        return true;
+      }
       if (
         current.selectedProviderId === FILE_PROVIDER_ID &&
         item.kind === 'directory' &&
@@ -1919,6 +1960,7 @@ export function useAtMentionMenu({
       scheduleLoadItems,
       scheduleLoadMcpResourceItems,
       viewRef,
+      onUploadRequest,
     ],
   );
 

@@ -53,6 +53,7 @@ function Harness({
   shellMode = false,
   view,
   createInlineTagEffect,
+  onUploadRequest,
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
@@ -65,6 +66,7 @@ function Harness({
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
+  onUploadRequest?: (targetDir: string) => void;
 }) {
   latest = useAtMentionMenu({
     viewRef: { current: view ?? null },
@@ -74,6 +76,7 @@ function Harness({
     builtinProviders,
     providers,
     createInlineTagEffect,
+    onUploadRequest,
   });
   return null;
 }
@@ -86,6 +89,7 @@ function mount({
   shellMode,
   view,
   createInlineTagEffect,
+  onUploadRequest,
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
@@ -98,6 +102,7 @@ function mount({
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
+  onUploadRequest?: (targetDir: string) => void;
 } = {}) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -112,6 +117,7 @@ function mount({
         shellMode={shellMode}
         view={view}
         createInlineTagEffect={createInlineTagEffect}
+        onUploadRequest={onUploadRequest}
       />,
     );
   });
@@ -170,6 +176,36 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
       'files',
     ]);
+  });
+
+  it('removes the triggering mention before opening the upload picker', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const onUploadRequest = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '' },
+      selection: { anchor: 0 },
+    });
+    expect(onUploadRequest).toHaveBeenCalledWith('.');
   });
 
   it('reuses an unchanged category menu and limits rendered providers', () => {

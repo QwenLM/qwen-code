@@ -9,6 +9,7 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import express from 'express';
 import request from 'supertest';
 import { createServeApp } from '../server.js';
 import {
@@ -292,5 +293,473 @@ describe('POST /file/edit', () => {
     expect(res.status).toBe(400);
     expect(res.body.errorKind).toBe('symlink_escape');
     expect(await fsp.readFile(outside, 'utf-8')).toBe('foo=1\n');
+  });
+});
+
+describe('POST /file/upload', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness({ token: 'secret' });
+  });
+  afterEach(async () => teardown(h));
+
+  const upload = (pathParam: string) =>
+    request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'application/octet-stream')
+      .query({ path: pathParam });
+
+  it('writes bytes atomically and returns the confirmed path, size, hash', async () => {
+    const data = randomBytes(256);
+    const res = await upload('blob.bin').send(data);
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_upload',
+      path: 'blob.bin',
+      sizeBytes: data.length,
+      hash: rawHash(data),
+    });
+    expect(res.body).not.toHaveProperty('renamed');
+    expect(await fsp.readFile(path.join(h.workspace, 'blob.bin'))).toEqual(
+      data,
+    );
+  });
+
+  it('accepts a zero-byte octet-stream upload', async () => {
+    const res = await upload('empty.bin').send(Buffer.alloc(0));
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_upload',
+      path: 'empty.bin',
+      sizeBytes: 0,
+      hash: rawHash(Buffer.alloc(0)),
+    });
+  });
+
+  it('rejects a wrong Content-Type with 415 before buffering', async () => {
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'text/plain')
+      .query({ path: 'a.txt' })
+      .send('not binary');
+    expect(res.status).toBe(415);
+    expect(res.body).toMatchObject({
+      errorKind: 'unsupported_media_type',
+      status: 415,
+    });
+  });
+
+  it('rejects a missing path with parse_error', async () => {
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'application/octet-stream')
+      .send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('rejects an oversized declared Content-Length with the upload 413 envelope', async () => {
+    // Declare a Content-Length above the cap while sending a tiny body. The
+    // admission gate rejects on the header alone, before buffering, so no
+    // 50 MiB transfer (and no client EPIPE) is needed to exercise the path.
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'application/octet-stream')
+      .set('Content-Length', String(50 * 1024 * 1024 + 1))
+      .query({ path: 'big.bin' })
+      .send(Buffer.from('x'));
+    expect(res.status).toBe(413);
+    expect(res.body).toMatchObject({
+      errorKind: 'file_too_large',
+      status: 413,
+      maxBytes: 50 * 1024 * 1024,
+    });
+    expect(res.body.error).not.toContain('10 MB');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'big.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('auto-numbers when the requested name is occupied by a file', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'report.pdf'), 'orig');
+    const res = await upload('report.pdf').send(Buffer.from('new'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('report (1).pdf');
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'report.pdf'), 'utf-8'),
+    ).toBe('orig');
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'report (1).pdf'), 'utf-8'),
+    ).toBe('new');
+  });
+
+  it('auto-numbers past several taken candidates', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'a.txt'), '0');
+    await fsp.writeFile(path.join(h.workspace, 'a (1).txt'), '1');
+    const res = await upload('a.txt').send(Buffer.from('2'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('a (2).txt');
+  });
+
+  it('lands concurrent same-name uploads on distinct candidates', async () => {
+    const [first, second] = await Promise.all([
+      upload('race.bin').send(Buffer.from('one')),
+      upload('race.bin').send(Buffer.from('two')),
+    ]);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    // The no-clobber create guarantees the two uploads never share a path.
+    expect(first.body.path).not.toBe(second.body.path);
+    expect(new Set([first.body.path, second.body.path])).toEqual(
+      new Set(['race.bin', 'race (1).bin']),
+    );
+    // Both files exist with their own content.
+    await expect(
+      fsp.stat(path.join(h.workspace, 'race.bin')),
+    ).resolves.toBeDefined();
+    await expect(
+      fsp.stat(path.join(h.workspace, 'race (1).bin')),
+    ).resolves.toBeDefined();
+  });
+
+  it('numbers a name occupied by a directory', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'data'));
+    const res = await upload('data').send(Buffer.from('x'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('data (1)');
+  });
+
+  it('numbers instead of writing through an in-workspace symlink', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'real.bin'), 'orig');
+    await fsp.symlink(
+      path.join(h.workspace, 'real.bin'),
+      path.join(h.workspace, 'link.bin'),
+    );
+    const res = await upload('link.bin').send(Buffer.from('new'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('link (1).bin');
+    // The symlink target is untouched and no file was written through it.
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'real.bin'), 'utf-8'),
+    ).toBe('orig');
+  });
+
+  it('rejects an escaping symlink at the boundary', async () => {
+    const outside = path.join(h.scratch, 'outside.bin');
+    await fsp.writeFile(outside, 'external');
+    await fsp.symlink(outside, path.join(h.workspace, 'evil.bin'));
+    const res = await upload('evil.bin').send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('symlink_escape');
+    expect(await fsp.readFile(outside, 'utf-8')).toBe('external');
+  });
+
+  it('rejects a missing parent directory before buffering', async () => {
+    const res = await upload('no/such/dir/a.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('preserves a generation-closed error from the parent stat', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness({
+      token: 'secret',
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 3) {
+            throw Object.assign(new Error('closed'), {
+              code: 'workspace_generation_closed',
+            });
+          }
+        },
+      },
+    });
+
+    const res = await upload('a.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('uploads into an existing subdirectory', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'sub'));
+    const res = await upload(path.join('sub', 'file.txt')).send(
+      Buffer.from('hi'),
+    );
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('sub/file.txt');
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'sub', 'file.txt'), 'utf-8'),
+    ).toBe('hi');
+  });
+
+  it('handles filenames with spaces, non-ASCII, and a literal %', async () => {
+    const name = 'my 数据 %b.txt';
+    const res = await upload(name).send(Buffer.from('v'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe(name);
+    expect(await fsp.readFile(path.join(h.workspace, name), 'utf-8')).toBe('v');
+  });
+
+  it('rejects a requested basename over 255 UTF-8 bytes', async () => {
+    const longName = 'あ'.repeat(100) + '.txt'; // 100*3 + 4 = 304 bytes
+    const res = await upload(longName).send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('rejects an unknown client id before buffering', async () => {
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'application/octet-stream')
+      .set('X-Qwen-Client-Id', 'not-a-real-client')
+      .query({ path: 'a.bin' })
+      .send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_client_id');
+  });
+
+  it('returns 403 untrusted_workspace on an untrusted workspace', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: false, token: 'secret' });
+    const res = await upload('a.bin').send(Buffer.from('x'));
+    expect(res.status).toBe(403);
+    expect(res.body.errorKind).toBe('untrusted_workspace');
+  });
+
+  it('requires a token', async () => {
+    await teardown(h);
+    h = await makeHarness();
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Content-Type', 'application/octet-stream')
+      .query({ path: 'a.bin' })
+      .send(Buffer.from('x'));
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects "." and ".." basenames with parse_error', async () => {
+    const dot = await upload('.').send(Buffer.from('x'));
+    expect(dot.status).toBe(400);
+    expect(dot.body.errorKind).toBe('parse_error');
+    const dotdot = await upload('sub/..').send(Buffer.from('x'));
+    expect(dotdot.status).toBe(400);
+    expect(dotdot.body.errorKind).toBe('parse_error');
+  });
+
+  it('accepts an upload above the 5 MiB text cap (binary policy at HTTP)', async () => {
+    // 6 MiB > MAX_WRITE_BYTES (5 MiB) but <= MAX_UPLOAD_BYTES: proves the
+    // route applies the binary-ingress cap, not the text-write default.
+    const data = Buffer.alloc(6 * 1024 * 1024, 7);
+    const res = await upload('big.bin').send(data);
+    expect(res.status).toBe(201);
+    expect(res.body.sizeBytes).toBe(data.length);
+    expect((await fsp.stat(path.join(h.workspace, 'big.bin'))).size).toBe(
+      data.length,
+    );
+  });
+
+  it('trims a long stem on numbering to stay within the 255-byte cap', async () => {
+    // 249-byte stem + '.txt' = 253-byte basename (passes the admission cap).
+    const stem = 'a'.repeat(249);
+    const name = `${stem}.txt`;
+    await fsp.writeFile(path.join(h.workspace, name), 'orig');
+    const res = await upload(name).send(Buffer.from('new'));
+    expect(res.status).toBe(201);
+    const base = path.posix.basename(res.body.path);
+    // Numbering adds ' (1)' (4 bytes) -> 257, so the stem is trimmed to fit 255.
+    expect(Buffer.byteLength(base, 'utf-8')).toBeLessThanOrEqual(255);
+    expect(base.endsWith(' (1).txt')).toBe(true);
+    expect(base).not.toBe(`${stem} (1).txt`);
+    // The original is untouched.
+    expect(await fsp.readFile(path.join(h.workspace, name), 'utf-8')).toBe(
+      'orig',
+    );
+  });
+
+  it('returns 409 when all numbered candidates up to the cap are occupied', async () => {
+    // Occupy a.txt, a (1).txt ... a (999).txt (all 1000 candidates).
+    await Promise.all(
+      Array.from({ length: 1000 }, (_, i) =>
+        fsp.writeFile(
+          path.join(h.workspace, i === 0 ? 'a.txt' : `a (${i}).txt`),
+          'x',
+        ),
+      ),
+    );
+    const res = await upload('a.txt').send(Buffer.from('y'));
+    expect(res.status).toBe(409);
+    expect(res.body.errorKind).toBe('file_already_exists');
+  });
+});
+
+describe('upload concurrency gate', () => {
+  it('admits up to the cap and rejects the next until a slot frees', async () => {
+    const { createUploadConcurrencyGate } = await import(
+      './workspace-file-write.js'
+    );
+    const gate = createUploadConcurrencyGate(2);
+    expect(gate.tryAcquire()).toBe(true);
+    expect(gate.tryAcquire()).toBe(true);
+    expect(gate.tryAcquire()).toBe(false);
+    gate.release();
+    expect(gate.tryAcquire()).toBe(true);
+    // Release is idempotent and never goes negative.
+    gate.release();
+    gate.release();
+    gate.release();
+    expect(gate.tryAcquire()).toBe(true);
+  });
+});
+
+describe('POST /file/upload HTTP concurrency gate (end-to-end)', () => {
+  it('holds a slot through a disconnected write, then frees it on completion', async () => {
+    const scratch = await fsp.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `qwen-upload-gate-${randomBytes(4).toString('hex')}-`,
+      ),
+    );
+    const wsDir = path.join(scratch, 'ws');
+    await fsp.mkdir(wsDir);
+    const workspace = canonicalizeWorkspace(wsDir);
+    const realFactory = createWorkspaceFileSystemFactory({
+      boundWorkspaces: [workspace],
+      trusted: true,
+      emit: () => {},
+    });
+    // Hold every writeBytesAtomic until released, counting how many uploads
+    // have reached the write step (= have already acquired a gate slot).
+    let started = 0;
+    let release: () => void = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hangingFactory = {
+      assertCanWrite: () => {},
+      forRequest: (ctx: { originatorClientId?: string; route: string }) => {
+        const realFs = realFactory.forRequest(ctx);
+        // A Proxy (not a spread) so prototype methods like resolve/stat are
+        // preserved; only writeBytesAtomic is intercepted to hold the slot.
+        return new Proxy(realFs, {
+          get(target, prop, receiver) {
+            if (prop === 'writeBytesAtomic') {
+              return (
+                p: Parameters<typeof realFs.writeBytesAtomic>[0],
+                data: Buffer,
+              ) => {
+                started += 1;
+                return hold.then(() => target.writeBytesAtomic(p, data));
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      },
+    };
+    const app = createServeApp(
+      { ...baseOpts, workspace, token: 'secret' },
+      undefined,
+      { fsFactory: hangingFactory as never },
+    );
+    const upload = (name: string) =>
+      request(app)
+        .post('/file/upload')
+        .set('Host', loopbackHost())
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: name })
+        .send(Buffer.from('x'));
+
+    try {
+      const inFlight = [
+        upload('a.bin'),
+        upload('b.bin'),
+        upload('c.bin'),
+        upload('d.bin'),
+      ];
+      // Supertest Tests are lazy thenables — attach a catch to actually send
+      // each request without awaiting it (they hang until `release()`).
+      inFlight.forEach((p) => void p.catch(() => {}));
+      // Wait until all four have acquired a gate slot (reached the write step).
+      await vi.waitFor(() => {
+        expect(started).toBe(4);
+      });
+
+      // Disconnect one client after its full body has reached the held write.
+      // The server still owns that Buffer and write task, so the slot must not
+      // be released until writeBytesAtomic settles.
+      const firstSettled = inFlight[0].then(
+        () => undefined,
+        () => undefined,
+      );
+      inFlight[0].abort();
+      await firstSettled;
+
+      const fifth = await upload('e.bin').timeout({
+        response: 500,
+        deadline: 1_000,
+      });
+      expect(fifth.status).toBe(429);
+      expect(fifth.body).toMatchObject({
+        errorKind: 'upload_busy',
+        status: 429,
+        retryAfterSeconds: 1,
+      });
+      expect(fifth.headers['retry-after']).toBe('1');
+
+      release();
+      const results = await Promise.all(inFlight.slice(1));
+      for (const res of results) {
+        expect(res.status).toBe(201);
+      }
+
+      // Slots freed on completion — a subsequent upload now succeeds.
+      const sixth = await upload('f.bin');
+      expect(sixth.status).toBe(201);
+      expect(sixth.body.path).toBe('f.bin');
+    } finally {
+      release();
+      await fsp.rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('fileUploadBodyParser 413 (oversized buffered body)', () => {
+  it('maps a body-parser 413 to the upload-specific envelope', async () => {
+    // Exercises the raw-parser branch (not the admission Content-Length
+    // pre-check): a body that is actually larger than MAX_UPLOAD_BYTES is
+    // buffered and rejected by express.raw, and the wrapper converts that 413
+    // into the upload-specific `file_too_large` envelope with `maxBytes`.
+    const { fileUploadBodyParser } = await import('./workspace-file-write.js');
+    const app = express();
+    app.post('/upload', fileUploadBodyParser(), (req, res) => {
+      res.status(200).json({ ok: true, size: (req.body as Buffer).length });
+    });
+    const oversized = Buffer.alloc(50 * 1024 * 1024 + 1);
+    const res = await request(app)
+      .post('/upload')
+      .set('Content-Type', 'application/octet-stream')
+      .send(oversized);
+    expect(res.status).toBe(413);
+    expect(res.body).toMatchObject({
+      errorKind: 'file_too_large',
+      status: 413,
+      maxBytes: 50 * 1024 * 1024,
+    });
   });
 });

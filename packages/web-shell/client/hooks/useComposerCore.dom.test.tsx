@@ -1291,6 +1291,8 @@ describe('useComposerCore tags', () => {
     });
     expect(latest!.handle.hasAttachments()).toBe(false);
     expect(latest!.hasAttachments).toBe(false);
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('');
+    expect(document.body.querySelector('.cm-placeholder')).not.toBeNull();
   });
 
   it('updates inline tag state when a document change removes the last tag', async () => {

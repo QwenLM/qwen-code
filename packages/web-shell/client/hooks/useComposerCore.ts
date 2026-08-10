@@ -577,6 +577,19 @@ export const removeInlineTagEffect = StateEffect.define<{
 }>();
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
+function normalizeInlineTagRemovalChanges(
+  view: EditorView,
+  changes: Array<{ from: number; to: number; insert: string }>,
+) {
+  let remaining = view.state.doc.toString();
+  for (const change of changes.slice().reverse()) {
+    remaining = remaining.slice(0, change.from) + remaining.slice(change.to);
+  }
+  return remaining.trim().length === 0
+    ? [{ from: 0, to: view.state.doc.length, insert: '' }]
+    : changes;
+}
+
 let nextComposerTagTooltipId = 0;
 
 class ComposerTagWidget extends WidgetType {
@@ -798,7 +811,7 @@ class ComposerTagWidget extends WidgetType {
         });
       if (changes.length === 0) return;
       view.dispatch({
-        changes,
+        changes: normalizeInlineTagRemovalChanges(view, changes),
         effects: removeInlineTagEffect.of({
           predicate: (tag) => tag.id === this.tag.id,
         }),
@@ -1101,6 +1114,12 @@ export interface UseComposerCoreOptions {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /**
+   * Invoked when the user selects the @ panel's "Upload file" item, with the
+   * directory currently being browsed. The composer opens a file picker and
+   * uploads into that directory. When absent, the upload item is hidden.
+   */
+  onFileUploadRequest?: (targetDir: string) => void;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -1299,6 +1318,7 @@ export interface UseComposerCoreReturn {
   canSubmit: boolean;
   pendingImageBatchCount: number;
   imageDragActive: boolean;
+  clearImageDragState: () => void;
   imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1377,6 +1397,7 @@ export function useComposerCore(
     renderComposerTagTooltip,
     onComposerTagClick,
     onImageIngestionNotice,
+    onFileUploadRequest,
     editorTheme,
   } = options;
 
@@ -1591,6 +1612,7 @@ export function useComposerCore(
     workspaceKey: atWorkspaceCwd,
     builtinProviders: builtinAtProviders,
     providers: atProviders,
+    onUploadRequest: onFileUploadRequest,
     createInlineTagEffect: (range) =>
       addInlineTagEffect.of({
         ...range,
@@ -3682,7 +3704,7 @@ export function useComposerCore(
         });
       if (changes.length === 0) return;
       view.dispatch({
-        changes,
+        changes: normalizeInlineTagRemovalChanges(view, changes),
         effects: removeInlineTagEffect.of({ predicate }),
         scrollIntoView: true,
       });
@@ -4212,6 +4234,7 @@ export function useComposerCore(
     canSubmit,
     pendingImageBatchCount,
     imageDragActive,
+    clearImageDragState,
     imageTransferHandlers,
     handle,
     pastedImages,

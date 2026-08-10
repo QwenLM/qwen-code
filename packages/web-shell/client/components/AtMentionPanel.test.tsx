@@ -239,6 +239,22 @@ describe('AtMentionPanel', () => {
     expect(onSelectTab).toHaveBeenCalledWith('hg');
   });
 
+  it('renders the upload item with an upload icon', () => {
+    const menu = itemsMenu();
+    menu.items = [
+      {
+        id: 'upload-file',
+        label: 'Upload file',
+        kind: 'upload',
+        insertText: '',
+      },
+    ];
+    mount(menu);
+
+    expect(document.body.textContent).toContain('Upload file');
+    expect(document.body.querySelector('svg.lucide-upload')).not.toBeNull();
+  });
+
   it('guards image icon sources', () => {
     const menu = itemsMenu();
     menu.items = [

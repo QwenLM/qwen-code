@@ -92,6 +92,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
       },
       capabilities: { features: [] },
     }),
+    useOptionalWorkspace: () => uploadWorkspaceState.current,
   };
 });
 
@@ -101,7 +102,29 @@ const composerCoreState = vi.hoisted(() => ({
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
   openHistorySearch: vi.fn(),
+  imageDropCapture: vi.fn(),
+  clearImageDragState: vi.fn(),
+  addTags: vi.fn(),
   shellMode: false,
+}));
+
+// Controllable `useOptionalWorkspace()` value for file-upload gating tests.
+// Defaults to undefined (upload disabled) so existing tests are unaffected.
+const uploadWorkspaceState = vi.hoisted(() => ({
+  current: undefined as
+    | {
+        client: { uploadWorkspaceFile: ReturnType<typeof vi.fn> };
+        capabilities: {
+          features: string[];
+          limits?: { maxWorkspaceFileUploadBytes: number };
+          workspaces?: Array<{
+            cwd: string;
+            primary: boolean;
+            trusted: boolean;
+          }>;
+        };
+      }
+    | undefined,
 }));
 
 const voiceButtonState = vi.hoisted(() => ({
@@ -139,7 +162,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       canSubmit: false,
       pendingImageBatchCount: 0,
       imageDragActive: false,
-      imageTransferHandlers: {},
+      clearImageDragState: composerCoreState.clearImageDragState,
+      imageTransferHandlers: {
+        onDropCapture: composerCoreState.imageDropCapture,
+      },
       handle: {
         focus: vi.fn(),
         insertText: vi.fn(),
@@ -157,7 +183,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
       removeImage: vi.fn(),
       composerTags: mockComposerCoreState.composerTags,
       removeTopTag: mockComposerCoreState.removeTopTag,
-      addTags: vi.fn(),
+      addTags: composerCoreState.addTags,
       removeInlineTags: vi.fn(),
       insertText: vi.fn(),
       setText: vi.fn(),
@@ -241,6 +267,9 @@ afterEach(() => {
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
   composerCoreState.openHistorySearch.mockReset();
+  composerCoreState.imageDropCapture.mockReset();
+  composerCoreState.clearImageDragState.mockReset();
+  composerCoreState.addTags.mockReset();
   voiceButtonState.onActiveChange = undefined;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -1368,5 +1397,185 @@ describe('ChatEditor mobile composer quick actions', () => {
         container.querySelector('[data-mobile-voice-active="true"]'),
       ).toBeFalsy();
     });
+  });
+});
+
+describe('ChatEditor file upload gating', () => {
+  const makeWorkspace = (
+    features: string[],
+    trusted = true,
+    maxUploadBytes = 50 * 1024 * 1024,
+  ) => ({
+    client: { uploadWorkspaceFile: vi.fn() },
+    capabilities: {
+      features,
+      limits: { maxWorkspaceFileUploadBytes: maxUploadBytes },
+      workspaces: [{ cwd: '/workspace', primary: true, trusted }],
+    },
+  });
+
+  const dispatchDrag = (
+    target: Element,
+    type: string,
+    types: string[],
+    files: File[] = [],
+  ) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { types, files },
+    });
+    act(() => target.dispatchEvent(event));
+    return event;
+  };
+
+  afterEach(() => {
+    uploadWorkspaceState.current = undefined;
+  });
+
+  it('enables the upload entry point when the capability is present', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({});
+    expect(
+      container.querySelector('[data-web-shell-upload-input]'),
+    ).not.toBeNull();
+  });
+
+  it('fileUploadEnabled={false} force-disables even with the capability', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({
+      customization: { fileUploadEnabled: false },
+    });
+    expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+  });
+
+  it('fileUploadEnabled={true} still requires the capability (AND, not override)', () => {
+    // No workspace_file_upload capability: upload stays disabled even though
+    // the host prop opts in — the prop does not bypass the capability check.
+    uploadWorkspaceState.current = makeWorkspace([]);
+    const container = renderChatEditor({
+      customization: { fileUploadEnabled: true },
+    });
+    expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+  });
+
+  it('stays disabled without the capability and without the prop', () => {
+    uploadWorkspaceState.current = makeWorkspace([]);
+    const container = renderChatEditor({});
+    expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+  });
+
+  it('stays disabled for an untrusted legacy-primary workspace', () => {
+    uploadWorkspaceState.current = makeWorkspace(
+      ['workspace_file_upload'],
+      false,
+    );
+    const container = renderChatEditor({});
+    expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+  });
+
+  it('does not intercept non-file drops', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({});
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const event = dispatchDrag(surface, 'drop', ['text/plain']);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('clears the file-drop overlay when dragleave omits data-transfer types', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({});
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    dispatchDrag(surface, 'dragenter', ['Files']);
+    expect(
+      container.querySelector('[data-web-shell-upload-drop-overlay]'),
+    ).not.toBeNull();
+
+    dispatchDrag(surface, 'dragleave', []);
+    expect(
+      container.querySelector('[data-web-shell-upload-drop-overlay]'),
+    ).toBeNull();
+  });
+
+  it('intercepts file drops before the editor and renders status above it', () => {
+    uploadWorkspaceState.current = makeWorkspace(
+      ['workspace_file_upload'],
+      true,
+      1,
+    );
+    const container = renderChatEditor({});
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = surface.querySelector('[data-web-shell-composer-editor]')!;
+    const editorDrop = vi.fn();
+    editor.addEventListener('drop', editorDrop);
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['xx'], 'large.txt')],
+    );
+
+    const strip = container.querySelector('[data-web-shell-upload-strip]');
+    expect(drop.defaultPrevented).toBe(true);
+    expect(editorDrop).not.toHaveBeenCalled();
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(composerCoreState.clearImageDragState).toHaveBeenCalledTimes(1);
+    expect(strip).not.toBeNull();
+    expect(strip?.nextElementSibling).toBe(surface);
+    expect(surface.contains(strip)).toBe(false);
+  });
+
+  it('keeps supported image drops on the image attachment path', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['png'], 'photo.png', { type: 'image/png' })],
+    );
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('inserts a successful upload as an inline file tag', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'report (1).txt',
+      sizeBytes: 3,
+      hash: `sha256:${'c'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'report.txt')]);
+    await act(async () => {});
+
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [
+        {
+          id: 'file:@report\\ \\(1\\).txt',
+          kind: 'file',
+          value: 'report (1).txt',
+          serialized: '@report\\ \\(1\\).txt',
+        },
+      ],
+      { placement: 'inline' },
+    );
   });
 });

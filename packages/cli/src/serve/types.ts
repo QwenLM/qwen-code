@@ -462,6 +462,8 @@ export interface CapabilitiesEnvelope {
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
     sessionRestoreTimeoutMs?: number;
+    /** Present when `workspace_file_upload` is advertised. */
+    maxWorkspaceFileUploadBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

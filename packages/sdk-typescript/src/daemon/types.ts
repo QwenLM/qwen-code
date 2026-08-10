@@ -26,6 +26,8 @@ export interface DaemonCapabilitiesLimits {
   maxTotalSessions?: number | null;
   /** Server-side deadline for ACP session load/resume. */
   sessionRestoreTimeoutMs?: number;
+  /** Present when `workspace_file_upload` is advertised. */
+  maxWorkspaceFileUploadBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -1961,6 +1963,32 @@ export interface DaemonWorkspaceFileEditResult {
   bom: boolean;
   lineEnding: 'crlf' | 'lf';
   matchedIgnore: 'file' | 'directory' | null;
+}
+
+/**
+ * Binary file upload request. The bytes are sent as
+ * `application/octet-stream`; `path` is the target relative to the workspace
+ * root. Uploads never overwrite — an occupied name is auto-numbered by the
+ * daemon, and the returned `path` is the final server-confirmed name.
+ */
+export interface DaemonWorkspaceFileUploadRequest {
+  path: string;
+  data: ArrayBuffer | Uint8Array | Blob;
+  signal?: AbortSignal;
+  /** Omitted inherits the client's default; `0` disables the timeout. */
+  timeoutMs?: number;
+  /**
+   * Browser-only upload progress. Requesting progress where
+   * `XMLHttpRequest` is unavailable throws before sending.
+   */
+  onProgress?: (event: { loaded: number; total: number }) => void;
+}
+
+export interface DaemonWorkspaceFileUploadResult {
+  kind: 'file_upload';
+  path: string;
+  sizeBytes: number;
+  hash: DaemonContentHash;
 }
 
 /**
