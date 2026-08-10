@@ -1038,6 +1038,9 @@ describe('AppContainer State Management', () => {
       // A revert to useWakeRepaint(refreshStatic) would leave the spy
       // uncalled (VP refreshStatic is write-free) and fail here.
       expect(repaintSpy).toHaveBeenCalledTimes(1);
+      // A repaint-only wiring (dropping the static remount bump) must not
+      // masquerade as the wake repaint.
+      expect(wakeCallback).not.toBe(repaintSpy);
     });
 
     it('defaults to VP mode when useTerminalBuffer is unset', () => {

@@ -23,11 +23,14 @@ export function createEraseLinesPattern(flags?: string): RegExp {
 
 const MULTILINE_ERASE_LINES_PATTERN = createEraseLinesPattern('g');
 
-function escapeRegExp(value: string): string {
+export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export function countOccurrences(value: string, search: string): number {
+  // Match core's editHelper.countOccurrences empty-needle semantics; without
+  // this guard indexOf('', 0) never advances and the loop hangs.
+  if (search === '') return 0;
   let count = 0;
   let index = 0;
 

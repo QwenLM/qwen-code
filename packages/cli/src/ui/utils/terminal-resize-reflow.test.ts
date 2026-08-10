@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ansiEscapes from 'ansi-escapes';
 import {
   buildWakeRepaint,
@@ -46,6 +46,16 @@ class FakeStdout extends EventEmitter {
 }
 
 describe('installTerminalResizeReflow', () => {
+  // The PR's legacy escape hatches short-circuit the wrappers; keep the
+  // suite deterministic when a developer runs it with a hatch exported.
+  beforeEach(() => {
+    vi.stubEnv('QWEN_CODE_LEGACY_RESIZE_ERASE', '');
+    vi.stubEnv('QWEN_CODE_LEGACY_ERASE_LINES', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('amplifies the post-shrink erase to the reflowed frame height', () => {
     const stdout = new FakeStdout();
     const { restore } = installTerminalResizeReflow(
@@ -233,6 +243,27 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
+  it('short console noise captured mid-handoff does not become the model', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.write(eraseLines(10)); // clear-only: arms the handoff
+      stdout.write('short console noise'); // <8 rows: MIN gate rejects
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      // Amplification still targets the real frame; with the MIN gate
+      // removed the noise (1 row) would become the model and no amplification
+      // would fire.
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+    } finally {
+      restore();
+    }
+  });
+
   it('the VP clear window expires', () => {
     vi.useFakeTimers();
     try {
@@ -314,8 +345,8 @@ describe('installTerminalResizeReflow', () => {
       stdout.emit('resize');
       stdout.write(eraseLines(10));
       expect(stdout.written.at(-1)).toBe(eraseLines(10));
-      // No repaint: the VP wake path falls back to its bare viewport clear
-      // plus the static remount bump instead of a silent no-op.
+      // No repaint: the VP wake path stays write-free (static remount bump
+      // only) — a bare viewport clear would blank the screen.
       expect(handle.repaint).toBeUndefined();
       handle.restore();
     } finally {
@@ -372,6 +403,46 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
+  it('expands tabs to 8-column stops when packing', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      const tabbed = Array.from(
+        { length: 10 },
+        () => '\t'.repeat(3) + 'x'.repeat(70),
+      ).join('\n');
+      stdout.write(eraseLines(10) + tabbed);
+      stdout.columns = 80; // 24 tab cells + 70 = 94 -> 2 rows per line
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+    } finally {
+      restore();
+    }
+  });
+
+  it('packs grapheme clusters as one block (ZWJ emoji)', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+      const emoji = Array.from({ length: 10 }, () => family.repeat(6)).join(
+        '\n',
+      );
+      stdout.write(eraseLines(10) + emoji);
+      stdout.columns = 30; // 12 cells per line -> 1 row; per-code-point gives 2
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(10));
+    } finally {
+      restore();
+    }
+  });
+
   it('overflow full-reset redraws reset the model instead of poisoning it', () => {
     const stdout = new FakeStdout();
     const { restore } = installTerminalResizeReflow(
@@ -384,6 +455,25 @@ describe('installTerminalResizeReflow', () => {
       stdout.write(eraseLines(10)); // amplified, arms the handoff
       // Ink's overflow path: clearTerminal + full static history + live
       // frame as one bare write. Must not become the frame model.
+      stdout.write(ansiEscapes.clearTerminal + frame(60, 30));
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(5));
+      expect(stdout.written.at(-1)).toBe(eraseLines(5));
+    } finally {
+      restore();
+    }
+  });
+
+  it('drops the model on unarmed full-reset writes (the common state)', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      // Ink's shouldClearTerminal path writes clearTerminal + full static +
+      // live frame with NO preceding log.clear(), i.e. while unarmed.
       stdout.write(ansiEscapes.clearTerminal + frame(60, 30));
       stdout.columns = 15;
       stdout.emit('resize');
@@ -415,7 +505,7 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
-  it('does not amplify on a stale return-to-bottom anchor', () => {
+  it('adjusts the return-to-bottom prefix when amplifying', () => {
     const stdout = new FakeStdout();
     const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
@@ -424,9 +514,14 @@ describe('installTerminalResizeReflow', () => {
       stdout.write(eraseLines(10) + frame(60, 10));
       stdout.columns = 30;
       stdout.emit('resize');
+      // The prefix cursorDown was computed pre-reflow; the screen grew by
+      // delta = target - count rows, so the amplified write must advance the
+      // cursor by count+delta or the erase window shifts into scrollback.
       const prefix = '\x1b[?25l\x1b[2B\x1b[0G';
       stdout.write(prefix + eraseLines(10));
-      expect(stdout.written.at(-1)).toBe(prefix + eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(
+        '\x1b[?25l\x1b[12B\x1b[0G' + eraseLines(20),
+      );
     } finally {
       restore();
     }

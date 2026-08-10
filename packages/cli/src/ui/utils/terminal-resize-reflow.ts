@@ -21,8 +21,10 @@ const ESC = '\u001B[';
 const CLEAR_TERMINAL = ansiEscapes.clearTerminal;
 
 // Return-to-bottom prefixes carry cursorDown computed from pre-reflow
-// geometry; amplifying on such an anchor shifts the erase window up.
-const CURSOR_DOWN_PATTERN = new RegExp(`${ESC}[0-9;]*B`);
+// geometry; the amplified erase needs the cursor advanced by the reflow
+// delta too, or the erase window shifts up into scrollback.
+// eslint-disable-next-line no-control-regex
+const CURSOR_DOWN_PATTERN = /\x1b\[(\d+)B/;
 
 // How long after a shrink every VP redraw starts from a clean viewport.
 const CLEAR_WINDOW_MS = 600;
@@ -57,9 +59,17 @@ function greedyRows(charWidths: number[], columns: number): number[][] {
 }
 
 function lineCharWidths(line: string): number[] {
+  // Grapheme-cluster widths: multi-code-point clusters (ZWJ emoji, skin-tone
+  // modifiers) occupy one cell block, so per-code-point sums over-count and
+  // would over-erase into committed scrollback. Tabs advance to the next
+  // 8-column stop (stringWidth('\t') is 0) or tab-indented frames under-count.
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
   const widths: number[] = [];
-  for (const ch of line) {
-    widths.push(stringWidth(ch));
+  let col = 0;
+  for (const { segment } of segmenter.segment(line)) {
+    const width = segment === '\t' ? 8 - (col % 8) : stringWidth(segment);
+    widths.push(width);
+    col += width;
   }
   return widths;
 }
@@ -261,30 +271,37 @@ export function installTerminalResizeReflow(
           const count = countOccurrences(match[0], ERASE_LINE);
           const target = pendingAmplify;
           pendingAmplify = 0;
-          // A return-to-bottom prefix (cursorDown computed from PRE-reflow
-          // geometry) shifts the amplified erase window up into scrollback
-          // after the terminal reflows; keep Ink's stale-but-anchor-consistent
-          // clear instead of amplifying on an untrusted anchor.
-          const untrustedAnchor = CURSOR_DOWN_PATTERN.test(
-            chunk.slice(0, match.index),
-          );
-          if (count < target && !untrustedAnchor) {
+          if (count < target) {
+            // A return-to-bottom prefix's cursorDown was computed from
+            // PRE-reflow geometry; the screen grew by (target - count) rows,
+            // so advance the cursor by that delta too or the amplified erase
+            // window shifts up into scrollback. Terminals clamp cursor moves
+            // at the bottom row, keeping this safe.
+            const delta = target - count;
+            const prefix = chunk
+              .slice(0, match.index)
+              .replace(
+                CURSOR_DOWN_PATTERN,
+                (_m, n: string) => `${ESC}${Number(n) + delta}B`,
+              );
             debugLogger.debug('amplify', { original: count, target });
             chunk =
-              chunk.slice(0, match.index) +
+              prefix +
               ansiEscapes.eraseLines(target) +
               chunk.slice(match.index + match[0].length);
           }
         }
+      } else if (chunk.includes(CLEAR_TERMINAL)) {
+        // Overflow-path full reset (clearTerminal + full static history +
+        // live frame as one write, with NO preceding log.clear()): the chunk
+        // is not a frame, so drop the model until a clean erase-prefixed
+        // write re-anchors it. Not gated on expectFrame — the reset write
+        // arrives unarmed in the normal interactive state.
+        expectFrame = false;
+        barePrintableCount = 0;
+        model.content = '';
       } else if (expectFrame) {
-        if (chunk.includes(CLEAR_TERMINAL)) {
-          // Overflow-path full reset (clearTerminal + full static history +
-          // live frame as one bare write): the chunk is not a frame, so drop
-          // the model until a clean erase-prefixed write re-anchors it.
-          expectFrame = false;
-          barePrintableCount = 0;
-          model.content = '';
-        } else if (stripAnsi(chunk).trim() !== '') {
+        if (stripAnsi(chunk).trim() !== '') {
           // Bare redraw (or static append preceding it): model each printable
           // bare write, last one wins; the second printable bare write of a
           // commit is the live frame and replaces the model even below

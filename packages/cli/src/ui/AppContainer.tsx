@@ -628,7 +628,8 @@ interface AppContainerProps {
   /**
    * VP wake/SIGCONT repaint: clear the viewport and replay the last frame
    * (Ink skips unchanged-output redraws, so a bare clear would blank the
-   * screen). Falls back to a viewport clear when absent.
+   * screen). Absent under QWEN_CODE_LEGACY_RESIZE_ERASE: the VP wake path
+   * stays write-free (static remount bump only), matching pre-PR behavior.
    */
   repaintViewport?: () => void;
 }
@@ -1318,6 +1319,19 @@ export const AppContainer = (props: AppContainerProps) => {
         isInteractiveTerminal(),
       ),
   );
+
+  // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
+  // <Static> content from the viewport just like the wake path; pair it with
+  // the same remount bump so keyed statics (agent tab history) re-emit.
+  const prevTerminalWidthRef = useRef(terminalWidth);
+  useEffect(() => {
+    const prev = prevTerminalWidthRef.current;
+    prevTerminalWidthRef.current = terminalWidth;
+    if (useTerminalBuffer && terminalWidth < prev) {
+      remountStaticHistory();
+    }
+  }, [terminalWidth, useTerminalBuffer, remountStaticHistory]);
+
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
