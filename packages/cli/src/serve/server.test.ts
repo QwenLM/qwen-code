@@ -3403,6 +3403,25 @@ describe('createServeApp', () => {
       }
     });
 
+    it('serves the shell pre-auth on a non-loopback bind (every launch mode)', async () => {
+      // Re-pins the non-loopback half of the deleted `/demo` suite: the
+      // shell is pre-auth in every launch mode. The old `/demo` registered
+      // after bearerAuth on non-loopback, so a future change re-gating
+      // mountWebShellAssets on the bind address would 401 browser
+      // navigations to a --hostname 0.0.0.0 deployment; this fails first.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
     it('does not shadow /health on a browser navigation (Critical #1)', async () => {
       // Non-loopback + requireAuth registers /health POST-auth. A browser
       // navigation (Accept text/html) must fall THROUGH the SPA fallback to

@@ -100,7 +100,7 @@ Non-loopback binds bypass this middleware (operator chose the surface area; bear
 
 Reject any request with an `Origin` header. CLI/SDK never set Origin; only browsers do. Returns deterministic `403 { error: 'Request denied by CORS policy' }` rather than the 500 HTML the `cors` package's error-callback would produce.
 
-Exception: the Web Shell's same-origin XHRs are handled by a separate middleware (in `server.ts`) that strips `Origin` when it matches the daemon's own address.
+Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`). On non-loopback binds the shell's XHRs carry an unmatched `Origin` and need `--allow-origin` for the daemon origin.
 
 ### `allowOriginCors` (`--allow-origin` mode)
 

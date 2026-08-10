@@ -67,7 +67,7 @@ qwen serve --channel-idle-timeout-ms 60000
 QWEN_SERVE_RATE_LIMIT=1 qwen serve
 ```
 
-With the hardened loopback recipe (3), `/health` is registered after `bearerAuth`, so probes must carry the token like every other route.
+With the hardened loopback recipe (3), `/health` is registered after `bearerAuth`, so probes must carry the token like every other API route (the Web Shell static surface stays pre-auth by design; pass `--no-web` for an API-only daemon).
 
 ## 3. Full startup flags
 
