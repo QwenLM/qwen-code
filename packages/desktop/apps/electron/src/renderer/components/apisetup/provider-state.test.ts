@@ -6,8 +6,8 @@ import {
   defaultModelIds,
   initialApiKey,
   initialModelIds,
-  modelIdsDifferFromDefaults,
   modelIdsAfterBaseUrlChange,
+  resetTrimmedDefaultModelIds,
   shouldResetApiKeyAfterBaseUrlChange,
   trimmedDefaultModelIds,
 } from './provider-state';
@@ -160,62 +160,13 @@ describe('provider endpoint state', () => {
     expect(customModelIds).toEqual([]);
   });
 
-  it('treats persisted default trimming as an authoritative model edit', () => {
-    const provider: QwenProviderSummary = {
-      ...kimi,
-      baseUrl: [
-        {
-          id: 'coding-plan',
-          label: 'Coding Plan',
-          url: 'https://api.kimi.com/coding/v1',
-          models: [{ id: 'k3-256k' }, { id: 'k3' }],
-        },
-      ],
-    };
+  it('resets persisted trims when seeding a different provider', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const trims = new Map([['https://stale.example/v1', ['stale-default']]]);
 
-    expect(
-      modelIdsDifferFromDefaults(provider, 'https://api.kimi.com/coding/v1', [
-        'k3-256k',
-      ]),
-    ).toBe(true);
-    expect(
-      modelIdsDifferFromDefaults(
-        provider,
-        'https://api.kimi.com/coding/v1',
-        'k3-256k, k3',
-      ),
-    ).toBe(false);
-  });
+    resetTrimmedDefaultModelIds(trims, kimi, codingUrl, ['k3-256k']);
 
-  it('treats seeded custom ids as part of the clean model baseline', () => {
-    const provider: QwenProviderSummary = {
-      ...kimi,
-      baseUrl: [
-        {
-          id: 'coding-plan',
-          label: 'Coding Plan',
-          url: 'https://api.kimi.com/coding/v1',
-          models: [{ id: 'k3-256k' }, { id: 'k3' }],
-        },
-      ],
-    };
-
-    expect(
-      modelIdsDifferFromDefaults(
-        provider,
-        'https://api.kimi.com/coding/v1',
-        ['custom-model', 'k3', 'k3-256k'],
-        ['custom-model'],
-      ),
-    ).toBe(false);
-    expect(
-      modelIdsDifferFromDefaults(
-        provider,
-        'https://api.kimi.com/coding/v1',
-        ['custom-model', 'k3-256k'],
-        ['custom-model'],
-      ),
-    ).toBe(true);
+    expect([...trims.entries()]).toEqual([[codingUrl, []]]);
   });
 
   it('resets API keys only when the endpoint key domain changes', () => {

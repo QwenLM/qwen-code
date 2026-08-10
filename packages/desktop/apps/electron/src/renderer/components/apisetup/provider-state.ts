@@ -38,24 +38,6 @@ export function initialModelIds(
     : defaultModelIds(provider, baseUrl);
 }
 
-export function modelIdsDifferFromDefaults(
-  provider: QwenProviderSummary,
-  baseUrl: string,
-  value: string | readonly string[],
-  customModelIds: readonly string[] = [],
-): boolean {
-  const ids = typeof value === 'string' ? parseModelIds(value) : [...value];
-  const baseline = new Set([
-    ...defaultModelIds(provider, baseUrl),
-    ...customModelIds,
-  ]);
-  const actual = new Set(ids);
-  return (
-    actual.size !== baseline.size ||
-    [...actual].some((id) => !baseline.has(id))
-  );
-}
-
 export function customModelIdsAfterEdit(
   defaultIds: readonly string[],
   currentCustomModelIds: readonly string[],
@@ -78,6 +60,16 @@ export function trimmedDefaultModelIds(
 ): string[] {
   const field = new Set(modelIds);
   return defaultModelIds(provider, baseUrl).filter((id) => !field.has(id));
+}
+
+export function resetTrimmedDefaultModelIds(
+  trims: Map<string, string[]>,
+  provider: QwenProviderSummary,
+  baseUrl: string,
+  modelIds: readonly string[],
+): void {
+  trims.clear();
+  trims.set(baseUrl, trimmedDefaultModelIds(provider, baseUrl, modelIds));
 }
 
 /**

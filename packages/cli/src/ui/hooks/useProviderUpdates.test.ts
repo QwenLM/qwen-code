@@ -534,6 +534,7 @@ describe('useProviderUpdates', () => {
   });
 
   it('does not refresh auth when updating an inactive provider on the same protocol', async () => {
+    mockConfig.getModel.mockReturnValue('qwen3.7-plus');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       authType: AuthType.USE_OPENAI,
       baseUrl: TOKEN_PLAN_BASE_URL,
@@ -563,6 +564,7 @@ describe('useProviderUpdates', () => {
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
   });
 
   it('does not refresh auth before auth initialization completes', async () => {
@@ -798,6 +800,55 @@ describe('useProviderUpdates', () => {
     const labels = entries.map((e) => e.providerLabel);
     expect(labels).toContain('Coding Plan');
     expect(labels).toContain('Token Plan');
+  });
+
+  it('labels same-provider endpoint updates with stable unique identities', async () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs['kimi--coding-plan'] = {
+      baseUrl: codingUrl,
+      version: 'old-version-hash',
+    };
+    metadataNs['kimi--api-international'] = {
+      baseUrl: apiUrl,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...buildProviderTemplate(kimiProvider, codingUrl),
+        ...buildProviderTemplate(kimiProvider, apiUrl),
+      ],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest?.entries).toHaveLength(2);
+    });
+    expect(result.current.providerUpdateRequest?.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          metadataKey: 'kimi--coding-plan',
+          providerLabel: 'Kimi',
+          endpointLabel: 'Coding Plan',
+        }),
+        expect.objectContaining({
+          metadataKey: 'kimi--api-international',
+          providerLabel: 'Kimi',
+          endpointLabel: 'API Key (International)',
+        }),
+      ]),
+    );
   });
 
   it('skip persists ignoredVersion for all providers in batch', async () => {

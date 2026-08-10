@@ -38,6 +38,11 @@ describe('buildAuthProviderCatalog', () => {
       'kimi-for-coding',
       'kimi-for-coding-highspeed',
     ]);
+    expect(options[0]?.models?.[0]).toEqual({
+      id: 'k3-256k',
+      contextWindowSize: 262144,
+      modalities: { image: true },
+    });
     expect(options[1]?.models?.map((model) => model.id)).toEqual([
       'kimi-k3',
       'kimi-k2.7-code',

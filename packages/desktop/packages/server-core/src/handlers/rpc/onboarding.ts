@@ -7,7 +7,10 @@ import { getAuthState, getSetupNeeds } from '@craft-agent/shared/auth';
 import { isSetupDeferred, setSetupDeferred } from '@craft-agent/shared/config';
 import { prepareMcpOAuth } from '@craft-agent/shared/auth';
 import { validateMcpConnection } from '@craft-agent/shared/mcp';
-import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
+import {
+  RPC_CHANNELS,
+  type QwenProviderSummary,
+} from '@craft-agent/shared/protocol';
 import {
   getQwenWorkspacePreflightViaAcp,
   listQwenProvidersViaAcp,
@@ -76,11 +79,11 @@ function preflightSetupSignal(
     : 'complete';
 }
 
-function hasExistingProviderConfig(catalog: {
-  providers: Array<{
-    existingConfig?: { hasApiKey?: boolean; modelIds?: string[] };
-  }>;
-}): boolean {
+export function hasExistingProviderConfig(
+  catalog: {
+    providers: Array<Pick<QwenProviderSummary, 'existingConfig'>>;
+  },
+): boolean {
   return catalog.providers.some((provider) => {
     const config = provider.existingConfig;
     return config?.hasApiKey === true || !!config?.modelIds?.length;

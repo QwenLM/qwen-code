@@ -43,7 +43,9 @@ export interface ModelUpdateDiff {
 export type UpdateChoice = 'update' | 'later' | 'skip';
 
 export interface ProviderUpdateEntry {
+  metadataKey: string;
   providerLabel: string;
+  endpointLabel?: string;
   diff: ModelUpdateDiff;
 }
 
@@ -368,14 +370,8 @@ export function useProviderUpdates(
         delete installPlan.env;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
-        const endpointOwnsModel = (model: ProviderModelConfig) =>
-          resolveOwnsModel(providerCfg)?.(model) === true &&
-          normalizeBaseUrlForMatching(model.baseUrl) ===
-            normalizeBaseUrlForMatching(resolved);
-        if (providerCfg.mergeModelsByIdentity) {
-          const patch = installPlan.modelProviders?.[0];
-          if (patch) patch.ownsModel = endpointOwnsModel;
-        }
+        const endpointOwnsModel =
+          installPlan.modelProviders?.[0]?.ownsModel ?? (() => false);
         const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
         const availableConfigs = providerCfg.mergeModelsByIdentity
           ? [
@@ -392,7 +388,8 @@ export function useProviderUpdates(
         const previousModelStillAvailable = availableConfigs.some(
           (cfg) =>
             cfg.id === previousModel &&
-            (!activeConfig?.baseUrl ||
+            (!providerCfg.mergeModelsByIdentity ||
+              !activeConfig?.baseUrl ||
               normalizeBaseUrlForMatching(cfg.baseUrl) ===
                 normalizeBaseUrlForMatching(activeConfig.baseUrl)),
         );
@@ -486,10 +483,21 @@ export function useProviderUpdates(
 
     if (pendingList.length === 0) return;
 
-    const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
-      providerLabel: t(p.provider.label),
-      diff: p.diff,
-    }));
+    const entries: ProviderUpdateEntry[] = pendingList.map((p) => {
+      const endpoint = Array.isArray(p.provider.baseUrl)
+        ? p.provider.baseUrl.find(
+            (option) =>
+              normalizeBaseUrlForMatching(option.url) ===
+              normalizeBaseUrlForMatching(p.baseUrl),
+          )
+        : undefined;
+      return {
+        metadataKey: p.metadataKey,
+        providerLabel: t(p.provider.label),
+        ...(endpoint ? { endpointLabel: t(endpoint.label) } : {}),
+        diff: p.diff,
+      };
+    });
 
     setUpdateRequest({
       entries,

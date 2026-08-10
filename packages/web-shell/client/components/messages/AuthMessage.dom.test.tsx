@@ -194,17 +194,7 @@ describe('AuthMessage draft isolation', () => {
       message: 'ok',
     });
 
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-    await act(async () => {
-      root!.render(
-        <I18nProvider language="en">
-          <AuthMessage onMessage={vi.fn()} onClose={vi.fn()} />
-        </I18nProvider>,
-      );
-    });
-    await flush();
+    await renderAuthMessage();
 
     // groups → providers → provider Alpha
     click(findButtonContaining('Third-party Providers'));
@@ -245,17 +235,7 @@ describe('AuthMessage draft isolation', () => {
       message: 'ok',
     });
 
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-    await act(async () => {
-      root!.render(
-        <I18nProvider language="en">
-          <AuthMessage onMessage={vi.fn()} onClose={vi.fn()} />
-        </I18nProvider>,
-      );
-    });
-    await flush();
+    await renderAuthMessage();
 
     click(findButtonContaining('Third-party Providers'));
     click(findButtonContaining('Provider Alpha'));

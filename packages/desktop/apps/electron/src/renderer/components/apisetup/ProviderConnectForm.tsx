@@ -39,6 +39,7 @@ import {
   initialModelIds,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
+  resetTrimmedDefaultModelIds,
   trimmedDefaultModelIds,
 } from './provider-state';
 
@@ -194,10 +195,11 @@ export function ProviderConnectForm({
     customModelIdsRef.current = seededModelIds.filter(
       (id) => !seededDefaults.has(id),
     );
-    trimmedDefaultModelIdsRef.current.clear();
-    trimmedDefaultModelIdsRef.current.set(
+    resetTrimmedDefaultModelIds(
+      trimmedDefaultModelIdsRef.current,
+      provider,
       baseUrl,
-      trimmedDefaultModelIds(provider, baseUrl, seededModelIds),
+      seededModelIds,
     );
     setModelIdsText(seededModelIds.join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);

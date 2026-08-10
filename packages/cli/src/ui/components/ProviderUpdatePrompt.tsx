@@ -21,13 +21,13 @@ interface ProviderUpdatePromptProps {
 }
 
 const ProviderDiffSection = ({ entry }: { entry: ProviderUpdateEntry }) => {
-  const { providerLabel, diff } = entry;
+  const { providerLabel, endpointLabel, diff } = entry;
   const hasModelChanges = diff.added.length > 0 || diff.removed.length > 0;
 
   return (
     <Box flexDirection="column">
       <Text bold color={theme.text.secondary}>
-        {providerLabel}
+        {endpointLabel ? `${providerLabel} · ${endpointLabel}` : providerLabel}
       </Text>
       {hasModelChanges ? (
         <Box flexDirection="column">
@@ -89,7 +89,7 @@ export const ProviderUpdatePrompt = ({
 
       <Box flexDirection="column" marginTop={1} gap={1}>
         {entries.map((entry) => (
-          <ProviderDiffSection key={entry.providerLabel} entry={entry} />
+          <ProviderDiffSection key={entry.metadataKey} entry={entry} />
         ))}
       </Box>
 
