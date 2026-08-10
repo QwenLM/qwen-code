@@ -478,7 +478,7 @@ worker generation are rejected.
 | `InProcessBackend`                                       | **Split**                           | Lifecycle half → `InProcessRuntime`; `getAgent` → `InProcessSession`; no-op display half → deleted |
 | `agent-view` protocol + store + server + client + runner | **Reuse as-is**                     | Already the right contract                                                                         |
 | `agent-view` handler ops                                 | **Implement**                       | `dispatch`, `send`, `answer`, `stop`, `kill`, `list`, `subscribe` broadcast                        |
-| `terminal-bridge.ts`                                     | **Reuse, defer**                    | Only needed for Phase 5 raw attach                                                                 |
+| `terminal-bridge.ts`                                     | **Reuse, defer**                    | Only needed for PR 3 raw attach                                                                    |
 | `identity.ts`                                            | **Extend**                          | Add env-based resolution alongside AsyncLocalStorage                                               |
 | `notifyTasksUpdated`                                     | **Adapt**                           | Extract a `TaskNotifier` seam; default in-memory, supervised fan-out later                         |
 | `send_message` tool                                      | **Adapt**                           | Add the no-TeamManager mailbox route                                                               |
@@ -491,64 +491,198 @@ worker generation are rejected.
 ## 6. MVP versus eventual architecture
 
 The MVP boundary is drawn to avoid building terminal infrastructure before the semantic layer
-works.
+works. "MVP" below means **the state after PR 1B** (§7.3); the PR column names where each
+capability lands.
 
-| Capability                                                     | MVP                   | Eventual                      |
-| -------------------------------------------------------------- | --------------------- | ----------------------------- |
-| Independent persistent teammate processes                      | ✅                    | ✅                            |
-| Roster with live state (working/blocked/idle/completed/failed) | ✅                    | ✅                            |
-| Inspect a teammate while running                               | ✅ via transcript tab | ✅ + raw PTY attach           |
-| Interact with one teammate directly                            | ✅ via tab composer   | ✅ + full terminal takeover   |
-| Messages with turn correlation                                 | ✅                    | ✅                            |
-| Explicit routable approvals                                    | ✅                    | ✅                            |
-| Leader restart → reattach                                      | ✅                    | ✅                            |
-| Teammate→leader latency                                        | poll (existing)       | socket wake                   |
-| Task-change notification across processes                      | poll                  | socket fan-out                |
-| Raw terminal attach / resize / scrollback                      | ❌                    | ✅ (`terminal-bridge`)        |
-| Hibernation / respawn                                          | ❌                    | ✅                            |
-| tmux / external surfaces                                       | ❌                    | ✅ optional adapters          |
-| Heterogeneous CLIs, remote/SSH                                 | ❌                    | ❌ — permanently out of scope |
+| Capability                                                  | MVP                   | Lands in | Eventual                      |
+| ----------------------------------------------------------- | --------------------- | -------- | ----------------------------- |
+| Independent teammate processes                              | ✅                    | 1B       | ✅                            |
+| Live teammate state (working/blocked/idle/completed/failed) | ✅                    | 1B       | ✅                            |
+| Inspect a teammate while running                            | ✅ via transcript tab | 1B       | ✅ + raw PTY attach           |
+| Interact with one teammate directly                         | ✅ via tab composer   | 1B       | ✅ + full terminal takeover   |
+| Messages with turn correlation                              | ✅                    | 1A       | ✅                            |
+| Explicit routable approvals                                 | ✅                    | 1A       | ✅                            |
+| Enforced read-only teammates                                | ✅                    | 1A       | ✅                            |
+| Clean leader exit stops teammates                           | ✅                    | 1B       | ✅                            |
+| Leader crash → teammate survival, restart → reattach        | ❌                    | 2        | ✅                            |
+| Single-leader lock                                          | ❌                    | 2        | ✅                            |
+| Teammate→leader latency                                     | poll (existing)       | 2        | socket wake                   |
+| Task-change notification across processes                   | poll                  | 2        | socket fan-out                |
+| Raw terminal attach / resize / scrollback                   | ❌                    | 3        | ✅ (`terminal-bridge`)        |
+| Hibernation / respawn                                       | ❌                    | 3        | ✅                            |
+| tmux / external surfaces                                    | ❌                    | 3        | ✅ optional adapters          |
+| Heterogeneous CLIs, remote/SSH                              | ❌                    | —        | ❌ — permanently out of scope |
 
-**MVP op set** on the supervisor: `dispatch`, `send`, `answer`, `stop`, `kill`, `list`,
-`subscribe`. That is seven handlers, not the full nineteen.
+**MVP op set** on the supervisor: `dispatch`, `send`, `answer`, `stop`, `list`, `subscribe`, plus
+a shutdown broadcast. Six handlers plus the existing three, not the full nineteen; `kill`,
+`respawn` and the attach/peek family are deferred to PR 2 and PR 3.
 
-## 7. Phased plan
+## 7. Implementation strategy
 
-Phases 1–4 are pure refactors with **no user-visible change**. Behavior changes begin at Phase 5.
+The work ships as **four PRs**, not a long refactor chain. Each delivers something exercisable.
 
-| #   | Phase                                                                               | User-visible? | Unlocks                                                                                                                |
-| --- | ----------------------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 1   | Extract `AgentSession` from `TeamAgentHandle`; retarget `TeamManager`               | No            | The seam. Nothing else is possible without it                                                                          |
-| 2   | Extract `AgentSessionView`; tab UI depends on it, not `AgentInteractive`            | No            | Remote sessions can render in existing tabs                                                                            |
-| 3   | Split `Backend` → `AgentRuntime` + `AgentSurface`; `InProcessBackend` splits in two | No            | Runtime becomes pluggable; display no-ops deleted                                                                      |
-| 4   | Add `turnId` correlation + `ApprovalRegistry` (in-process only)                     | No            | Correlation and approvals work before any IPC exists                                                                   |
-| 5   | `SupervisedRuntime` + `RemoteSession` + the seven supervisor handlers               | **Yes**       | **MVP**: real independent persistent teammates, roster, inspection, correlated messaging, routable approvals, reattach |
-| 6   | Socket fan-out for mailbox + task notification                                      | Yes (latency) | Removes polling                                                                                                        |
-| 7   | Raw PTY attach via `terminal-bridge`; hibernation/respawn                           | Yes           | "Enter the session" and long-idle survival                                                                             |
-| 8   | Arena migrates to Runtime + Surface; `Backend` deleted; tmux as optional surface    | No            | One runtime model repo-wide                                                                                            |
+### 7.1 Sizing verdict
 
-Phases 1–4 are worth landing regardless of whether 5–8 ever ship: they delete dead no-op code,
-remove a concrete-class dependency from the UI, and make approvals correlatable in-process.
+A single PR containing the whole MVP measures at roughly **3,400 production LOC + 3,400 test LOC
+across ~50 files**. That is too large to review in this repository — for scale, #8804 was
+398+/52− across 12 files. There is no _correctness_ reason it cannot be one PR; the objection is
+reviewability alone.
 
-## 8. Landable as isolated refactors
+The smallest adjustment that keeps every PR exercisable is to split the MVP once, at the
+**process boundary**: in-process semantics first, subprocess runtime second. This yields four
+PRs total, and PR 1A still changes real product behaviour rather than being pure plumbing.
 
-Each is independently reviewable and revertible, with no behavior change:
+### 7.2 Reuse categorisation
 
-- **R1** — `AgentSession` interface + `TeamAgentHandle` alias; `InProcessSession` wrapper. Tests:
-  existing `coordination-harness.test.ts` must pass untouched.
-- **R2** — `AgentSessionView` extraction; `AgentChatContent`/`AgentChatView` consume it;
-  `RegisteredAgent.interactiveAgent` becomes `view`. Removes the
-  `DISPLAY_MODE.IN_PROCESS` guard at `useTeamInProcess.ts:88`.
-- **R3** — `Backend` split; `InProcessBackend` → `InProcessRuntime` + `InProcessSession`; the six
-  no-op display methods deleted rather than ported.
-- **R4** — `turnId` threaded through `AgentInteractive` events; `ApprovalRegistry` with one-shot
-  semantics; `leaderPermissionBridge` routes by `callId`.
-- **R5** — `TaskNotifier` seam extracted from `notifyTasksUpdated`; default implementation is
-  today's in-memory emitter.
-- **R6** — `identity.ts` gains env-based resolution; `send_message` gains the mailbox route. Both
-  dormant until a subprocess teammate exists.
+The reason PR 1 is tractable at all is that most of the machinery already exists.
 
-## 9. Risks and compatibility
+**Reused unchanged — 0 LOC written (~4,360 LOC of existing behaviour):**
+
+| Module                            | LOC   | Why it holds                                      |
+| --------------------------------- | ----- | ------------------------------------------------- |
+| `tasks.ts`                        | 1,050 | file-based, cross-process locked, claim protocol  |
+| `mailbox.ts`                      | 361   | same lock model; already the teammate→leader path |
+| `teamHelpers.ts`                  | 378   | pure helpers                                      |
+| `agent-view/supervisor-store.ts`  | 677   | atomic read/write for every protocol file         |
+| `agent-view/supervisor-client.ts` | 670   | typed client; every op already declared           |
+| `agent-view/supervisor-server.ts` | 547   | framing, auth, streaming-op dispatch              |
+| `agent-view/terminal-bridge.ts`   | 249   | untouched until PR 3                              |
+| `agent-view/protocol.ts`          | 207   | types already model the target state planes       |
+| `agentHistoryAdapter.ts`          | ~180  | `AgentMessage[]` → `HistoryItem[]`                |
+| `agent-view/current-cli-argv.ts`  | 40    | dev-tsx / bundled / global relaunch               |
+
+**Adapter only — existing code retargeted, ~900 LOC changed:**
+
+| Module                                        | File LOC | Changed | Nature                                                          |
+| --------------------------------------------- | -------- | ------- | --------------------------------------------------------------- |
+| `TeamManager.ts`                              | 1,829    | ~200    | 14 `getAgentFromBackend` + 5 `this.backend.*` + event bridge    |
+| `InProcessBackend.ts`                         | 715      | ~290    | split; extract `createPerAgentConfig` (`:487`); delete 6 no-ops |
+| `agent-interactive.ts`                        | 545      | ~80     | thread `turnId` through the message pump                        |
+| `fake-backend.ts` + `coordination-harness.ts` | 406      | ~120    | test doubles satisfy the new contracts                          |
+| `AgentViewContext.tsx`                        | 301      | ~70     | hold a view, not `AgentInteractive`                             |
+| `useTeamInProcess.ts`                         | 190      | ~50     | drop the `DISPLAY_MODE.IN_PROCESS` guard                        |
+| `leaderPermissionBridge.ts`                   | 142      | ~40     | route by `callId`                                               |
+| `identity.ts`                                 | 96       | ~50     | env-based resolution for subprocesses                           |
+| `send-message.ts`                             | ~300     | ~40     | no-`TeamManager` mailbox route                                  |
+| `team-create.ts`                              | ~250     | ~25     | resolve runtime from an injected factory                        |
+| `gemini.tsx`                                  | 1,426    | ~20     | two early dispatches — low LOC, **high risk**                   |
+
+**Genuinely new — ~2,480 production LOC:**
+
+| Module                                            | Est. |
+| ------------------------------------------------- | ---- |
+| supervisor handler ops (7)                        | 450  |
+| `fleet/session.ts` + `runtime.ts` + `view.ts`     | 320  |
+| teammate subprocess entrypoint + agent host       | 320  |
+| `SupervisedRuntime.ts`                            | 280  |
+| `RemoteSession.ts`                                | 260  |
+| `session-projection.ts`                           | 220  |
+| teammate sideband client                          | 180  |
+| `fleet/serializable-confirmation.ts` (6 variants) | 140  |
+| `fleet/approvals.ts` (one-shot registry)          | 130  |
+| supervisor process entrypoint                     | 120  |
+| feature gate + settings                           | 60   |
+
+**Deliberately left in place — PR 1 does not touch:**
+
+`Backend` stays exported and Arena keeps using it. `TmuxBackend`, `ITermBackend`, `ArenaManager`,
+`terminal-bridge.ts` are untouched. `TeamAgentHandle` remains as a type alias. The display no-ops
+survive on `Backend` for Arena's sake even though `InProcessRuntime` drops them. Hibernation,
+respawn, `kill`, and the roster's own UI component are all deferred — PR 1B surfaces teammate
+status through the **existing `AgentTabBar`**, which already renders per-agent state indicators.
+
+### 7.3 The four PRs
+
+| PR     | Scope                                  | Prod LOC | Test LOC | Files | Review risk | Impl. risk |
+| ------ | -------------------------------------- | -------- | -------- | ----- | ----------- | ---------- |
+| **1A** | Fleet contracts + in-process semantics | ~1,300   | ~1,400   | ~25   | Medium      | Low        |
+| **1B** | Supervised runtime — **the MVP**       | ~1,900   | ~2,000   | ~25   | High        | High       |
+| **2**  | Persistence, recovery, hardening       | ~1,200   | ~1,600   | ~20   | Medium      | Medium     |
+| **3**  | PTY attach + legacy cleanup            | ~1,100   | ~1,000   | ~25   | Medium      | Medium     |
+
+#### PR 1A — Fleet contracts and in-process semantics
+
+Contracts, `ApprovalRegistry` with one-shot semantics, serializable confirmation details, turn
+correlation, `TeamManager` migration, `InProcessBackend` split, view extraction, and #8804's
+`read_only` enforcement folded in (§0.1 makes it load-bearing).
+
+_Demonstrable:_ in-process teammates whose turns are correlated end to end, whose approvals reach
+the leader with real call IDs and cannot be double-answered, and whose read-only mode is enforced
+by the runtime rather than by prompt. This is product behaviour, not plumbing.
+
+_Incomplete:_ no subprocess teammates; teammates still share the leader process.
+
+_Risk note:_ low implementation risk — everything is in one process and the existing
+`coordination-harness.test.ts` (751 LOC) acts as the regression net. Review risk is medium
+because `TeamManager` is touched in ~19 places.
+
+Commits:
+
+1. `fleet/` contracts + `TeamAgentHandle` alias
+2. serializable confirmation details + `ApprovalRegistry`
+3. `turnId` correlation through `AgentInteractive`
+4. `InProcessBackend` split into `InProcessRuntime` + `InProcessSession`
+5. `TeamManager` retargeted to `AgentRuntime`/`AgentSession`
+6. `AgentSessionView` extraction in the tab UI
+7. `read_only` enforcement (from #8804)
+8. tests + docs
+
+#### PR 1B — Supervised runtime (the MVP)
+
+The six new supervisor ops, the supervisor process entrypoint, the teammate subprocess entrypoint
+and sideband, `SupervisedRuntime` / `RemoteSession`, semantic event streaming, session
+projection, the `experimental.fleet` gate, and teammate status in the existing tab bar.
+
+_Demonstrable — the acceptance criterion in full:_ one leader plus multiple real Qwen subprocess
+teammates, task assignment, reliable semantic messaging, correlated turns, explicit approvals,
+live status, and inspectable teammate transcripts, with no PTY attach.
+
+_Incomplete:_ no crash survival, no reattach, no single-leader lock, no socket fan-out (polling
+is used), no raw attach.
+
+_Risk note:_ highest of the four. Two new process entrypoints, one of them in `gemini.tsx`, plus
+the first cross-process semantic transport.
+
+Commits:
+
+1. supervisor handler ops against the existing store
+2. supervisor process entrypoint (`--internal-agent-view-supervisor`)
+3. teammate subprocess entrypoint + shared agent construction
+4. teammate sideband client (worker → supervisor events)
+5. `SupervisedRuntime` + `RemoteSession`
+6. session projection into the existing tab UI
+7. feature gate + `/coordinate` entry
+8. end-to-end tests + docs
+
+#### PR 2 — Persistence, recovery, hardening
+
+Leader crash → teammate survival; leader restart → reattach; worker generation and stale-event
+rejection; single-leader lock with stale reclaim; subprocess crash handling; worktree ownership
+recovery; socket fan-out replacing polling; Windows lifecycle validation; resource cleanup;
+failure-mode tests.
+
+#### PR 3 — Terminal session experience and cleanup
+
+Raw PTY attach via `terminal-bridge`, enter/detach a teammate session, resize and terminal
+lifecycle, hibernation and respawn if justified, optional surface adapters, Arena migration, and
+deletion of `Backend` once every consumer has moved. Items that grow beyond this should become
+independent follow-ups rather than expanding PR 3.
+
+### 7.4 What cannot be deferred out of PR 1B
+
+Three items look like PR 2 hardening but are load-bearing the moment subprocesses exist:
+
+1. **Supervisor-driven teammate shutdown.** §0.1 decided clean leader exit stops teammates.
+   Without it, quitting Qwen Code leaves agents running and spending tokens.
+2. **Nested fan-out denial.** A teammate that can spawn its own team is a runaway risk from the
+   first subprocess. Reject `team_create` when a teammate identity is present.
+3. **Token sanitisation.** The teammate's supervisor token must not reach its own shell, MCP, or
+   hook children — route every spawn through `sanitize-child-env.ts`.
+
+Conversely, **stale generation rejection genuinely can wait** for PR 2: PR 1B has no respawn and
+no reattach, so a worker generation can never rotate within its scope.
+
+## 8. Risks and compatibility
 
 **Concurrency on the task board — verified, no upgrade needed.** Two or more OS processes will
 mutate `~/.qwen/teams/{team}/`. Both `tasks.ts` and `mailbox.ts` already implement a deliberate
@@ -559,7 +693,7 @@ names the multi-process case directly — the mutex exists so local writers "don
 file lock", which is retained "to still guard against writers in other agent processes" — and the
 jitter comment cites `scanIdleAgentsForTasks` racing `MAX_TEAMMATES` claimants at one task file.
 
-The coordination plane was built for multi-process access. Phase 5 needs **no lock upgrade**, and
+The coordination plane was built for multi-process access. PR 1B needs **no lock upgrade**, and
 a crashed teammate's lock self-clears after the 5s stale window, which also gives recovery a
 defined bound.
 
@@ -579,7 +713,7 @@ show all blocked sessions at once, and the leader UI must handle a queue, not a 
 (`supervisor-process.ts:68`), but subprocess teammates and later PTY attach need explicit Windows
 validation.
 
-**Compatibility.** `Backend` and `TeamAgentHandle` stay exported through Phases 1–7. Existing
+**Compatibility.** `Backend` and `TeamAgentHandle` stay exported until PR 3. Existing
 in-process teams keep working unchanged — the in-process runtime is the default. Supervised
 teammates sit behind a new gate (`experimental.fleet`) layered on the existing
 `experimental.agentTeam`.
@@ -587,30 +721,30 @@ teammates sit behind a new gate (`experimental.fleet`) layered on the existing
 **Settings drift.** A teammate process re-reads settings independently. Its execution profile must
 be locked from the spec at launch, ignoring user-config sources that could execute code.
 
-## 10. Remaining questions, and who answers them
+## 9. Remaining questions, and who answers them
 
 The four product decisions in §0.1 are settled, and the cross-process locking question is
-resolved in §9. What remains are implementation choices, to be made with engineering judgment
+resolved in §8. What remains are implementation choices, to be made with engineering judgment
 during the phase that needs them rather than escalated:
 
 1. Does `AgentApprovalRequestEvent` already carry a stable `callId`, or must one be introduced?
    Determined by tracing during R4.
 2. Stream a teammate's transcript continuously, or fetch on tab focus? Default to streaming
    append-only deltas with a bounded buffer; revisit only if large teams show cost pressure.
-3. Leader poll interval for MVP. Tune against real runs; socket fan-out (Phase 6) supersedes it.
+3. Leader poll interval for MVP. Tune against real runs; socket fan-out (PR 2) supersedes it.
 4. `worktreePath` ownership on teammate crash — reuse the `WorktreeSession` receipt or extend the
-   supervisor's `AgentViewWorktreeState`. Decide by tracing both during Phase 5.
-5. Naming, module paths, socket op names, and how R1–R6 are grouped into PRs.
+   supervisor's `AgentViewWorktreeState`. Decide by tracing both during PR 2.
+5. Naming, module paths, socket op names, and commit boundaries inside each PR.
 
 Escalate only if one of these turns out to change user-visible behavior or contradict §0.1.
 
-## 11. What this means for open work
+## 10. What this means for open work
 
 - **#8804** — land the `read_only` enforcement, corrected to a four-tool inspection base rather
   than reusing the seven-tool plan-mode _pre-approval_ list (a UX list being used as a security
   boundary). Split out `working_dir` and the auto-forward change. Under this architecture
   `read_only` becomes a field on `AgentSpec`, applied by whichever runtime starts the session.
-- **#7800–#7803** — this is Phase 5's dependency. The protocol is right; the handlers are what is
+- **#7800–#7803** — this is PR 1B's dependency. The protocol is right; the handlers are what is
   missing. Consider landing only the seven MVP ops rather than the full stack.
 - **Arena tmux split panes** — orthogonal. Stands alone as a fix to a documented-but-absent
-  feature; becomes an `AgentSurface` in Phase 8. Not a step toward this architecture.
+  feature; becomes an `AgentSurface` in PR 3. Not a step toward this architecture.
