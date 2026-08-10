@@ -223,7 +223,8 @@ describe('isCommandAllowed', () => {
 
     it('does not overflow on adversarially nested expansions', () => {
       // Deep nesting is capped and fails closed instead of throwing.
-      const deep = `echo "${'${a['.repeat(200)}${'}]'.repeat(200)}@P}"`;
+      const deep = `echo "${'${a['.repeat(200)}${'}]'.repeat(200)}@\\
+P}"`;
       expect(() => detectCommandSubstitution(deep)).not.toThrow();
       expect(detectCommandSubstitution(deep)).toBe(true);
       const deepWithoutAtP = `"${'${a['.repeat(200)}0${'}]'.repeat(200)}"`;

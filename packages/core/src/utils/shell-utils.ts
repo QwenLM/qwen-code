@@ -1727,7 +1727,7 @@ export function detectCommandSubstitution(command: string): boolean {
         // literal `@P}` — an accepted safe-direction cost, since any real
         // `${...@P}` in that remainder is independently detected when the
         // outer scan reaches it.
-        return text.includes('@P}', i);
+        return text.slice(i).replace(/\\\n/g, '').includes('@P}');
       }
       i = subscriptClose + 1;
       skipLineContinuations();
