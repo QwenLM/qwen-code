@@ -66,18 +66,29 @@ export class BundledSkillLoader implements ICommandLoader {
         return true;
       });
 
+      const fleetEnabled = this.config?.isFleetEnabled?.() ?? false;
+      const featureVisible = cronVisible.filter((skill) => {
+        if (skill.name === 'coordinate' && !fleetEnabled) {
+          debugLogger.debug(
+            'Hiding skill "coordinate" because Fleet is not enabled',
+          );
+          return false;
+        }
+        return true;
+      });
+
       // Apply user-controlled `skills.disabled` filter HERE so disabling a
       // bundled skill cannot accidentally hide a same-named built-in
       // command or MCP prompt (which would happen if we routed this
       // through `CommandService`'s global denylist instead).
       const disabled =
         this.config?.getDisabledSkillNames() ?? new Set<string>();
-      const skills = cronVisible.filter(
+      const skills = featureVisible.filter(
         (skill) => !disabled.has(skill.name.toLowerCase()),
       );
 
       debugLogger.debug(
-        `Loaded ${skills.length} bundled skill(s) as slash commands; ${cronVisible.length - skills.length} hidden by skills.disabled`,
+        `Loaded ${skills.length} bundled skill(s) as slash commands; ${allSkills.length - featureVisible.length} hidden by feature flags; ${featureVisible.length - skills.length} hidden by skills.disabled`,
       );
 
       return skills.map((skill) => ({

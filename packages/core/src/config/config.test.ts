@@ -598,6 +598,19 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('Fleet settings', () => {
+    it('enables team coordination internally without the Agent Team setting', () => {
+      const config = new Config({
+        ...baseParams,
+        fleetEnabled: true,
+        agentTeamEnabled: false,
+      });
+
+      expect(config.isFleetEnabled()).toBe(true);
+      expect(config.isAgentTeamEnabled()).toBe(true);
+    });
+  });
+
   describe('getMemoryAgentTimeoutMinutes', () => {
     it('returns undefined when unset', () => {
       expect(

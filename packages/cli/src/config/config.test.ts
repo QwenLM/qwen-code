@@ -1459,6 +1459,28 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('should keep Fleet disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({ fleetEnabled: false }),
+    );
+  });
+
+  it('should propagate the Fleet opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { fleet: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({ fleetEnabled: true }),
+    );
+  });
+
   it('should keep the session writer lease disabled by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

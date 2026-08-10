@@ -3652,7 +3652,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+          'Enable the low-level agent team collaboration tools (experimental). Fleet enables these tools automatically, so Fleet users do not need to enable this setting separately. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+        showInDialog: true,
+      },
+      fleet: {
+        type: 'boolean',
+        label: 'Enable Fleet Preview',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the in-process Fleet preview and /coordinate workflow. Fleet coordinates bounded read-only teammates through shared tasks, messages, and existing Agent View tabs. Teammates remain in the leader process until the supervised runtime lands.',
         showInDialog: true,
       },
       artifact: {

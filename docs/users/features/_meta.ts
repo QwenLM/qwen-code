@@ -5,6 +5,7 @@ export default {
   'tool-use-summaries': 'Tool-Use Summaries',
   'markdown-rendering': 'Markdown Rendering',
   'sub-agents': 'SubAgents',
+  'fleet-preview': 'Fleet Preview',
   arena: 'Agent Arena',
   skills: 'Skills',
   memory: 'Memory',

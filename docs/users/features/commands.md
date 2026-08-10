@@ -139,14 +139,15 @@ Commands for managing AI tools and models.
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command      | Description                                                 | Usage Examples                                                            |
-| ------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `/review`    | Multi-agent code review (12 parallel agents at high effort) | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
-| `/loop`      | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                                                |
-| `/simplify`  | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`                             |
-| `/qc-helper` | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`                                      |
+| Command       | Description                                                 | Usage Examples                                                            |
+| ------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `/review`     | Multi-agent code review (12 parallel agents at high effort) | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
+| `/coordinate` | Coordinate bounded read-only Fleet teammates                | `/coordinate investigate the authentication regression`                   |
+| `/loop`       | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                                                |
+| `/simplify`   | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`                             |
+| `/qc-helper`  | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`                                      |
 
-See [Code Review](./code-review.md) for full `/review` documentation.
+See [Code Review](./code-review.md) for `/review` documentation and [Fleet Preview](./fleet-preview.md) for `/coordinate`.
 
 ### 1.6 Side Question (`/btw`)
 

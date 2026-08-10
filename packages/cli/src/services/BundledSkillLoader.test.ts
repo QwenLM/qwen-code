@@ -48,6 +48,7 @@ describe('BundledSkillLoader', () => {
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
+      isFleetEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
       getCliVersion: vi.fn().mockReturnValue('0.21.2'),
       getPermissionManager: vi
@@ -473,6 +474,26 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(1);
     expect(commands[0].name).toBe('review');
+  });
+
+  it('shows coordinate only when Fleet is enabled', async () => {
+    mockSkillManager.listSkills.mockResolvedValue([
+      makeSkill({ name: 'review' }),
+      makeSkill({ name: 'coordinate' }),
+    ]);
+    const loader = new BundledSkillLoader(mockConfig);
+
+    expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
+      'review',
+    ]);
+
+    (mockConfig.isFleetEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+      true,
+    );
+    expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
+      'review',
+      'coordinate',
+    ]);
   });
 
   describe('skills.disabled filter', () => {
