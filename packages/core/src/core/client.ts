@@ -2308,6 +2308,12 @@ export class GeminiClient {
         // hooks must not fire on (or be able to block) internal team
         // coordination traffic.
         messageType !== SendMessageType.Teammate &&
+        // Peer envelopes are the same class of machine-driven re-entry,
+        // and the stronger case: their content is attacker-influenced, so
+        // a side-effecting hook would fire on another session's payload,
+        // and a blocking hook would swallow a turn the gate has already
+        // receipted `delivered`.
+        messageType !== SendMessageType.Peer &&
         messageType !== SendMessageType.Goal &&
         hooksEnabled &&
         messageBus &&
@@ -2468,13 +2474,17 @@ export class GeminiClient {
 
     if (
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer
     ) {
       // Teammate envelopes record like notifications: the UI rendered
       // them as a compact `●` line (the displayText) and the envelope
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
-      // interaction missing from chat recording entirely.
+      // interaction missing from chat recording entirely. Peer envelopes
+      // arrive the same way — the drain hands over the one-line summary
+      // as `notificationDisplayText` — so without this arm a resumed
+      // session replies to a turn whose user side was never persisted.
       this.config
         .getChatRecordingService()
         ?.recordNotification(
@@ -2516,7 +2526,12 @@ export class GeminiClient {
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate;
+      messageType === SendMessageType.Teammate ||
+      // A peer turn is a fresh interaction too: without the reset, a
+      // previous turn's streak — or a latched `loopDetected` — carries in,
+      // and once latched every later peer turn aborts before doing any
+      // work while its sender was already told `delivered`.
+      messageType === SendMessageType.Peer;
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
