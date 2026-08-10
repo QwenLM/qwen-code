@@ -18,11 +18,11 @@ import type {
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
 import {
-  buildToolWriteOriginMeta,
   createDebugLogger,
   getErrorMessage,
   isSubpath,
 } from '@qwen-code/qwen-code-core';
+import { buildToolWriteOriginMeta } from '@qwen-code/qwen-code-core/toolWriteOrigin';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 

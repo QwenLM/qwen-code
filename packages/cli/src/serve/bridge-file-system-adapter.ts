@@ -59,7 +59,7 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { BridgeFileSystem } from '@qwen-code/acp-bridge';
-import { parseToolWriteOriginMeta } from '@qwen-code/qwen-code-core';
+import { parseToolWriteOriginMeta } from '@qwen-code/qwen-code-core/toolWriteOrigin';
 import type {
   WorkspaceFileSystemFactory,
   RequestContext,
