@@ -184,12 +184,13 @@ export const MD_LINK_CAPTURE = /^\[(.*?)\]\(((?:[^()]|\([^()]*\))*)\)$/;
  * routinely glues `（…）`/`。` onto a URL with no space
  * (`https://x.com（2 commits）`), and `\S` swallows the punctuation plus
  * everything up to the next ASCII space, turning the OSC 8 target into a
- * 404. Raw CJK ideographs, U+3005 々, and U+3007 〇 stay in the match because
- * they are word-forming IRI characters. ASCII and typographic trailing
- * punctuation stays matched and is left to `trimTrailingUrlPunctuation` so
- * valid raw IRIs and visible bytes remain unchanged.
+ * 404. Raw CJK ideographs, U+3005 々, U+3006 〆, and U+3007 〇 stay in the
+ * match because they are word-forming IRI characters. The exclusion also
+ * covers CJK Compatibility Forms (U+FE30–U+FE6F) and Vertical Forms
+ * (U+FE10–U+FE1F). ASCII and other typographic punctuation stays matched and
+ * is left to `trimTrailingUrlPunctuation`.
  */
-export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s\u00a0\u3000-\u3004\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+`;
+export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s\u3001-\u3004\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\ufe10-\ufe1f\ufe30-\ufe6f]+`;
 
 /**
  * Should the markdown renderers wrap a `[label](url)` token in an OSC 8

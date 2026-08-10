@@ -313,12 +313,22 @@ describe('osc8 helpers', () => {
       expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
     });
 
-    it('stops before common CJK punctuation', () => {
-      expect(
-        new RegExp(BARE_URL_PATTERN).exec(
-          'https://example.com/page。下一步',
-        )?.[0],
-      ).toBe('https://example.com/page');
+    it.each([
+      ['https://example.com/page。下一步', 'https://example.com/page'],
+      ['https://example.com/page、続き', 'https://example.com/page'],
+      ['https://example.com/page：説明', 'https://example.com/page'],
+      ['https://example.com/page？質問', 'https://example.com/page'],
+      ['https://example.com/page！注意', 'https://example.com/page'],
+    ])('stops before CJK punctuation in %s', (input, expected) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(input)?.[0]).toBe(expected);
+    });
+
+    it.each([
+      ['https://example.com/x﹙備註﹚', 'https://example.com/x'],
+      ['https://example.com/a︒後続', 'https://example.com/a'],
+      ['https://example.com/p﹖説明', 'https://example.com/p'],
+    ])('stops before CJK compat/vertical forms in %s', (input, expected) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(input)?.[0]).toBe(expected);
     });
   });
 
