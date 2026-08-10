@@ -113,6 +113,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
   it('enables content-only thinking-tag leak detection', () => {
     expect(provider.getResponseParsingOptions()).toEqual({
+      taggedThinkingTags: true,
       contentOnlyThinkingTagLeaks: true,
     });
   });
