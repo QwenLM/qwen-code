@@ -718,6 +718,97 @@ describe('acquireInheritedLoaderEnvScrub', () => {
       write.mockRestore();
     }
   });
+
+  // The release that drops the refcount back to zero clears the snapshot;
+  // without that clear, the next cycle's final release would restore a key
+  // the host removed between cycles, re-injecting a stale loader value into
+  // the shared env.
+  it('does not restore a prior cycle snapshot for a key the host removed', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    process.env['NODE_OPTIONS'] = '--cycle-one';
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const firstCycle = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      firstCycle.release();
+      expect(process.env['NODE_OPTIONS']).toBe('--cycle-one');
+
+      // The host removes the key entirely between cycles.
+      delete process.env['NODE_OPTIONS'];
+
+      const secondCycle = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(secondCycle.removedKeys).not.toContain('NODE_OPTIONS');
+      secondCycle.release();
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  // The test-only reset must drop a leaked cycle's snapshot along with the
+  // refcount, or the next test's first release would re-inject the leaked
+  // value into process.env.
+  it('reset drops a leaked snapshot before the next acquire', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    process.env['LD_PRELOAD'] = '/leaked.so';
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      // Simulate a holder that never releases before the reset runs.
+      acquireInheritedLoaderEnvScrub(process.env, 'qwen serve', 'daemon');
+      resetInheritedLoaderEnvScrubForTesting();
+      delete process.env['LD_PRELOAD'];
+
+      const handle = acquireInheritedLoaderEnvScrub(
+        process.env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(handle.removedKeys).toEqual([]);
+      handle.release();
+      expect(process.env['LD_PRELOAD']).toBeUndefined();
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  // A loader key present with an undefined value is scrubbed but has
+  // nothing to restore; snapshotting it would let the final release write
+  // `undefined` back into the env.
+  it('does not snapshot loader keys whose value is undefined', () => {
+    resetInheritedLoaderEnvScrubForTesting();
+    const env: NodeJS.ProcessEnv = {
+      NODE_OPTIONS: undefined,
+      PATH: '/usr/bin',
+    };
+    const write = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const handle = acquireInheritedLoaderEnvScrub(
+        env,
+        'qwen serve',
+        'daemon',
+      );
+      expect(handle.removedKeys).toEqual(['NODE_OPTIONS']);
+      expect(env).not.toHaveProperty('NODE_OPTIONS');
+      handle.release();
+      expect(env).not.toHaveProperty('NODE_OPTIONS');
+      expect(env['PATH']).toBe('/usr/bin');
+    } finally {
+      write.mockRestore();
+    }
+  });
 });
 
 describe('clearLoaderKeyRejectionReporterIfCurrent', () => {

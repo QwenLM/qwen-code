@@ -296,10 +296,15 @@ export function isLoaderEnvKey(key: string): boolean {
   return canonical.startsWith('bash-func-') || LOADER_ENV_KEYS.has(canonical);
 }
 
-export function scrubInheritedLoaderEnv(env: NodeJS.ProcessEnv): string[] {
+export function scrubInheritedLoaderEnv(
+  env: NodeJS.ProcessEnv,
+  snapshotInto?: Map<string, string>,
+): string[] {
   const removedKeys: string[] = [];
   for (const key of Object.keys(env)) {
     if (isLoaderEnvKey(key)) {
+      const value = env[key];
+      if (snapshotInto && value !== undefined) snapshotInto.set(key, value);
       delete env[key];
       removedKeys.push(key);
     }
@@ -315,8 +320,9 @@ export function scrubAndReportInheritedLoaderEnv(
   env: NodeJS.ProcessEnv,
   commandLabel: string,
   processLabel: string,
+  snapshotInto?: Map<string, string>,
 ): string[] {
-  const removedKeys = scrubInheritedLoaderEnv(env);
+  const removedKeys = scrubInheritedLoaderEnv(env, snapshotInto);
   if (removedKeys.length > 0) {
     writeStderrLineSafe(
       `${commandLabel}: scrubbed inherited loader env vars from the ` +
@@ -351,33 +357,28 @@ export interface InheritedLoaderEnvScrubHandle {
 // `process.env`), reference-counted so it is safe to call from overlapping
 // daemon instances in one process. The caller owns the `process.env`
 // reference so the serve-surface process.env guard still sees the access;
-// `scrubAndReportInheritedLoaderEnv` remains for one-shot scrubs of a private
-// env object (ACP child / channel worker boot). Concurrent callers must pass
-// the same shared env object for the snapshot/restore refcount to be correct.
+// one-shot scrubs of a private env object (ACP child / channel worker boot)
+// use the same reporting scrub without a snapshot. Concurrent callers must
+// pass the same shared env object for the snapshot/restore refcount to be
+// correct.
 export function acquireInheritedLoaderEnvScrub(
   env: NodeJS.ProcessEnv,
   commandLabel: string,
   processLabel: string,
 ): InheritedLoaderEnvScrubHandle {
-  if (sharedProcessEnvScrubDepth === 0) {
-    sharedProcessEnvScrubOriginals.clear();
-  }
+  sharedProcessEnvScrubDepth++;
   // Snapshot on every acquire, not just the first: the embedding host can
   // assign loader keys between acquires, and the scrub below deletes them
   // with no record — the final release would then leave the assignment
   // absent or restore a stale pre-scrub value, corrupting the shared env.
   // The newest value observed at any acquire boundary is the one the final
-  // restore must bring back.
-  for (const key of Object.keys(env)) {
-    if (!isLoaderEnvKey(key)) continue;
-    const value = env[key];
-    if (value !== undefined) sharedProcessEnvScrubOriginals.set(key, value);
-  }
-  sharedProcessEnvScrubDepth++;
+  // restore must bring back. The snapshot is recorded inside the scrub's
+  // single pass over the shared env below.
   const removedKeys = scrubAndReportInheritedLoaderEnv(
     env,
     commandLabel,
     processLabel,
+    sharedProcessEnvScrubOriginals,
   );
   let released = false;
   return {
