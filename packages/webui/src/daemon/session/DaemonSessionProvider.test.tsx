@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
   NonBlockingPromptAccepted,
+  DaemonSseConnectReason,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonUiSessionActions,
@@ -98,6 +99,7 @@ interface MockSession {
   events: (opts?: {
     signal?: AbortSignal;
     maxQueued?: number;
+    sseConnectReason?: DaemonSseConnectReason;
   }) => AsyncGenerator<DaemonEvent, void, unknown>;
 }
 
@@ -2045,6 +2047,9 @@ describe('DaemonSessionProvider', () => {
       await secondSubscriptionStarted.promise;
     });
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'prompt_restart',
+    });
     expect(eventSignals[0]?.aborted).toBe(true);
     expect(eventSignals[1]?.aborted).toBe(false);
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
@@ -2139,6 +2144,9 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'prompt_restart',
+    });
     expect(eventSignals[0]?.aborted).toBe(true);
     expect(eventSignals[1]?.aborted).toBe(false);
     expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(providersCalls);
@@ -3658,6 +3666,9 @@ describe('DaemonSessionProvider', () => {
 
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'stream_end',
+    });
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
@@ -5623,7 +5634,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-epoch-active',
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(promptStatus).toBe('streaming');
@@ -5763,12 +5774,16 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(events).toHaveBeenCalledTimes(2);
+    expect(events.mock.calls[1]?.[0]).toMatchObject({
+      sseConnectReason: 'transport_error',
+    });
     expect(promptStatus).not.toBe('idle');
   });
 
   it('keeps restored active prompts streaming after resync requests', async () => {
     const resyncSeen = createDeferred<void>();
     const reloaded = createDeferred<void>();
+    const reloadedEvents = vi.fn(createPendingEvents(reloaded));
     const session = createMockSession({
       sessionId: 'session-restored-resync',
       hasActivePrompt: true,
@@ -5785,7 +5800,7 @@ describe('DaemonSessionProvider', () => {
     const reloadedSession = createMockSession({
       sessionId: 'session-restored-resync',
       hasActivePrompt: true,
-      events: createPendingEvents(reloaded),
+      events: reloadedEvents,
     });
     sdkMocks.sessions.push(session, reloadedSession);
     let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
@@ -5807,6 +5822,9 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(promptStatus).toBe('streaming');
+    expect(reloadedEvents.mock.calls[0]?.[0]).toMatchObject({
+      sseConnectReason: 'state_resync',
+    });
   });
 
   it('does not infer active prompts from replayed user turns without terminal events', async () => {
@@ -7235,7 +7253,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-resync',
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(connection).toMatchObject({
@@ -7636,6 +7654,45 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('surfaces a restore 504 without treating the session as missing', async () => {
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      new DaemonHttpError(
+        504,
+        {
+          code: 'session_restore_timeout',
+          errorKind: 'restore_timeout',
+          retryable: true,
+        },
+        'AcpSessionBridge session/load timed out after 60000ms',
+      ),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+      sessionId: 'large-session',
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'AcpSessionBridge session/load timed out after 60000ms',
+      errorStatus: 504,
+      missingSession: false,
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'large-session',
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
+      expect.any(String),
+    );
+  });
+
   it('keeps the current transcript when a same-session reload is aborted', async () => {
     const replacement = createDeferred<MockSession>();
     const currentSession = createMockSession({
@@ -7796,7 +7853,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-b',
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(connection).toMatchObject({ sessionId: 'session-b' });
@@ -7977,7 +8034,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-a',
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(
@@ -8751,7 +8808,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-ring-evicted',
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(awaitingResync).toBe(false);
@@ -9941,7 +9998,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-epoch-closed-tail',
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(connection?.status).toBe('connected');
@@ -10257,7 +10314,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       session.sessionId,
-      { workspaceCwd: '/mock-workspace' },
+      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
       expect.any(String),
     );
     expect(history?.hasMore).toBe(false);
@@ -10317,7 +10374,11 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       session.sessionId,
-      { workspaceCwd: '/mock-workspace', historyPageSize: 25 },
+      {
+        workspaceCwd: '/mock-workspace',
+        historyPageSize: 25,
+        timeoutMs: 70_000,
+      },
       expect.any(String),
     );
     expect(history?.hasMore).toBe(true);

@@ -115,7 +115,8 @@ function sortedEntries(
  *
  * Excluded fields (per-session filter / metadata; do NOT change the
  * underlying transport):
- *   includeTools, excludeTools, trust, description, extensionName,
+ *   includeTools, excludeTools, trust, alwaysLoadTools, description,
+ *   extensionName,
  *   discoveryTimeoutMs (operational tuning; honored from the first
  *   acquire's config but not in the key — see TODO below)
  *

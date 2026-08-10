@@ -6,9 +6,7 @@ import type {
 import type { ACPToolCall } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
 import {
-  useWorkspaceActions,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
   type DaemonScheduledTask,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
@@ -17,7 +15,9 @@ import { DownloadIcon } from 'lucide-react';
 import {
   ChevronRightIcon,
   CirclePlusIcon,
+  Maximize2Icon,
   MessageCirclePlusIcon,
+  Minimize2Icon,
   PanelRightIcon,
   PlusIcon,
   SquareActivityIcon,
@@ -80,6 +80,10 @@ import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
 import {
+  useArtifactWorkspaceTarget,
+  type ArtifactWorkspaceActions,
+} from './useArtifactWorkspaceTarget';
+import {
   MonitorTaskDetail,
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
@@ -108,8 +112,8 @@ export type ArtifactPanelTab =
       id: string;
       kind: 'review';
       title: string;
-      workspaceActions?: DaemonWorkspaceActions;
       workspaceCwd?: string;
+      workspaceId?: string;
       changes?: readonly TurnOutputFileChange[];
       selectedPath?: string;
     }
@@ -118,7 +122,8 @@ export type ArtifactPanelTab =
       kind: 'file';
       title: string;
       workspacePath: string;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
       previewContent?: string;
     }
   | {
@@ -126,7 +131,9 @@ export type ArtifactPanelTab =
       kind: 'artifact';
       title: string;
       artifactId: string;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
+      sourceSessionId?: string;
       previewContent?: string;
     }
   | {
@@ -134,7 +141,8 @@ export type ArtifactPanelTab =
       kind: 'scheduled_task';
       title: string;
       task: TurnOutputScheduledTask;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
     }
   | {
       id: string;
@@ -172,6 +180,22 @@ export type ArtifactPanelTab =
       initialPrompt?: string;
     };
 
+type WorkspaceScopedArtifactPanelTab = Extract<
+  ArtifactPanelTab,
+  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+>;
+
+function isWorkspaceScopedTab(
+  tab: ArtifactPanelTab,
+): tab is WorkspaceScopedArtifactPanelTab {
+  return (
+    tab.kind === 'review' ||
+    tab.kind === 'file' ||
+    tab.kind === 'artifact' ||
+    tab.kind === 'scheduled_task'
+  );
+}
+
 export interface SideTaskListItem {
   sessionId: string;
   title: string;
@@ -198,8 +222,8 @@ interface ArtifactPanelProps {
   onCloseTab: (tabId: string) => void;
   onOpenFilePreview: (
     change: TurnOutputFileChange,
-    workspaceActions: DaemonWorkspaceActions,
     workspaceCwd?: string,
+    workspaceId?: string,
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
@@ -224,12 +248,13 @@ interface ArtifactPanelProps {
   onNestedArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }
 
 export function ArtifactPanel({
@@ -262,6 +287,8 @@ export function ArtifactPanel({
   sessionWorkflowEnabled,
   onClose,
   variant = 'docked',
+  fullscreen = false,
+  onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
@@ -301,17 +328,26 @@ export function ArtifactPanel({
     Boolean(onCreateSideTask);
   const showAddMenu =
     Boolean(activeTab) && (showReviewMenuItem || showSideTaskMenuItems);
-  const defaultWorkspaceActions = useWorkspaceActions();
+  const activeWorkspaceIdentity =
+    activeTab && isWorkspaceScopedTab(activeTab)
+      ? {
+          workspaceCwd: activeTab.workspaceCwd,
+          workspaceId: activeTab.workspaceId,
+        }
+      : undefined;
+  const activeWorkspaceTarget = useArtifactWorkspaceTarget(
+    activeWorkspaceIdentity?.workspaceCwd,
+  );
   const activeWorkspaceActions =
-    activeTab && 'workspaceActions' in activeTab
-      ? (activeTab.workspaceActions ?? defaultWorkspaceActions)
-      : defaultWorkspaceActions;
+    activeWorkspaceTarget?.workspaceId === activeWorkspaceIdentity?.workspaceId
+      ? activeWorkspaceTarget?.actions
+      : undefined;
 
   return (
     <aside
-      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''} ${fullscreen ? styles.panelFullscreen : ''}`}
       style={
-        variant === 'docked' && panelWidth
+        variant === 'docked' && panelWidth && !fullscreen
           ? { flexBasis: panelWidth, width: panelWidth }
           : undefined
       }
@@ -424,6 +460,26 @@ export function ArtifactPanel({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+          )}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              className={`${styles.iconButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              onClick={onToggleFullscreen}
+              aria-label={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+              aria-pressed={fullscreen}
+              title={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+            >
+              {fullscreen ? (
+                <Minimize2Icon className={styles.toolbarIcon} aria-hidden />
+              ) : (
+                <Maximize2Icon className={styles.toolbarIcon} aria-hidden />
+              )}
+            </button>
           )}
           <button
             type="button"
@@ -565,6 +621,12 @@ export function ArtifactPanel({
                 </DropdownMenu>
               ))}
           </div>
+        ) : isWorkspaceScopedTab(activeTab) &&
+          (activeTab.kind !== 'scheduled_task' || activeTab.task.durable) &&
+          !activeWorkspaceActions ? (
+          <div className={styles.empty} role="alert">
+            {t('workspace.notFoundDescription')}
+          </div>
         ) : activeTab.kind === 'review' ? (
           <ReviewChanges
             changes={activeTab.changes ?? reviewChanges}
@@ -573,13 +635,13 @@ export function ArtifactPanel({
             onOpenFilePreview={(change) =>
               onOpenFilePreview(
                 change,
-                activeWorkspaceActions,
                 activeTab.workspaceCwd ?? workspaceCwd,
+                activeTab.workspaceId,
               )
             }
             onDownloadFile={(change, isCancelled) =>
               downloadWorkspaceFile(
-                activeWorkspaceActions,
+                activeWorkspaceActions!,
                 change.path,
                 getReviewDownloadMimeType(change.path),
                 isCancelled,
@@ -600,7 +662,7 @@ export function ArtifactPanel({
           <WorkspaceFilePreview
             key={activeTab.id}
             workspacePath={activeTab.workspacePath}
-            workspaceActions={activeWorkspaceActions}
+            workspaceActions={activeWorkspaceActions!}
             previewContent={activeTab.previewContent}
           />
         ) : activeTab.kind === 'artifact' ? (
@@ -608,7 +670,7 @@ export function ArtifactPanel({
             key={activeTab.id}
             artifacts={artifacts}
             artifactId={activeTab.artifactId}
-            workspaceActions={activeWorkspaceActions}
+            workspaceActions={activeWorkspaceActions!}
             previewContent={activeTab.previewContent}
             loading={loading}
             error={error}
@@ -804,7 +866,7 @@ function ArtifactDetailTab({
 }: {
   artifacts: readonly DaemonSessionArtifact[];
   artifactId: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   loading?: boolean;
   error?: string | null;
@@ -833,7 +895,7 @@ function ScheduledTaskDetail({
   actions,
 }: {
   task: TurnOutputScheduledTask;
-  actions: DaemonWorkspaceActions;
+  actions: ArtifactWorkspaceActions | undefined;
 }) {
   const { t } = useI18n();
   const [loadedTask, setLoadedTask] = useState<DaemonScheduledTask | null>(
@@ -851,9 +913,71 @@ function ScheduledTaskDetail({
   const [busy, setBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const requestRef = useRef(0);
+  const loadRequestRef = useRef(0);
+  const requestScopeRef = useRef({
+    actions,
+    taskId: task.id,
+    workspaceId: task.workspaceId,
+  });
+  requestScopeRef.current = {
+    actions,
+    taskId: task.id,
+    workspaceId: task.workspaceId,
+  };
+  const isCurrentRequest = useCallback(
+    (
+      request: number,
+      requestActions: ArtifactWorkspaceActions,
+      taskId: string,
+      workspaceId: string | undefined,
+    ) => {
+      const scope = requestScopeRef.current;
+      return (
+        request === requestRef.current &&
+        scope.actions === requestActions &&
+        scope.taskId === taskId &&
+        scope.workspaceId === workspaceId
+      );
+    },
+    [],
+  );
+  const isCurrentLoad = useCallback(
+    (
+      request: number,
+      requestActions: ArtifactWorkspaceActions,
+      taskId: string,
+      workspaceId: string | undefined,
+    ) => {
+      const scope = requestScopeRef.current;
+      return (
+        request === loadRequestRef.current &&
+        scope.actions === requestActions &&
+        scope.taskId === taskId &&
+        scope.workspaceId === workspaceId
+      );
+    },
+    [],
+  );
+  useEffect(
+    () => () => {
+      requestRef.current += 1;
+      loadRequestRef.current += 1;
+    },
+    [],
+  );
+  useEffect(() => {
+    setBusy(false);
+    setSubmitting(false);
+    setFormError(null);
+  }, [actions, task.id, task.workspaceId]);
 
   const loadTask = useCallback(async () => {
-    if (!task.durable) {
+    const request = ++requestRef.current;
+    const loadRequest = ++loadRequestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
+    if (!task.durable || !actions) {
       setLoadedTask(null);
       setName('');
       setPrompt(task.prompt);
@@ -865,7 +989,8 @@ function ScheduledTaskDetail({
     setLoading(true);
     setLoadError(null);
     try {
-      const tasks = await actions.listScheduledTasks();
+      const tasks = await actions.listScheduledTasks(workspaceId);
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
       const match = tasks.find((item) => item.id === task.id) ?? null;
       setLoadedTask(match);
       if (match) {
@@ -878,11 +1003,24 @@ function ScheduledTaskDetail({
         setBuilder(parseCronToBuilder(task.cron));
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
+      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (isCurrentLoad(loadRequest, actions, taskId, workspaceId)) {
+        setLoading(false);
+      }
     }
-  }, [actions, task.cron, task.durable, task.id, task.prompt]);
+  }, [
+    actions,
+    isCurrentLoad,
+    isCurrentRequest,
+    task.cron,
+    task.durable,
+    task.id,
+    task.prompt,
+    task.workspaceId,
+  ]);
 
   useEffect(() => {
     void loadTask();
@@ -916,7 +1054,7 @@ function ScheduledTaskDetail({
   }, [loadedTask]);
 
   const handleSave = useCallback(async () => {
-    if (!loadedTask) return;
+    if (!loadedTask || !actions) return;
     const cron = buildCron(builder);
     if (!cron) {
       setFormError(t('scheduledTasks.error.invalidSchedule'));
@@ -926,56 +1064,98 @@ function ScheduledTaskDetail({
       setFormError(t('scheduledTasks.error.emptyPrompt'));
       return;
     }
+    const request = ++requestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
     setSubmitting(true);
     setFormError(null);
     try {
-      const updated = await actions.updateScheduledTask(loadedTask.id, {
-        cron,
-        prompt: prompt.trim(),
-        name: name.trim() || null,
-      });
+      const updated = await actions.updateScheduledTask(
+        loadedTask.id,
+        {
+          cron,
+          prompt: prompt.trim(),
+          name: name.trim() || null,
+        },
+        workspaceId,
+      );
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
       setLoadedTask(updated);
       setName(updated.name ?? '');
       setPrompt(updated.prompt);
       setBuilder(parseCronToBuilder(updated.cron));
       setShowForm(false);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : String(err));
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setFormError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setSubmitting(false);
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setSubmitting(false);
+      }
     }
-  }, [actions, builder, loadedTask, name, prompt, t]);
+  }, [
+    actions,
+    builder,
+    isCurrentRequest,
+    loadedTask,
+    name,
+    prompt,
+    t,
+    task.id,
+    task.workspaceId,
+  ]);
 
   const handleToggle = useCallback(async () => {
-    if (!loadedTask) return;
+    if (!loadedTask || !actions) return;
+    const request = ++requestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
     setBusy(true);
     setFormError(null);
     try {
-      const updated = await actions.updateScheduledTask(loadedTask.id, {
-        enabled: !loadedTask.enabled,
-      });
+      const updated = await actions.updateScheduledTask(
+        loadedTask.id,
+        {
+          enabled: !loadedTask.enabled,
+        },
+        workspaceId,
+      );
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
       setLoadedTask(updated);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : String(err));
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setFormError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setBusy(false);
+      }
     }
-  }, [actions, loadedTask]);
+  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
 
   const handleDelete = useCallback(async () => {
-    if (!loadedTask) return;
+    if (!loadedTask || !actions) return;
+    const request = ++requestRef.current;
+    const taskId = task.id;
+    const workspaceId = task.workspaceId;
     setBusy(true);
     setFormError(null);
     try {
-      await actions.deleteScheduledTask(loadedTask.id);
+      await actions.deleteScheduledTask(loadedTask.id, workspaceId);
+      if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
       setLoadedTask(null);
       setShowDeleteConfirm(false);
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : String(err));
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setFormError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentRequest(request, actions, taskId, workspaceId)) {
+        setBusy(false);
+      }
     }
-  }, [actions, loadedTask]);
+  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
@@ -2110,7 +2290,7 @@ function ArtifactDetail({
   previewContent,
 }: {
   artifact: DaemonSessionArtifact;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
 }) {
   const location = getArtifactLocation(artifact);
@@ -2272,7 +2452,7 @@ function WorkspaceFilePreview({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   imageMimeType?: string;
   previewKind?: 'html' | 'markdown' | 'image' | 'source';
@@ -2336,7 +2516,7 @@ function ImageArtifactPreview({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   mimeType: string;
 }) {
   const [src, setSrc] = useState<string | null>(null);
@@ -2407,7 +2587,7 @@ function useWorkspaceFileContent({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
   truncatedMessage: string;
 }) {
@@ -2451,7 +2631,7 @@ function HtmlArtifactPreview({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
 }) {
   const { content, error } = useWorkspaceFileContent({
@@ -2487,7 +2667,7 @@ function FileArtifactPreview({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -2544,7 +2724,7 @@ function MarkdownArtifactPreview({
 }: {
   workspacePath: string;
   artifactVersion?: string;
-  workspaceActions: DaemonWorkspaceActions;
+  workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
 }) {
   const { content, error } = useWorkspaceFileContent({

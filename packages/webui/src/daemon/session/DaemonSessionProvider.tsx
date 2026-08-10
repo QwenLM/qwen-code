@@ -26,13 +26,18 @@ import {
   normalizeDaemonEvent,
   type CreateSessionRequest,
   type DaemonEvent,
+  type DaemonSseConnectReason,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
+import {
+  createDaemonSessionActions,
+  getPromptSettledKey,
+  resolveSessionRestoreTimeouts,
+} from './actions.js';
 import {
   eventPromptId,
   findLiveJournalRepairSuffix,
@@ -798,6 +803,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
       let hasCurrentSessionActivePrompt = () => false;
       // Set when the user explicitly deletes the session (server
@@ -1068,12 +1074,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               pendingSessionLoadRef.current?.sessionId === targetSessionId
                 ? pendingSessionLoadRef.current
                 : undefined;
+            const restoreRequestTimeoutMs =
+              attemptedLoad?.requestTimeoutMs ??
+              resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
                   restoreSessionId,
                   {
                     workspaceCwd: effectWorkspaceCwd,
+                    timeoutMs: restoreRequestTimeoutMs,
                     ...(historyPaginationSupported &&
                     restoreMode === 'load' &&
                     attemptedLoad?.replaySource !== 'memory' &&
@@ -1089,6 +1099,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     reconnectSessionId,
                     {
                       workspaceCwd: effectWorkspaceCwd,
+                      timeoutMs: restoreRequestTimeoutMs,
                       ...(historyPaginationSupported &&
                       historyPageSizeRef.current !== undefined
                         ? { historyPageSize: historyPageSizeRef.current }
@@ -1150,7 +1161,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               if (pendingSessionLoadRef.current === attemptedLoad) {
                 pendingSessionLoadRef.current = undefined;
-                clearTimeout(attemptedLoad.timeout);
+                if (attemptedLoad.timeout !== undefined) {
+                  clearTimeout(attemptedLoad.timeout);
+                }
                 attemptedLoad.reject(
                   new DOMException('Session load cancelled', 'AbortError'),
                 );
@@ -1200,7 +1213,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
                 if (pendingSessionLoadRef.current === attemptedLoad) {
                   pendingSessionLoadRef.current = undefined;
-                  clearTimeout(attemptedLoad.timeout);
+                  if (attemptedLoad.timeout !== undefined) {
+                    clearTimeout(attemptedLoad.timeout);
+                  }
                   attemptedLoad.reject(
                     new Error(
                       nextSession.replayDegraded === true
@@ -1674,7 +1689,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }));
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoadToResolve.timeout);
+            if (pendingLoadToResolve.timeout !== undefined) {
+              clearTimeout(pendingLoadToResolve.timeout);
+            }
             if (
               skipNextCleanupDetachSessionIdRef.current ===
               activeSession.sessionId
@@ -1862,6 +1879,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
+            nextSseConnectReason = 'state_resync';
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
@@ -1889,9 +1907,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           });
           removeProviderAbortListener = () =>
             abort.signal.removeEventListener('abort', abortEventStream);
+          const sseConnectReason = nextSseConnectReason;
+          nextSseConnectReason = undefined;
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
+            ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
             if (sessionRef.current?.sessionId !== activeSession.sessionId) {
               break;
@@ -2160,6 +2181,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     activeSession.sessionId,
                   );
                   resyncRequested = true;
+                  nextSseConnectReason = 'state_resync';
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
@@ -2221,6 +2243,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const restartRequested = eventStream.restartRequested;
           clearEventStream();
           if (restartRequested) {
+            nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -2255,6 +2278,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
+            nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current?.sessionId === activeSession.sessionId) {
@@ -2288,6 +2312,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           clearEventStream();
           if (restartRequested && !disposed && !abort.signal.aborted) {
             flushTranscriptSync();
+            nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -2332,7 +2357,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               skipNextCleanupDetachSessionIdRef.current = undefined;
             }
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
+            if (pendingLoad.timeout !== undefined) {
+              clearTimeout(pendingLoad.timeout);
+            }
             pendingLoad.reject(error);
           }
           if (isAuthFailure || isTerminal) {
@@ -2411,6 +2438,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               '[DaemonSessionProvider] retriable SSE error, preserving session for delta resume (sessionId=%s)',
               session?.sessionId,
             );
+            if (eventStream) {
+              nextSseConnectReason = 'transport_error';
+            }
           }
           if (!autoReconnect) {
             session = undefined;
@@ -2491,7 +2521,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadRef.current &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
+        if (pendingSessionLoadRef.current.timeout !== undefined) {
+          clearTimeout(pendingSessionLoadRef.current.timeout);
+        }
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
