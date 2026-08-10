@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { writeTerminalTitleSpy } = vi.hoisted(() => ({
+const { writeTerminalTitleSpy, useWakeRepaintMock } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
+  useWakeRepaintMock: vi.fn(),
+}));
+
+vi.mock('./hooks/use-wake-repaint.js', () => ({
+  useWakeRepaint: useWakeRepaintMock,
 }));
 
 vi.mock('../utils/windowTitle.js', async (importOriginal) => {
@@ -993,9 +998,51 @@ describe('AppContainer State Management', () => {
     });
 
     // The wake/SIGCONT trigger itself is covered by use-wake-repaint.test.ts
-    // (SIGCONT/heartbeat-gap -> repaint callback); the VP/static selection in
-    // wakeRepaint is exercised manually because ink-testing-library does not
-    // flush AppContainer effects, so the listener never arms in this harness.
+    // (SIGCONT/heartbeat-gap -> repaint callback); the VP/static selection is
+    // unit-covered by buildWakeRepaint tests. This test locks the AppContainer
+    // call site: the callback handed to the hook must be the wake repaint
+    // (repaintViewport + remount), not refreshStatic or a mis-wired memo.
+    it('wires the wake repaint (not refreshStatic) into useWakeRepaint', async () => {
+      useWakeRepaintMock.mockClear();
+      const repaintSpy = vi.fn();
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          repaintViewport={repaintSpy}
+        />,
+      );
+
+      const wakeMod = await import('./hooks/use-wake-repaint.js');
+      const wakeCallback = useWakeRepaintMock.mock.calls.at(-1)?.[0];
+      expect(
+        typeof wakeCallback,
+        `same=${wakeMod.useWakeRepaint === useWakeRepaintMock} calls=${
+          useWakeRepaintMock.mock.calls.length
+        }`,
+      ).toBe('function');
+      act(() => {
+        wakeCallback();
+      });
+      // A revert to useWakeRepaint(refreshStatic) would leave the spy
+      // uncalled (VP refreshStatic is write-free) and fail here.
+      expect(repaintSpy).toHaveBeenCalledTimes(1);
+    });
 
     it('defaults to VP mode when useTerminalBuffer is unset', () => {
       const defaultSettings = {

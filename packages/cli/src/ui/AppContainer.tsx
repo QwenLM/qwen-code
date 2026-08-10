@@ -1343,17 +1343,10 @@ export const AppContainer = (props: AppContainerProps) => {
       buildWakeRepaint({
         isVP: useTerminalBuffer,
         repaintViewport,
-        clearViewportFallback: () => stdout.write(ansiEscapes.clearViewport),
         refreshStatic,
         remountStaticHistory,
       }),
-    [
-      useTerminalBuffer,
-      repaintViewport,
-      stdout,
-      refreshStatic,
-      remountStaticHistory,
-    ],
+    [useTerminalBuffer, repaintViewport, refreshStatic, remountStaticHistory],
   );
 
   // Keep the static header in sync with model changes without polling.

@@ -6,10 +6,13 @@
 
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
+import ansiEscapes from 'ansi-escapes';
 import {
   buildWakeRepaint,
   installTerminalResizeReflow,
 } from './terminal-resize-reflow.js';
+import { installTerminalRedrawOptimizer } from './terminalRedrawOptimizer.js';
+import { installSynchronizedOutput } from './synchronizedOutput.js';
 
 const ESC = '\u001B[';
 const BSU = `${ESC}?2026h`;
@@ -194,14 +197,33 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
-  it('short erase-prefixed bursts do not clobber the frame model', () => {
+  it('erase-prefixed printable writes authoritatively re-model small frames', () => {
     const stdout = new FakeStdout();
     const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
     );
     try {
       stdout.write(eraseLines(10) + frame(60, 10));
+      // Ink replacing its live region with a <8-row render is authoritative;
+      // rejecting it would freeze the target on the stale 10-row frame.
       stdout.write(eraseLines(3) + frame(60, 3));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(3));
+      expect(stdout.written.at(-1)).toBe(eraseLines(6));
+    } finally {
+      restore();
+    }
+  });
+
+  it('bare console-style bursts below MIN_FRAME_LINES do not clobber the model', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.write('short console noise');
       stdout.columns = 30;
       stdout.emit('resize');
       stdout.write(eraseLines(10));
@@ -313,13 +335,277 @@ describe('installTerminalResizeReflow', () => {
     stdout.write(eraseLines(10) + frame(30, 20));
     expect(stdout.written.at(-1)).toBe(eraseLines(10) + frame(30, 20));
   });
+
+  it('models widths from ANSI-stripped content (SGR bytes are not cells)', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      const styled = Array.from(
+        { length: 10 },
+        () => `\x1b[31m${'x'.repeat(60)}\x1b[39m`,
+      ).join('\n');
+      stdout.write(eraseLines(10) + styled);
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+    } finally {
+      restore();
+    }
+  });
+
+  it('cursor-suffixed frames pack to visible rows plus the cursor-below line', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(11) + frame(20, 10) + '\n' + '\x1b[?25l');
+      stdout.columns = 10;
+      stdout.emit('resize');
+      stdout.write(eraseLines(11));
+      expect(stdout.written.at(-1)).toBe(eraseLines(21));
+    } finally {
+      restore();
+    }
+  });
+
+  it('overflow full-reset redraws reset the model instead of poisoning it', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10)); // amplified, arms the handoff
+      // Ink's overflow path: clearTerminal + full static history + live
+      // frame as one bare write. Must not become the frame model.
+      stdout.write(ansiEscapes.clearTerminal + frame(60, 30));
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(5));
+      expect(stdout.written.at(-1)).toBe(eraseLines(5));
+    } finally {
+      restore();
+    }
+  });
+
+  it('the live frame replaces a static append even below MIN_FRAME_LINES', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10)); // arms the handoff
+      stdout.write(frame(60, 25)); // static append models first
+      stdout.write(frame(30, 6)); // <8-row live frame still wins
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(6));
+      expect(stdout.written.at(-1)).toBe(eraseLines(12));
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not amplify on a stale return-to-bottom anchor', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      const prefix = '\x1b[?25l\x1b[2B\x1b[0G';
+      stdout.write(prefix + eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(prefix + eraseLines(10));
+    } finally {
+      restore();
+    }
+  });
+
+  it('return-prefixed renders still match and re-model', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      const prefix = '\x1b[?25l\x1b[2B\x1b[0G';
+      stdout.write(prefix + eraseLines(10) + frame(30, 20));
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(20));
+      expect(stdout.written.at(-1)).toBe(eraseLines(40));
+    } finally {
+      restore();
+    }
+  });
+
+  it('consecutive shrinks without a redraw between them stay exact', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 50;
+      stdout.emit('resize');
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+    } finally {
+      restore();
+    }
+  });
+
+  it('the model survives a grow and re-amplifies the next shrink', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.columns = 120;
+      stdout.emit('resize');
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+    } finally {
+      restore();
+    }
+  });
+
+  it('amplification is one-shot per shrink', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(10));
+    } finally {
+      restore();
+    }
+  });
+
+  it('VP replaces erase-only post-shrink clears inside the window', () => {
+    vi.useFakeTimers();
+    try {
+      const stdout = new FakeStdout();
+      const { restore } = installTerminalResizeReflow(
+        stdout as unknown as NodeJS.WriteStream,
+        { virtualViewport: true },
+      );
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(`${ESC}2J${ESC}H`);
+      restore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never clamps an erase that already exceeds the target', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(5, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(12));
+      expect(stdout.written.at(-1)).toBe(eraseLines(12));
+    } finally {
+      restore();
+    }
+  });
+
+  it('amplifies end-to-end when stacked inside the redraw optimizer', () => {
+    const stdout = new FakeStdout();
+    // Production install order: optimizer innermost, reflow outermost.
+    const optimizer = installTerminalRedrawOptimizer(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    const reflow = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10) + frame(30, 20));
+      // Reflow amplified to 20 before the optimizer compressed the prefix.
+      expect(stdout.written.at(-1)).toContain(`${ESC}19A`);
+      expect(stdout.written.at(-1)).toContain(frame(30, 20));
+    } finally {
+      reflow.restore();
+      optimizer();
+    }
+  });
+
+  it('wrapper restores unwind in LIFO order only', () => {
+    const stdout = new FakeStdout();
+    const original = stdout.write;
+    const optimizer = installTerminalRedrawOptimizer(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    const sync = installSynchronizedOutput(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    const reflow = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    reflow.restore();
+    sync();
+    optimizer();
+    expect(stdout.write).toBe(original);
+
+    // Out-of-order restore leaks wrappers silently (identity guards no-op).
+    const stdout2 = new FakeStdout();
+    const original2 = stdout2.write;
+    const optimizer2 = installTerminalRedrawOptimizer(
+      stdout2 as unknown as NodeJS.WriteStream,
+    );
+    const sync2 = installSynchronizedOutput(
+      stdout2 as unknown as NodeJS.WriteStream,
+    );
+    const reflow2 = installTerminalResizeReflow(
+      stdout2 as unknown as NodeJS.WriteStream,
+    );
+    sync2(); // wrong order: middle layer restored before the outer one
+    reflow2.restore(); // re-installs syncWrapper as "original"
+    optimizer2();
+    expect(stdout2.write).not.toBe(original2);
+  });
 });
 
 describe('buildWakeRepaint', () => {
   const deps = () => ({
     isVP: true,
     repaintViewport: vi.fn(),
-    clearViewportFallback: vi.fn(),
     refreshStatic: vi.fn(),
     remountStaticHistory: vi.fn(),
   });
@@ -329,15 +615,16 @@ describe('buildWakeRepaint', () => {
     buildWakeRepaint(d)();
     expect(d.repaintViewport).toHaveBeenCalledTimes(1);
     expect(d.remountStaticHistory).toHaveBeenCalledTimes(1);
-    expect(d.clearViewportFallback).not.toHaveBeenCalled();
     expect(d.refreshStatic).not.toHaveBeenCalled();
   });
 
-  it('VP without prop: falls back to the viewport clear and bumps', () => {
+  it('VP without prop (legacy hatch): write-free, bump only', () => {
     const d = deps();
     buildWakeRepaint({ ...d, repaintViewport: undefined })();
-    expect(d.clearViewportFallback).toHaveBeenCalledTimes(1);
+    // A bare viewport clear would blank the screen (Ink writes zero bytes
+    // for unchanged output); pre-PR behavior was stale-but-visible.
     expect(d.remountStaticHistory).toHaveBeenCalledTimes(1);
+    expect(d.refreshStatic).not.toHaveBeenCalled();
   });
 
   it('static mode: uses refreshStatic (which clears and bumps)', () => {

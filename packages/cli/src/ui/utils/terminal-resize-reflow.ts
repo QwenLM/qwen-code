@@ -17,6 +17,12 @@ import {
 const debugLogger = createDebugLogger('RESIZE_REFLOW');
 
 const CLEAR_VIEWPORT = ansiEscapes.clearViewport;
+const ESC = '\u001B[';
+const CLEAR_TERMINAL = ansiEscapes.clearTerminal;
+
+// Return-to-bottom prefixes carry cursorDown computed from pre-reflow
+// geometry; amplifying on such an anchor shifts the erase window up.
+const CURSOR_DOWN_PATTERN = new RegExp(`${ESC}[0-9;]*B`);
 
 // How long after a shrink every VP redraw starts from a clean viewport.
 const CLEAR_WINDOW_MS = 600;
@@ -72,8 +78,9 @@ function reflowModel(model: FrameModel, columns: number): number {
   // Re-pack from the raw frame in one step on every shrink: reflow terminals
   // track logical lines, so segmenting an already-segmented model compounds
   // (sum-of-ceils >= ceil-of-sum) and consecutive shrinks would over-erase
-  // into committed scrollback.
-  const lines = model.content.split('\n');
+  // into committed scrollback. Widths come from ANSI-stripped lines — SGR
+  // parameter bytes are invisible and would pack as phantom cells otherwise.
+  const lines = stripAnsi(model.content).split('\n');
   if (model.trailingNewline && lines[lines.length - 1] === '') lines.pop();
   let total = 0;
   for (const line of lines) {
@@ -95,8 +102,8 @@ export interface TerminalResizeReflowHandle {
    * cannot rely on React alone after an external clear. Only the wake path
    * may call this — ordinary refreshStatic callers must stay write-free in
    * VP (replaying the pre-change frame would flash stale content). Absent
-   * under QWEN_CODE_LEGACY_RESIZE_ERASE: the wake path then falls back to a
-   * bare viewport clear plus the static remount bump.
+   * under QWEN_CODE_LEGACY_RESIZE_ERASE: the VP wake path then stays
+   * write-free (static remount bump only), matching pre-PR behavior.
    */
   repaint?: () => void;
 }
@@ -104,22 +111,24 @@ export interface TerminalResizeReflowHandle {
 export interface WakeRepaintDeps {
   isVP: boolean;
   repaintViewport?: () => void;
-  clearViewportFallback: () => void;
   refreshStatic: () => void;
   remountStaticHistory: () => void;
 }
 
 /**
  * Wake/SIGCONT selection, extracted for unit coverage: VP repaints by
- * clearing the viewport and replaying the last frame (Ink skips
- * unchanged-output redraws), and must bump the static remount key so
- * one-shot <Static> history (agent tabs) is re-emitted over the clear;
- * static mode uses the ordinary refreshStatic.
+ * replaying the last frame over a clean viewport (Ink skips unchanged-output
+ * redraws) and bumps the static remount key so one-shot <Static> history
+ * (agent tabs) is re-emitted over the clear. Without a repaint (the legacy
+ * escape hatch) VP wake stays write-free — a bare viewport clear would blank
+ * the screen, since Ink then writes zero bytes for byte-identical output —
+ * matching pre-PR behavior (stale but visible). Static mode uses the
+ * ordinary refreshStatic.
  */
 export function buildWakeRepaint(deps: WakeRepaintDeps): () => void {
   return () => {
     if (deps.isVP) {
-      (deps.repaintViewport ?? deps.clearViewportFallback)();
+      deps.repaintViewport?.();
       deps.remountStaticHistory();
     } else {
       deps.refreshStatic();
@@ -166,6 +175,9 @@ export function installTerminalResizeReflow(
   // and only printable writes consume it — Ink's standalone synchronized-
   // output control writes must not.
   let expectFrame = false;
+  // Printable bare writes seen in the current armed burst; the second one is
+  // the live frame following a static append and bypasses MIN_FRAME_LINES.
+  let barePrintableCount = 0;
   // After a shrink, every redraw (not just Ink's clear) erases with a stale
   // row count against the reflowed on-screen frame, re-stranding the frame
   // top each time. For this window, start every VP redraw from a clean
@@ -173,11 +185,14 @@ export function installTerminalResizeReflow(
   let clearUntil = 0;
   debugLogger.debug('installed', { width: lastWidth, isVP });
 
-  const modelFrame = (content: string) => {
-    if (content.split('\n').length < MIN_FRAME_LINES) return;
+  const modelFrame = (content: string, bypassMin = false) => {
+    if (!bypassMin && content.split('\n').length < MIN_FRAME_LINES) return;
     model.content = content;
     model.columns = stdout.columns ?? lastWidth;
-    model.trailingNewline = content.endsWith('\n');
+    // Ink appends the cursor suffix AFTER the frame's trailing newline, so
+    // detect the newline on the ANSI-stripped content (the suffix is either
+    // pure control bytes or a one-cell cursor block, never a '\n').
+    model.trailingNewline = stripAnsi(content).endsWith('\n');
   };
 
   const onResize = () => {
@@ -222,11 +237,18 @@ export function installTerminalResizeReflow(
         const content = chunk.slice(match.index + match[0].length);
         const printable = stripAnsi(content).trim() !== '';
         if (printable) {
-          modelFrame(content);
+          // Erase-prefixed printable writes are authoritative Ink renders of
+          // the new live region (console interleaving arrives as clear-only +
+          // bare), so they update the model even below MIN_FRAME_LINES —
+          // rejecting them would freeze the amplification target on a stale
+          // larger frame after every turn commit.
+          modelFrame(content, true);
           expectFrame = false;
+          barePrintableCount = 0;
         } else {
           // Clear-only write (Ink's log.clear): the redraw follows bare.
           expectFrame = true;
+          barePrintableCount = 0;
         }
         debugLogger.debug('match', { printable });
         if (isVP && Date.now() < clearUntil) {
@@ -239,7 +261,14 @@ export function installTerminalResizeReflow(
           const count = countOccurrences(match[0], ERASE_LINE);
           const target = pendingAmplify;
           pendingAmplify = 0;
-          if (count < target) {
+          // A return-to-bottom prefix (cursorDown computed from PRE-reflow
+          // geometry) shifts the amplified erase window up into scrollback
+          // after the terminal reflows; keep Ink's stale-but-anchor-consistent
+          // clear instead of amplifying on an untrusted anchor.
+          const untrustedAnchor = CURSOR_DOWN_PATTERN.test(
+            chunk.slice(0, match.index),
+          );
+          if (count < target && !untrustedAnchor) {
             debugLogger.debug('amplify', { original: count, target });
             chunk =
               chunk.slice(0, match.index) +
@@ -247,11 +276,23 @@ export function installTerminalResizeReflow(
               chunk.slice(match.index + match[0].length);
           }
         }
-      } else if (expectFrame && stripAnsi(chunk).trim() !== '') {
-        // Bare redraw (or static append preceding it): model each printable
-        // bare write, last one wins; stay armed until the next erase-prefixed
-        // or clear-only write closes the commit.
-        modelFrame(chunk);
+      } else if (expectFrame) {
+        if (chunk.includes(CLEAR_TERMINAL)) {
+          // Overflow-path full reset (clearTerminal + full static history +
+          // live frame as one bare write): the chunk is not a frame, so drop
+          // the model until a clean erase-prefixed write re-anchors it.
+          expectFrame = false;
+          barePrintableCount = 0;
+          model.content = '';
+        } else if (stripAnsi(chunk).trim() !== '') {
+          // Bare redraw (or static append preceding it): model each printable
+          // bare write, last one wins; the second printable bare write of a
+          // commit is the live frame and replaces the model even below
+          // MIN_FRAME_LINES. Stay armed until an erase-prefixed write closes
+          // the commit.
+          barePrintableCount++;
+          modelFrame(chunk, barePrintableCount > 1);
+        }
       }
     }
     return originalWrite.call(
