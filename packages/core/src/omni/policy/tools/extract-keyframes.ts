@@ -14,7 +14,11 @@ import type {
 } from '../../../tools/tools.js';
 import { Kind } from '../../../tools/tools.js';
 import { ToolNames } from '../../../tools/tool-names.js';
-import { probeMediaMetadata, runFfmpeg } from '../../ffmpeg.js';
+import {
+  probeMediaMetadata,
+  runFfmpeg,
+  type FfmpegRunResult,
+} from '../../ffmpeg.js';
 import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
@@ -126,6 +130,46 @@ async function listFrameFiles(outputDir: string): Promise<string[]> {
   return entries.filter((name) => FRAME_FILE_PATTERN.test(name)).sort();
 }
 
+/**
+ * Per-bucket scene search window cap in seconds. Bounding the search
+ * keeps the worst case (no scene changes anywhere — every window decoded
+ * to its end) at `maxFrames × window` seconds of decoded video instead
+ * of the full duration.
+ */
+const SCENE_SEARCH_WINDOW_SECONDS = 30;
+
+/** One extracted frame with its absolute position on the timeline. */
+interface ExtractedFrame {
+  fileName: string;
+  /** Absolute timestamp in seconds (undefined only on the legacy path
+   * when showinfo produced no usable pts). */
+  timeSeconds?: number;
+}
+
+/** Seconds formatted for ffmpeg `-ss`/`-t` args: fixed-point, never
+ * scientific notation, millisecond precision. */
+function formatSeconds(seconds: number): string {
+  return seconds.toFixed(3);
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Shared knobs threaded through one extraction run. */
+interface ExtractionContext {
+  maxFrames: number;
+  sceneThreshold: number;
+  maxDimension: number;
+  remainingTimeoutMs: () => number;
+  signal: AbortSignal;
+}
+
 class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKeyframesParams> {
   constructor(
     params: ExtractKeyframesParams,
@@ -155,107 +199,37 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         'video',
         signal,
       );
-      const outputPattern = path.join(
-        this.params.outputDir,
-        'keyframe_%04d.jpg',
-      );
-
-      // Scene-detection pass: frame 0 always selected, then every frame
-      // whose scene score exceeds the threshold, capped at maxFrames.
-      // showinfo (after select) logs one stderr line per KEPT frame with
-      // its pts_time — the timestamps feed the per-frame disclosures.
-      // Both passes share ONE wall-clock budget: the uniform-sampling
-      // fallback gets only what the scene pass left, keeping the
-      // invocation within the configured timeout instead of doubling it.
-      const remainingTimeoutMs = createPolicyToolTimeoutBudget(this.timeoutMs);
-      const scenePass = await runFfmpeg(
-        [
-          '-y',
-          '-i',
-          this.params.inputPath,
-          '-vf',
-          `select='eq(n,0)+gt(scene,${sceneThreshold})',${scaleFilter(maxDimension)},showinfo`,
-          '-vsync',
-          'vfr',
-          '-frames:v',
-          String(maxFrames),
-          '-q:v',
-          '4',
-          outputPattern,
-        ],
-        { signal, timeoutMs: remainingTimeoutMs() },
-      );
-      if (signal.aborted) {
-        return mediaPolicyToolError('keyframe extraction aborted');
-      }
-      if (scenePass.code !== 0) {
-        return mediaPolicyToolError(
-          ffmpegFailureMessage(
-            scenePass,
-            'extracting keyframes from',
-            this.params.inputPath,
-          ),
-        );
-      }
-
-      let frameFiles = await listFrameFiles(this.params.outputDir);
-      let timestamps = parseShowinfoTimestamps(scenePass.stderr);
-
-      // Uniform-sampling fallback: a static or single-shot video defeats
-      // scene detection (only frame 0 survives). When the caller asked
-      // for more than one frame and the duration is known, resample the
-      // timeline evenly instead.
       const durationSeconds =
         probe.durationMs !== undefined && probe.durationMs > 0
           ? probe.durationMs / 1000
           : undefined;
-      if (
-        frameFiles.length < Math.min(2, maxFrames) &&
-        maxFrames > 1 &&
-        durationSeconds !== undefined
-      ) {
-        await Promise.all(
-          frameFiles.map((name) =>
-            fs.rm(path.join(this.params.outputDir, name), { force: true }),
-          ),
-        );
-        const fps = maxFrames / durationSeconds;
-        const uniformPass = await runFfmpeg(
-          [
-            '-y',
-            '-i',
-            this.params.inputPath,
-            '-vf',
-            `fps=${fps},${scaleFilter(maxDimension)},showinfo`,
-            '-frames:v',
-            String(maxFrames),
-            '-q:v',
-            '4',
-            outputPattern,
-          ],
-          { signal, timeoutMs: remainingTimeoutMs() },
-        );
-        if (signal.aborted) {
-          return mediaPolicyToolError('keyframe extraction aborted');
-        }
-        if (uniformPass.code !== 0) {
-          return mediaPolicyToolError(
-            ffmpegFailureMessage(
-              uniformPass,
-              'uniformly sampling',
-              this.params.inputPath,
-            ),
-          );
-        }
-        frameFiles = await listFrameFiles(this.params.outputDir);
-        timestamps = parseShowinfoTimestamps(uniformPass.stderr);
-      }
 
-      if (frameFiles.length === 0) {
-        return mediaPolicyToolError(
-          `no keyframes could be extracted from ${path.basename(this.params.inputPath)}`,
-        );
+      // ALL ffmpeg passes share ONE wall-clock budget, keeping the
+      // invocation within the configured timeout no matter how many
+      // per-bucket runs it takes.
+      const remainingTimeoutMs = createPolicyToolTimeoutBudget(this.timeoutMs);
+      const context: ExtractionContext = {
+        maxFrames,
+        sceneThreshold,
+        maxDimension,
+        remainingTimeoutMs,
+        signal,
+      };
+
+      // Bucketed extraction is the primary path: it spreads the frames
+      // across the FULL duration instead of stopping at the first
+      // maxFrames scene changes (which front-loads every frame into the
+      // opening minutes of a long video). The single-pass path remains
+      // for unknown duration (no way to place buckets) and single-frame
+      // requests (one bucket ≡ one pass).
+      const bucketed = durationSeconds !== undefined && maxFrames > 1;
+      const extraction = bucketed
+        ? await this.extractBucketed(context, durationSeconds)
+        : await this.extractSinglePass(context);
+      if (!Array.isArray(extraction)) {
+        return extraction;
       }
+      const frames = extraction;
 
       const originalDuration =
         durationSeconds !== undefined
@@ -265,13 +239,14 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         probe.width !== undefined && probe.height !== undefined
           ? `/${probe.width}×${probe.height}`
           : '';
+      const samplingNote = bucketed ? '静态抽帧（全片分桶采样）' : '静态抽帧';
 
       const artifacts: ToolArtifact[] = [];
-      for (const [index, fileName] of frameFiles.entries()) {
+      for (const [index, frame] of frames.entries()) {
         const sizeBytes = (
-          await fs.stat(path.join(this.params.outputDir, fileName))
+          await fs.stat(path.join(this.params.outputDir, frame.fileName))
         ).size;
-        const t = timestamps[index];
+        const t = frame.timeSeconds;
         const atTime =
           t !== undefined && Number.isFinite(t)
             ? ` @ ${Math.round(t * 10) / 10}s`
@@ -279,17 +254,17 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         artifacts.push({
           kind: 'image',
           storage: 'workspace',
-          title: `Keyframe ${index + 1}/${frameFiles.length}`,
-          workspacePath: fileName,
+          title: `Keyframe ${index + 1}/${frames.length}`,
+          workspacePath: frame.fileName,
           mimeType: 'image/jpeg',
           sizeBytes,
           metadata: {
-            omniDisclosure: `原视频 ${originalDuration}${originalResolution} → 关键帧 ${index + 1}/${frameFiles.length}${atTime}，静态抽帧，时间连续性丢失`,
+            omniDisclosure: `原视频 ${originalDuration}${originalResolution} → 关键帧 ${index + 1}/${frames.length}${atTime}，${samplingNote}，时间连续性丢失`,
           },
         });
       }
 
-      const summary = `Extracted ${frameFiles.length} keyframe(s) from ${path.basename(this.params.inputPath)} (${originalDuration}${originalResolution})`;
+      const summary = `Extracted ${frames.length} keyframe(s) from ${path.basename(this.params.inputPath)} (${originalDuration}${originalResolution})`;
       // Not mediaPolicyToolSuccess: that helper encodes the common
       // one-artifact contract, while this is the multi-artifact tool —
       // every frame is its own artifact with its own disclosure.
@@ -302,22 +277,215 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       return mediaPolicyToolFailure(error);
     }
   }
+
+  /**
+   * Full-duration coverage: split the timeline into `maxFrames` equal
+   * buckets and extract one frame per bucket — a scene change from the
+   * bucket's opening window when one exists, the bucket midpoint
+   * otherwise. Input seeking (`-ss` before `-i`) jumps straight to each
+   * bucket without decoding the preceding footage; it also resets
+   * pts to ~0, so the absolute timestamp is bucketStart + showinfo
+   * pts_time. Individual bucket failures are tolerated (the last one is
+   * kept for the zero-frames diagnostic); the loop stops early when the
+   * shared budget is exhausted.
+   */
+  private async extractBucketed(
+    context: ExtractionContext,
+    durationSeconds: number,
+  ): Promise<ToolResult | ExtractedFrame[]> {
+    const {
+      maxFrames,
+      sceneThreshold,
+      maxDimension,
+      remainingTimeoutMs,
+      signal,
+    } = context;
+    const bucket = durationSeconds / maxFrames;
+    const window = Math.min(bucket, SCENE_SEARCH_WINDOW_SECONDS);
+    const frames: ExtractedFrame[] = [];
+    let lastFailure: FfmpegRunResult | undefined;
+
+    for (let i = 0; i < maxFrames; i++) {
+      if (remainingTimeoutMs() <= 1) {
+        break;
+      }
+      const bucketStart = i * bucket;
+      const fileName = `keyframe_${String(i + 1).padStart(4, '0')}.jpg`;
+      const outputPath = path.join(this.params.outputDir, fileName);
+
+      // Scene attempt: first scene change within the bucket's opening
+      // window. `-update 1` lets ffmpeg write a literal (non-pattern)
+      // image filename; `-frames:v 1` stops the decode at the first hit.
+      const sceneRun = await runFfmpeg(
+        [
+          '-y',
+          '-ss',
+          formatSeconds(bucketStart),
+          '-t',
+          formatSeconds(window),
+          '-i',
+          this.params.inputPath,
+          '-vf',
+          `select='gt(scene,${sceneThreshold})',${scaleFilter(maxDimension)},showinfo`,
+          '-vsync',
+          'vfr',
+          '-frames:v',
+          '1',
+          '-q:v',
+          '4',
+          '-update',
+          '1',
+          outputPath,
+        ],
+        { signal, timeoutMs: remainingTimeoutMs() },
+      );
+      if (signal.aborted) {
+        return mediaPolicyToolError('keyframe extraction aborted');
+      }
+      if (sceneRun.code === 0 && (await fileExists(outputPath))) {
+        const pts = parseShowinfoTimestamps(sceneRun.stderr)[0];
+        frames.push({
+          fileName,
+          timeSeconds:
+            bucketStart +
+            (pts !== undefined && Number.isFinite(pts) ? pts : window / 2),
+        });
+        continue;
+      }
+      if (sceneRun.code !== 0) {
+        lastFailure = sceneRun;
+      }
+
+      // Midpoint fallback: no scene change in the window (static or
+      // slow footage) — take the bucket's midpoint frame instead so the
+      // bucket still contributes coverage.
+      const midpoint = bucketStart + bucket / 2;
+      const midpointRun = await runFfmpeg(
+        [
+          '-y',
+          '-ss',
+          formatSeconds(midpoint),
+          '-i',
+          this.params.inputPath,
+          '-vf',
+          scaleFilter(maxDimension),
+          '-frames:v',
+          '1',
+          '-q:v',
+          '4',
+          '-update',
+          '1',
+          outputPath,
+        ],
+        { signal, timeoutMs: remainingTimeoutMs() },
+      );
+      if (signal.aborted) {
+        return mediaPolicyToolError('keyframe extraction aborted');
+      }
+      if (midpointRun.code === 0 && (await fileExists(outputPath))) {
+        frames.push({ fileName, timeSeconds: midpoint });
+      } else if (midpointRun.code !== 0) {
+        lastFailure = midpointRun;
+      }
+    }
+
+    if (frames.length === 0) {
+      return mediaPolicyToolError(
+        lastFailure !== undefined
+          ? ffmpegFailureMessage(
+              lastFailure,
+              'extracting keyframes from',
+              this.params.inputPath,
+            )
+          : `no keyframes could be extracted from ${path.basename(this.params.inputPath)}`,
+      );
+    }
+    return frames;
+  }
+
+  /**
+   * Single-pass scene detection (legacy path): frame 0 always selected,
+   * then every frame whose scene score exceeds the threshold, capped at
+   * maxFrames. Only used when the duration is unknown (buckets cannot
+   * be placed) or a single frame was requested. showinfo (after select)
+   * logs one stderr line per KEPT frame with its pts_time — the
+   * timestamps feed the per-frame disclosures.
+   */
+  private async extractSinglePass(
+    context: ExtractionContext,
+  ): Promise<ToolResult | ExtractedFrame[]> {
+    const {
+      maxFrames,
+      sceneThreshold,
+      maxDimension,
+      remainingTimeoutMs,
+      signal,
+    } = context;
+    const outputPattern = path.join(this.params.outputDir, 'keyframe_%04d.jpg');
+    const scenePass = await runFfmpeg(
+      [
+        '-y',
+        '-i',
+        this.params.inputPath,
+        '-vf',
+        `select='eq(n,0)+gt(scene,${sceneThreshold})',${scaleFilter(maxDimension)},showinfo`,
+        '-vsync',
+        'vfr',
+        '-frames:v',
+        String(maxFrames),
+        '-q:v',
+        '4',
+        outputPattern,
+      ],
+      { signal, timeoutMs: remainingTimeoutMs() },
+    );
+    if (signal.aborted) {
+      return mediaPolicyToolError('keyframe extraction aborted');
+    }
+    if (scenePass.code !== 0) {
+      return mediaPolicyToolError(
+        ffmpegFailureMessage(
+          scenePass,
+          'extracting keyframes from',
+          this.params.inputPath,
+        ),
+      );
+    }
+
+    const frameFiles = await listFrameFiles(this.params.outputDir);
+    if (frameFiles.length === 0) {
+      return mediaPolicyToolError(
+        `no keyframes could be extracted from ${path.basename(this.params.inputPath)}`,
+      );
+    }
+    const timestamps = parseShowinfoTimestamps(scenePass.stderr);
+    return frameFiles.map((fileName, index) => {
+      const t = timestamps[index];
+      return {
+        fileName,
+        timeSeconds: t !== undefined && Number.isFinite(t) ? t : undefined,
+      };
+    });
+  }
 }
 
 /**
- * `omni_extract_keyframes` — scene-detected still frames (ffmpeg): select
- * frame 0 plus scene changes above the threshold, scaled to fit
- * `maxDimension`, as JPEG artifacts with per-frame timestamps in the
- * disclosure; uniform sampling is the fallback for static footage
- * (mapping doc §6.1). This is the multi-artifact policy tool — every
- * frame is promoted in one atomic invocation transaction.
+ * `omni_extract_keyframes` — still frames covering the FULL video
+ * duration (ffmpeg): the timeline is split into `maxFrames` equal
+ * buckets and each bucket contributes one frame — a scene change from
+ * its opening window when one exists, its midpoint otherwise — scaled to
+ * fit `maxDimension`, as JPEG artifacts with per-frame timestamps in the
+ * disclosure (mapping doc §6.1). Single-pass scene detection remains for
+ * unknown duration or single-frame requests. This is the multi-artifact
+ * policy tool — every frame is promoted in one atomic invocation
+ * transaction.
  */
 export class OmniExtractKeyframesTool extends BaseMediaPolicyTool<ExtractKeyframesParams> {
   constructor(config: MediaPolicyToolConfigView) {
     super(
       OMNI_EXTRACT_KEYFRAMES_TOOL_NAME,
       'ExtractKeyframes',
-      'Extracts representative still frames from a video via scene detection (uniform sampling as fallback), producing JPEG keyframes with per-frame timestamps and a disclosure of the temporal loss.',
+      'Extracts representative still frames spread across the full video duration (per-segment scene detection with midpoint fallback), producing JPEG keyframes with per-frame timestamps and a disclosure of the temporal loss.',
       Kind.Other,
       {
         type: 'object',

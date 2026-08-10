@@ -50,8 +50,10 @@ describe('OmniExtractKeyframesTool', () => {
     mocks.probeMediaMetadata.mockResolvedValue(result as MediaProbeResult);
   };
 
-  /** One ffmpeg run: writes `count` frames from the %04d pattern and
-   * emits matching showinfo stderr. */
+  /** One ffmpeg run: writes `count` frames from the output arg (a
+   * `%04d` pattern on the legacy path, a literal filename on the
+   * bucketed path — replace() is a no-op there) and emits matching
+   * showinfo stderr. */
   const framesRun =
     (count: number, times: number[]) =>
     async (args: string[]): Promise<{ code: number; stderr: string }> => {
@@ -64,6 +66,13 @@ describe('OmniExtractKeyframesTool', () => {
       }
       return { code: 0, stderr: showinfoStderr(times) };
     };
+
+  /** One ffmpeg run that exits cleanly but produces NO output file —
+   * a bucket window with no scene change above the threshold. */
+  const noFrameRun = async (): Promise<{ code: number; stderr: string }> => ({
+    code: 0,
+    stderr: '',
+  });
 
   const run = async (
     params: Record<string, unknown> = {},
@@ -114,162 +123,311 @@ describe('OmniExtractKeyframesTool', () => {
     });
   });
 
-  it('extracts scene-detected frames as one multi-artifact batch with per-frame disclosures', async () => {
-    probe({ durationMs: 63_000, width: 1920, height: 1080 });
-    mocks.runFfmpeg.mockImplementation(framesRun(3, [0, 12.4, 47]));
-    const { result, signal } = await run();
+  describe('bucketed extraction (known duration, maxFrames > 1)', () => {
+    it('spreads one frame per equal bucket across the FULL duration', async () => {
+      probe({ durationMs: 80_000, width: 1920, height: 1080 });
+      // Every bucket has a scene change 3.5s into its window.
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [3.5]));
+      const { result, signal } = await run({ maxFrames: 4 });
 
-    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
-    expect(mocks.runFfmpeg).toHaveBeenCalledWith(
-      [
-        '-y',
-        '-i',
-        inputPath,
-        '-vf',
-        "select='eq(n,0)+gt(scene,0.2)'," +
-          "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease," +
-          'showinfo',
-        '-vsync',
-        'vfr',
-        '-frames:v',
-        '8',
-        '-q:v',
-        '4',
-        path.join(outputDir, 'keyframe_%04d.jpg'),
-      ],
-      { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
-    );
+      // One scene attempt per bucket, no fallbacks needed.
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(4);
+      expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
+        1,
+        [
+          '-y',
+          '-ss',
+          '0.000',
+          '-t',
+          '20.000',
+          '-i',
+          inputPath,
+          '-vf',
+          "select='gt(scene,0.2)'," +
+            "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease," +
+            'showinfo',
+          '-vsync',
+          'vfr',
+          '-frames:v',
+          '1',
+          '-q:v',
+          '4',
+          '-update',
+          '1',
+          path.join(outputDir, 'keyframe_0001.jpg'),
+        ],
+        { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
+      );
+      // Buckets seek to 20s, 40s, 60s — coverage reaches the last
+      // quarter of the video instead of stopping at the first scenes.
+      const seeks = mocks.runFfmpeg.mock.calls.map(
+        (call) => (call[0] as string[])[2],
+      );
+      expect(seeks).toEqual(['0.000', '20.000', '40.000', '60.000']);
 
-    expect(result.error).toBeUndefined();
-    expect(result.artifacts).toHaveLength(3);
-    expect(result.artifacts?.[1]).toEqual({
-      kind: 'image',
-      storage: 'workspace',
-      title: 'Keyframe 2/3',
-      workspacePath: 'keyframe_0002.jpg',
-      mimeType: 'image/jpeg',
-      sizeBytes: FRAME_SIZE,
-      metadata: {
-        omniDisclosure:
-          '原视频 63s/1920×1080 → 关键帧 2/3 @ 12.4s，静态抽帧，时间连续性丢失',
-      },
-    });
-    // Every artifact carries its OWN disclosure — the orchestrator
-    // validates each lossy artifact independently.
-    for (const artifact of result.artifacts ?? []) {
-      expect(artifact.metadata?.['omniDisclosure']).toContain('静态抽帧');
-    }
-  });
-
-  it('falls back to uniform sampling when scene detection yields a single frame', async () => {
-    probe({ durationMs: 10_000, width: 640, height: 360 });
-    mocks.runFfmpeg
-      .mockImplementationOnce(framesRun(1, [0]))
-      .mockImplementationOnce(framesRun(4, [0, 2.5, 5, 7.5]));
-    const { result } = await run({ maxFrames: 4 });
-
-    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
-    const secondArgs = mocks.runFfmpeg.mock.calls[1][0] as string[];
-    expect(secondArgs.join(' ')).toContain('fps=0.4,');
-    expect(secondArgs).not.toContain('-vsync');
-    expect(result.error).toBeUndefined();
-    expect(result.artifacts).toHaveLength(4);
-    expect(result.artifacts?.[3]?.metadata?.['omniDisclosure']).toContain(
-      '关键帧 4/4 @ 7.5s',
-    );
-  });
-
-  it('charges the uniform fallback against the SAME wall-clock budget (no timeout doubling)', async () => {
-    probe({ durationMs: 10_000, width: 640, height: 360 });
-    mocks.runFfmpeg
-      .mockImplementationOnce(async (args: string[]) => {
-        // Burn measurable wall-clock time in the scene pass before it
-        // yields a single frame (which triggers the uniform fallback).
-        await new Promise((r) => setTimeout(r, 50));
-        return framesRun(1, [0])(args);
-      })
-      .mockImplementationOnce(framesRun(4, [0, 2.5, 5, 7.5]));
-    const { result } = await run({ maxFrames: 4 });
-
-    expect(result.error).toBeUndefined();
-    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
-    const firstTimeout = (
-      mocks.runFfmpeg.mock.calls[0][1] as { timeoutMs: number }
-    ).timeoutMs;
-    const secondTimeout = (
-      mocks.runFfmpeg.mock.calls[1][1] as { timeoutMs: number }
-    ).timeoutMs;
-    expect(firstTimeout).toBe(DEFAULT_POLICY_TOOL_TIMEOUT_MS);
-    // The fallback gets only what the scene pass left, never a fresh
-    // full budget (timers never fire early, so ≥40ms must be gone).
-    expect(secondTimeout).toBeLessThanOrEqual(
-      DEFAULT_POLICY_TOOL_TIMEOUT_MS - 40,
-    );
-    expect(secondTimeout).toBeGreaterThan(0);
-  });
-
-  it('does not fall back when a single frame was all that was asked for', async () => {
-    probe({ durationMs: 10_000 });
-    mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
-    const { result } = await run({ maxFrames: 1 });
-    expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
-    expect(result.artifacts).toHaveLength(1);
-  });
-
-  it('errors when no frames could be extracted at all', async () => {
-    probe({ durationMs: 10_000 });
-    mocks.runFfmpeg.mockResolvedValue({ code: 0, stderr: '' });
-    const { result } = await run();
-    expect(result.error?.message).toMatch(/no keyframes could be extracted/);
-    expect(result.artifacts).toBeUndefined();
-  });
-
-  it('threads tunable overrides into the scene-pass args', async () => {
-    probe({ durationMs: 63_000 });
-    mocks.runFfmpeg.mockImplementation(framesRun(2, [0, 5]));
-    await run({ maxFrames: 16, sceneThreshold: 0.5, maxDimension: 512 });
-    const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
-    expect(args.join(' ')).toContain('gt(scene,0.5)');
-    expect(args.join(' ')).toContain("'min(512,iw)':'min(512,ih)'");
-    expect(args).toContain('16');
-  });
-
-  it('reports the ffmpeg error on a failed scene pass', async () => {
-    probe({ durationMs: 63_000 });
-    mocks.runFfmpeg.mockResolvedValue({ code: 187, stderr: 'boom' });
-    const { result } = await run();
-    expect(result.error?.message).toMatch(/ffmpeg failed \(exit 187\)/);
-    expect(result.error?.message).toContain('boom');
-  });
-
-  it('reports an aborted run', async () => {
-    probe({ durationMs: 63_000 });
-    const controller = new AbortController();
-    mocks.runFfmpeg.mockImplementation(async () => {
-      controller.abort();
-      return { code: 0, stderr: '' };
-    });
-    const invocation = tool.build({ inputPath, outputDir });
-    const result = await invocation.execute(controller.signal);
-    expect(result.error?.message).toBe('keyframe extraction aborted');
-  });
-
-  it('threads policyTools.<tool>.runtime.timeoutMs into runFfmpeg', async () => {
-    probe({ durationMs: 63_000 });
-    mocks.runFfmpeg.mockImplementation(framesRun(2, [0, 5]));
-    const configured = new OmniExtractKeyframesTool({
-      getOmniPolicyToolsSettings: () => ({
-        [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
-          runtime: { timeoutMs: 90_000 },
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(4);
+      // Absolute timestamp = bucket start + showinfo pts_time (input
+      // seeking resets pts to ~0 within each window).
+      expect(result.artifacts?.[3]).toEqual({
+        kind: 'image',
+        storage: 'workspace',
+        title: 'Keyframe 4/4',
+        workspacePath: 'keyframe_0004.jpg',
+        mimeType: 'image/jpeg',
+        sizeBytes: FRAME_SIZE,
+        metadata: {
+          omniDisclosure:
+            '原视频 80s/1920×1080 → 关键帧 4/4 @ 63.5s，静态抽帧（全片分桶采样），时间连续性丢失',
         },
-      }),
+      });
+      for (const artifact of result.artifacts ?? []) {
+        expect(artifact.metadata?.['omniDisclosure']).toContain('全片分桶采样');
+      }
     });
-    const invocation = configured.build({ inputPath, outputDir });
-    await invocation.execute(new AbortController().signal);
-    expect(mocks.runFfmpeg).toHaveBeenCalledWith(
-      expect.any(Array),
-      expect.objectContaining({ timeoutMs: 90_000 }),
-    );
+
+    it('caps the per-bucket scene search window at 30s on long videos', async () => {
+      probe({ durationMs: 4_882_000, width: 1920, height: 804 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [1]));
+      await run({ maxFrames: 2 });
+
+      const first = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      const second = mocks.runFfmpeg.mock.calls[1][0] as string[];
+      // Bucket = 2441s, but the scene search only decodes 30s of it.
+      expect(first.slice(1, 5)).toEqual(['-ss', '0.000', '-t', '30.000']);
+      expect(second.slice(1, 5)).toEqual(['-ss', '2441.000', '-t', '30.000']);
+    });
+
+    it('falls back to the bucket midpoint when the window has no scene change', async () => {
+      probe({ durationMs: 40_000, width: 640, height: 360 });
+      mocks.runFfmpeg
+        .mockImplementationOnce(noFrameRun) // bucket 1: scene attempt → nothing
+        .mockImplementationOnce(framesRun(1, [])) // bucket 1: midpoint frame
+        .mockImplementationOnce(framesRun(1, [2])); // bucket 2: scene hit
+      const { result, signal } = await run({ maxFrames: 2 });
+
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(3);
+      // Midpoint fallback: plain seek to bucketStart + bucket/2, no
+      // select filter, same literal output file.
+      expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
+        2,
+        [
+          '-y',
+          '-ss',
+          '10.000',
+          '-i',
+          inputPath,
+          '-vf',
+          "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease",
+          '-frames:v',
+          '1',
+          '-q:v',
+          '4',
+          '-update',
+          '1',
+          path.join(outputDir, 'keyframe_0001.jpg'),
+        ],
+        { signal, timeoutMs: expect.any(Number) },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(2);
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '关键帧 1/2 @ 10s',
+      );
+      expect(result.artifacts?.[1]?.metadata?.['omniDisclosure']).toContain(
+        '关键帧 2/2 @ 22s',
+      );
+    });
+
+    it('tolerates individual bucket failures and keeps the surviving frames', async () => {
+      probe({ durationMs: 40_000 });
+      mocks.runFfmpeg
+        .mockResolvedValueOnce({ code: 187, stderr: 'scene boom' }) // bucket 1 scene
+        .mockResolvedValueOnce({ code: 187, stderr: 'midpoint boom' }) // bucket 1 midpoint
+        .mockImplementationOnce(framesRun(1, [5])); // bucket 2 scene
+      const { result } = await run({ maxFrames: 2 });
+
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(1);
+      expect(result.artifacts?.[0]?.title).toBe('Keyframe 1/1');
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '@ 25s',
+      );
+    });
+
+    it('surfaces the last ffmpeg failure when every bucket failed', async () => {
+      probe({ durationMs: 20_000 });
+      mocks.runFfmpeg.mockResolvedValue({ code: 187, stderr: 'boom' });
+      const { result } = await run({ maxFrames: 2 });
+      expect(result.error?.message).toMatch(/ffmpeg failed \(exit 187\)/);
+      expect(result.error?.message).toContain('boom');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('errors generically when no bucket produced a frame without any ffmpeg failure', async () => {
+      probe({ durationMs: 20_000 });
+      mocks.runFfmpeg.mockImplementation(noFrameRun);
+      const { result } = await run({ maxFrames: 2 });
+      // 2 buckets × (scene attempt + midpoint fallback)
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(4);
+      expect(result.error?.message).toMatch(/no keyframes could be extracted/);
+    });
+
+    it('charges every bucket run against the SAME wall-clock budget', async () => {
+      probe({ durationMs: 20_000 });
+      mocks.runFfmpeg
+        .mockImplementationOnce(async (args: string[]) => {
+          // Burn measurable wall-clock time in the first bucket.
+          await new Promise((r) => setTimeout(r, 50));
+          return framesRun(1, [0])(args);
+        })
+        .mockImplementationOnce(framesRun(1, [1]));
+      const { result } = await run({ maxFrames: 2 });
+
+      expect(result.error).toBeUndefined();
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(2);
+      const firstTimeout = (
+        mocks.runFfmpeg.mock.calls[0][1] as { timeoutMs: number }
+      ).timeoutMs;
+      const secondTimeout = (
+        mocks.runFfmpeg.mock.calls[1][1] as { timeoutMs: number }
+      ).timeoutMs;
+      expect(firstTimeout).toBe(DEFAULT_POLICY_TOOL_TIMEOUT_MS);
+      // The second bucket gets only what the first one left, never a
+      // fresh full budget (timers never fire early, so ≥40ms is gone).
+      expect(secondTimeout).toBeLessThanOrEqual(
+        DEFAULT_POLICY_TOOL_TIMEOUT_MS - 40,
+      );
+      expect(secondTimeout).toBeGreaterThan(0);
+    });
+
+    it('stops looping and returns the frames gathered so far when the budget runs out', async () => {
+      probe({ durationMs: 80_000 });
+      const configured = new OmniExtractKeyframesTool({
+        getOmniPolicyToolsSettings: () => ({
+          [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
+            runtime: { timeoutMs: 60 },
+          },
+        }),
+      });
+      mocks.runFfmpeg.mockImplementation(async (args: string[]) => {
+        // Outlive the whole 60ms budget inside the first bucket.
+        await new Promise((r) => setTimeout(r, 90));
+        return framesRun(1, [0])(args);
+      });
+      const invocation = configured.build({ inputPath, outputDir });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Buckets 2..8 were never attempted.
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(1);
+    });
+
+    it('threads tunable overrides into every bucket scene attempt', async () => {
+      probe({ durationMs: 64_000 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      await run({ maxFrames: 16, sceneThreshold: 0.5, maxDimension: 512 });
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(16);
+      const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      expect(args.join(' ')).toContain('gt(scene,0.5)');
+      expect(args.join(' ')).toContain("'min(512,iw)':'min(512,ih)'");
+    });
+
+    it('threads policyTools.<tool>.runtime.timeoutMs into runFfmpeg', async () => {
+      probe({ durationMs: 63_000 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      const configured = new OmniExtractKeyframesTool({
+        getOmniPolicyToolsSettings: () => ({
+          [OMNI_EXTRACT_KEYFRAMES_TOOL_NAME]: {
+            runtime: { timeoutMs: 90_000 },
+          },
+        }),
+      });
+      const invocation = configured.build({ inputPath, outputDir });
+      await invocation.execute(new AbortController().signal);
+      expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
+        1,
+        expect.any(Array),
+        expect.objectContaining({ timeoutMs: 90_000 }),
+      );
+    });
+
+    it('reports an aborted run', async () => {
+      probe({ durationMs: 63_000 });
+      const controller = new AbortController();
+      mocks.runFfmpeg.mockImplementation(async () => {
+        controller.abort();
+        return { code: 0, stderr: '' };
+      });
+      const invocation = tool.build({ inputPath, outputDir });
+      const result = await invocation.execute(controller.signal);
+      expect(result.error?.message).toBe('keyframe extraction aborted');
+    });
+  });
+
+  describe('single-pass extraction (unknown duration or maxFrames 1)', () => {
+    it('extracts scene-detected frames in one pass when the duration is unknown', async () => {
+      probe({ width: 1920, height: 1080 });
+      mocks.runFfmpeg.mockImplementation(framesRun(3, [0, 12.4, 47]));
+      const { result, signal } = await run();
+
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+      expect(mocks.runFfmpeg).toHaveBeenCalledWith(
+        [
+          '-y',
+          '-i',
+          inputPath,
+          '-vf',
+          "select='eq(n,0)+gt(scene,0.2)'," +
+            "scale='min(768,iw)':'min(768,ih)':force_original_aspect_ratio=decrease," +
+            'showinfo',
+          '-vsync',
+          'vfr',
+          '-frames:v',
+          '8',
+          '-q:v',
+          '4',
+          path.join(outputDir, 'keyframe_%04d.jpg'),
+        ],
+        { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(3);
+      const disclosure = result.artifacts?.[1]?.metadata?.['omniDisclosure'];
+      expect(disclosure).toContain('关键帧 2/3 @ 12.4s');
+      expect(disclosure).toContain('静态抽帧，时间连续性丢失');
+      expect(disclosure).not.toContain('全片分桶采样');
+    });
+
+    it('uses a single pass when a single frame is all that was asked for', async () => {
+      probe({ durationMs: 10_000 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      const { result } = await run({ maxFrames: 1 });
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+      const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+      expect(args[args.length - 1]).toBe(
+        path.join(outputDir, 'keyframe_%04d.jpg'),
+      );
+      expect(result.artifacts).toHaveLength(1);
+    });
+
+    it('errors when no frames could be extracted at all', async () => {
+      probe({});
+      mocks.runFfmpeg.mockResolvedValue({ code: 0, stderr: '' });
+      const { result } = await run();
+      expect(result.error?.message).toMatch(/no keyframes could be extracted/);
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('reports the ffmpeg error on a failed scene pass', async () => {
+      probe({});
+      mocks.runFfmpeg.mockResolvedValue({ code: 187, stderr: 'boom' });
+      const { result } = await run();
+      expect(result.error?.message).toMatch(/ffmpeg failed \(exit 187\)/);
+      expect(result.error?.message).toContain('boom');
+    });
   });
 
   it.each([
