@@ -330,7 +330,7 @@ daemon's typed-error taxonomy (when the daemon stamps it):
 
 ```ts
 import type { DaemonErrorKind } from '@qwen-code/sdk/daemon';
-// 'missing_binary' | 'blocked_egress' | 'auth_env_error' | 'init_timeout'
+// 'missing_binary' | 'blocked_egress' | 'auth_env_error' | 'init_timeout' | 'restore_timeout'
 // | 'protocol_error' | 'missing_file' | 'parse_error' | 'budget_exhausted'
 ```
 
@@ -367,12 +367,47 @@ function toolIcon(event: DaemonUiToolUpdateEvent): React.ReactNode {
 The SDK has a `mcp__<server>__<tool>` naming heuristic fallback — even
 when daemon doesn't explicitly stamp provenance, MCP tools are detectable.
 
+## Debug reason categorization
+
+`DaemonUiStatusEvent.debugReason` is a closed-enum the normalizer stamps
+when it projects a `debug` block instead of a typed event (mirrored onto
+`DaemonStatusTranscriptBlock` for transcript consumers):
+
+```ts
+import type { DaemonUiDebugReason } from '@qwen-code/sdk/daemon';
+// 'unrecognized_event' | 'unrecognized_session_update' | 'malformed_payload'
+```
+
+The canonical list is exported as `DAEMON_UI_DEBUG_REASONS`. Reason names
+are wildcard-named categories: `unrecognized_*` means the daemon sent a
+frame this SDK version has no case for — forward-compat noise, developer
+diagnostics rather than conversation content. `malformed_*` means a frame
+the SDK _does_ know arrived with an unusable payload — a real defect
+signal.
+
+Renderers should branch on `debugReason`, not the debug text — the text
+prefix is diagnostic wording and changes without notice:
+
+```ts
+function hideDebugBlock(reason?: DaemonUiDebugReason): boolean {
+  // Hide forward-compat noise by category so reasons a newer SDK adds are
+  // covered automatically. Defect signals and client-dispatched debug
+  // events (which carry no reason) keep rendering.
+  return reason?.startsWith('unrecognized_') ?? false;
+}
+```
+
+`status` events never carry a `debugReason`, and neither do debug events
+dispatched by clients themselves (e.g. Web Shell's model-switch summary) —
+both must keep rendering.
+
 ## Forward-compat principles
 
 Every layer in the daemon UI SDK follows the **forward-compat principle**:
 unknown values do NOT throw; they degrade gracefully.
 
-- Unknown daemon event types → `debug` event with the raw type name
+- Unknown daemon event types → `debug` event with the raw type name,
+  stamped with an `unrecognized_*` `debugReason` (see above)
 - Unknown tool status → `currentToolCallId` left untouched (no clear)
 - Unknown error kind → `errorKind` undefined (renderer falls back to text)
 - Missing serverTimestamp → falls back to `clientReceivedAt`

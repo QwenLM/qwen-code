@@ -59,6 +59,8 @@ import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
+  MAX_SESSION_RESTORE_TIMEOUT_MS,
+  resolveSessionRestoreTimeoutMs,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import {
@@ -106,6 +108,7 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { createRequestedSessionIdAdmission } from './session-id-admission.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -550,6 +553,11 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
+  /**
+   * Returns every bridge generation that is still alive, including draining
+   * generations no longer exposed by the workspace registry.
+   */
+  getSessionBridges?: () => readonly AcpSessionBridge[];
   workspaceTrustHotReloadAvailable?: boolean;
   getWorkspaceTrustPolicySnapshot?: () =>
     | DaemonTrustPolicySnapshot
@@ -612,6 +620,7 @@ export interface ServeAppDeps {
 // Mirrors the bridge's session-idle reaper default (30 min). Used only to
 // size the scheduled-task keepalive interval when no explicit timeout is set.
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+const SCHEDULED_TASK_RESTORE_HEADROOM_MS = 10_000;
 // Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
 // timeout) and ≤10min (stay well inside the 30-min default reaper window).
 const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
@@ -670,9 +679,26 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  // The scheduled-task helpers retain an outer watchdog for injected bridges.
+  // A value above the timer ceiling is their explicit no-watchdog sentinel.
+  const scheduledTaskRestoreTimeoutMs =
+    sessionRestoreTimeoutMs + SCHEDULED_TASK_RESTORE_HEADROOM_MS >
+    MAX_SESSION_RESTORE_TIMEOUT_MS
+      ? MAX_SESSION_RESTORE_TIMEOUT_MS + 1
+      : sessionRestoreTimeoutMs + SCHEDULED_TASK_RESTORE_HEADROOM_MS;
   if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
     throw new Error(
       'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
+    );
+  }
+  if (
+    (deps.workspaceTrustHotReloadAvailable === true ||
+      deps.workspaceRuntimeRemoval !== undefined) &&
+    deps.getSessionBridges === undefined
+  ) {
+    throw new Error(
+      'createServeApp: runtime replacement/removal requires deps.getSessionBridges so session-id admission can inspect draining generations.',
     );
   }
   const app = express();
@@ -973,6 +999,7 @@ export function createServeApp(
       maxJournalEvents: opts.maxJournalEvents,
       maxJournalBytes: opts.maxJournalBytes,
       initializeTimeoutMs: opts.initializeTimeoutMs,
+      sessionRestoreTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -1137,6 +1164,21 @@ export function createServeApp(
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
+  const requestedSessionIdAdmission = createRequestedSessionIdAdmission({
+    archiveCoordinator,
+    getBridges:
+      deps.getSessionBridges ??
+      (() => workspaceRegistry.listManaged().map((runtime) => runtime.bridge)),
+    getPersistenceTargets: () =>
+      workspaceRegistry.listManaged().map((runtime) => ({
+        workspaceCwd: runtime.workspaceCwd,
+        runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      })),
+    getBridgeWorkspaceId: (bridge) =>
+      workspaceRegistry
+        .listEntries()
+        .find((entry) => entry.current?.runtime.bridge === bridge)?.workspaceId,
+  });
   primaryTrustRegistry = workspaceRegistry;
   const primaryRuntime = createLiveWorkspaceDelegate(
     () => workspaceRegistry.primary,
@@ -1753,6 +1795,7 @@ export function createServeApp(
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
+    sessionRestoreTimeoutMs,
     languageCodes,
   });
 
@@ -2257,6 +2300,7 @@ export function createServeApp(
     bridge: primaryBridge,
     workspaceRegistry,
     archiveCoordinator,
+    requestedSessionIdAdmission,
     mutate,
     sendBridgeError,
     daemonLog,
@@ -2502,6 +2546,7 @@ export function createServeApp(
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
           boundWorkspace: runtime.workspaceCwd,
+          loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
             registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
           onError: (sessionId, err) => {
@@ -2540,6 +2585,7 @@ export function createServeApp(
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
         cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
         onTasksRead: (tasks) =>
@@ -2612,6 +2658,7 @@ export function createServeApp(
     workspaceRegistry,
     isPrimaryWorkspaceTrusted,
     archiveCoordinator,
+    requestedSessionIdAdmission,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,
     deviceFlowRegistry,

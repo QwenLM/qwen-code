@@ -44,6 +44,7 @@ import {
 import {
   DEADLINE_ENV,
   RESERVE_ENV,
+  COMPOSE_FLOOR_ENV,
   readBudgetStop,
   readRoundStamps,
 } from './lib/deadline.js';
@@ -2730,8 +2731,14 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
   });
 
-  it('does not gate the verifier — the reserve exists so it can run', () => {
-    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+  it('does not gate the verifier by the reserve — it runs within it', () => {
+    // The reverse-audit RESERVE is not a verifier gate: within it (above
+    // the smaller compose floor) the terminal round's verification is
+    // exactly the work the reserve was kept for. 30 minutes remain — inside
+    // the 80-minute reserve, above the 20-minute compose floor — so the
+    // verifier builds. (The compose floor DOES gate it; that is a separate
+    // describe.)
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 1800);
     const dir = mkdtempSync(join(tmpdir(), 'ap-budget-v-'));
     dirs.push(dir);
     const plan = join(dir, 'plan.json');
@@ -3976,5 +3983,101 @@ describe('the tool budget in the briefs', () => {
     expect(brief).toContain('never suppresses a finding');
     expect(brief).toContain('Budget gap: <the check>');
     expect(brief).not.toContain('as the recall rule requires');
+  });
+});
+
+describe('the verify gate — compose survives a budget stop', () => {
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[COMPOSE_FLOOR_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function verifyCall(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verifygate-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    // Non-empty: an empty verify findings file throws earlier, before the gate.
+    writeFileSync(findings, '- **[Critical]** x.ts:1 — y — [unverified]');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    return plan;
+  }
+
+  it('refuses a verify build below the compose floor: exit 4, no prompt', () => {
+    // 60s left — far below the ~20-minute compose floor.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const plan = verifyCall();
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('VERIFY BUDGET:');
+    expect(msg).toContain('compose');
+    expect(msg).toContain('[unverified]');
+    // A refused verifier is NOT a reverse-audit stop: it must write no
+    // budget-stop marker (compose-review would otherwise post a false
+    // "reverse audit — stopped before round N" on a run whose audit
+    // converged and only the verifier hit the floor) and no admission stamp
+    // (a stray stamp would price later rounds from a refusal timestamp).
+    expect(readBudgetStop(plan)).toBeNull();
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('validation beats the gate: a malformed verify call under the floor throws, not exit 4', () => {
+    // The gate sits AFTER argument validation, like the RA gate. A budgeted
+    // run whose orchestrator issues a broken verify call must get the
+    // validation error naming the bug, not a VERIFY BUDGET termination rule
+    // it would mistake for a budget stop.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verifyval-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    // --findings omitted: a malformed verify call.
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+      }),
+    ).toThrow(/--findings/);
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it('builds the verifier normally when the deadline is far', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const plan = verifyCall();
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    expect(readRecordedPrompts(plan).size).toBe(1);
+  });
+
+  it('builds the verifier when there is no deadline at all — every local run', () => {
+    verifyCall();
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('the floor-0 escape hatch disables the verify gate', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    process.env[COMPOSE_FLOOR_ENV] = '0';
+    const plan = verifyCall();
+    expect(process.exitCode).toBeUndefined();
+    expect(readRecordedPrompts(plan).size).toBe(1);
   });
 });

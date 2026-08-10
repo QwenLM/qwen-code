@@ -1371,6 +1371,7 @@ describe('runQwenServe telemetry validation', () => {
         mode: 'http-bridge',
         workspace: [primary, secondary],
         maxSessions: 1,
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       {
@@ -1390,12 +1391,16 @@ describe('runQwenServe telemetry validation', () => {
           primary: boolean;
           removable?: boolean;
         }>;
-        limits: { maxTotalSessions: number | null };
+        limits: {
+          maxTotalSessions: number | null;
+          sessionRestoreTimeoutMs: number;
+        };
       };
       expect(body.workspaceCwd).toBe(canonicalizeWorkspace(primary));
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
       expect(body.limits.maxTotalSessions).toBe(2);
+      expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
         expect.objectContaining({
           cwd: canonicalizeWorkspace(primary),
@@ -1421,6 +1426,7 @@ describe('runQwenServe telemetry validation', () => {
     for (const [options] of createBridge.mock.calls) {
       expect(options).toMatchObject({
         delegateReadTextFileToClient: false,
+        sessionRestoreTimeoutMs: 90_000,
       });
     }
     for (const result of createBridge.mock.results) {
@@ -1557,6 +1563,7 @@ describe('runQwenServe telemetry validation', () => {
         mode: 'http-bridge',
         workspace: primary,
         token: 'hot-remove-token',
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       {
@@ -1586,6 +1593,7 @@ describe('runQwenServe telemetry validation', () => {
       );
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
+        sessionRestoreTimeoutMs: 90_000,
       });
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
@@ -1654,6 +1662,7 @@ describe('runQwenServe telemetry validation', () => {
       for (const [options] of createBridge.mock.calls) {
         expect(options).toMatchObject({
           delegateReadTextFileToClient: false,
+          sessionRestoreTimeoutMs: 90_000,
         });
       }
       let releaseRemoval!: (count: number) => void;
@@ -1833,6 +1842,7 @@ describe('runQwenServe telemetry validation', () => {
         maxSessions: 1,
         eventRingSize: 1234,
         compactedReplayMaxBytes: 1024,
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       {
@@ -1847,12 +1857,14 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        sessionRestoreTimeoutMs: 90_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        sessionRestoreTimeoutMs: 90_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
@@ -2608,6 +2620,8 @@ describe('runQwenServe initializeTimeoutMs validation', () => {
         await handle.runtimeReady;
         expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
           initializeTimeoutMs: 30_000,
+          // Below the restore default, so the restore budget holds at 60 s.
+          sessionRestoreTimeoutMs: 60_000,
         });
       } finally {
         await handle.close();
@@ -6927,6 +6941,7 @@ describe('runQwenServe runtime startup failures', () => {
         mode: 'http-bridge',
         workspace: tmpDir,
         maxSessions: 1,
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       { resolveOnListen: true, daemonLogBaseDir: blockedLogBaseDir },
@@ -6970,7 +6985,10 @@ describe('runQwenServe runtime startup failures', () => {
         workspaceCwd: boundWorkspace,
         transports: ['rest'],
         policy: { permission: 'first-responder' },
-        limits: { maxPendingPromptsPerSession: 5 },
+        limits: {
+          maxPendingPromptsPerSession: 5,
+          sessionRestoreTimeoutMs: 90_000,
+        },
       });
       expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
@@ -10487,6 +10505,40 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('does not retry EADDRINUSE in strict-port mode', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-strict-port-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          strictPort: true,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([4170]);
   });
 
   it('does not retry on non-EADDRINUSE listen errors', async () => {
