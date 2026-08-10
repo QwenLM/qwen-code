@@ -14,12 +14,13 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  ChannelAgentBridge,
-  ChannelAgentBridgeSessionOptions,
-  ChannelLoopToolHandler,
-  ToolCallEvent,
+import {
+  CHANNEL_PROMPT_META_KEY,
+  type AvailableCommand,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
   CHANNEL_LOOP_MCP_SERVER_NAME,
@@ -280,6 +281,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       await conn.prompt({
         sessionId,
         prompt: prompt as Array<{ type: 'text'; text: string }>,
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
       });
     } finally {
       this.off('textChunk', onChunk);
