@@ -2131,6 +2131,39 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-child-env');
   });
 
+  it('does not load a distrusted parent .env for a trusted child workspace', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-child-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'child');
+    mkdirSync(childWorkspace);
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-distrusted-parent-env\n',
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.DO_NOT_TRUST,
+        [childWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(childWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
   it('treats TRUST_PARENT as trusting the containing folder', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
