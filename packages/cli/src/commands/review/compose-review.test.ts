@@ -193,6 +193,7 @@ function transcript(
     toolCalls?: number;
     text?: string;
     opens?: string[];
+    toolPath?: string;
     /** `[offset, limit]` making the diff reads ranged, as a compliant agent's are. */
     range?: [number, number];
   } = {},
@@ -227,7 +228,7 @@ function transcript(
                       offset: opts.range[0],
                       limit: opts.range[1],
                     }
-                  : { file_path: DIFF },
+                  : { file_path: opts.toolPath ?? DIFF },
               },
             },
           ],
@@ -924,7 +925,7 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // any "Reviewed…" opener above "Not reviewed:" read as the body
     // contradicting itself (#8811).
     expect(r.body).toContain(
-      'Partially reviewed — gaps disclosed below. Suggestions are inline.',
+      'Partially reviewed — gaps disclosed. Suggestions are inline.',
     );
     expect(r.body).not.toContain('no blockers');
   });
@@ -1094,7 +1095,7 @@ describe('composeReview — stacked states compose, none erased', () => {
     // downgradeApprove did not fire (base event was COMMENT), so no sentence…
     expect(r.body).not.toContain('Downgraded');
     // …but every disclosure is present exactly once, and nothing certifies.
-    expect(r.body).toContain('Partially reviewed — gaps disclosed below.');
+    expect(r.body).toContain('Partially reviewed — gaps disclosed.');
     expect(r.body).toContain('Suggestions are inline.');
     expect(r.body).toContain('1 Suggestion-level finding(s)');
     expect(r.body).toContain('Unresolved, please confirm:');
@@ -1305,6 +1306,8 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     });
     expect(r.body).toContain('Not explored to full depth');
     expect(r.body).not.toContain('no blockers');
+    expect(r.body).toContain('Reviewed.');
+    expect(r.body).not.toContain('Partially reviewed');
   });
 });
 
@@ -2105,7 +2108,7 @@ describe('coverage is recomputed, never accepted', () => {
     recordMatrix(p);
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
-    expect(r.body).toContain('Partially reviewed — gaps disclosed below.');
+    expect(r.body).toContain('Partially reviewed — gaps disclosed.');
     expect(r.body).not.toContain('could not certify');
   });
 
@@ -2171,23 +2174,60 @@ describe('coverage is recomputed, never accepted', () => {
     // truthy tes..." read as a sentence about the whole PR, not the name of
     // the one agent that failed. Quotes say which it is, and the truncation
     // stops at a word boundary instead of mid-word.
-    transcript(
-      'p1',
+    const p = plan({ han: true });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const brief = briefPath(p, 'chunk-1');
+    writeFileSync(brief, 'The chunk-1 brief.');
+    const launch =
       'This PR narrows the daemon-marker check from a truthy test to an exact one\n' +
-        `read_file(file_path="${DIFF}")`,
-      { toolCalls: 0 },
-    );
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(promptRecordDir(p), 'chunk-1.txt'), launch);
+    transcript('p1', launch, {
+      toolCalls: 1,
+      toolPath: join(dir, 'other.ts'),
+      opens: [brief],
+    });
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
-      planPath: plan(),
+      planPath: p,
       env: ENV,
       modelId: MODEL,
     });
     expect(r.body).toContain(
-      'Not reviewed: "This PR narrows the daemon-marker check from a truthy..."',
+      'Not reviewed: `"This PR narrows the daemon-marker check from a truthy test…"`',
     );
     expect(r.body).not.toContain('truthy tes...');
+    expect(r.body).toContain(
+      '启动 prompt 为它指定了 diff 中的行，但它从未打开',
+    );
+  });
+
+  it('keeps long agent labels distinct when their first word matches', () => {
+    transcript(
+      'p1',
+      `Angle-A: packages/core/src/services/session-lifecycle-manager.ts\n${DIFF}`,
+    );
+    transcript(
+      'p2',
+      `Angle-A: packages/core/src/services/session-lifecycle-reaper.ts\n${DIFF}`,
+    );
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain('session-lifecycle-manag…');
+    expect(r.body).toContain('session-lifecycle-reape…');
+  });
+
+  it('renders prompt-derived labels as inert Markdown', () => {
+    transcript('p1', `Fix @owner from #123 in </details> handling\n${DIFF}`);
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain(
+      'Not reviewed: `"Fix @owner from #123 in </details> handling"`',
+    );
   });
 
   it('names a blind launch as itself, not as a whiff', () => {
@@ -2968,8 +3008,8 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     // The zh sentence carries the translated reason, not the English one.
     expect(r.body).toContain('没有记录表明它的 brief 到达过任何 agent');
     // The partial opener, in both halves (#8811).
-    expect(r.body).toContain('Partially reviewed — gaps disclosed below.');
-    expect(r.body).toContain('仅完成部分审查，未覆盖部分见下方披露。');
+    expect(r.body).toContain('Partially reviewed — gaps disclosed.');
+    expect(r.body).toContain('仅完成部分审查，审查缺口已披露。');
   });
 
   it('quotes untranslatable caller text as-is in both halves', () => {
@@ -4018,6 +4058,9 @@ describe('composeReview — the findings file tag check', () => {
     expect(r.body).toContain(
       '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
         'ended',
+    );
+    expect(r.body).toContain(
+      'Review incomplete — unverified findings disclosed.',
     );
     // The opener may not certify over a loop that ended mid-verification.
     expect(r.body).not.toContain('no blockers');

@@ -584,7 +584,7 @@ function composeReviewBody(
       for (const label of cov.idleAgents) {
         coverageEntries.push({
           subject: label,
-          ...quotedAgentSubject(label),
+          publicSubject: publicAgentSubject(label),
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
         });
@@ -606,7 +606,7 @@ function composeReviewBody(
       for (const label of cov.blindAgents) {
         coverageEntries.push({
           subject: label,
-          ...quotedAgentSubject(label),
+          publicSubject: publicAgentSubject(label),
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
@@ -628,7 +628,7 @@ function composeReviewBody(
       for (const label of cov.unopenedAgents) {
         coverageEntries.push({
           subject: label,
-          ...quotedAgentSubject(label),
+          publicSubject: publicAgentSubject(label),
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
@@ -1121,11 +1121,19 @@ function composeReviewBody(
     const shown = keptBudgetGaps.slice(0, MAX_BUDGET_GAP_LINES);
     const more = keptBudgetGaps.length - shown.length;
     const enList =
-      shown.map((it) => `${it.agent}: ${mdField(it.gap)}`).join('; ') +
-      (more > 0 ? `, and ${more} more` : '');
+      shown
+        .map(
+          (it) =>
+            `${publicAgentSubject(it.agent) ?? it.agent}: ${mdField(it.gap)}`,
+        )
+        .join('; ') + (more > 0 ? `, and ${more} more` : '');
     const zhList =
-      shown.map((it) => `${it.agent}：${mdField(it.gap)}`).join('；') +
-      (more > 0 ? `，另有 ${more} 条` : '');
+      shown
+        .map(
+          (it) =>
+            `${publicAgentSubject(it.agent) ?? it.agent}：${mdField(it.gap)}`,
+        )
+        .join('；') + (more > 0 ? `，另有 ${more} 条` : '');
     notReviewedParts.push({
       en: `Not explored to full depth (tool budget reached): ${enList}.`,
       zh: `未探索到全部深度（达到工具调用预算）：${zhList}。`,
@@ -1409,6 +1417,10 @@ function composeReviewBody(
       coverageEntries.some((e) => e.subject === 'coverage') ||
       (plannedChunks.length > 0 &&
         coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    const hasCoverageGaps =
+      unreviewed.length + coverageEntries.length > 0 ||
+      missingReceipts.length > 0 ||
+      uncoverable.length > 0;
     // Any opener starting with "Reviewed" reads as contradicting the
     // "Not reviewed:" clauses below it — announcing the gaps does not fix
     // it, as the first cut of this wording showed (#8811). When disclosures
@@ -1423,12 +1435,17 @@ function composeReviewBody(
           }
         : canCertify
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
-          : notReviewedParts.length > 0
+          : hasCoverageGaps
             ? {
-                en: 'Partially reviewed — gaps disclosed below.',
-                zh: '仅完成部分审查，未覆盖部分见下方披露。',
+                en: 'Partially reviewed — gaps disclosed.',
+                zh: '仅完成部分审查，审查缺口已披露。',
               }
-            : { en: 'Reviewed.', zh: '已审查。' },
+            : findingsUnverifiedAtCompose
+              ? {
+                  en: 'Review incomplete — unverified findings disclosed.',
+                  zh: '审查未完成——未验证的发现已披露。',
+                }
+              : { en: 'Reviewed.', zh: '已审查。' },
     );
   }
 
@@ -1508,8 +1525,8 @@ function composeReviewBody(
  * that failed. Quoted, it reads as a name. The INTERNAL subject stays the
  * unquoted label: the dedup and certification checks key on it.
  */
-function quotedAgentSubject(label: string): { publicSubject?: string } {
-  return /^chunk \d+$/.test(label) ? {} : { publicSubject: `"${label}"` };
+function publicAgentSubject(label: string): string | undefined {
+  return /^chunk \d+$/.test(label) ? undefined : mdField(`"${label}"`);
 }
 
 /**
