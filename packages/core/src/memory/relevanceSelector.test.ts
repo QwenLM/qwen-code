@@ -279,7 +279,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       filePath: `/tmp/bounded-${index}.md`,
       relativePath: `bounded-${index}.md`,
       filename: `bounded-${index}.md`,
-      description: '界'.repeat(500),
+      description: `${'界'.repeat(511)}😀${'x'.repeat(2_000)}`,
       mtimeMs: index,
     }));
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
@@ -305,6 +305,8 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     const text = content?.parts?.[0]?.text ?? '';
     const manifest = text.split('Available memories:\n')[1] ?? '';
     expect(manifest).toContain('/tmp/bounded-0.md');
+    expect(manifest).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(manifest).not.toContain('x');
     expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThanOrEqual(25_000);
   });
 
