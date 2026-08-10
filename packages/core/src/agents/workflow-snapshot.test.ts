@@ -1013,8 +1013,7 @@ describe('durable workflow manifests', () => {
       args: null,
       journal: checkpoint,
     });
-    const bytes = await fs.readFile(journal.path);
-    await fs.writeFile(journal.path, bytes.subarray(0, bytes.byteLength - 1));
+    await fs.truncate(journal.path, checkpoint.byteLength - 1);
 
     await expect(readWorkflowManifest(config, runId)).rejects.toThrow(
       /truncated/i,
