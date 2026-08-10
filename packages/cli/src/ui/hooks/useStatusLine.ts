@@ -6,6 +6,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
+import wrapAnsi from 'wrap-ansi';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -13,7 +14,6 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimModeState } from '../contexts/VimModeContext.js';
 import { useTerminalSize } from './useTerminalSize.js';
-import { getCachedStringWidth } from '../utils/textUtils.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -779,8 +779,10 @@ export function useStatusLine(
       keepAutomaticContextIndicator ||
         output.some(
           (line) =>
-            getCachedStringWidth(line) >
-            MAX_STATUS_LINES * Math.max(1, availableWidth ?? terminalWidth - 4),
+            wrapAnsi(line, Math.max(1, availableWidth ?? terminalWidth - 4), {
+              trim: false,
+              hard: true,
+            }).split('\n').length > MAX_STATUS_LINES,
         ),
     ),
   };

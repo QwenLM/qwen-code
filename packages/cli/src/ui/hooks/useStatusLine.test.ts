@@ -213,6 +213,7 @@ describe('useStatusLine', () => {
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
     mockConfig.getModelDisplayName.mockReturnValue('Test Model');
+    mockConfig.getTargetDir.mockReturnValue('/test/dir');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
     });
@@ -401,12 +402,23 @@ describe('useStatusLine', () => {
     });
 
     it('keeps an automatic indicator when the rendered footer column clips it', () => {
-      mockUIState.branchName = `feature/${'x'.repeat(145)}`;
+      mockConfig.getTargetDir.mockReturnValue(
+        '/home/runner/actions-runner-19/_work/qwen-code/qwen-code',
+      );
+      mockConfig.getModelDisplayName.mockReturnValue('Qwen3 Code Plus');
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning', 'current-dir', 'context-used'],
+      });
       const fullWidth = renderHook(() => useStatusLine());
       expect(fullWidth.result.current.hideContextIndicator).toBe(true);
       fullWidth.unmount();
 
-      const { result } = renderHook(() => useStatusLine(false, 99));
+      const { result } = renderHook(() => useStatusLine(false, 60));
 
       expect(result.current.hideContextIndicator).toBe(false);
     });
