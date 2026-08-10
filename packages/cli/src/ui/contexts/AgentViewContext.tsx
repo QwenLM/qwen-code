@@ -8,7 +8,7 @@
  * @fileoverview AgentViewContext — React context for in-process agent view switching.
  *
  * Tracks which view is active (main or an agent tab) and the set of registered
- * AgentInteractive instances. Consumed by AgentTabBar, AgentChatView, and
+ * AgentSession views. Consumed by AgentTabBar, AgentChatView, and
  * DefaultAppLayout to implement tab-based agent navigation.
  *
  * Kept separate from UIStateContext to avoid bloating the main state with
@@ -23,9 +23,13 @@ import {
   useState,
 } from 'react';
 import {
+  type AgentSession,
+  type AgentSessionView,
   type AgentInteractive,
-  type ApprovalMode,
+  type ApprovalDecision,
+  ApprovalMode,
   type Config,
+  InProcessSession,
 } from '@qwen-code/qwen-code-core';
 import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
 import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
@@ -33,7 +37,10 @@ import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
 // ─── Types ──────────────────────────────────────────────────
 
 export interface RegisteredAgent {
-  interactiveAgent: AgentInteractive;
+  session: AgentSession;
+  view: AgentSessionView;
+  answerApproval(decision: ApprovalDecision): Promise<void>;
+  dispose?: () => void;
   /** Model identifier shown in tabs and paths (e.g. "glm-5"). */
   modelId: string;
   /** Human-friendly model name (e.g. "GLM 5"). */
@@ -62,7 +69,16 @@ export interface AgentViewActions {
   switchToPrevious(): void;
   registerAgent(
     agentId: string,
-    interactiveAgent: AgentInteractive,
+    session: AgentSession,
+    view: AgentSessionView,
+    answerApproval: (decision: ApprovalDecision) => Promise<void>,
+    modelId: string,
+    color: string,
+    modelName?: string,
+  ): void;
+  registerAgent(
+    agentId: string,
+    interactive: AgentInteractive,
     modelId: string,
     color: string,
     modelName?: string,
@@ -170,23 +186,45 @@ export function AgentViewProvider({
   const registerAgent = useCallback(
     (
       agentId: string,
-      interactiveAgent: AgentInteractive,
-      modelId: string,
-      color: string,
+      sessionOrInteractive: AgentSession | AgentInteractive,
+      viewOrModelId: AgentSessionView | string,
+      answerOrColor: ((decision: ApprovalDecision) => Promise<void>) | string,
+      modelIdOrName?: string,
+      color?: string,
       modelName?: string,
     ) => {
+      const legacy = typeof viewOrModelId === 'string';
+      const adapter = legacy
+        ? new InProcessSession(
+            agentId,
+            'arena',
+            sessionOrInteractive as AgentInteractive,
+          )
+        : undefined;
+      const session = adapter ?? (sessionOrInteractive as AgentSession);
+      const view = adapter ?? (viewOrModelId as AgentSessionView);
+      const answerApproval = adapter
+        ? (decision: ApprovalDecision) => adapter.answer(decision)
+        : (answerOrColor as (decision: ApprovalDecision) => Promise<void>);
+      const resolvedModelId = legacy ? viewOrModelId : modelIdOrName!;
+      const resolvedColor = legacy ? (answerOrColor as string) : color!;
+      const resolvedModelName = legacy ? modelIdOrName : modelName;
       setAgents((prev) => {
         const next = new Map(prev);
+        next.get(agentId)?.dispose?.();
         next.set(agentId, {
-          interactiveAgent,
-          modelId,
-          color,
-          modelName,
+          session,
+          view,
+          answerApproval,
+          modelId: resolvedModelId,
+          color: resolvedColor,
+          modelName: resolvedModelName,
+          dispose: adapter ? () => adapter.dispose() : undefined,
         });
         return next;
       });
       // Seed approval mode from the agent's own config
-      const mode = interactiveAgent.getCore().runtimeContext.getApprovalMode();
+      const mode = view.getApprovalMode?.() ?? ApprovalMode.DEFAULT;
       setAgentApprovalModes((prev) => {
         const next = new Map(prev);
         next.set(agentId, mode);
@@ -200,6 +238,7 @@ export function AgentViewProvider({
     setAgents((prev) => {
       if (!prev.has(agentId)) return prev;
       const next = new Map(prev);
+      next.get(agentId)?.dispose?.();
       next.delete(agentId);
       return next;
     });
@@ -213,7 +252,10 @@ export function AgentViewProvider({
   }, []);
 
   const unregisterAll = useCallback(() => {
-    setAgents(new Map());
+    setAgents((prev) => {
+      for (const agent of prev.values()) agent.dispose?.();
+      return new Map();
+    });
     setAgentApprovalModes(new Map());
     setActiveView('main');
     setAgentTabBarFocused(false);
@@ -223,9 +265,7 @@ export function AgentViewProvider({
     (agentId: string, mode: ApprovalMode) => {
       // Update the agent's runtime config so tool scheduling picks it up
       const agent = agents.get(agentId);
-      if (agent) {
-        agent.interactiveAgent.getCore().runtimeContext.setApprovalMode(mode);
-      }
+      agent?.view.setApprovalMode?.(mode);
       // Update UI state
       setAgentApprovalModes((prev) => {
         const next = new Map(prev);

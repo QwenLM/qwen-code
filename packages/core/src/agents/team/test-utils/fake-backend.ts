@@ -22,13 +22,20 @@ import {
 import { isTerminalStatus } from '../../runtime/agent-types.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { FakeAgent, type FakeAgentScript } from './fake-agent.js';
+import type {
+  AgentRuntime,
+  AgentSessionDescriptor,
+  AgentSpec,
+} from '../../fleet/runtime.js';
+import type { ApprovalDecision } from '../../fleet/session.js';
 
 /**
  * FakeBackend — Backend implementation that creates FakeAgent
  * instances for deterministic testing of multi-agent coordination.
  */
-export class FakeBackend implements Backend {
+export class FakeBackend implements Backend, AgentRuntime {
   readonly type = DISPLAY_MODE.IN_PROCESS;
+  readonly kind = 'in-process' as const;
 
   private readonly agents = new Map<string, FakeAgent>();
   private readonly scripts = new Map<string, FakeAgentScript>();
@@ -74,6 +81,64 @@ export class FakeBackend implements Backend {
             : null;
       this.exitCallback?.(config.agentId, exitCode, null);
     });
+  }
+
+  async start(spec: AgentSpec): Promise<FakeAgent> {
+    await this.spawnAgent({
+      agentId: spec.agentId,
+      command: '',
+      args: [],
+      cwd: spec.cwd,
+      inProcess: {
+        agentName: spec.name,
+        initialTask: spec.initialTask,
+        runtimeConfig: {
+          promptConfig: { systemPrompt: spec.systemPrompt },
+          modelConfig: spec.modelConfig ?? {},
+          runConfig: spec.runConfig ?? {},
+          toolConfig: spec.toolConfig,
+        },
+        approvalMode: spec.approvalMode,
+        teammateIdentity: spec.identity,
+      },
+    });
+    return this.agents.get(spec.agentId)!;
+  }
+
+  async reattach(agentId: string): Promise<FakeAgent | undefined> {
+    return this.agents.get(agentId);
+  }
+
+  async list(teamId?: string): Promise<AgentSessionDescriptor[]> {
+    return [...this.agents.values()]
+      .filter((agent) => teamId === undefined || agent.teamId === teamId)
+      .map((agent) => ({
+        agentId: agent.agentId,
+        teamId: agent.teamId,
+        name: agent.agentName,
+        status: agent.getStatus(),
+        processState: isTerminalStatus(agent.getStatus()) ? 'exited' : 'alive',
+        cwd: '',
+        lastActivityAt: new Date().toISOString(),
+      }));
+  }
+
+  async stop(agentId: string): Promise<void> {
+    this.stopAgent(agentId);
+  }
+
+  async kill(agentId: string): Promise<void> {
+    this.stopAgent(agentId);
+  }
+
+  async answer(agentId: string, _decision: ApprovalDecision): Promise<void> {
+    if (!this.agents.has(agentId)) {
+      throw new Error(`Agent "${agentId}" does not exist.`);
+    }
+  }
+
+  async dispose(): Promise<void> {
+    await this.cleanup();
   }
 
   stopAgent(agentId: string): void {

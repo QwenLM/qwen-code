@@ -24,7 +24,7 @@
 
 import { Box, Text } from 'ink';
 import { useState, useEffect, useCallback } from 'react';
-import { AgentStatus, AgentEventType } from '@qwen-code/qwen-code-core';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -45,7 +45,7 @@ function statusIndicator(agent: RegisteredAgent): {
   symbol: string;
   color: string;
 } {
-  const status = agent.interactiveAgent.getStatus();
+  const status = agent.view.getStatus();
   switch (status) {
     case AgentStatus.RUNNING:
     case AgentStatus.INITIALIZING:
@@ -129,13 +129,7 @@ export const AgentTabBar: React.FC = () => {
   useEffect(() => {
     const cleanups: Array<() => void> = [];
     for (const [, agent] of agents) {
-      const emitter = agent.interactiveAgent.getEventEmitter();
-      if (emitter) {
-        emitter.on(AgentEventType.STATUS_CHANGE, forceRender);
-        cleanups.push(() =>
-          emitter.off(AgentEventType.STATUS_CHANGE, forceRender),
-        );
-      }
+      cleanups.push(agent.view.onChange(forceRender));
     }
     return () => cleanups.forEach((fn) => fn());
   }, [agents, forceRender]);

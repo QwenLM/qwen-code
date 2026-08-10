@@ -10,18 +10,16 @@
  *
  * Subscribes to `config.onTeamManagerChange()` to react immediately when
  * the team manager is set or cleared. When a teammate joins, the
- * InProcessBackend is queried for the AgentInteractive handle which is
- * then registered in AgentViewContext so it appears as a tab.
+ * The manager's sessions are registered in AgentViewContext as tabs.
  *
  * Follows the useArenaInProcess pattern exactly.
  */
 
 import { useEffect, useRef } from 'react';
 import {
-  DISPLAY_MODE,
   TeamEventType,
   type Config,
-  type InProcessBackend,
+  type AgentSessionView,
   type TeamManager,
   type TeammateJoinedEvent,
   type TeammateExitedEvent,
@@ -74,9 +72,7 @@ export function useTeamInProcess(
       detachTeamListeners = null;
     };
 
-    /** Attach to a team manager's event emitter. The backend is resolved
-     *  lazily — we only need it when registering agents, not at subscribe
-     *  time. */
+    /** Attach to a team manager's event emitter. */
     const attachSession = (manager: TeamManager) => {
       const emitter = manager.getEventEmitter();
       let colorIndex = 0;
@@ -84,36 +80,26 @@ export function useTeamInProcess(
       const nextColor = () =>
         TEAMMATE_COLORS[colorIndex++ % TEAMMATE_COLORS.length]!;
 
-      /** Resolve the InProcessBackend, or null if not applicable. */
-      const getInProcessBackend = (): InProcessBackend | null => {
-        const backend = manager.getBackend();
-        if (!backend || backend.type !== DISPLAY_MODE.IN_PROCESS) {
-          return null;
-        }
-        return backend as InProcessBackend;
-      };
-
       // Register teammates that already joined (events may have fired
       // before the callback was attached).
       const teamFile = manager.getTeamFile();
-      const inProcessBackend = getInProcessBackend();
-      if (inProcessBackend) {
-        for (const member of teamFile.members) {
-          const interactive = inProcessBackend.getAgent(member.agentId);
-          if (interactive) {
-            // Tab label is the teammate's name, not its model: teammates
-            // usually inherit the leader's model, so a model label would be
-            // empty (→ 'teammate') or identical across the whole team, making
-            // tabs indistinguishable. The name is the teammate's identity.
-            actionsRef.current.registerAgent(
-              member.agentId,
-              interactive,
-              member.name,
-              member.color ?? nextColor(),
-              member.name,
-            );
-            ownedAgentIds.add(member.agentId);
-          }
+      for (const member of teamFile.members) {
+        const session = manager.getSession(member.agentId);
+        if (session) {
+          // Tab label is the teammate's name, not its model: teammates
+          // usually inherit the leader's model, so a model label would be
+          // empty (→ 'teammate') or identical across the whole team, making
+          // tabs indistinguishable. The name is the teammate's identity.
+          actionsRef.current.registerAgent(
+            member.agentId,
+            session,
+            session as typeof session & AgentSessionView,
+            (decision) => manager.getRuntime().answer(member.agentId, decision),
+            member.name,
+            member.color ?? nextColor(),
+            member.name,
+          );
+          ownedAgentIds.add(member.agentId);
         }
       }
 
@@ -124,15 +110,15 @@ export function useTeamInProcess(
 
       const onTeammateJoined = (event: TeammateJoinedEvent) => {
         const tryRegister = (retriesLeft: number) => {
-          const backend = getInProcessBackend();
-          if (!backend) return;
-
-          const interactive = backend.getAgent(event.agentId);
-          if (interactive) {
+          const session = manager.getSession(event.agentId);
+          if (session) {
             // Label the tab by teammate name (see discovery path above).
             actionsRef.current.registerAgent(
               event.agentId,
-              interactive,
+              session,
+              session as typeof session & AgentSessionView,
+              (decision) =>
+                manager.getRuntime().answer(event.agentId, decision),
               event.name,
               event.color ?? nextColor(),
               event.name,

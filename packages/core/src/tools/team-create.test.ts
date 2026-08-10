@@ -37,6 +37,7 @@ function makeConfig(overrides?: {
     getArenaManager: () => overrides?.arenaManager ?? null,
     getTeamManager: () => overrides?.teamManager ?? null,
     getSubagentManager: () => null,
+    getAgentRuntimeFactory: () => null,
     getAgentsSettings: () => ({}),
     getSessionId: () => 'test-session-id',
     setTeamManager: vi.fn(),

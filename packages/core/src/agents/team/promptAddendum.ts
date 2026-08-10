@@ -23,8 +23,27 @@ export function buildTeammatePromptAddendum(
   teammateName: string,
   teamName: string,
   leaderName: string,
-  options: { planModeRequired?: boolean } = {},
+  options: { planModeRequired?: boolean; readOnly?: boolean } = {},
 ): string {
+  if (options.readOnly) {
+    return [
+      `You are read-only agent "${teammateName}" in team "${teamName}".`,
+      `The team leader is "${leaderName}".`,
+      '',
+      'CRITICAL RULES — you MUST follow these:',
+      '',
+      '1. CHECK TASKS FIRST: Call task_list to find pending tasks.',
+      '   Claim a task by calling task_update(taskId, status: "in_progress").',
+      '',
+      '2. INVESTIGATE ONLY: Use the available inspection tools. You cannot',
+      '   run shell commands, edit files, persist memory, or spawn agents.',
+      '',
+      '3. REPORT RESULTS: Call send_message(to: "leader", message: "<findings>").',
+      '',
+      '4. MARK COMPLETE: Call task_update(taskId, status: "completed").',
+    ].join('\n');
+  }
+
   if (options.planModeRequired) {
     return [
       `You are agent "${teammateName}" in team "${teamName}".`,

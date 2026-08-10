@@ -6,6 +6,7 @@
 
 import type { FunctionCall } from '@google/genai';
 import type {
+  ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolConfirmationPayload,
 } from '../tools/tools.js';
@@ -55,42 +56,11 @@ export interface ToolConfirmationResponse {
  * Data-only versions of ToolCallConfirmationDetails for bus transmission.
  */
 export type SerializableConfirmationDetails =
-  | {
-      type: 'info';
-      title: string;
-      prompt: string;
-      urls?: string[];
-    }
-  | {
-      type: 'edit';
-      title: string;
-      fileName: string;
-      filePath: string;
-      fileDiff: string;
-      originalContent: string | null;
-      newContent: string;
-      isModifying?: boolean;
-    }
-  | {
-      type: 'exec';
-      title: string;
-      command: string;
-      rootCommand: string;
-      rootCommands: string[];
-      commands?: string[];
-    }
-  | {
-      type: 'mcp';
-      title: string;
-      serverName: string;
-      toolName: string;
-      toolDisplayName: string;
-    }
-  | {
-      type: 'exit_plan_mode';
-      title: string;
-      planPath: string;
-    };
+  ToolCallConfirmationDetails extends infer Details
+    ? Details extends unknown
+      ? Omit<Details, 'onConfirm'>
+      : never
+    : never;
 
 export interface ToolExecutionSuccess<T = unknown> {
   type: MessageBusType.TOOL_EXECUTION_SUCCESS;

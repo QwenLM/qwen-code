@@ -8,6 +8,16 @@ import { describe, expect, it } from 'vitest';
 import { buildTeammatePromptAddendum } from './promptAddendum.js';
 
 describe('buildTeammatePromptAddendum', () => {
+  it('describes enforced read-only teammates', () => {
+    const prompt = buildTeammatePromptAddendum('reader', 'team', 'leader', {
+      readOnly: true,
+    });
+
+    expect(prompt).toContain('read-only agent');
+    expect(prompt).toContain('cannot');
+    expect(prompt).toContain('send_message');
+  });
+
   it('uses ordinary teammate reporting instructions by default', () => {
     const prompt = buildTeammatePromptAddendum('worker', 'team', 'leader');
 

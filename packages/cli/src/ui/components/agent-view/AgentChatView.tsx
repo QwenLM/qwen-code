@@ -21,17 +21,14 @@ export const AgentChatView = ({ agentId }: AgentChatViewProps) => {
   const { agents } = useAgentViewState();
   const agent = agents.get(agentId);
 
-  const interactiveAgent = agent?.interactiveAgent;
-  const core = interactiveAgent?.getCore();
-
-  if (!agent || !interactiveAgent || !core) {
+  if (!agent) {
     return <AgentChatMissing label={`Agent "${agentId}" not found.`} />;
   }
 
   return (
     <AgentChatContent
-      core={core}
-      interactiveAgent={interactiveAgent}
+      view={agent.view}
+      answerApproval={agent.answerApproval}
       instanceKey={agentId}
       modelName={agent.modelName}
     />

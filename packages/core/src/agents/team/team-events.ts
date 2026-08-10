@@ -12,7 +12,7 @@
  */
 
 import { EventEmitter } from 'events';
-import type { AgentApprovalRequestEvent } from '../runtime/agent-events.js';
+import type { SerializableConfirmationDetails } from '../../confirmation-bus/types.js';
 import type { AgentStatus } from '../runtime/agent-types.js';
 import type {
   ToolConfirmationOutcome,
@@ -102,7 +102,7 @@ export interface TeammateApprovalRequestEvent {
   /** Tool input parameters (for display). */
   toolInput: Record<string, unknown>;
   /** Renderable confirmation details without the runtime-owned callback. */
-  confirmationDetails?: AgentApprovalRequestEvent['confirmationDetails'];
+  confirmationDetails?: SerializableConfirmationDetails;
   /** Callback to resolve the approval. */
   respond: (
     outcome: ToolConfirmationOutcome,

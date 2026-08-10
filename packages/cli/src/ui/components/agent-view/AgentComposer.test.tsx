@@ -54,12 +54,15 @@ describe('AgentComposer', () => {
           {
             modelId: 'qwen',
             color: 'cyan',
-            interactiveAgent: {
-              cancelCurrentRound: vi.fn(),
-              enqueueMessage: vi.fn(),
+            session: {
+              cancelTurn: vi.fn(),
+              send: vi.fn(),
               getError: vi.fn(),
+            },
+            view: {
               getLastRoundError: vi.fn(),
             },
+            answerApproval: vi.fn(),
           },
         ],
       ]),

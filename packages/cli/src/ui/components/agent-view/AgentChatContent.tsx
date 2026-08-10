@@ -5,8 +5,8 @@
  */
 
 /**
- * Presentational transcript renderer for a single AgentCore. Subscribes
- * to the core's event emitter internally and force-renders on updates,
+ * Presentational transcript renderer for an AgentSessionView. Subscribes
+ * to the view internally and force-renders on updates,
  * so consumers only pass state props and don't wire their own listeners.
  */
 
@@ -14,11 +14,10 @@ import { Box, Text, Static } from 'ink';
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   AgentStatus,
-  AgentEventType,
   getGitBranch,
-  type AgentCore,
-  type AgentInteractive,
-  type AgentStatusChangeEvent,
+  type AgentSessionView,
+  type ApprovalDecision,
+  type ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -33,17 +32,8 @@ import { AgentHeader } from './AgentHeader.js';
 import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
 
 export interface AgentChatContentProps {
-  /** The agent's AgentCore — the source of truth for transcript state. */
-  core: AgentCore;
-  /**
-   * The InteractiveAgent wrapper, if any. Present for live arena tabs;
-   * omit for read-only transcript surfaces. When provided, drives the
-   * spinner and the embedded-shell affordance — all reads happen inside
-   * this component, which re-renders on the relevant events, so state
-   * stays fresh without plumbing props from an ancestor that doesn't
-   * subscribe.
-   */
-  interactiveAgent?: AgentInteractive | null;
+  view: AgentSessionView;
+  answerApproval(decision: ApprovalDecision): Promise<void>;
   /** Stable identifier used for memo keys and the Static remount key. */
   instanceKey: string;
   /** Optional display name shown in the header. */
@@ -51,12 +41,11 @@ export interface AgentChatContentProps {
 }
 
 export const AgentChatContent = ({
-  core,
-  interactiveAgent,
+  view,
+  answerApproval,
   instanceKey,
   modelName,
 }: AgentChatContentProps) => {
-  const readonly = !interactiveAgent;
   const uiState = useUIState();
   const { historyRemountKey, availableTerminalHeight, constrainHeight } =
     uiState;
@@ -73,46 +62,29 @@ export const AgentChatContent = ({
     setRenderTick(tickRef.current);
   }, []);
 
-  useEffect(() => {
-    const emitter = core.getEventEmitter();
+  useEffect(() => view.onChange(forceRender), [view, forceRender]);
 
-    const onStatusChange = (_event: AgentStatusChangeEvent) => forceRender();
-    const onToolCall = () => forceRender();
-    const onToolResult = () => forceRender();
-    const onRoundEnd = () => forceRender();
-    const onApproval = () => forceRender();
-    const onOutputUpdate = () => forceRender();
-    const onFinish = () => forceRender();
-
-    emitter.on(AgentEventType.STATUS_CHANGE, onStatusChange);
-    emitter.on(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
-    emitter.on(AgentEventType.ROUND_END, onRoundEnd);
-    emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-    emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onOutputUpdate);
-    emitter.on(AgentEventType.FINISH, onFinish);
-
-    return () => {
-      emitter.off(AgentEventType.STATUS_CHANGE, onStatusChange);
-      emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-      emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
-      emitter.off(AgentEventType.ROUND_END, onRoundEnd);
-      emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
-      emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onOutputUpdate);
-      emitter.off(AgentEventType.FINISH, onFinish);
-    };
-  }, [core, forceRender]);
-
-  const messages = core.getMessages();
-  const pendingApprovals = core.getPendingApprovals();
-  const liveOutputs = core.getLiveOutputs();
-  const shellPids = core.getShellPids();
+  const messages = view.getMessages();
+  const pendingApprovals = new Map(
+    [...view.getPendingApprovals()].map(([callId, details]) => [
+      callId,
+      {
+        ...details,
+        onConfirm: async (
+          outcome: Parameters<ToolCallConfirmationDetails['onConfirm']>[0],
+          payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
+        ) => answerApproval({ callId, outcome, payload }),
+      } as ToolCallConfirmationDetails,
+    ]),
+  );
+  const liveOutputs = view.getLiveOutputs();
+  const shellPids = view.getShellPids();
 
   // Read status/PTY/timing state fresh on every render — this component
   // re-renders on STATUS_CHANGE/TOOL_CALL/TOOL_OUTPUT_UPDATE so the reads
   // stay current without prop plumbing from a non-subscribed ancestor.
-  const status = interactiveAgent?.getStatus() ?? AgentStatus.COMPLETED;
-  const executionStartTimes = interactiveAgent?.getExecutionStartTimes();
+  const status = view.getStatus();
+  const executionStartTimes = view.getExecutionStartTimes();
   const activePtyId =
     shellPids.size > 0
       ? ((shellPids.values().next().value as number | undefined) ?? null)
@@ -128,13 +100,12 @@ export const AgentChatContent = ({
   const { setAgentShellFocused } = useAgentViewActions();
 
   useEffect(() => {
-    if (readonly) return;
     setAgentShellFocused(embeddedShellFocused);
     // Intentionally not resetting on unmount: calling setState on a parent
     // context provider during effect cleanup triggers React error #185
     // ("Cannot update a component while rendering a different component")
     // when both child and provider unmount in the same commit phase.
-  }, [embeddedShellFocused, readonly, setAgentShellFocused]);
+  }, [embeddedShellFocused, setAgentShellFocused]);
 
   useEffect(() => {
     if (!activePtyId) setEmbeddedShellFocused(false);
@@ -142,14 +113,13 @@ export const AgentChatContent = ({
 
   useKeypress(
     (key) => {
-      if (readonly) return;
       if (key.ctrl && key.name === 'f') {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
       }
     },
-    { isActive: !readonly },
+    { isActive: true },
   );
 
   // tickRef.current in deps ensures we rebuild when events fire even if
@@ -204,7 +174,7 @@ export const AgentChatContent = ({
     [allItems],
   );
 
-  const agentWorkingDir = core.runtimeContext.getTargetDir() ?? '';
+  const agentWorkingDir = view.workingDir;
   // Cache the branch — it won't change during the agent's lifetime and
   // getGitBranch uses synchronous execSync which blocks the render loop.
   const agentGitBranch = useMemo(
@@ -213,7 +183,7 @@ export const AgentChatContent = ({
     [instanceKey],
   );
 
-  const agentModelId = core.modelConfig.model ?? '';
+  const agentModelId = view.modelId;
 
   return (
     <Box flexDirection="column">
@@ -258,7 +228,7 @@ export const AgentChatContent = ({
           availableTerminalHeight={
             constrainHeight ? availableTerminalHeight : undefined
           }
-          isFocused={!readonly}
+          isFocused={true}
           activeShellPtyId={activePtyId}
           embeddedShellFocused={embeddedShellFocused}
         />

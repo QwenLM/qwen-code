@@ -17,6 +17,12 @@ import {
   AgentEventEmitter,
   AgentEventType,
 } from '../../runtime/agent-events.js';
+import { EventEmitter } from 'node:events';
+import type {
+  AgentSession,
+  AgentSessionEvents,
+  TurnId,
+} from '../../fleet/session.js';
 import { AgentStatus, isTerminalStatus } from '../../runtime/agent-types.js';
 import type { AgentStatsSummary } from '../../runtime/agent-statistics.js';
 
@@ -50,12 +56,15 @@ export interface FakeAgentScript {
  * enqueueMessage(), waitForCompletion(), abort(), shutdown(),
  * cancelCurrentRound().
  */
-export class FakeAgent {
+export class FakeAgent implements AgentSession {
+  readonly kind = 'in-process' as const;
   readonly agentId: string;
   readonly agentName: string;
+  readonly teamId: string;
 
   private status: AgentStatus = AgentStatus.INITIALIZING;
   private readonly emitter = new AgentEventEmitter();
+  private readonly sessionEmitter = new EventEmitter();
   private readonly receivedMessages: string[] = [];
   private readonly pendingQueue: string[] = [];
   private processing = false;
@@ -63,6 +72,8 @@ export class FakeAgent {
   private script: FakeAgentScript;
   private error: string | undefined;
   private lastRoundError: string | undefined;
+  private turnSequence = 0;
+  private activeTurnId: TurnId | undefined;
 
   /** Resolvers waiting for a specific message count. */
   private messageWaiters: Array<{
@@ -87,6 +98,7 @@ export class FakeAgent {
   ) {
     this.agentId = agentId;
     this.agentName = agentName;
+    this.teamId = agentId.split('@')[1] ?? '';
     this.script = script;
 
     this.completionPromise = new Promise<void>((resolve) => {
@@ -120,6 +132,14 @@ export class FakeAgent {
 
   getEventEmitter(): AgentEventEmitter {
     return this.emitter;
+  }
+
+  on<E extends keyof AgentSessionEvents>(
+    event: E,
+    handler: (payload: AgentSessionEvents[E]) => void,
+  ): () => void {
+    this.sessionEmitter.on(event, handler);
+    return () => this.sessionEmitter.off(event, handler);
   }
 
   getError(): string | undefined {
@@ -160,6 +180,13 @@ export class FakeAgent {
     if (!this.processing) {
       this.processNext();
     }
+  }
+
+  async send(message: string): Promise<TurnId> {
+    const turnId = `fake-turn-${++this.turnSequence}`;
+    this.activeTurnId = turnId;
+    this.enqueueMessage(message);
+    return turnId;
   }
 
   private processNext(): void {
@@ -232,6 +259,10 @@ export class FakeAgent {
     }
   }
 
+  cancelTurn(): void {
+    this.cancelCurrentRound();
+  }
+
   // ─── Test control ───────────────────────────────────────────
 
   /** Manually transition to a status (emits STATUS_CHANGE). */
@@ -247,6 +278,23 @@ export class FakeAgent {
       newStatus,
       timestamp: Date.now(),
     });
+    this.sessionEmitter.emit('status', {
+      previous: previousStatus,
+      next: newStatus,
+      turnId: this.activeTurnId,
+    } satisfies AgentSessionEvents['status']);
+
+    if (isTerminalStatus(newStatus)) {
+      this.sessionEmitter.emit('exited', {
+        code:
+          newStatus === AgentStatus.COMPLETED
+            ? 0
+            : newStatus === AgentStatus.FAILED
+              ? 1
+              : null,
+        reason: newStatus,
+      } satisfies AgentSessionEvents['exited']);
+    }
 
     this.flushStatusWaiters();
 

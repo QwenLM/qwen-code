@@ -21,13 +21,10 @@ import type {
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { AgentStatus } from './agent-types.js';
+import type { TurnId } from '../fleet/session.js';
+import type { SerializableConfirmationDetails } from '../../confirmation-bus/types.js';
 
-type WithoutConfirmationCallback<T> = T extends unknown
-  ? Omit<T, 'onConfirm'>
-  : never;
-
-export type AgentConfirmationDetails =
-  WithoutConfirmationCallback<ToolCallConfirmationDetails>;
+export type AgentConfirmationDetails = SerializableConfirmationDetails;
 
 // ─── Event Types ────────────────────────────────────────────
 
@@ -44,6 +41,7 @@ export type AgentEvent =
   | 'tool_waiting_approval'
   | 'usage_metadata'
   | 'external_message'
+  | 'turn_text'
   | 'finish'
   | 'error'
   | 'status_change';
@@ -63,6 +61,7 @@ export enum AgentEventType {
   USAGE_METADATA = 'usage_metadata',
   /** External user message injected mid-run (e.g. via send_message). */
   EXTERNAL_MESSAGE = 'external_message',
+  TURN_TEXT = 'turn_text',
   FINISH = 'finish',
   ERROR = 'error',
   STATUS_CHANGE = 'status_change',
@@ -199,6 +198,13 @@ export interface AgentExternalMessageEvent {
   timestamp: number;
 }
 
+export interface AgentTurnTextEvent {
+  subagentId: string;
+  turnId: TurnId;
+  text: string;
+  timestamp: number;
+}
+
 export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
@@ -223,6 +229,7 @@ export interface AgentStatusChangeEvent {
   agentId: string;
   previousStatus: AgentStatus;
   newStatus: AgentStatus;
+  turnId?: TurnId;
   /** True when the transition to IDLE was caused by user cancelling the round. */
   roundCancelledByUser?: boolean;
   timestamp: number;
@@ -246,6 +253,7 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;
+  [AgentEventType.TURN_TEXT]: AgentTurnTextEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;

@@ -32,7 +32,7 @@ import { TaskListTool } from './task-list.js';
 import type { Config } from '../config/config.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
 import type { TeamContext } from '../agents/team/types.js';
-import type { FakeBackend } from '../agents/team/test-utils/fake-backend.js';
+import { FakeBackend } from '../agents/team/test-utils/fake-backend.js';
 import type { FakeAgent } from '../agents/team/test-utils/fake-agent.js';
 import { formatAgentId } from '../agents/team/teamHelpers.js';
 
@@ -54,26 +54,8 @@ vi.mock('../config/storage.js', () => {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 
-// ─── Mock InProcessBackend → FakeBackend ───────────────────
-
-// Capture the backend created by TeamCreateTool so we can
-// script FakeAgents on it.
+// Capture the runtime created by TeamCreateTool so we can script FakeAgents.
 let capturedBackend: FakeBackend | null = null;
-
-vi.mock('../agents/backends/InProcessBackend.js', async () => {
-  const { FakeBackend: FB } = await import(
-    '../agents/team/test-utils/fake-backend.js'
-  );
-  return {
-    InProcessBackend: class MockInProcessBackend extends FB {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      constructor(_config: any) {
-        super();
-        capturedBackend = this as unknown as FakeBackend;
-      }
-    },
-  };
-});
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -90,6 +72,11 @@ function makeConfig(): Config {
     getArenaManager: () => null,
     getTeamManager: () => teamManager,
     getSubagentManager: () => null,
+    getAgentRuntimeFactory: () => () => {
+      const runtime = new FakeBackend();
+      capturedBackend = runtime;
+      return runtime;
+    },
     getAgentsSettings: () => ({}),
     getSessionId: () => 'test-session-id',
     setTeamManager: vi.fn((m: TeamManager | null) => {

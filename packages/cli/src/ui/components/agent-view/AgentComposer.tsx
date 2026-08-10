@@ -64,7 +64,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     setAgentApprovalMode,
   } = useAgentViewActions();
   const agent = agents.get(agentId);
-  const interactiveAgent = agent?.interactiveAgent;
+  const session = agent?.session;
+  const view = agent?.view;
 
   const config = useConfig();
   const preferredEditor = usePreferredEditor();
@@ -78,7 +79,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     isInputActive,
     elapsedTime,
     lastPromptTokenCount,
-  } = useAgentStreamingState(interactiveAgent);
+  } = useAgentStreamingState(view);
 
   // ── Escape to cancel the active agent round ──
 
@@ -88,7 +89,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         key.name === 'escape' &&
         streamingState === StreamingState.Responding
       ) {
-        interactiveAgent?.cancelCurrentRound();
+        session?.cancelTurn();
       }
     },
     {
@@ -201,21 +202,21 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     ) {
       const combined = messageQueue.join('\n');
       setMessageQueue([]);
-      interactiveAgent?.enqueueMessage(combined);
+      void session?.send(combined);
     }
-  }, [streamingState, messageQueue, interactiveAgent, status]);
+  }, [streamingState, messageQueue, session, status]);
 
   const handleSubmit = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || !interactiveAgent) return;
+      if (!trimmed || !session) return;
       if (streamingState === StreamingState.Idle) {
-        interactiveAgent.enqueueMessage(trimmed);
+        void session.send(trimmed);
       } else {
         setMessageQueue((prev) => [...prev, trimmed]);
       }
     },
-    [interactiveAgent, streamingState],
+    [session, streamingState],
   );
 
   // ── Render ──
@@ -228,9 +229,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         return {
           text: t('Failed: {{error}}', {
             error:
-              interactiveAgent?.getError() ??
-              interactiveAgent?.getLastRoundError() ??
-              'unknown',
+              session?.getError() ?? view?.getLastRoundError?.() ?? 'unknown',
           }),
           color: theme.status.error,
         };
@@ -239,7 +238,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       default:
         return null;
     }
-  }, [status, interactiveAgent]);
+  }, [status, session, view]);
 
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 

@@ -1333,6 +1333,44 @@ describe('AgentTool', () => {
         }),
       ).toBeNull();
     });
+
+    it('accepts read_only for a named teammate in an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'reader',
+          read_only: true,
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects read_only without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          read_only: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects read_only with plan_mode_required', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'reader',
+          read_only: true,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/cannot be used together/i);
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -1491,6 +1529,30 @@ describe('AgentTool', () => {
         expect.objectContaining({
           name: 'planner',
           planModeRequired: true,
+        }),
+      );
+    });
+
+    it('passes read_only through to TeamManager for named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Inspect implementation',
+        prompt: 'Inspect the coordination boundary',
+        subagent_type: 'file-search',
+        name: 'reader',
+        read_only: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'reader',
+          readOnly: true,
         }),
       );
     });

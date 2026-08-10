@@ -23,7 +23,7 @@ import {
 import { resetTaskList } from '../agents/team/tasks.js';
 import { clearAllInboxes } from '../agents/team/mailbox.js';
 import { TeamManager } from '../agents/team/TeamManager.js';
-import { InProcessBackend } from '../agents/backends/InProcessBackend.js';
+import { InProcessRuntime } from '../agents/runtime/inproc/in-process-runtime.js';
 import { isNodeError } from '../utils/errors.js';
 import type { TeamFile, TeamContext } from '../agents/team/types.js';
 import { LEADER_NAME, MAX_TEAMMATES } from '../agents/team/types.js';
@@ -134,11 +134,11 @@ class TeamCreateInvocation extends BaseToolInvocation<
     await resetTaskList(teamName);
     await clearAllInboxes(teamName);
 
-    // Create backend and manager.
-    const backend = new InProcessBackend(this.config);
-    await backend.init();
+    const runtime =
+      this.config.getAgentRuntimeFactory()?.() ??
+      new InProcessRuntime(this.config);
     const manager = new TeamManager(
-      backend,
+      runtime,
       teamFile,
       this.config.getSubagentManager(),
       {

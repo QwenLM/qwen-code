@@ -23,6 +23,7 @@ import type {
 import type { AgentEventEmitter } from '../runtime/agent-events.js';
 import type { ApprovalMode } from '../../config/config.js';
 import type { TeammateIdentity } from '../team/types.js';
+import type { AgentSession } from '../fleet/session.js';
 
 /**
  * Canonical display mode values shared across core and CLI.
@@ -124,14 +125,11 @@ export type AgentExitCallback = (
   signal: number | null,
 ) => void;
 
-/**
- * Minimal handle a backend can return for an in-process agent.
- *
- * Both `AgentInteractive` (real) and `FakeAgent` (tests) satisfy this
- * shape. PTY-based backends (tmux, iTerm2) don't expose an agent handle
- * because the agent runs in a subprocess.
- */
-export interface TeamAgentHandle {
+/** Compatibility alias kept until legacy backends are removed. */
+export type TeamAgentHandle = AgentSession;
+
+/** Minimal handle exposed by the legacy in-process Arena backend. */
+interface BackendAgentHandle {
   getStatus(): AgentStatus;
   getEventEmitter(): AgentEventEmitter | undefined;
   enqueueMessage(msg: string): void;
@@ -183,7 +181,7 @@ export interface Backend {
    * agents in the current process. PTY-based backends do not expose
    * a handle and may omit this method.
    */
-  getAgent?(agentId: string): TeamAgentHandle | undefined;
+  getAgent?(agentId: string): BackendAgentHandle | undefined;
 
   /**
    * Stop all running agents.

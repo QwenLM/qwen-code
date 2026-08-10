@@ -241,6 +241,8 @@ export interface AgentParams {
   name?: string;
   /** Start a named teammate in plan mode and require leader approval. */
   plan_mode_required?: boolean;
+  /** Restrict a named teammate to inspection and team coordination tools. */
+  read_only?: boolean;
   /**
    * When set to `'worktree'`, spins up a temporary git worktree under
    * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
@@ -407,6 +409,14 @@ const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
     'When true, the named teammate starts in plan mode and must call ' +
     'exit_plan_mode to request leader approval before executing. Only valid ' +
     'with a named teammate in an active team.',
+};
+
+const TEAM_AGENT_READ_ONLY_PROPERTY = {
+  type: 'boolean',
+  description:
+    'When true, the named teammate can only inspect the checkout and use ' +
+    'team coordination tools. Shell, file writes, memory, and nested agents ' +
+    'are blocked by an execution allowlist.',
 };
 
 /**
@@ -859,6 +869,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           ? {
               name: TEAM_AGENT_NAME_PROPERTY,
               plan_mode_required: TEAM_AGENT_PLAN_REQUIRED_PROPERTY,
+              read_only: TEAM_AGENT_READ_ONLY_PROPERTY,
             }
           : {}),
         isolation: {
@@ -1043,6 +1054,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
+        read_only?: typeof TEAM_AGENT_READ_ONLY_PROPERTY;
       };
     };
     if (schema.properties) {
@@ -1050,9 +1062,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
         schema.properties.plan_mode_required =
           TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
+        schema.properties.read_only = TEAM_AGENT_READ_ONLY_PROPERTY;
       } else {
         delete schema.properties.name;
         delete schema.properties.plan_mode_required;
+        delete schema.properties.read_only;
       }
 
       const availableGrades = [
@@ -1276,6 +1290,27 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
         if (!this.config.getTeamManager()) {
           return 'Parameter "plan_mode_required" requires an active team.';
+        }
+      }
+    }
+
+    if (params.read_only !== undefined) {
+      if (typeof params.read_only !== 'boolean') {
+        return 'Parameter "read_only" must be a boolean when set.';
+      }
+      if (params.read_only) {
+        if (
+          !params.name ||
+          typeof params.name !== 'string' ||
+          params.name.trim() === ''
+        ) {
+          return 'Parameter "read_only" requires a named teammate via "name".';
+        }
+        if (!this.config.getTeamManager()) {
+          return 'Parameter "read_only" requires an active team.';
+        }
+        if (params.plan_mode_required === true) {
+          return 'Parameters "read_only" and "plan_mode_required" cannot be used together.';
         }
       }
     }
@@ -2276,6 +2311,30 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (this.params.read_only === true) {
+      if (
+        !this.params.name ||
+        this.params.name.trim() === '' ||
+        isSubagentLikeExecutionContext()
+      ) {
+        const msg =
+          'read_only can only be used when spawning a named teammate from the team leader.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      if (!this.config.getTeamManager()) {
+        const msg = 'read_only requires an active team. Use TeamCreate first.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     if (this.params.plan_mode_required === true) {
       if (
         !this.params.name ||
@@ -4321,6 +4380,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         agentType: this.params.subagent_type,
         cwd: this.config.getCwd(),
         planModeRequired: this.params.plan_mode_required === true,
+        readOnly: this.params.read_only === true,
       });
 
       // Return immediately — teammate runs concurrently.

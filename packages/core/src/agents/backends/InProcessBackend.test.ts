@@ -395,22 +395,19 @@ describe('InProcessBackend', () => {
     // (SkillManager / SubagentManager) get released immediately, and (2)
     // delete the Map entry so a subsequent cleanup() doesn't double-stop
     // and a re-spawn with the same id can take a fresh registry.
-    await backend.init();
-    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    const config = createMockConfig() as unknown as {
+      createToolRegistry: ReturnType<typeof vi.fn>;
+    };
+    const localBackend = new InProcessBackend(config as never);
+    await localBackend.init();
+    await localBackend.spawnAgent(createSpawnConfig('agent-1'));
+    const registry = await config.createToolRegistry.mock.results[0]!.value;
+    expect(localBackend.getAgentRegistryCount()).toBe(1);
 
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      backend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
+    localBackend.stopAgent('agent-1');
 
-    const registry = registries.get('agent-1');
-    expect(registry).toBeDefined();
-    expect(registries.has('agent-1')).toBe(true);
-
-    backend.stopAgent('agent-1');
-
-    expect(registry!.stop).toHaveBeenCalledTimes(1);
-    expect(registries.has('agent-1')).toBe(false);
+    expect(registry.stop).toHaveBeenCalledTimes(1);
+    expect(localBackend.getAgentRegistryCount()).toBe(0);
   });
 
   it('stopAgent on a non-existent id is a no-op (no throw, Map untouched)', async () => {
@@ -421,14 +418,10 @@ describe('InProcessBackend', () => {
     await backend.init();
     await backend.spawnAgent(createSpawnConfig('agent-1'));
 
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      backend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
-    const sizeBefore = registries.size;
+    const sizeBefore = backend.getAgentRegistryCount();
 
     expect(() => backend.stopAgent('agent-does-not-exist')).not.toThrow();
-    expect(registries.size).toBe(sizeBefore);
+    expect(backend.getAgentRegistryCount()).toBe(sizeBefore);
   });
 
   it('cleanup disposes all remaining registries (covers the in-flight shutdown path)', async () => {
@@ -443,53 +436,47 @@ describe('InProcessBackend', () => {
     const config = createMockConfig() as unknown as {
       createToolRegistry: ReturnType<typeof vi.fn>;
     };
+    const registries = [createMockToolRegistry(), createMockToolRegistry()];
     config.createToolRegistry = vi
       .fn()
-      .mockImplementation(() => Promise.resolve(createMockToolRegistry()));
+      .mockResolvedValueOnce(registries[0])
+      .mockResolvedValueOnce(registries[1]);
     const localBackend = new InProcessBackend(config as never);
     await localBackend.init();
     await localBackend.spawnAgent(createSpawnConfig('agent-1'));
     await localBackend.spawnAgent(createSpawnConfig('agent-2'));
 
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      localBackend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
-    const r1 = registries.get('agent-1')!;
-    const r2 = registries.get('agent-2')!;
+    const [r1, r2] = registries;
     expect(r1).not.toBe(r2);
 
     await localBackend.cleanup();
 
     expect(r1.stop).toHaveBeenCalledTimes(1);
     expect(r2.stop).toHaveBeenCalledTimes(1);
-    expect(registries.size).toBe(0);
+    expect(localBackend.getAgentRegistryCount()).toBe(0);
   });
 
   it('should stop all agents', async () => {
     const config = createMockConfig() as unknown as {
       createToolRegistry: ReturnType<typeof vi.fn>;
     };
+    const registries = [createMockToolRegistry(), createMockToolRegistry()];
     config.createToolRegistry = vi
       .fn()
-      .mockImplementation(() => Promise.resolve(createMockToolRegistry()));
+      .mockResolvedValueOnce(registries[0])
+      .mockResolvedValueOnce(registries[1]);
     const localBackend = new InProcessBackend(config as never);
     await localBackend.init();
     await localBackend.spawnAgent(createSpawnConfig('agent-1'));
     await localBackend.spawnAgent(createSpawnConfig('agent-2'));
 
-    type AgentRegistries = Map<string, { stop: ReturnType<typeof vi.fn> }>;
-    const registries = (
-      localBackend as unknown as { agentRegistries: AgentRegistries }
-    ).agentRegistries;
-    const r1 = registries.get('agent-1')!;
-    const r2 = registries.get('agent-2')!;
+    const [r1, r2] = registries;
 
     localBackend.stopAll();
 
     expect(r1.stop).toHaveBeenCalledTimes(1);
     expect(r2.stop).toHaveBeenCalledTimes(1);
-    expect(registries.size).toBe(0);
+    expect(localBackend.getAgentRegistryCount()).toBe(0);
   });
 
   it('restores approval override cleanup when per-agent setup fails', async () => {
@@ -968,21 +955,7 @@ describe('InProcessBackend', () => {
     expect(registry.stop).toHaveBeenCalledTimes(1);
     expect(failingBackend.getAgent('agent-fail')).toBeUndefined();
     expect(failingBackend.getActiveAgentId()).toBeNull();
-    expect(
-      (
-        failingBackend as unknown as {
-          agentApprovalCleanups: Map<string, () => void>;
-          agentRegistries: Map<string, unknown>;
-        }
-      ).agentApprovalCleanups.size,
-    ).toBe(0);
-    expect(
-      (
-        failingBackend as unknown as {
-          agentRegistries: Map<string, unknown>;
-        }
-      ).agentRegistries.size,
-    ).toBe(0);
+    expect(failingBackend.getAgentRegistryCount()).toBe(0);
   });
 
   it('should return true immediately from waitForAll after cleanup', async () => {

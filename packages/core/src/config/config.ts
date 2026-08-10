@@ -32,6 +32,7 @@ import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
 import type { TeamContext } from '../agents/team/types.js';
+import type { AgentRuntimeFactory } from '../agents/fleet/runtime.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -2002,6 +2003,7 @@ export class Config {
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private teamManager: TeamManager | null = null;
+  private agentRuntimeFactory: AgentRuntimeFactory | null = null;
   private teamManagerChangeCallbacks = new Set<
     (manager: TeamManager | null) => void
   >();
@@ -5845,6 +5847,14 @@ export class Config {
 
   getTeamManager(): TeamManager | null {
     return this.teamManager;
+  }
+
+  getAgentRuntimeFactory(): AgentRuntimeFactory | null {
+    return this.agentRuntimeFactory;
+  }
+
+  setAgentRuntimeFactory(factory: AgentRuntimeFactory | null): void {
+    this.agentRuntimeFactory = factory;
   }
 
   setTeamManager(manager: TeamManager | null): void {

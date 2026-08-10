@@ -59,9 +59,9 @@ describe('AgentTabBar', () => {
           {
             modelId: 'qwen',
             color: 'cyan',
-            interactiveAgent: {
+            view: {
               getStatus: () => AgentStatus.IDLE,
-              getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+              onChange: () => vi.fn(),
             },
           },
         ],

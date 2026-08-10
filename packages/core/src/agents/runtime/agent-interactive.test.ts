@@ -10,6 +10,8 @@ import type { AgentCore } from './agent-core.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
   AgentRoundTextEvent,
+  AgentStatusChangeEvent,
+  AgentTurnTextEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentToolOutputUpdateEvent,
@@ -198,6 +200,34 @@ describe('AgentInteractive', () => {
 
   beforeEach(() => {
     context = new ContextState();
+  });
+
+  it('correlates status and final text with the returned turnId', async () => {
+    const { core, emitter } = createMockCore({
+      loopResult: { text: 'Done', terminateMode: null, turnsUsed: 1 },
+    });
+    const statuses: AgentStatusChangeEvent[] = [];
+    const finalTexts: AgentTurnTextEvent[] = [];
+    emitter.on(AgentEventType.STATUS_CHANGE, (event) => statuses.push(event));
+    emitter.on(AgentEventType.TURN_TEXT, (event) => finalTexts.push(event));
+
+    const agent = new AgentInteractive(createConfig(), core);
+    await agent.start(context);
+    const turnId = agent.enqueueMessage('work');
+    const queuedTurnId = agent.enqueueMessage('queued work');
+
+    await vi.waitFor(() => expect(agent.getStatus()).toBe(AgentStatus.IDLE));
+    const runningTurnIds = statuses
+      .filter((event) => event.newStatus === AgentStatus.RUNNING)
+      .map((event) => event.turnId);
+    expect(runningTurnIds).toEqual([turnId, queuedTurnId]);
+    expect(statuses.at(-1)?.turnId).toBe(queuedTurnId);
+    expect(finalTexts).toEqual([
+      expect.objectContaining({ turnId, text: 'Done' }),
+      expect.objectContaining({ turnId: queuedTurnId, text: 'Done' }),
+    ]);
+
+    await agent.shutdown();
   });
 
   // ─── Lifecycle ──────────────────────────────────────────────

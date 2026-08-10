@@ -8,6 +8,7 @@ import { ToolNames } from '../../tools/tool-names.js';
 import type { ToolResult } from '../../tools/tools.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
+import type { ToolConfig } from './agent-types.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
 import { getCurrentAgentId } from './agent-context.js';
 
@@ -15,6 +16,27 @@ export const SUBAGENT_PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.ENTER_PLAN_MODE,
   ToolNames.EXIT_PLAN_MODE,
 ]);
+
+export const READ_ONLY_INSPECTION_TOOLS = [
+  ToolNames.READ_FILE,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.LS,
+] as const;
+
+const READ_ONLY_TEAM_TOOLS = [
+  ...READ_ONLY_INSPECTION_TOOLS,
+  ToolNames.SEND_MESSAGE,
+  ToolNames.TASK_LIST,
+  ToolNames.TASK_UPDATE,
+];
+
+export function createReadOnlyTeammateToolConfig(): ToolConfig {
+  return {
+    tools: [...READ_ONLY_TEAM_TOOLS],
+    executionAllowedTools: [...READ_ONLY_TEAM_TOOLS],
+  };
+}
 
 const PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.EXIT_PLAN_MODE,

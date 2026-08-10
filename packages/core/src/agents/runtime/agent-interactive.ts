@@ -28,6 +28,7 @@ import type { AgentCore } from './agent-core.js';
 import type { ContextState } from './agent-headless.js';
 import type { GeminiChat } from '../../core/geminiChat.js';
 import type { FunctionDeclaration } from '@google/genai';
+import { randomUUID } from 'node:crypto';
 import {
   ToolConfirmationOutcome,
   type ToolCallConfirmationDetails,
@@ -41,6 +42,7 @@ import {
   type AgentInteractiveConfig,
   type AgentMessage,
 } from './agent-types.js';
+import type { TurnId } from '../fleet/session.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 
@@ -56,7 +58,10 @@ const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 export class AgentInteractive {
   readonly config: AgentInteractiveConfig;
   private readonly core: AgentCore;
-  private readonly queue = new AsyncMessageQueue<string>();
+  private readonly queue = new AsyncMessageQueue<{
+    message: string;
+    turnId: TurnId;
+  }>();
 
   /**
    * This agent's nesting depth, captured from the spawner's ambient frame at
@@ -80,6 +85,7 @@ export class AgentInteractive {
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
   private roundCancelledByUser = false;
+  private currentTurnId: TurnId | undefined;
 
   // Wall-clock timestamp when each currently-executing tool transitioned into
   // the scheduler's `executing` state. Keyed by callId. First TOOL_OUTPUT_UPDATE
@@ -143,7 +149,10 @@ export class AgentInteractive {
     }
 
     if (this.config.initialTask) {
-      this.queue.enqueue(this.config.initialTask);
+      this.queue.enqueue({
+        message: this.config.initialTask,
+        turnId: randomUUID(),
+      });
       this.executionPromise = this.startRunLoop();
     }
   }
@@ -166,11 +175,14 @@ export class AgentInteractive {
   private async runLoopInner(): Promise<void> {
     this.processing = true;
     try {
-      let message = this.queue.dequeue();
-      while (message !== null && !this.masterAbortController.signal.aborted) {
-        this.addMessage('user', message);
-        await this.runOneRound(message);
-        message = this.queue.dequeue();
+      let turn = this.queue.dequeue();
+      while (turn !== null && !this.masterAbortController.signal.aborted) {
+        this.currentTurnId = turn.turnId;
+        this.addMessage('user', turn.message, {
+          metadata: { turnId: turn.turnId },
+        });
+        await this.runOneRound(turn.message);
+        turn = this.queue.dequeue();
       }
 
       if (this.masterAbortController.signal.aborted) {
@@ -184,6 +196,7 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive processing failed:', err);
     } finally {
       this.processing = false;
+      this.currentTurnId = undefined;
       // A message enqueued during the synchronous IDLE STATUS_CHANGE
       // emit (e.g. TeamManager flushing a held message the moment the
       // agent settles) arrives after the dequeue loop's final empty
@@ -210,9 +223,9 @@ export class AgentInteractive {
   private async runOneRound(message: string): Promise<void> {
     if (!this.chat) return;
 
-    this.setStatus(AgentStatus.RUNNING);
-    this.lastRoundError = undefined;
     this.roundCancelledByUser = false;
+    this.setStatus(AgentStatus.RUNNING, true);
+    this.lastRoundError = undefined;
     this.roundAbortController = createChildAbortController(
       this.masterAbortController,
     );
@@ -232,6 +245,13 @@ export class AgentInteractive {
           maxTimeMinutes: this.config.maxTimeMinutesPerMessage,
         },
       );
+
+      this.core.eventEmitter?.emit(AgentEventType.TURN_TEXT, {
+        subagentId: this.core.subagentId,
+        turnId: this.currentTurnId!,
+        text: result.text,
+        timestamp: Date.now(),
+      });
 
       // Surface non-normal termination as a visible info message and as
       // lastRoundError so Arena can distinguish limit stops from successes.
@@ -315,11 +335,12 @@ export class AgentInteractive {
   /**
    * Enqueue a message for the agent to process.
    */
-  enqueueMessage(message: string): void {
-    this.queue.enqueue(message);
+  enqueueMessage(message: string, turnId: TurnId = randomUUID()): TurnId {
+    this.queue.enqueue({ message, turnId });
     if (!this.processing) {
       this.executionPromise = this.startRunLoop();
     }
+    return turnId;
   }
 
   // ─── State Accessors (delegates to AgentCore) ──────────────
@@ -429,9 +450,9 @@ export class AgentInteractive {
     }
   }
 
-  private setStatus(newStatus: AgentStatus): void {
+  private setStatus(newStatus: AgentStatus, notifyIfUnchanged = false): void {
     const previousStatus = this.status;
-    if (previousStatus === newStatus) return;
+    if (previousStatus === newStatus && !notifyIfUnchanged) return;
 
     this.status = newStatus;
 
@@ -439,6 +460,7 @@ export class AgentInteractive {
       agentId: this.config.agentId,
       previousStatus,
       newStatus,
+      turnId: this.currentTurnId,
       roundCancelledByUser: this.roundCancelledByUser || undefined,
       timestamp: Date.now(),
     });

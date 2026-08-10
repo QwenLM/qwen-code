@@ -85,7 +85,7 @@ export interface TeamMember {
   /** Git worktree path if isolated. */
   worktreePath?: string;
   /** Backend type used to spawn this member. */
-  backendType?: DisplayMode;
+  backendType?: DisplayMode | 'supervised';
   /** false = idle, undefined/true = active. */
   isActive?: boolean;
   /** Tool subscriptions (event channels). */
