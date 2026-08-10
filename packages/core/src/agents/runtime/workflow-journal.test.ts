@@ -18,6 +18,7 @@ import {
   JOURNAL_FORMAT_VERSION,
   JOURNAL_KEY_VERSION,
   MAX_WORKFLOW_JOURNAL_BYTES,
+  readBounded,
   type JournalCheckpoint,
   type JournalEntry,
 } from './workflow-journal.js';
@@ -398,15 +399,31 @@ describe('WorkflowJournal', () => {
       vi.spyOn(fs, 'open').mockImplementationOnce(
         async (...args: Parameters<typeof fs.open>) => {
           const handle = await realOpen(...args);
+          let renamed = false;
           return {
             stat: (...statArgs: Parameters<typeof handle.stat>) =>
               handle.stat(...statArgs),
-            readFile: async (
-              ...readArgs: Parameters<typeof handle.readFile>
+            // Hooks `read` rather than `readFile`: the committed prefix is
+            // now read in bounded chunks, but the instant being simulated
+            // is the same one — the bytes are in hand and the pathname is
+            // about to stop pointing at the inode they came from.
+            read: async (
+              buffer: Buffer,
+              offset: number,
+              length: number,
+              position: number | null,
             ) => {
-              const bytes = await handle.readFile(...readArgs);
-              await fs.rename(replacement, journalPath);
-              return bytes;
+              const result = await handle.read(
+                buffer,
+                offset,
+                length,
+                position,
+              );
+              if (!renamed) {
+                renamed = true;
+                await fs.rename(replacement, journalPath);
+              }
+              return result;
             },
             close: () => handle.close(),
           } as unknown as Awaited<ReturnType<typeof fs.open>>;
@@ -420,6 +437,41 @@ describe('WorkflowJournal', () => {
       await expect(fs.readFile(journalPath)).resolves.toEqual(replacementBytes);
     },
   );
+
+  it('rejects committed bytes that are not valid UTF-8', async () => {
+    // The SHA-256 authenticates the raw bytes, but `toString('utf8')`
+    // rewrites invalid sequences to U+FFFD — so a lossy decode could hand
+    // back JSON that parses cleanly and resumes with data the hash never
+    // covered. The checkpoint here is built over the corrupt bytes on
+    // purpose, so the hash matches and the decode is the only thing left
+    // standing between them and the replay.
+    const journalPath = path.join(dir, 'bad-utf8', 'journal.jsonl');
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    const entry = JSON.stringify({
+      type: 'result',
+      key: 'v2:k1',
+      agentId: '1',
+      result: 'PLACEHOLDER',
+    });
+    // A lone 0x80 continuation byte, inside the result string.
+    const bytes = Buffer.concat([
+      Buffer.from(entry.replace('PLACEHOLDER', 'x')),
+      Buffer.from('\n'),
+    ]);
+    bytes[bytes.indexOf(0x78)] = 0x80;
+    await fs.writeFile(journalPath, bytes);
+
+    const journal = new WorkflowJournal(journalPath);
+    await expect(
+      journal.load({
+        version: JOURNAL_FORMAT_VERSION,
+        keyVersion: JOURNAL_KEY_VERSION,
+        byteLength: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        integrity: 'complete',
+      }),
+    ).rejects.toThrow(/UTF-8/i);
+  });
 
   it('fails closed for truncated or hash-mismatched committed bytes', async () => {
     const journalPath = path.join(dir, 'corrupt', 'journal.jsonl');
@@ -494,5 +546,101 @@ describe('deriveArgsSeed', () => {
     const k1 = deriveAgentKey(deriveArgsSeed({ topic: 'a' }), 'do x', {});
     const k2 = deriveAgentKey(deriveArgsSeed({ topic: 'b' }), 'do x', {});
     expect(k1).not.toBe(k2); // same prompt+opts, different args → different key
+  });
+});
+
+describe('readBounded', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-bounded-'));
+  });
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function withFile<T>(
+    bytes: Buffer,
+    run: (handle: Awaited<ReturnType<typeof fs.open>>) => Promise<T>,
+  ): Promise<T> {
+    const filePath = path.join(dir, 'artifact');
+    await fs.writeFile(filePath, bytes);
+    const handle = await fs.open(filePath, 'r');
+    try {
+      return await run(handle);
+    } finally {
+      await handle.close();
+    }
+  }
+
+  it('returns the whole file when it fits', async () => {
+    const bytes = Buffer.from('hello world');
+    const out = await withFile(bytes, (h) => readBounded(h, bytes.byteLength));
+    expect(out).toEqual(bytes);
+  });
+
+  it('returns an empty buffer for an empty file', async () => {
+    const out = await withFile(Buffer.alloc(0), (h) => readBounded(h, 16));
+    expect(out).toEqual(Buffer.alloc(0));
+  });
+
+  it('accepts a file of exactly the limit and rejects one byte more', async () => {
+    const bytes = Buffer.alloc(64, 0x61);
+    expect(await withFile(bytes, (h) => readBounded(h, 64))).toEqual(bytes);
+    expect(await withFile(bytes, (h) => readBounded(h, 63))).toBeNull();
+  });
+
+  it('bounds on the bytes read, not on a size observed beforehand', async () => {
+    // The point of the change: `fstat` and the read are two observations of
+    // an inode its owner can still be growing, so a pre-read size cannot
+    // bound the buffer. Here the handle reports a size well under the limit
+    // and then serves far more than it.
+    const bytes = Buffer.alloc(4096, 0x62);
+    const out = await withFile(bytes, async (handle) => {
+      vi.spyOn(handle, 'stat').mockResolvedValue({
+        size: 8,
+      } as unknown as Awaited<ReturnType<typeof handle.stat>>);
+      return readBounded(handle, 1024);
+    });
+    expect(out).toBeNull();
+  });
+
+  it('keeps reading through short reads', async () => {
+    // `read()` may return short of EOF, so a single call cannot tell a
+    // complete small file from a partially read large one — the reason
+    // this is a loop and not one `handle.read()`.
+    const bytes = Buffer.from('abcdefghij');
+    const out = await withFile(bytes, async (handle) => {
+      const real = handle.read.bind(handle);
+      vi.spyOn(handle, 'read').mockImplementation(((
+        buffer: Buffer,
+        offset: number,
+        _length: number,
+        position: number | null,
+      ) => real(buffer, offset, 1, position)) as typeof handle.read);
+      return readBounded(handle, 32);
+    });
+    expect(out).toEqual(bytes);
+  });
+
+  it('never buffers more than one byte past the limit', async () => {
+    // Reading `limit + 1` is what makes "too large" detectable; reading
+    // more would reintroduce the unbounded buffering being fixed.
+    const bytes = Buffer.alloc(4096, 0x63);
+    let served = 0;
+    await withFile(bytes, async (handle) => {
+      const real = handle.read.bind(handle);
+      vi.spyOn(handle, 'read').mockImplementation((async (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number | null,
+      ) => {
+        const result = await real(buffer, offset, length, position);
+        served += result.bytesRead;
+        return result;
+      }) as typeof handle.read);
+      return readBounded(handle, 100);
+    });
+    expect(served).toBe(101);
   });
 });

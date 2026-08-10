@@ -39,6 +39,7 @@ import {
   realpathSync,
   type Stats,
 } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseLineTolerant } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -238,12 +239,25 @@ function validateCheckpoint(checkpoint: JournalCheckpoint): void {
   }
 }
 
+const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true });
+
 function parseCommittedEntries(bytes: Buffer): JournalEntry[] {
   if (bytes.byteLength === 0) return [];
   if (bytes[bytes.byteLength - 1] !== 0x0a) {
     throw new Error('Invalid workflow journal: committed line is truncated');
   }
-  const lines = bytes.toString('utf8').split('\n');
+  // The SHA-256 above authenticates these exact bytes, and
+  // `Buffer.toString('utf8')` silently rewrites invalid sequences to
+  // U+FFFD — so a lossy decode can hand back JSON that parses cleanly and
+  // resumes with data the hash never covered. Decode fatally instead: a
+  // journal that is not valid UTF-8 is corrupt, not repairable.
+  let text: string;
+  try {
+    text = UTF8_STRICT.decode(bytes);
+  } catch {
+    throw new Error('Invalid workflow journal: committed bytes are not UTF-8');
+  }
+  const lines = text.split('\n');
   lines.pop();
   return lines.map((line, index) => {
     if (line.length === 0) {
@@ -426,15 +440,63 @@ async function readJournalBytes(journalPath: string): Promise<Buffer> {
     assertSafeJournalFile(current, journalPath);
     assertSameJournalFile(before, current, journalPath);
     assertSameJournalFile(opened, current, journalPath);
+    // Cheap pre-rejection only. `opened.size` and the bytes a read would
+    // return are two observations of an inode that stays writable to its
+    // owner, so a size taken before the read cannot bound the read.
     if (opened.size > MAX_WORKFLOW_JOURNAL_BYTES) {
       throw new Error(
         `Workflow journal is too large: ${journalPath} (${opened.size} bytes, limit ${MAX_WORKFLOW_JOURNAL_BYTES})`,
       );
     }
-    return await handle.readFile();
+    const bytes = await readBounded(handle, MAX_WORKFLOW_JOURNAL_BYTES);
+    if (bytes === null) {
+      throw new Error(
+        `Workflow journal is too large: ${journalPath} (over the ${MAX_WORKFLOW_JOURNAL_BYTES} byte limit)`,
+      );
+    }
+    return bytes;
   } finally {
     await handle.close();
   }
+}
+
+/** Chunk size for {@link readBounded}; unrelated to either cap. */
+const BOUNDED_READ_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Read an already-identity-checked handle to EOF, or give up at `limit`.
+ *
+ * Returns null when the file is over the limit, having buffered at most
+ * one byte past it. The caps in this module are enforced here rather than
+ * from a preceding `fstat` because the size and the bytes are separate
+ * observations of an inode another process may still be growing — the
+ * pre-read check is a cheap rejection, not the bound.
+ *
+ * Loops because `read()` is allowed to return short of EOF, so a single
+ * call cannot tell a complete small file from a partially read large one.
+ */
+export async function readBounded(
+  handle: FileHandle,
+  limit: number,
+): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  // `limit + 1 - total` keeps the last read to the single byte that proves
+  // the file is over the limit, instead of allocating the whole cap up
+  // front for what is usually a few hundred bytes.
+  while (total <= limit) {
+    const chunk = Buffer.allocUnsafe(
+      Math.min(BOUNDED_READ_CHUNK_BYTES, limit + 1 - total),
+    );
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+    chunks.push(
+      bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead),
+    );
+  }
+  if (total > limit) return null;
+  return Buffer.concat(chunks, total);
 }
 
 async function appendJournalLine(

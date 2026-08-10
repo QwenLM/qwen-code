@@ -100,6 +100,34 @@ describe('toSnapshot', () => {
     expect(s.result).toMatch(/non-JSON-serializable/);
   });
 
+  it('projects the serialization, not the live result object', () => {
+    // Validating by serializing and then handing the original object on
+    // proves nothing about what gets written: a getter runs again for the
+    // manifest and again for the snapshot, and is free to answer
+    // differently — or throw — the second time, turning a finished
+    // workflow into a persistence failure.
+    let reads = 0;
+    const result = {
+      get answer() {
+        reads += 1;
+        if (reads > 1) throw new Error('one shot only');
+        return 42;
+      },
+    };
+    const s = toSnapshot(task({ result }));
+    expect(s.result).toEqual({ answer: 42 });
+    // Whatever consumers do with the snapshot, the getter is done running.
+    expect(() => JSON.stringify(s)).not.toThrow();
+    expect(JSON.parse(JSON.stringify(s)).result).toEqual({ answer: 42 });
+  });
+
+  it('drops a result that serializes to undefined without throwing', () => {
+    // A function or symbol makes `JSON.stringify` return undefined rather
+    // than throw, so it never reached the placeholder branch; the
+    // enclosing stringify would have dropped the key either way.
+    expect(toSnapshot(task({ result: () => 1 })).result).toBeUndefined();
+  });
+
   it('copies arrays defensively (snapshot is decoupled from the live entry)', () => {
     const t = task();
     const s = toSnapshot(t);
@@ -481,6 +509,11 @@ describe('durable workflow manifests', () => {
       // cannot tell that apart from a caller who really passed null.
       ['nan', { secret: Number.NaN }],
       ['infinity', { secret: Number.POSITIVE_INFINITY }],
+      // Quieter still: -0 is finite and stringifies to "0", so it cleared
+      // both gates above and persisted as +0 under canResume true. A script
+      // branching on Object.is(args.secret, -0) takes the other path after
+      // a resume the manifest promised was faithful.
+      ['negative-zero', { secret: -0 }],
       ['function', { secret: () => 'PRIVATE_FUNCTION_SENTINEL' }],
       ['symbol', { secret: Symbol('PRIVATE_SYMBOL_SENTINEL') }],
       ['too-large', { secret: 'x'.repeat(MAX_WORKFLOW_ARGS_BYTES + 1) }],

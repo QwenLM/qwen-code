@@ -32,6 +32,7 @@ import {
   JOURNAL_FORMAT_VERSION,
   JOURNAL_KEY_VERSION,
   WorkflowJournal,
+  readBounded,
   type JournalCheckpoint,
 } from './runtime/workflow-journal.js';
 import {
@@ -134,15 +135,28 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   };
 }
 
-/** A non-JSON-serializable result is replaced with a placeholder string. */
+/**
+ * A non-JSON-serializable result is replaced with a placeholder string.
+ *
+ * Returns the *parsed projection* of the serialization, not the original
+ * object. Validating by serializing and then handing the live object on
+ * proves nothing: a getter or a `toJSON()` runs again when the manifest
+ * and the snapshot are written, and it is free to throw the second time
+ * (turning a finished workflow into a persistence failure) or to return
+ * something else (persisting output the run never produced).
+ */
 function safeResult(result: unknown): unknown {
   if (result === undefined) return undefined;
+  let serialized: string | undefined;
   try {
-    JSON.stringify(result);
-    return result;
+    serialized = JSON.stringify(result);
   } catch {
     return `(non-JSON-serializable ${typeof result})`;
   }
+  // A function or a symbol serializes to `undefined` without throwing;
+  // the enclosing stringify would have dropped the key, so drop it here.
+  if (serialized === undefined) return undefined;
+  return JSON.parse(serialized);
 }
 
 function projectTask(task: WorkflowTask): Omit<WorkflowSnapshot, 'status'> {
@@ -184,7 +198,13 @@ function cloneJsonArgs(args: unknown): {
       ) {
         return true;
       }
-      if (typeof value === 'number') return Number.isFinite(value);
+      // -0 is finite and stringifies to "0", so it passes as strict JSON
+      // while silently becoming +0 in the manifest. A run that branches on
+      // `Object.is(args.value, -0)` would then take a different path after
+      // resuming from a checkpoint marked resumable.
+      if (typeof value === 'number') {
+        return Number.isFinite(value) && !Object.is(value, -0);
+      }
       if (typeof value !== 'object' || seen.has(value)) return false;
       const proto = Object.getPrototypeOf(value);
       if (
@@ -297,13 +317,22 @@ async function readRegularFileNoFollow(
     }
     // The size is already in hand from the identity stat; check it before
     // buffering so an oversized artifact degrades to a skipped/invalid record
-    // instead of aborting the process on an uncatchable heap OOM.
+    // instead of aborting the process on an uncatchable heap OOM. It is only
+    // a cheap pre-rejection though — the size and the bytes are separate
+    // observations of an inode its owner may still be growing, so the cap
+    // that actually holds is the one the read enforces.
     if (opened.size > MAX_WORKFLOW_ARTIFACT_BYTES) {
       throw new Error(
         `Workflow artifact is too large: ${filePath} (${opened.size} bytes, limit ${MAX_WORKFLOW_ARTIFACT_BYTES})`,
       );
     }
-    return await handle.readFile('utf8');
+    const bytes = await readBounded(handle, MAX_WORKFLOW_ARTIFACT_BYTES);
+    if (bytes === null) {
+      throw new Error(
+        `Workflow artifact is too large: ${filePath} (over the ${MAX_WORKFLOW_ARTIFACT_BYTES} byte limit)`,
+      );
+    }
+    return bytes.toString('utf8');
   } finally {
     await handle.close();
   }
