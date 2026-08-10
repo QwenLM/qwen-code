@@ -820,19 +820,39 @@ describe('createDaemonSessionActions', () => {
 
   it('restarts the event stream after prompt admission', async () => {
     const restartEventStream = vi.fn();
+    const onAdmissionStarted = vi.fn();
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({
       restartEventStream,
       session,
     });
 
-    const prompt = actions.sendPrompt('hello');
+    const prompt = actions.sendPrompt('hello', { onAdmissionStarted });
 
     await vi.waitFor(() => {
       expect(restartEventStream).toHaveBeenCalledWith('session-a');
     });
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
     await actions.cancel();
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
+  it('starts admission only after local prompt guards pass', async () => {
+    const onAdmissionStarted = vi.fn();
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      activePrompts: new Map([
+        ['session-a', { controller: new AbortController() } as ActivePrompt],
+      ]),
+      session,
+    });
+
+    await expect(
+      actions.sendPrompt('hello', { onAdmissionStarted }),
+    ).rejects.toThrow('A prompt is already in progress');
+
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
+    expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('does not restart the event stream when the admitted prompt is stale', async () => {
