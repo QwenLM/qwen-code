@@ -29,7 +29,10 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from '../workspace-runtime-storage.js';
 import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
 import {
   isCompatibleLiveSessionSource,
@@ -1104,9 +1107,11 @@ export class LiveTaskService {
       removed = false;
     }
     if (removed) {
-      await createWorkspaceRuntimeSessionService(runtime)
-        .removeSession(session.sessionId)
-        .catch(() => undefined);
+      await runWithWorkspaceRuntimeStorage(runtime, () =>
+        createWorkspaceRuntimeSessionService(runtime)
+          .removeSession(session.sessionId)
+          .catch(() => undefined),
+      );
     }
     if (projectless && removed) {
       await this.options

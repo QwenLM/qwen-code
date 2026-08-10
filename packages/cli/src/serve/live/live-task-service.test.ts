@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -31,6 +32,7 @@ const sessionSources = vi.hoisted(
 const removeSessionMock = vi.hoisted(() =>
   vi.fn(async (_sessionId: string) => true),
 );
+const removeSessionRuntimeBaseDirs = vi.hoisted(() => new Array<string>());
 const listWorkspaceSessionsForResponse = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -71,6 +73,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       removeSession(sessionId: string) {
+        removeSessionRuntimeBaseDirs.push(actual.Storage.getRuntimeBaseDir());
         return removeSessionMock(sessionId);
       }
     },
@@ -309,6 +312,7 @@ beforeEach(() => {
   parentSessions.clear();
   sessionSources.clear();
   removeSessionMock.mockClear();
+  removeSessionRuntimeBaseDirs.length = 0;
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
     sessions: [],
@@ -913,6 +917,10 @@ describe('LiveTaskService', () => {
     expect(harness.bridge.killSession).toHaveBeenCalledWith('new-task', {
       requireZeroAttaches: true,
     });
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(removeSessionRuntimeBaseDirs).toEqual([
+      path.resolve('/runtime/conversations'),
+    ]);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
   });
 });
