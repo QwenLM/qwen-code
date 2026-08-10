@@ -8,12 +8,12 @@ import type {
   AgentSideConnection,
   FileSystemCapability,
   ReadTextFileRequest,
-  WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
   CoreReadTextFileRequest,
+  CoreWriteTextFileRequest,
   FileSystemService,
   ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
@@ -22,6 +22,7 @@ import {
   getErrorMessage,
   isSubpath,
 } from '@qwen-code/qwen-code-core';
+import { buildToolWriteOriginMeta } from '@qwen-code/qwen-code-core/toolWriteOrigin';
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -211,21 +212,24 @@ export class AcpFileSystemService implements FileSystemService {
   }
 
   async writeTextFile(
-    params: Omit<WriteTextFileRequest, 'sessionId'>,
+    params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
     if (!this.capabilities.writeTextFile) {
       return this.fallback.writeTextFile(params);
     }
 
+    const { toolWriteOrigin, _meta: requestMeta, ...wireParams } = params;
     const finalContent =
-      params._meta?.['bom'] && params.content.charCodeAt(0) !== 0xfeff
+      requestMeta?.['bom'] && params.content.charCodeAt(0) !== 0xfeff
         ? '\uFEFF' + params.content
         : params.content;
+    const wireMeta = buildToolWriteOriginMeta(requestMeta, toolWriteOrigin);
 
     try {
       await this.connection.writeTextFile({
-        ...params,
+        ...wireParams,
         content: finalContent,
+        ...(wireMeta !== undefined ? { _meta: wireMeta } : {}),
         sessionId: this.sessionId,
       });
     } catch (error) {

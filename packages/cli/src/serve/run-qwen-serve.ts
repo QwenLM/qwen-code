@@ -2461,8 +2461,9 @@ async function runQwenServeImpl(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
           ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
-            'token gates API routes; /health and /demo remain pre-auth ' +
-            'on loopback unless --require-auth is set)'
+            'token gates API routes; the Web Shell static assets stay ' +
+            'pre-auth in every mode unless --no-web, and /health stays ' +
+            'pre-auth on loopback unless --require-auth is set)'
           : ''),
     );
   }
@@ -4145,7 +4146,9 @@ async function runQwenServeImpl(
         permissionAudit: permissionAuditPublisher,
         statusProvider,
         delegateReadTextFileToClient: false,
-        fileSystem: createBridgeFileSystemAdapter(fsFactory),
+        fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             primaryGenerationGuard.assertOpen();
@@ -4548,7 +4551,9 @@ async function runQwenServeImpl(
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
         delegateReadTextFileToClient: false,
-        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
+        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: true,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             secondaryGenerationGuard.assertOpen();
@@ -5101,7 +5106,9 @@ async function runQwenServeImpl(
             env: wsEnv.effectiveEnv,
           }),
           delegateReadTextFileToClient: false,
-          fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+          fileSystem: createBridgeFileSystemAdapter(wsFsFactory, {
+            allowSameHostToolWritesOutsideWorkspace: true,
+          }),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {
               generationGuard.assertOpen();
