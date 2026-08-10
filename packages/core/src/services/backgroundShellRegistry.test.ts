@@ -432,7 +432,7 @@ describe('BackgroundShellRegistry', () => {
         }),
       );
 
-      reg.fail('a&b', 'bad <thing>\x1B[31m', 2000);
+      reg.fail('a&b', 'bad <thing>\x1B[31m \u202Eevil\u2069', 2000);
 
       const [displayText, modelText] = callback.mock.calls[0];
       expect(displayText).toBe('Background shell "echo "<script>"" failed.');
@@ -441,7 +441,13 @@ describe('BackgroundShellRegistry', () => {
         '<command>echo &quot;&lt;script&gt;&quot;</command>',
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
-      expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
+      expect(modelText).toContain(
+        '<result>bad &lt;thing&gt;[31m evil</result>',
+      );
+      // The bidi pair in the fixture pins the fourth render site: <result>
+      // is the failed shell's error string and renders only on this path.
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
       // Through the SAME pipeline production uses: escapeXml handles all
       // five metacharacters globally, and a hand-rolled `replace` only
       // matched the first one — so the expectation was correct only while
