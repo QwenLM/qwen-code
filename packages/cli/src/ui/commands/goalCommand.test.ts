@@ -527,6 +527,25 @@ describe('goalCommand', () => {
         });
       },
     );
+
+    it('does not report a failed clear dispatch as successful', async () => {
+      const snapshot = goalSnapshot();
+      const { dispatch, runtime } = makeRuntime(snapshot);
+      dispatch.mockRejectedValue(
+        new GoalPersistenceUnavailableError('journal write failed'),
+      );
+      const { context } = makeContext(runtime);
+
+      const result = await goalCommand.action!(context, 'clear');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'journal write failed',
+      });
+      expect(result).not.toHaveProperty('response');
+      expect(runtime.getSnapshot()).toEqual(snapshot);
+    });
   });
 
   it('rejects when config is missing', async () => {

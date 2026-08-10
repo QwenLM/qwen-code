@@ -6,6 +6,7 @@
 
 import type {
   GoalControlRequest,
+  GoalRuntime,
   GoalStateResponse,
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
@@ -119,8 +120,26 @@ export const goalCommand: SlashCommand = {
       );
     }
 
+    let runtime: GoalRuntime;
     try {
-      const runtime = await config.getGoalRuntimeReady();
+      runtime = await config.getGoalRuntimeReady();
+    } catch (error) {
+      // A session that cannot initialize persistent Goal state has no Goal,
+      // which is an authoritative answer for status and clear. Dispatch
+      // failures are handled below because they can leave an existing Goal
+      // unchanged and must not be reported as a successful clear.
+      if (
+        error instanceof GoalPersistenceUnavailableError &&
+        (operation.kind === 'status' || operation.kind === 'clear')
+      ) {
+        return goalControl(operation, { snapshot: emptyGoalSnapshot() });
+      }
+      return errorMessage(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    try {
       const snapshot = runtime.getSnapshot();
       if (operation.kind === 'status') {
         return goalControl(operation, { snapshot });
@@ -168,22 +187,6 @@ export const goalCommand: SlashCommand = {
         request.action,
       );
     } catch (error) {
-      // A session that cannot persist goals has no goal, which is a
-      // describable answer for the operations that only read or reduce
-      // state — and the one the sibling `sessionGoalGet`/`sessionGoalClear`
-      // ext methods already give. Failing instead is worse here than
-      // anywhere else: in ACP an error return throws out of
-      // `#processSlashCommandResult`, so a sticky `recoveryError` (or plain
-      // `general.chatRecording: false`) would fail the user's whole prompt
-      // request, and keep doing so for the rest of the session, while
-      // `GET /goals` answers the same question fine. `set`/`edit`/`resume`
-      // still fail: those genuinely need persistence.
-      if (
-        error instanceof GoalPersistenceUnavailableError &&
-        (operation.kind === 'status' || operation.kind === 'clear')
-      ) {
-        return goalControl(operation, { snapshot: emptyGoalSnapshot() });
-      }
       return errorMessage(
         error instanceof Error ? error.message : String(error),
       );
