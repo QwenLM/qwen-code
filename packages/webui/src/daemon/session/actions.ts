@@ -246,18 +246,19 @@ export function createDaemonSessionActions({
                 if (sessionRef.current?.sessionId !== sessionId) {
                   manualSessionClearRef.current = true;
                   setRestoreSessionId(undefined);
-                  setConnection((current) =>
-                    current.status === 'connecting' &&
-                    current.sessionId === sessionId
-                      ? {
-                          ...current,
-                          status: 'disconnected',
-                          sessionId: undefined,
-                          loadingTranscript: undefined,
-                          catchingUp: undefined,
-                        }
-                      : current,
-                  );
+                  setRestoreWorkspaceCwd(undefined);
+                  setConnection((current) => {
+                    if (
+                      current.status !== 'connecting' ||
+                      current.sessionId !== sessionId
+                    ) {
+                      return current;
+                    }
+                    return {
+                      ...getConnectionAfterSessionClear(current, sessionId),
+                      status: 'disconnected',
+                    };
+                  });
                 }
                 reject(
                   dispatchActionError(
