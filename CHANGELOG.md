@@ -12,6 +12,101 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.21.9](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.9) - 2026-08-10
+
+### Highlights
+
+- Added native support for installing Qoder plugins from directories, archives, Git repos, URLs, and npm packages with automatic system-prompt loading. ([#8661](https://github.com/QwenLM/qwen-code/pull/8661))
+- Enabled Local Control pairing via QR code in CLI and Desktop apps for secure LAN access and added automatic default workspace creation on first launch. ([#8727](https://github.com/QwenLM/qwen-code/pull/8727), [#8814](https://github.com/QwenLM/qwen-code/pull/8814))
+- Added drag-and-drop support for images in Web Shell and a fullscreen toggle for the right panel to improve artifact and subagent visibility. ([#8696](https://github.com/QwenLM/qwen-code/pull/8696), [#8614](https://github.com/QwenLM/qwen-code/pull/8614))
+- Fixed Linux Wayland text copying to prefer native wl-copy and enabled microphone access for the macOS Desktop app with required entitlements. ([#8481](https://github.com/QwenLM/qwen-code/pull/8481), [#8715](https://github.com/QwenLM/qwen-code/pull/8715))
+- Prevented telemetry startup failures by ignoring unsupported OpenTelemetry exporter environment variables and fixed session attribution marker logic. ([#8703](https://github.com/QwenLM/qwen-code/pull/8703), [#8712](https://github.com/QwenLM/qwen-code/pull/8712))
+- Improved code review performance for large diffs and guaranteed composition survival during budget stops by reserving a 20-minute floor. ([#8773](https://github.com/QwenLM/qwen-code/pull/8773), [#8791](https://github.com/QwenLM/qwen-code/pull/8791))
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- Adds native support for installing Qoder plugins from directories, archives, Git repos, URLs, and npm packages, automatically loading system-prompt.md as extension context. ([#8661](https://github.com/QwenLM/qwen-code/pull/8661)) by @callmeYe
+- Automatically assigns issues to area owners based on labels using a round-robin strategy that prefers owners with the fewest open assigned issues. ([#8668](https://github.com/QwenLM/qwen-code/pull/8668)) by @yiliang114
+- Adds a daemon API endpoint and SDK helpers to enable or disable up to 100 Skills in a single batch request with per-target error reporting. ([#8664](https://github.com/QwenLM/qwen-code/pull/8664)) by @callmeYe
+- The qwen review submit command now outputs the direct URL to posted reviews in both stderr and JSON stdout. ([#8770](https://github.com/QwenLM/qwen-code/pull/8770)) by @wenshao
+- Added Local Control pairing to the CLI and Desktop app, allowing secure LAN access via QR code and a new Control menu option. ([#8727](https://github.com/QwenLM/qwen-code/pull/8727)) by @yiliang114
+- Added a fullscreen toggle to the Web Shell right panel for easier viewing of artifacts and subagent details. ([#8614](https://github.com/QwenLM/qwen-code/pull/8614)) by @wenshao
+- Added a guard to pause tool execution after repeated failures within a single interactive ACP session. ([#8469](https://github.com/QwenLM/qwen-code/pull/8469)) by @doudouOUC
+- Enhanced the Workflow tool description with orchestration policies and default pipelining guidance for better model behavior. ([#8694](https://github.com/QwenLM/qwen-code/pull/8694)) by @qqqys
+- Desktop now automatically creates a default workspace at ~/Documents/Qwen and starts the runtime on first launch without blocking the main thread. ([#8814](https://github.com/QwenLM/qwen-code/pull/8814)) by @yiliang114
+- Web Shell now displays context window usage as a mini progress pill in the status bar with tooltips and accessible labels. ([#8794](https://github.com/QwenLM/qwen-code/pull/8794)) by @wenshao
+- Web Shell now supports dragging and dropping PNG, JPEG, GIF, WebP, and BMP images into the composer with full attachment management and concurrency limits. ([#8696](https://github.com/QwenLM/qwen-code/pull/8696)) by @water-in-stone
+- Stable Qwen Live Host packages are now mirrored to Aliyun OSS with automatic fallback to GitHub and support for up to one-hour archive downloads. ([#8674](https://github.com/QwenLM/qwen-code/pull/8674)) by @LaZzyMan
+- Added automatic background cleanup for expired OpenAI API logs based on the new model.openAILogRetentionDays setting, which defaults to seven days. ([#8862](https://github.com/QwenLM/qwen-code/pull/8862)) by @doudouOUC
+
+#### Bug Fixes
+
+- Requires explicit confirmation for read-only Git commands when repository configuration executes external programs via diff.external or core.fsmonitor. ([#8645](https://github.com/QwenLM/qwen-code/pull/8645)) by @yiliang114
+- Prevents telemetry initialization failures by ignoring unsupported OTEL_TRACES_EXPORTER, OTEL_LOGS_EXPORTER, and OTEL_METRICS_EXPORTER environment variables during startup. ([#8703](https://github.com/QwenLM/qwen-code/pull/8703)) by @zjunothing
+- Improves the WebSearch startup notice to include a copy-pasteable settings.json example and environment variable alternative when no search model is configured. ([#8665](https://github.com/QwenLM/qwen-code/pull/8665)) by @qwen-code-dev-bot
+- Prefers the native wl-copy command for text copying on Linux Wayland sessions, falling back to xclip, xsel, or OSC 52 if unavailable. ([#8481](https://github.com/QwenLM/qwen-code/pull/8481)) by @zjunothing
+- Fixes session attribution to require exact value 1 for QWEN_CODE_SERVE and QWEN_CODE_DESKTOP markers, preventing false positives from values like 0 or false. ([#8712](https://github.com/QwenLM/qwen-code/pull/8712)) by @yiliang114
+- Fixed a rendering issue where the queued-acknowledgement comment on pull requests displayed raw text instead of formatted Markdown with working links. ([#8726](https://github.com/QwenLM/qwen-code/pull/8726)) by @wenshao
+- Standardized caller-supplied session IDs across all daemon interfaces to ensure consistent session creation and validation. ([#8415](https://github.com/QwenLM/qwen-code/pull/8415)) by @doudouOUC
+- Reduced noise in the demo event log by aggregating usage_update frames into a single context meter display. ([#8762](https://github.com/QwenLM/qwen-code/pull/8762)) by @wenshao
+- Fixed a compatibility issue in external context reading by switching to an explicit reader loop for response bodies. ([#8764](https://github.com/QwenLM/qwen-code/pull/8764)) by @wenshao
+- Enabled microphone access for the macOS Desktop app by adding the required usage description and audio-input entitlement. ([#8715](https://github.com/QwenLM/qwen-code/pull/8715)) by @yiliang114
+- Fixed a race condition in the Qoder plugin install integration test by properly awaiting the test rig setup. ([#8793](https://github.com/QwenLM/qwen-code/pull/8793)) by @yiliang114
+- Fixed flaky CI tests by updating memory extraction timeouts and extending manifest fixture teardown limits. ([#8797](https://github.com/QwenLM/qwen-code/pull/8797)) by @wenshao
+- Hidden raw ACP usage update notifications from Web Shell transcripts while retaining token accounting functionality. ([#8790](https://github.com/QwenLM/qwen-code/pull/8790)) by @carffuca
+- Compacted the Local Control dialog to ensure the QR code, pairing link, and disconnect button remain visible without scrolling. ([#8800](https://github.com/QwenLM/qwen-code/pull/8800)) by @yiliang114
+- Fixed workflow label mutations by switching to REST endpoints to avoid errors with older GitHub CLI versions. ([#8761](https://github.com/QwenLM/qwen-code/pull/8761)) by @wenshao
+- Implemented a dedicated 60-second timeout for ACP session restoration to prevent hangs and improve error handling. ([#8691](https://github.com/QwenLM/qwen-code/pull/8691)) by @doudouOUC
+- Web Shell no longer displays debug projections for unrecognized daemon events as conversation content in transcripts. ([#8812](https://github.com/QwenLM/qwen-code/pull/8812)) by @wenshao
+- Background shell tests now use unique temporary paths to prevent file permission errors caused by shared sidecar files. ([#8813](https://github.com/QwenLM/qwen-code/pull/8813)) by @wenshao
+- Local Control now opens the active Desktop session on mobile instead of a blank Web Shell and improves network address verification security. ([#8806](https://github.com/QwenLM/qwen-code/pull/8806)) by @yiliang114
+- Desktop now displays specific error messages when automatic updates fail instead of silently returning or attempting unsafe retries. ([#8807](https://github.com/QwenLM/qwen-code/pull/8807)) by @yiliang114
+- The floating Todo panel now respects the Session Workflow setting, appearing as non-interactive progress when disabled and opening the plan execution view when enabled. ([#8828](https://github.com/QwenLM/qwen-code/pull/8828)) by @yiliang114
+- Workspace trust is now evaluated separately for each project .env file to prevent untrusted parent directories from leaking secrets into trusted child workspaces. ([#8706](https://github.com/QwenLM/qwen-code/pull/8706)) by @zjunothing
+- On macOS, closing the main window now hides it instead of destroying it, allowing instant restoration from the Dock while preserving focus behavior. ([#8802](https://github.com/QwenLM/qwen-code/pull/8802)) by @yiliang114
+- Session work is now fenced by specific attachment identity to prevent stale asynchronous operations from corrupting newer attachments sharing the same session ID. ([#8833](https://github.com/QwenLM/qwen-code/pull/8833)) by @doudouOUC
+- Shell registry tests now use isolated temporary directories to prevent conflicts, and notifications are sanitized using a shared helper for consistent display. ([#8795](https://github.com/QwenLM/qwen-code/pull/8795)) by @wenshao
+- Bounded replay snapshots now compact consecutive assistant text and thought chunks into entries of at most 256 source events while preserving metadata boundaries. ([#8801](https://github.com/QwenLM/qwen-code/pull/8801)) by @wenshao
+- Added an idle watchdog to kill silent sandbox hangs after 20 minutes and implemented stale container reaping to prevent leaked runners from consuming resources. ([#8816](https://github.com/QwenLM/qwen-code/pull/8816)) by @wenshao
+- Extended the environment variable denylist to prevent untrusted workspace .env values from leaking into session subprocesses and hardened the scrub lifecycle. ([#8763](https://github.com/QwenLM/qwen-code/pull/8763)) by @wenshao
+- Session-switch errors now list specific blocking background tasks with their IDs and statuses, directing users to the correct commands to stop them. ([#8742](https://github.com/QwenLM/qwen-code/pull/8742)) by @yiliang114
+- Daemon-owned runtimes can now complete authorized external text writes via built-in tools without disabling ACP delegation or widening workspace boundaries. ([#8852](https://github.com/QwenLM/qwen-code/pull/8852)) by @doudouOUC
+- Fixed a bug where setting QWEN_CODE_SERVE to 0 or false incorrectly removed NODE_OPTIONS and NODE_PATH during direct ACP launches. ([#8811](https://github.com/QwenLM/qwen-code/pull/8811)) by @yiliang114
+- Fixed an issue where refreshing a provider template incorrectly reset the user's selected model if that model belonged to a different provider. ([#8868](https://github.com/QwenLM/qwen-code/pull/8868)) by @yiliang114
+- Ported remaining hardening improvements to the verify gate to prevent unnecessary full re-runs caused by identity-less failures. ([#8878](https://github.com/QwenLM/qwen-code/pull/8878)) by @wenshao
+- Fixed sandbox container name collisions in shared daemon environments by switching to random 8-character hex suffixes for container names. ([#8880](https://github.com/QwenLM/qwen-code/pull/8880)) by @wenshao
+- Fixed the provider update prompt to respect the 'Remind me later' choice by persisting a 24-hour cooldown instead of re-prompting on every startup. ([#8829](https://github.com/QwenLM/qwen-code/pull/8829)) by @qwen-code-dev-bot
+- Review comments posted via /review are now formatted with proper paragraphs and lists to improve readability when unresolved Criticals or coverage disclosures are present. ([#8825](https://github.com/QwenLM/qwen-code/pull/8825)) by @wenshao
+
+#### Performance
+
+- The review process now guarantees compose and submission survive budget stops by reserving a 20-minute floor for composition before verification. ([#8791](https://github.com/QwenLM/qwen-code/pull/8791)) by @wenshao
+- Automatic review timeouts for micro diffs under 25 lines are now halved to reduce latency while maintaining high effort and inline comments. ([#8774](https://github.com/QwenLM/qwen-code/pull/8774)) by @wenshao
+- Code review performance is improved for diffs over 3000 lines by reducing audit rounds and disabling the specialist agent to prevent timeouts. ([#8773](https://github.com/QwenLM/qwen-code/pull/8773)) by @wenshao
+- Made the triage job timeout configurable via the QWEN_TRIAGE_TIMEOUT_MINUTES repository variable to prevent premature cancellations of long-running checks. ([#8810](https://github.com/QwenLM/qwen-code/pull/8810)) by @wenshao
+
+#### Documentation
+
+- Korean (한국어) has been added to the documentation language bar in the README to provide direct access to localized guides. ([#8836](https://github.com/QwenLM/qwen-code/pull/8836)) by @dss1222
+
+#### Internal Changes
+
+- Synchronized the external-context workspace version in the dependency lockfile to prevent unnecessary local install churn and working tree dirtiness. ([#8858](https://github.com/QwenLM/qwen-code/pull/8858)) by @wenshao
+- Removed the legacy /demo debug page from the daemon as its functionality is fully covered by the main Web Shell interface. ([#8805](https://github.com/QwenLM/qwen-code/pull/8805)) by @wenshao
+- Improved Web Shell session switching to retry when a target session is still closing instead of immediately reporting a permanent error. ([#8864](https://github.com/QwenLM/qwen-code/pull/8864)) by @yiliang114
+
+### New Contributors
+
+- @dss1222 made their first contribution in [#8836](https://github.com/QwenLM/qwen-code/pull/8836)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.21.8...v0.21.9
+
 ## [0.21.8](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.8) - 2026-08-08
 
 ### Highlights
