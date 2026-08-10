@@ -38,6 +38,7 @@ const QWEN_IDLE_TIMEOUT_MS =
   Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
     ? parsedIdleTimeoutMs
     : 20 * 60 * 1000;
+const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -206,6 +207,7 @@ function runQwen(options, prompt) {
   log.on('error', () => {});
   let diagnosticTail = '';
   let stdoutCarry = '';
+  let discardingOversizedStdoutLine = false;
   let terminalResult;
   let settled = false;
   let timedOut = false;
@@ -242,19 +244,49 @@ function runQwen(options, prompt) {
       diagnosticTail = (diagnosticTail + text).slice(-20_000);
     };
 
-    const consumeStreamJson = (text, final = false) => {
-      stdoutCarry += text;
-      const lines = stdoutCarry.split('\n');
-      stdoutCarry = final ? '' : (lines.pop() ?? '');
-      if (final && lines.at(-1) === '') lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event?.type === 'result') terminalResult = event;
-        } catch {
-          appendDiagnostic(`${line}\n`);
+    const consumeStreamJsonLine = (line, terminated) => {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        lastOutputAt = Date.now();
+        if (event?.type === 'result') terminalResult = event;
+        if (event?.type !== 'stream_event') {
+          process.stdout.write(`${line}${terminated ? '\n' : ''}`);
         }
+      } catch {
+        appendDiagnostic(`${line}${terminated ? '\n' : ''}`);
+        process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+      }
+    };
+
+    const consumeStreamJson = (text, final = false) => {
+      const parts = text.split('\n');
+      for (const [index, part] of parts.entries()) {
+        const terminated = index < parts.length - 1;
+        if (!discardingOversizedStdoutLine) {
+          const remaining = MAX_STREAM_JSON_LINE_LENGTH - stdoutCarry.length;
+          if (part.length <= remaining) {
+            stdoutCarry += part;
+          } else {
+            appendDiagnostic(`${stdoutCarry}${part.slice(0, remaining)}`);
+            stdoutCarry = '';
+            discardingOversizedStdoutLine = true;
+          }
+        }
+        if (terminated) {
+          if (!discardingOversizedStdoutLine) {
+            consumeStreamJsonLine(stdoutCarry, true);
+          }
+          stdoutCarry = '';
+          discardingOversizedStdoutLine = false;
+        }
+      }
+      if (final) {
+        if (!discardingOversizedStdoutLine) {
+          consumeStreamJsonLine(stdoutCarry, false);
+        }
+        stdoutCarry = '';
+        discardingOversizedStdoutLine = false;
       }
     };
 
@@ -290,7 +322,6 @@ function runQwen(options, prompt) {
     };
 
     const record = (chunk, stream, source) => {
-      lastOutputAt = Date.now();
       const text = chunk.toString('utf8');
       if (!sandboxName) {
         lineCarry += text;
@@ -311,10 +342,11 @@ function runQwen(options, prompt) {
       if (source === 'stdout') {
         consumeStreamJson(text);
       } else {
+        lastOutputAt = Date.now();
         appendDiagnostic(text);
+        stream.write(chunk);
       }
       log.write(chunk);
-      stream.write(chunk);
     };
 
     child.stdout.on('data', (chunk) => record(chunk, process.stdout, 'stdout'));
