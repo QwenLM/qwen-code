@@ -455,6 +455,107 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('does not move the user off a model owned by another provider', async () => {
+    // The user is on a self-hosted gateway model that Coding Plan does not own.
+    // Refreshing the Coding Plan template must leave model.name/model.baseUrl
+    // untouched. (#8863)
+    const foreignModel = {
+      id: 'my-own-model',
+      baseUrl: 'https://my-own-gateway.example.com/v1',
+      envKey: 'MY_OWN_KEY',
+      name: '[Mine] my-own-model',
+    };
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: foreignModel.baseUrl,
+      apiKeyEnvKey: foreignModel.envKey,
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [foreignModel, ...chinaTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('reports no model switch when the selection is left alone', async () => {
+    const foreignModel = {
+      id: 'my-own-model',
+      baseUrl: 'https://my-own-gateway.example.com/v1',
+      envKey: 'MY_OWN_KEY',
+      name: '[Mine] my-own-model',
+    };
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [foreignModel, ...chinaTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalled();
+    });
+
+    const texts = mockAddItem.mock.calls.map(
+      (call) => (call[0] as { text: string }).text,
+    );
+    expect(texts.some((text) => text.includes('Model switched to'))).toBe(
+      false,
+    );
+  });
+
   it('dismisses without persisting when user chooses "later"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY

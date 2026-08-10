@@ -171,6 +171,24 @@ function readInstalledOwnedIds(
     : allModels.map((m) => m.id);
 }
 
+/**
+ * Every model id installed under this provider's protocol, regardless of which
+ * provider owns it. Used to tell "the model belongs to a different provider"
+ * apart from "the model is not installed at all".
+ */
+function readInstalledProtocolIds(
+  settings: LoadedSettings,
+  provider: ProviderConfig,
+): string[] {
+  const protocol = provider.protocol;
+  if (!protocol) return [];
+  const mergedSettings = settings.merged as Record<string, unknown>;
+  const modelProviders = mergedSettings['modelProviders'] as
+    | Record<string, ProviderModelConfig[]>
+    | undefined;
+  return (modelProviders?.[protocol] ?? []).map((m) => m.id);
+}
+
 function getInstalledOwnedModelIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
@@ -241,9 +259,8 @@ export function useProviderUpdates(
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
         const defaultIds = getDefaultModelIds(providerCfg);
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
-        );
+        const ownedIds = readInstalledOwnedIds(settings, providerCfg);
+        const customIds = ownedIds.filter((id) => !defaultIds.includes(id));
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
@@ -255,7 +272,19 @@ export function useProviderUpdates(
         const previousModelStillAvailable = newConfigs.some(
           (cfg) => cfg.id === previousModel,
         );
-        if (previousModelStillAvailable) {
+        // `buildInstallPlan` always carries a first-time-install default
+        // selection. A template refresh must not act on it when the current
+        // model belongs to a *different* provider — that silently moves the
+        // user off their model and clears model.baseUrl, surfacing only on the
+        // next launch. A model not installed under this protocol at all is
+        // still migrated, otherwise the user is left pointing at nothing.
+        // (#8863)
+        const previousModelOwnedByOther =
+          !ownedIds.includes(previousModel) &&
+          readInstalledProtocolIds(settings, providerCfg).includes(
+            previousModel,
+          );
+        if (previousModelStillAvailable || previousModelOwnedByOther) {
           delete installPlan.modelSelection;
         }
         const activeConfig = config.getContentGeneratorConfig();
@@ -282,7 +311,7 @@ export function useProviderUpdates(
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
 
-        if (previousModelStillAvailable && activeModel === previousModel) {
+        if (activeModel === previousModel) {
           addItem(
             {
               type: 'info',
