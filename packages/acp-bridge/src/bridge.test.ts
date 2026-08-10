@@ -11068,6 +11068,16 @@ describe('createAcpSessionBridge', () => {
       await vi.waitFor(() => {
         expect(handle.agent.cancelCalls.length).toBeGreaterThan(0);
       });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: PROMPT_CANCEL_METHOD,
+        params: {
+          sessionId: session.sessionId,
+          terminalError: {
+            code: 'prompt_deadline_exceeded',
+            message: 'prompt exceeded the 50ms deadline',
+          },
+        },
+      });
       // FIFO released: a follow-up prompt dispatches and completes.
       const followup = bridge.sendPrompt(
         session.sessionId,

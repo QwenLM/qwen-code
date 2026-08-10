@@ -345,6 +345,19 @@ function isControlledPromptAbort(signal: AbortSignal): boolean {
       signal.reason === PROMPT_SUPERSEDED_ABORT_REASON)
   );
 }
+
+function getTerminalPromptAbortError(signal: AbortSignal): unknown | undefined {
+  if (!signal.aborted || isControlledPromptAbort(signal)) return undefined;
+  const reason = signal.reason;
+  if (typeof reason !== 'object' || reason === null) return undefined;
+  const record = reason as { code?: unknown; message?: unknown };
+  return typeof record.code === 'string' &&
+    record.code.length > 0 &&
+    typeof record.message === 'string' &&
+    record.message.length > 0
+    ? reason
+    : undefined;
+}
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
@@ -3038,6 +3051,16 @@ export class Session implements SessionContext {
       throw error;
     }
     if (admissionCancellation?.aborted) {
+      const terminalError = getTerminalPromptAbortError(admissionCancellation);
+      if (terminalError !== undefined) {
+        this.#settleTurnRecording(
+          'error',
+          turnRecording,
+          undefined,
+          terminalError,
+        );
+        throw terminalError;
+      }
       this.#settleTurnRecording('cancelled', turnRecording);
       return { stopReason: 'cancelled' };
     }
@@ -3048,7 +3071,11 @@ export class Session implements SessionContext {
     // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort(PROMPT_SUPERSEDED_ABORT_REASON);
     const pendingSend = new AbortController();
-    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    const cancelPendingSend = () =>
+      pendingSend.abort(
+        getTerminalPromptAbortError(admissionCancellation!) ??
+          USER_CANCEL_ABORT_REASON,
+      );
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -3119,6 +3146,16 @@ export class Session implements SessionContext {
     if (pendingSend.signal.aborted) {
       releasePendingSend();
       this.todoStopGuard.suspend();
+      const terminalError = getTerminalPromptAbortError(pendingSend.signal);
+      if (terminalError !== undefined) {
+        this.#settleTurnRecording(
+          'error',
+          turnRecording,
+          undefined,
+          terminalError,
+        );
+        throw terminalError;
+      }
       this.#settleTurnRecording('cancelled', turnRecording);
       return { stopReason: 'cancelled' };
     }
@@ -3169,10 +3206,15 @@ export class Session implements SessionContext {
         invocationContext,
         modelPrompt,
       );
-      settlement = {
-        state: result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
-        response: result,
-      };
+      const terminalError = getTerminalPromptAbortError(pendingSend.signal);
+      settlement =
+        result.stopReason === 'cancelled' && terminalError !== undefined
+          ? { state: 'error', error: terminalError }
+          : {
+              state:
+                result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
+              response: result,
+            };
       promptResult = result;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -3198,9 +3240,10 @@ export class Session implements SessionContext {
       const controlledCancellation = isControlledPromptAbort(
         pendingSend.signal,
       );
+      const terminalError = getTerminalPromptAbortError(pendingSend.signal);
       settlement = {
         state: controlledCancellation ? 'cancelled' : 'error',
-        error,
+        error: terminalError ?? error,
       };
       didPromptFail = true;
       if (error instanceof SessionWriterError) {

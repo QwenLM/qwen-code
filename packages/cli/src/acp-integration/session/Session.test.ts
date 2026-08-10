@@ -5244,6 +5244,41 @@ describe('Session', () => {
         );
       });
 
+      it('records a terminal parent cancellation as an error', async () => {
+        const cancellation = new AbortController();
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            cancellation.abort(
+              Object.assign(new Error('prompt exceeded the 50ms deadline'), {
+                code: 'prompt_deadline_exceeded',
+              }),
+            );
+          }),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'time out' }],
+            },
+            trustedContext,
+            cancellation.signal,
+          ),
+        ).rejects.toThrow('Request was aborted.');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: {
+              code: 'prompt_deadline_exceeded',
+              message: 'prompt exceeded the 50ms deadline',
+            },
+          }),
+        );
+      });
+
       it('records a cancelled turn when session disposal aborts a Stop hook', async () => {
         const messageBus = {
           request: vi.fn().mockImplementation(

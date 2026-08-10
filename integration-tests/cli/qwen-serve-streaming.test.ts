@@ -183,7 +183,9 @@ function writeUserSettings(settings: Record<string, unknown>): void {
   );
 }
 
-async function startDaemon(): Promise<void> {
+async function startDaemon(
+  options: { promptDeadlineMs?: number } = {},
+): Promise<void> {
   daemon = spawn(
     process.execPath,
     [
@@ -199,6 +201,9 @@ async function startDaemon(): Promise<void> {
       // one hermetic settings/trust boundary across direct and CI runs.
       '--workspace',
       workspaceDir,
+      ...(options.promptDeadlineMs !== undefined
+        ? ['--prompt-deadline-ms', String(options.promptDeadlineMs)]
+        : []),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -1068,6 +1073,62 @@ describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
 });
 
 describePOSIX('qwen serve — turn result blocker regressions', () => {
+  it('keeps a dispatched deadline error across daemon restart', async () => {
+    await stopDaemon();
+    await startDaemon({ promptDeadlineMs: 100 });
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    blockedPromptMarker = `deadline-turn-${Date.now()}`;
+    blockedPromptGate = new Promise<void>((resolve) => {
+      releaseBlockedPrompt = resolve;
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: blockedPromptMarker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          promptId: accepted.promptId,
+          state: 'error',
+          error: { code: 'prompt_deadline_exceeded' },
+        });
+
+      releaseBlockedPrompt?.();
+      await stopDaemon();
+      await startDaemon();
+      await client.resumeSession(session.sessionId, {
+        workspaceCwd: workspaceDir,
+      });
+      await expect(
+        turnStatus(session.sessionId, accepted.promptId),
+      ).resolves.toMatchObject({
+        promptId: accepted.promptId,
+        state: 'error',
+        error: { code: 'prompt_deadline_exceeded' },
+      });
+    } finally {
+      releaseBlockedPrompt?.();
+      blockedPromptMarker = '';
+      blockedPromptGate = undefined;
+      releaseBlockedPrompt = undefined;
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      await stopDaemon();
+      await startDaemon();
+    }
+  }, 90_000);
+
   it('keeps exact queued cancellation and prior completion across daemon restart', async () => {
     const session = await client.createOrAttachSession({
       workspaceCwd: workspaceDir,

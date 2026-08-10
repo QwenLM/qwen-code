@@ -335,6 +335,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  type PromptCancelRequest,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
@@ -7901,7 +7902,7 @@ class QwenAgent implements Agent {
 
     switch (method) {
       case PROMPT_CANCEL_METHOD: {
-        const sessionId = params['sessionId'];
+        const { sessionId, terminalError } = params as PromptCancelRequest;
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -7921,7 +7922,26 @@ class QwenAgent implements Agent {
         if (targetedCalls.size === 0) {
           return { cancelled: false };
         }
-        targetedCalls.forEach((call) => call.controller.abort());
+        let abortReason: Error | undefined;
+        if (terminalError !== undefined) {
+          if (
+            typeof terminalError !== 'object' ||
+            terminalError === null ||
+            typeof terminalError.message !== 'string' ||
+            terminalError.message.length === 0 ||
+            typeof terminalError.code !== 'string' ||
+            terminalError.code.length === 0
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid prompt terminal error',
+            );
+          }
+          abortReason = Object.assign(new Error(terminalError.message), {
+            code: terminalError.code,
+          });
+        }
+        targetedCalls.forEach((call) => call.controller.abort(abortReason));
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
       }

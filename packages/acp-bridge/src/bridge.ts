@@ -136,6 +136,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  type PromptCancelRequest,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -2613,6 +2614,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     pending: PendingPromptEntry,
     notification: CancelNotification,
+    terminalError?: PromptCancelRequest['terminalError'],
   ): Promise<void> => {
     if (pending.cancelForwardInitial) {
       return pending.cancelForwardInitial;
@@ -2620,7 +2622,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const initial = (async () => {
       try {
         const extension = entry.connection
-          .extMethod(PROMPT_CANCEL_METHOD, notification)
+          .extMethod(PROMPT_CANCEL_METHOD, {
+            ...notification,
+            ...(terminalError !== undefined ? { terminalError } : {}),
+          } satisfies PromptCancelRequest)
           .then((result) => ({ kind: 'result' as const, result }));
         const outcome = await Promise.race([
           extension,
@@ -7133,9 +7138,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   );
                   cancelPendingForSession(sessionId);
                   if (byId.get(sessionId) === entry) {
-                    void forwardRunningPromptCancel(entry, pendingEntry, {
-                      sessionId,
-                    }).catch((err) => {
+                    const abortReason = pendingAbort.signal.reason;
+                    void forwardRunningPromptCancel(
+                      entry,
+                      pendingEntry,
+                      {
+                        sessionId,
+                      },
+                      abortReason instanceof PromptDeadlineExceededError
+                        ? {
+                            code: 'prompt_deadline_exceeded',
+                            message: abortReason.message,
+                          }
+                        : undefined,
+                    ).catch((err) => {
                       writeStderrLine(
                         `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
                       );

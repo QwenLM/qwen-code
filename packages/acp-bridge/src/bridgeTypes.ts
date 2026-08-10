@@ -793,6 +793,10 @@ export interface TodoStopGuardQueueReleasedRequest {
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
 
+export type PromptCancelRequest = CancelNotification & {
+  terminalError?: TurnResultErrorPayload;
+};
+
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
  * stamps this boolean on a client-hosted (extension) MCP server's
