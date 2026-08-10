@@ -8,9 +8,11 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   DAEMON_APPROVAL_MODES,
   useActions,
@@ -252,6 +254,7 @@ import {
   shouldDisableComposerInput,
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
+import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
@@ -360,13 +363,56 @@ function TodoContextsProvider({
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_TOASTS = 4;
+const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
 const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
 const DOCKED_ENVIRONMENT_PANEL_WIDTH = 332;
+// The docked fullscreen surface contains Tab itself instead of going through
+// Radix FocusScope: FocusScope registers every mounted scope in a
+// module-global stack and pauses the current head even with trapped={false},
+// so a docked panel mounting under an open DialogShell would pause the
+// modal's trap. The surface covers the viewport, so the keyboard is the only
+// escape route; wrap it at the tabbable edges like FocusScope's loop does.
+function getFullscreenSurfaceTabEdges(
+  container: HTMLElement,
+): [HTMLElement | null, HTMLElement | null] {
+  const candidates: HTMLElement[] = [];
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
+    acceptNode(node) {
+      const element = node as HTMLElement;
+      if (element.hidden) return NodeFilter.FILTER_SKIP;
+      if (element instanceof HTMLInputElement && element.type === 'hidden') {
+        return NodeFilter.FILTER_SKIP;
+      }
+      if (
+        (element instanceof HTMLButtonElement ||
+          element instanceof HTMLInputElement ||
+          element instanceof HTMLSelectElement ||
+          element instanceof HTMLTextAreaElement) &&
+        element.disabled
+      ) {
+        return NodeFilter.FILTER_SKIP;
+      }
+      return element.tabIndex >= 0
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_SKIP;
+    },
+  });
+  while (walker.nextNode()) {
+    candidates.push(walker.currentNode as HTMLElement);
+  }
+  const visible = candidates.filter((element) =>
+    typeof element.checkVisibility === 'function'
+      ? element.checkVisibility({ checkVisibilityCSS: true })
+      : true,
+  );
+  return [visible[0] ?? null, visible[visible.length - 1] ?? null];
+}
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'contextUsage',
   'model',
   'widthMode',
   'voice',
@@ -436,6 +482,7 @@ interface SendPromptOptionsWithRetry {
   images?: PromptImage[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
+  onAdmissionStarted?: () => void;
   clearComposerOnPromptStart?: boolean;
   commitComposerAccepted?: ComposerSubmitCommit;
   onAdmitted?: () => void;
@@ -460,6 +507,15 @@ interface FailedPromptRetry {
   startedAt: number;
   admitted: boolean;
   settled: boolean;
+}
+
+interface UnknownPromptAdmission {
+  sessionId: string;
+  messageId?: string;
+  text?: string;
+  images?: PromptImage[];
+  inputAnnotations?: DaemonInputAnnotation[];
+  payloadAvailable: boolean;
 }
 
 function getLatestUserBlockId(
@@ -1655,6 +1711,9 @@ export function App({
       // A pending tool/permission approval owns Escape (it rejects the call),
       // so don't let the drawer swallow it while a prompt is visible.
       if (pendingApprovalRef.current) return;
+      // The fullscreen artifact surface owns Escape too (it shrinks back);
+      // a force-hidden drawer must not swallow the key first.
+      if (artifactPanelFullscreenRef.current) return;
       const target = e.target as HTMLElement | null;
       // Only let an editable element keep Escape for itself when it lives
       // outside the drawer; the drawer's own search input should still close
@@ -2149,6 +2208,10 @@ export function App({
       id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
       tone,
       message,
+      // Deadline instead of duration: the host remounts its items when the
+      // elevated portal moves, and a fresh timer per remount would keep a
+      // toast on screen indefinitely across repeated fullscreen toggles.
+      dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
     };
     setToasts((current) => {
       const withoutDuplicate = current.filter(
@@ -2165,6 +2228,16 @@ export function App({
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
   const [failedPromptRetry, setFailedPromptRetry] =
     useState<FailedPromptRetry | null>(null);
+  const [unknownPromptAdmission, setUnknownPromptAdmission] =
+    useState<UnknownPromptAdmission | null>(null);
+  const unknownPromptAdmissionRef = useRef<UnknownPromptAdmission | null>(null);
+  const updateUnknownPromptAdmission = useCallback(
+    (next: UnknownPromptAdmission | null) => {
+      unknownPromptAdmissionRef.current = next;
+      setUnknownPromptAdmission(next);
+    },
+    [],
+  );
   const updateFailedPrompt = useCallback((next: FailedPrompt | null) => {
     failedPromptRef.current = next;
     setFailedPrompt(next);
@@ -2225,6 +2298,12 @@ export function App({
       updateFailedPrompt(null);
     }
   }, [connection.sessionId, displayMessages, failedPrompt, updateFailedPrompt]);
+  useEffect(() => {
+    const unknown = unknownPromptAdmissionRef.current;
+    if (unknown && unknown.sessionId !== connection.sessionId) {
+      updateUnknownPromptAdmission(null);
+    }
+  }, [connection.sessionId, updateUnknownPromptAdmission]);
   const {
     artifacts,
     loading: artifactsLoading,
@@ -2402,6 +2481,23 @@ export function App({
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(
     DEFAULT_REVIEW_PANEL_WIDTH,
   );
+  const [artifactPanelFullscreen, setArtifactPanelFullscreen] = useState(false);
+  const artifactPanelFullscreenRef = useRef(false);
+  artifactPanelFullscreenRef.current = artifactPanelFullscreen;
+  // Exiting fullscreen swaps the same DOM node back to .artifactPanelDock,
+  // whose open animation would re-play on the already-open panel; suppress it
+  // until the dock remounts for a genuine open (panel close, or the floating
+  // drawer handing back).
+  const [
+    suppressArtifactDockOpenAnimation,
+    setSuppressArtifactDockOpenAnimation,
+  ] = useState(false);
+  // In-tree portal target for the docked panel (display:contents keeps the
+  // portaled wrapper a direct flex item of .appShell). Held in state so the
+  // portal container exists before the wrapper renders.
+  const [artifactPanelSlotEl, setArtifactPanelSlotEl] =
+    useState<HTMLDivElement | null>(null);
+  const artifactPanelFullscreenSurfaceRef = useRef<HTMLDivElement | null>(null);
   const artifactPanelResizeCleanupRef = useRef<(() => void) | null>(null);
   const artifactPanelSessionStateRef = useRef<ArtifactPanelSessionState | null>(
     null,
@@ -2456,6 +2552,7 @@ export function App({
       setArtifactPanelExtraArtifacts([]);
       setPaneArtifactSnapshots(new Map());
       setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
+      setArtifactPanelFullscreen(false);
       return;
     }
 
@@ -2467,6 +2564,7 @@ export function App({
     setArtifactPanelExtraArtifacts(savedState.extraArtifacts);
     setPaneArtifactSnapshots(new Map());
     setArtifactPanelWidth(savedState.width);
+    setArtifactPanelFullscreen(false);
   }, [connection.sessionId]);
   const sideTasksAvailable =
     Boolean(connection.sessionId && connection.workspaceCwd) &&
@@ -3144,12 +3242,19 @@ export function App({
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
+    // Reset fullscreen in the same commit: while it stays true the covered
+    // shells keep display:none, and deferring the reset to the management
+    // effect would paint one frame of an empty shell after the close.
+    setArtifactPanelFullscreen(false);
+    setSuppressArtifactDockOpenAnimation(false);
     setSideTaskCatalog((catalog) =>
       catalog.items.length === 0 ? { ...catalog, loaded: false } : catalog,
     );
   }, []);
   useLayoutEffect(() => {
-    if (!artifactPanelOpen) return;
+    // Fullscreen hides the chat pane (display:none); measuring it there
+    // reports 0 and would clamp the panel down to its minimum width.
+    if (!artifactPanelOpen || artifactPanelFullscreen) return;
     const clampWidth = () => {
       setArtifactPanelWidth((width) => {
         const chatPaneWidth =
@@ -3171,12 +3276,14 @@ export function App({
       window.removeEventListener('resize', clampWidth);
       observer.disconnect();
     };
-  }, [artifactPanelOpen]);
+  }, [artifactPanelOpen, artifactPanelFullscreen]);
   const closeArtifactPanelTab = useCallback((tabId: string) => {
     setArtifactPanelTabs((tabs) => {
       const nextTabs = tabs.filter((tab) => tab.id !== tabId);
       if (nextTabs.length === 0) {
         setArtifactPanelOpen(false);
+        setArtifactPanelFullscreen(false);
+        setSuppressArtifactDockOpenAnimation(false);
         setActiveArtifactPanelTabId(null);
         setReviewChanges([]);
         setSelectedReviewPath(null);
@@ -3616,6 +3723,12 @@ export function App({
   }, [displayMessages, streamingState]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const lastSubmittedInputAnnotationsRef = useRef<
+    DaemonInputAnnotation[] | undefined
+  >(undefined);
+  const lastSubmittedSourceVersionRef = useRef(
+    composerSourceVersionRef.current,
+  );
   const retryableTurnErrorIdRef = useRef<string | null>(null);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
@@ -3691,6 +3804,201 @@ export function App({
   const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  const toggleArtifactPanelFullscreen = useCallback(() => {
+    setArtifactPanelFullscreen((value) => !value);
+    // Only the docked node replays its open animation on the fullscreen ->
+    // docked class swap; the floating drawer has no such replay.
+    if (!useFloatingArtifactPanel) setSuppressArtifactDockOpenAnimation(true);
+  }, [useFloatingArtifactPanel]);
+  useEffect(() => {
+    if (!artifactPanelOpen) {
+      setArtifactPanelFullscreen(false);
+      setSuppressArtifactDockOpenAnimation(false);
+    } else if (useFloatingArtifactPanel) {
+      // The dock node unmounts while the drawer takes over; a stale flag would
+      // suppress the slide-in of the next genuine dock mount. Keep it while
+      // fullscreen persists: the next dock mount enters the fullscreen class,
+      // and shrinking it back still replays the slide-in without the flag.
+      if (!artifactPanelFullscreen) {
+        setSuppressArtifactDockOpenAnimation(false);
+      }
+    } else if (artifactPanelFullscreen) {
+      // Floating -> docked hand-over mid-fullscreen: the toggle never set the
+      // flag (the panel was floating when it fired), but shrinking the dock
+      // back to its docked class would replay the slide-in.
+      setSuppressArtifactDockOpenAnimation(true);
+    }
+  }, [artifactPanelOpen, useFloatingArtifactPanel, artifactPanelFullscreen]);
+  const dockedFullscreenActive =
+    artifactPanelOpen && !useFloatingArtifactPanel && artifactPanelFullscreen;
+  // Fullscreen moves the docked panel's portal slot into the top-level portal
+  // root so a transformed/paint-contained/lower-stacking host ancestor can
+  // neither bound the fixed surface nor paint over it; shrinking moves it
+  // back. The wrapper itself is portaled INTO the slot, so it stays mounted
+  // (and React's delegated listeners stay attached to the slot) across the
+  // move — a remount would discard panel-local state.
+  useLayoutEffect(() => {
+    const slot = artifactPanelSlotEl;
+    if (!slot || !dockedFullscreenActive) return;
+    const host = slot.parentElement;
+    if (!host) return;
+    const next = slot.nextSibling;
+    (portalRoot ?? document.body).appendChild(slot);
+    return () => {
+      host.insertBefore(slot, next);
+    };
+  }, [dockedFullscreenActive, portalRoot, artifactPanelSlotEl]);
+  // Document-level modal semantics for the fullscreen surface,
+  // matching what the floating variant gets from vaul's Radix dialog: hide
+  // every outside tree from AT (Tab containment is the surface's own keydown
+  // handler) and move stray focus into the surface — the covered chat subtree
+  // drops focus to body when it goes display:none.
+  useLayoutEffect(() => {
+    const surface = artifactPanelFullscreenSurfaceRef.current;
+    if (!dockedFullscreenActive || !surface) return;
+    const hidden: Array<{ element: Element; previous: string | null }> = [];
+    let node: Element | null = surface;
+    while (node && node !== document.body) {
+      const root = node.getRootNode();
+      const parent: Element | null =
+        node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+      if (!parent) break;
+      for (const sibling of Array.from(parent.children)) {
+        if (sibling === node) continue;
+        // The elevated toast host shares this portal root and must stay
+        // announced (and dismissible) while the surface is up.
+        if (sibling.matches('[data-web-shell-toast-host]')) continue;
+        hidden.push({
+          element: sibling,
+          // A live hideOthers lock (e.g. the floating drawer unmounting in
+          // the same commit that mounts the surface) owns this value; its
+          // unlock restores the true original itself.
+          previous: sibling.hasAttribute('data-aria-hidden')
+            ? null
+            : sibling.getAttribute('aria-hidden'),
+        });
+        sibling.setAttribute('aria-hidden', 'true');
+      }
+      node = parent;
+    }
+    // document.activeElement retargets to the shadow host in shadow-DOM
+    // portal mode; read the focused node from the surface's own root.
+    const surfaceRoot = surface.getRootNode() as Document | ShadowRoot;
+    if (!surface.contains(surfaceRoot.activeElement)) surface.focus();
+    // Keydowns inside the sandboxed HTML preview iframe never reach the
+    // surface's Tab-wrap handler or the window Escape handler, and a Tab
+    // past the preview's last focusable lands focus natively outside the
+    // surface. Pull stray focus back like the floating variant's Radix
+    // focus trap, so the keyboard stays the surface's escape route.
+    const pullStrayFocusIntoSurface = (event: FocusEvent) => {
+      // focusin is composed: at this document-level listener the browser
+      // retargets it to the shadow host, so resolve the real node.
+      const target =
+        (event.composedPath()[0] as Element | undefined) ??
+        (event.target as Element | null);
+      if (!target || surface.contains(target) || target.contains(surface)) {
+        return;
+      }
+      // The elevated toast host and any Radix layer opened from the panel
+      // share this portal root and stay actionable beside the surface.
+      if (portalRoot?.contains(target)) return;
+      surface.focus();
+    };
+    document.addEventListener('focusin', pullStrayFocusIntoSurface);
+    return () => {
+      document.removeEventListener('focusin', pullStrayFocusIntoSurface);
+      for (const { element, previous } of hidden) {
+        const restore = () => {
+          if (previous === null) element.removeAttribute('aria-hidden');
+          else element.setAttribute('aria-hidden', previous);
+        };
+        if (!element.hasAttribute('data-aria-hidden')) {
+          restore();
+          continue;
+        }
+        // A Radix hideOthers lock (a DialogShell opened over the surface)
+        // owns this node now: it recorded the node as already hidden, so its
+        // own unlock will not restore it, and restoring now would expose the
+        // app behind the open modal. Wait for the lock's marker to drop.
+        const observer = new MutationObserver(() => {
+          if (element.hasAttribute('data-aria-hidden')) return;
+          observer.disconnect();
+          restore();
+        });
+        observer.observe(element, {
+          attributes: true,
+          attributeFilter: ['data-aria-hidden'],
+        });
+      }
+    };
+  }, [dockedFullscreenActive, portalRoot]);
+  const handleArtifactPanelSurfaceKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (!artifactPanelFullscreen) return;
+      if (
+        event.key !== 'Tab' ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey
+      ) {
+        return;
+      }
+      const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
+      const focused = (
+        event.currentTarget.getRootNode() as Document | ShadowRoot
+      ).activeElement;
+      if (!first || !last) {
+        if (focused === event.currentTarget) event.preventDefault();
+        return;
+      }
+      if (!event.shiftKey && focused === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (
+        event.shiftKey &&
+        (focused === first || focused === event.currentTarget)
+      ) {
+        event.preventDefault();
+        last.focus();
+      }
+    },
+    [artifactPanelFullscreen],
+  );
+  // The drawer's Radix dismiss layer only checks `event.key === 'Escape'`
+  // (no isComposing guard), so while composing in a panel input an Escape
+  // that cancels the composition would close the drawer — and its
+  // preventDefault would swallow the native cancel. Mask the key for the
+  // capture-phase dismiss listener and restore it before the event reaches
+  // the focused input, mirroring DialogShell.preserveImeEscape. The docked
+  // fullscreen branch is covered by the window handler's IME guard.
+  useEffect(() => {
+    if (!artifactPanelOpen || !useFloatingArtifactPanel) return;
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+    };
+  }, [artifactPanelOpen, useFloatingArtifactPanel]);
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -4029,6 +4337,14 @@ export function App({
     if (activePanel) setActivePanel(null);
     if (modelDialogMode) setModelDialogMode(null);
     if (showApprovalModeDialog) setShowApprovalModeDialog(false);
+    // The fullscreen artifact panel hides the chat (display:none +
+    // aria-hidden), and the approval overlay renders inside the chat footer —
+    // shrink the panel back to its dock/drawer so the approval surfaces.
+    // Split-view pane approvals deliberately do not shrink the panel: each
+    // pane renders its own approval banner, and surfacing them here would
+    // need a pending-approval signal plumbed up through SplitView. Escape or
+    // the toolbar exits fullscreen and reveals them.
+    if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
     // The Scheduled Tasks and Goals pages are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
     // the same reason. The split view is deliberately NOT dismissed: each pane
@@ -4043,6 +4359,7 @@ export function App({
     modelDialogMode,
     showApprovalModeDialog,
     mainView,
+    artifactPanelFullscreen,
   ]);
   // Whether each approval overlay is the topmost (visible, uncovered) one. The
   // overlay components consume this as `keyboardActive`: when it flips true — on
@@ -4055,13 +4372,15 @@ export function App({
     !activePanel &&
     modelDialogMode === null &&
     !showApprovalModeDialog &&
-    mainView === 'chat';
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
   const askUserOverlayVisible =
     pendingAskUserApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
     !showApprovalModeDialog &&
-    mainView === 'chat';
+    mainView === 'chat' &&
+    !artifactPanelFullscreen;
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
@@ -4418,6 +4737,7 @@ export function App({
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
+        onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
       },
@@ -4425,18 +4745,29 @@ export function App({
       const isUserPrompt = !text.trimStart().startsWith('/');
       const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
+      const previousLastSubmittedInputAnnotations =
+        lastSubmittedInputAnnotationsRef.current;
+      const previousLastSubmittedSourceVersion =
+        lastSubmittedSourceVersionRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
       const restoreCancelledSubmitState = () => {
         setIsPreparingPrompt(false);
         lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
         lastSubmittedImagesRef.current = previousLastSubmittedImages;
+        lastSubmittedInputAnnotationsRef.current =
+          previousLastSubmittedInputAnnotations;
+        lastSubmittedSourceVersionRef.current =
+          previousLastSubmittedSourceVersion;
         retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
         setShowRetryHint(previousShowRetryHint);
       };
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
+        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
+        lastSubmittedSourceVersionRef.current =
+          composerSourceVersionRef.current;
         retriedTurnErrorIdRef.current = null;
       }
       setShowRetryHint(false);
@@ -4492,6 +4823,14 @@ export function App({
         inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
+        ...(opts?.onAdmissionStarted
+          ? {
+              onAdmissionStarted: () =>
+                opts.onAdmissionStarted?.(
+                  connectionRef.current.sessionId ?? allocatedSessionId,
+                ),
+            }
+          : {}),
         ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
       };
       if (opts?.commitComposerAccepted) {
@@ -4501,7 +4840,7 @@ export function App({
       }
       const sessionIdAfterEnsure =
         connectionRef.current.sessionId ?? allocatedSessionId;
-      if (sessionIdAfterEnsure && text.trim()) {
+      if (sessionIdAfterEnsure && (text.trim() || (images?.length ?? 0) > 0)) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId: sessionIdAfterEnsure,
@@ -4643,9 +4982,13 @@ export function App({
     activePanel !== null;
   // Block chat interaction (composer, chat keyboard shortcuts) both when a modal
   // is open (dialogOpen, which already includes the Settings/Status panel) and
-  // while a full-pane view (the Scheduled Tasks page) covers the chat, so
-  // keystrokes/Escape can't reach the hidden composer underneath.
-  const interactionBlocked = dialogOpen || mainView !== 'chat';
+  // while a covering surface hides the chat — a full-pane view (the Scheduled
+  // Tasks page) or the fullscreen artifact panel — so keystrokes/Escape can't
+  // reach the hidden composer underneath. The fullscreen gate also keeps the
+  // btw capture-phase Escape handler from dismissing hidden content and
+  // swallowing the Escape that shrinks the panel.
+  const interactionBlocked =
+    dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
   const mainVoiceTarget = useMemo(
     () =>
       resolveVoiceWorkspaceTarget({
@@ -4722,6 +5065,15 @@ export function App({
       updateFailedPrompt(null);
       return;
     }
+    const retryOwner = {
+      sourceVersion: composerSourceVersionRef.current,
+      sessionId: connectionRef.current.sessionId,
+      workspaceCwd: getComposerWorkspaceCwd(),
+    };
+    const retryOwnerIsCurrent = () =>
+      composerSourceVersionRef.current === retryOwner.sourceVersion &&
+      connectionRef.current.sessionId === retryOwner.sessionId &&
+      getComposerWorkspaceCwd() === retryOwner.workspaceCwd;
     updateFailedPrompt(null);
     const retryStartedAt = Date.now();
     setFailedPromptRetry({
@@ -4732,11 +5084,16 @@ export function App({
       settled: false,
     });
     let admitted = false;
+    let admissionStarted = false;
     sendPrompt(failed.text, failed.images, {
       optimisticUserMessage: false,
       inputAnnotations: failed.inputAnnotations,
+      onAdmissionStarted: () => {
+        admissionStarted = true;
+      },
       onAdmitted: () => {
         admitted = true;
+        if (!retryOwnerIsCurrent()) return;
         setFailedPromptRetry((current) =>
           current?.sessionId === failed.sessionId &&
           current.messageId === failed.messageId
@@ -4746,6 +5103,24 @@ export function App({
       },
     })
       .catch((error: unknown) => {
+        if (!retryOwnerIsCurrent()) return;
+        const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+        if (admissionStarted && !admitted && !definitelyRejected) {
+          updateUnknownPromptAdmission({
+            sessionId: failed.sessionId,
+            messageId: failed.messageId,
+            text: failed.text,
+            images: failed.images ? [...failed.images] : undefined,
+            inputAnnotations: failed.inputAnnotations,
+            payloadAvailable: true,
+          });
+          pushToast('warning', t('queue.admissionUnknown'));
+          console.warn(
+            '[WebShell] prompt retry admission outcome is unknown',
+            error,
+          );
+          return;
+        }
         if (
           !admitted &&
           connectionRef.current.sessionId === failed.sessionId &&
@@ -4756,6 +5131,7 @@ export function App({
         reportError(error, 'Failed to resend message');
       })
       .finally(() => {
+        if (!retryOwnerIsCurrent()) return;
         setFailedPromptRetry((current) =>
           current?.sessionId === failed.sessionId &&
           current.messageId === failed.messageId
@@ -4763,7 +5139,16 @@ export function App({
             : current,
         );
       });
-  }, [reportError, sendPrompt, store, updateFailedPrompt]);
+  }, [
+    getComposerWorkspaceCwd,
+    pushToast,
+    reportError,
+    sendPrompt,
+    store,
+    t,
+    updateFailedPrompt,
+    updateUnknownPromptAdmission,
+  ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
       'session_mid_turn_message_mutation',
@@ -4776,6 +5161,8 @@ export function App({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
+    restoreUnknownQueuedPrompt,
+    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     sessionId: connection.sessionId,
@@ -4827,7 +5214,7 @@ export function App({
                 editorRef.current?.clear();
               }
             }
-            if (sourceSessionId && text.trim()) {
+            if (sourceSessionId && (text.trim() || (images?.length ?? 0) > 0)) {
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
                 sessionId: sourceSessionId,
@@ -4851,7 +5238,7 @@ export function App({
         inputAnnotations,
       );
       const sessionId = connectionRef.current.sessionId;
-      if (sessionId && text.trim()) {
+      if (sessionId && (text.trim() || (images?.length ?? 0) > 0)) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId,
@@ -5697,7 +6084,10 @@ export function App({
       connected &&
       retryableTurnErrorId !== null &&
       retryableTurnErrorId !== retriedTurnErrorIdRef.current &&
-      lastSubmittedPromptRef.current.length > 0;
+      lastSubmittedSourceVersionRef.current ===
+        composerSourceVersionRef.current &&
+      (lastSubmittedPromptRef.current.length > 0 ||
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0);
     retryableTurnErrorIdRef.current = canRetry ? retryableTurnErrorId : null;
     setShowRetryHint(canRetry);
   }, [blocks, connected]);
@@ -5987,6 +6377,12 @@ export function App({
       sessionActions,
       reportError,
     ],
+  );
+  // Stable identity: ChatEditor is memoized and an inline closure would
+  // re-render it on every app render.
+  const handleShowContextUsage = useCallback(
+    () => showContextUsage('/context', false),
+    [showContextUsage],
   );
 
   // Stable reference: this travels through the memoized MessageList →
@@ -6510,6 +6906,7 @@ export function App({
 
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
+      composerSourceVersionRef.current += 1;
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
       setGitModeIntent({ mode: 'current' });
@@ -6915,6 +7312,13 @@ export function App({
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       if (
+        unknownPromptAdmissionRef.current?.payloadAvailable &&
+        unknownPromptAdmissionRef.current.sessionId ===
+          connectionRef.current.sessionId
+      ) {
+        return false;
+      }
+      if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
         return true;
@@ -6945,18 +7349,34 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        const admissionOwner = {
+          sourceVersion: composerSourceVersionRef.current,
+          sessionId: connectionRef.current.sessionId,
+          workspaceCwd: getComposerWorkspaceCwd(),
+        };
+        const admissionOwnerIsCurrent = () =>
+          composerSourceVersionRef.current === admissionOwner.sourceVersion &&
+          (admissionOwner.sessionId === undefined ||
+            (connectionRef.current.sessionId === admissionOwner.sessionId &&
+              getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
         let admitted = false;
+        let admissionStarted = false;
+        let admissionSessionId: string | undefined;
         sendPrompt(promptText, promptImages, {
           ...sendOptions,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
             ? commitComposerAccepted
             : undefined,
+          onAdmissionStarted: (sessionId) => {
+            admissionStarted = true;
+            admissionSessionId = sessionId;
+          },
           onAdmitted: () => {
             admitted = true;
           },
@@ -6968,7 +7388,32 @@ export function App({
               }
             : {}),
         }).catch((error: unknown) => {
+          if (!admissionOwnerIsCurrent()) return;
           const failedMessage = optimisticUserMessage;
+          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+          if (admissionStarted && !admitted && !definitelyRejected) {
+            updateFailedPrompt(null);
+            const uncertainSessionId =
+              failedMessage?.sessionId ??
+              admissionSessionId ??
+              connectionRef.current.sessionId;
+            if (uncertainSessionId) {
+              updateUnknownPromptAdmission({
+                sessionId: uncertainSessionId,
+                messageId: failedMessage?.messageId,
+                text: promptText,
+                images: promptImages ? [...promptImages] : undefined,
+                inputAnnotations: sendOptions.inputAnnotations,
+                payloadAvailable: true,
+              });
+            }
+            pushToast('warning', t('queue.admissionUnknown'));
+            console.warn(
+              '[WebShell] prompt admission outcome is unknown',
+              error,
+            );
+            return;
+          }
           if (
             trackSendFailure &&
             !admitted &&
@@ -7910,6 +8355,7 @@ export function App({
       blockLocalCommandDuringTurn,
       createSideTask,
       sideTasksAvailable,
+      getComposerWorkspaceCwd,
       openEnvironmentTasksPanel,
       hiddenCommands,
       pushToast,
@@ -7929,6 +8375,7 @@ export function App({
       t,
       workspaceActions,
       updateFailedPrompt,
+      updateUnknownPromptAdmission,
     ],
   );
 
@@ -7997,6 +8444,49 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
+  const discardUnknownPromptPayload = useCallback(() => {
+    const current = unknownPromptAdmissionRef.current;
+    if (
+      !current?.payloadAvailable ||
+      current.sessionId !== connectionRef.current.sessionId
+    ) {
+      return;
+    }
+    updateUnknownPromptAdmission({
+      sessionId: current.sessionId,
+      messageId: current.messageId,
+      payloadAvailable: false,
+    });
+  }, [updateUnknownPromptAdmission]);
+  const restoreUnknownPromptPayload = useCallback(() => {
+    const current = unknownPromptAdmissionRef.current;
+    const editor = editorRef.current;
+    if (
+      !current?.payloadAvailable ||
+      current.sessionId !== connectionRef.current.sessionId ||
+      !editor
+    ) {
+      return;
+    }
+    if (!window.confirm(t('queue.continueEditingConfirm'))) return;
+    const draft = editor.getText();
+    const restoredText = current.text?.trim()
+      ? draft.trim()
+        ? `${current.text}\n${draft}`
+        : current.text
+      : draft;
+    if (restoredText !== draft) editor.setText(restoredText);
+    if (current.images?.length) editor.restoreImages(current.images);
+    if (current.inputAnnotations?.length) {
+      editor.restoreInputAnnotations?.(current.inputAnnotations);
+    }
+    editor.focus();
+    updateUnknownPromptAdmission({
+      sessionId: current.sessionId,
+      messageId: current.messageId,
+      payloadAvailable: false,
+    });
+  }, [t, updateUnknownPromptAdmission]);
   const handleCanScrollToBottomChange = useCallback(
     (canScrollToBottom: boolean) => {
       setCanScrollMessageListToBottom(canScrollToBottom);
@@ -8011,10 +8501,18 @@ export function App({
       streamingStateRef.current === 'idle' &&
       retryableTurnErrorIdRef.current &&
       connectionRef.current.sessionId &&
-      lastSubmittedPromptRef.current
+      (lastSubmittedPromptRef.current ||
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0)
     ) {
       const retryErrorId = retryableTurnErrorIdRef.current;
       const retrySessionId = connectionRef.current.sessionId;
+      const retrySourceVersion = composerSourceVersionRef.current;
+      const retryText = lastSubmittedPromptRef.current;
+      const retryImages = lastSubmittedImagesRef.current;
+      const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
+      const retryOwnerIsCurrent = () =>
+        composerSourceVersionRef.current === retrySourceVersion &&
+        connectionRef.current.sessionId === retrySessionId;
       retriedTurnErrorIdRef.current = retryErrorId;
       setShowRetryHint(false);
       setFailedPromptRetry({
@@ -8024,24 +8522,49 @@ export function App({
         admitted: false,
         settled: false,
       });
-      sendPrompt(
-        lastSubmittedPromptRef.current,
-        lastSubmittedImagesRef.current,
-        {
-          optimisticUserMessage: false,
-          retry: true,
-          onAdmitted: () => {
-            setFailedPromptRetry((current) =>
-              current?.sessionId === retrySessionId &&
-              current.messageId === retryErrorId
-                ? { ...current, admitted: true }
-                : current,
-            );
-          },
+      let admissionStarted = false;
+      let admitted = false;
+      sendPrompt(retryText, retryImages, {
+        optimisticUserMessage: false,
+        retry: true,
+        inputAnnotations: retryInputAnnotations,
+        onAdmissionStarted: () => {
+          admissionStarted = true;
         },
-      )
-        .catch((error: unknown) => reportError(error, 'Failed to retry prompt'))
+        onAdmitted: () => {
+          admitted = true;
+          if (!retryOwnerIsCurrent()) return;
+          setFailedPromptRetry((current) =>
+            current?.sessionId === retrySessionId &&
+            current.messageId === retryErrorId
+              ? { ...current, admitted: true }
+              : current,
+          );
+        },
+      })
+        .catch((error: unknown) => {
+          if (!retryOwnerIsCurrent()) return;
+          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
+          if (admissionStarted && !admitted && !definitelyRejected) {
+            updateUnknownPromptAdmission({
+              sessionId: retrySessionId,
+              messageId: retryErrorId,
+              text: retryText,
+              images: retryImages ? [...retryImages] : undefined,
+              inputAnnotations: retryInputAnnotations,
+              payloadAvailable: true,
+            });
+            pushToast('warning', t('queue.admissionUnknown'));
+            console.warn(
+              '[WebShell] post-turn retry admission outcome is unknown',
+              error,
+            );
+            return;
+          }
+          reportError(error, 'Failed to retry prompt');
+        })
         .finally(() => {
+          if (!retryOwnerIsCurrent()) return;
           setFailedPromptRetry((current) =>
             current?.sessionId === retrySessionId &&
             current.messageId === retryErrorId
@@ -8052,7 +8575,15 @@ export function App({
     } else {
       store.dispatch([{ type: 'status', text: t('retry.none') }]);
     }
-  }, [connected, sendPrompt, reportError, store, t]);
+  }, [
+    connected,
+    pushToast,
+    reportError,
+    sendPrompt,
+    store,
+    t,
+    updateUnknownPromptAdmission,
+  ]);
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
@@ -8109,6 +8640,7 @@ export function App({
     closePanel,
     handleCancel,
     handleCycleMode,
+    artifactPanelFullscreen,
   });
   escLiveRef.current = {
     streamingState,
@@ -8118,6 +8650,7 @@ export function App({
     closePanel,
     handleCancel,
     handleCycleMode,
+    artifactPanelFullscreen,
   };
 
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
@@ -8142,8 +8675,26 @@ export function App({
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.isComposing) return;
+      // keyCode 229: WebKit marks IME-owned keys this way while isComposing
+      // is still false; the IME owns them exactly like composing keys.
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       const live = escLiveRef.current;
+
+      // The fullscreen right panel (artifacts/subagents) is the topmost
+      // surface; Escape shrinks it back to its dock/drawer. Modals opened on
+      // top are DialogShells, whose own handler stops Escape before this
+      // listener, so this only fires when the panel itself is topmost.
+      if (e.key === 'Escape' && live.artifactPanelFullscreen) {
+        // Mirror the activePanel branch below: the sidebar search input
+        // clears on Escape without stopping the event, so don't also shrink
+        // the panel when Escape is being handled inside the sidebar.
+        const target = e.target as HTMLElement | null;
+        if (!target?.closest('[data-sidebar-shell]')) {
+          e.preventDefault();
+          setArtifactPanelFullscreen(false);
+        }
+        return;
+      }
 
       // A full-view panel (Settings / Daemon Status) replaces the chat rather
       // than overlaying it; Escape returns to the chat. Any modal opened on top
@@ -8818,6 +9369,42 @@ export function App({
     };
   }, [appClassName, appStyle, portalRoot, selectedLanguage, selectedTheme]);
 
+  // Shared by the drawer and docked render sites below; only the genuine
+  // per-variant props (variant / panelWidth) stay at each site.
+  const artifactPanelSharedProps = {
+    artifacts: artifactPanelArtifacts,
+    tabs: artifactPanelTabs,
+    activeTabId: activeArtifactPanelTabId,
+    reviewChanges,
+    selectedReviewPath,
+    workspaceCwd: connection.workspaceCwd || '',
+    loading: artifactsLoading,
+    error: artifactsError,
+    onSelectTab: setActiveArtifactPanelTabId,
+    onCloseTab: closeArtifactPanelTab,
+    onOpenFilePreview: openFilePreview,
+    latestReviewAvailable: latestReviewChanges.length > 0,
+    onOpenLatestReview: openLatestReviewPanel,
+    items: rightPanelItems,
+    sideTaskAvailable: sideTasksAvailable,
+    sideTasks: visibleSideTasks,
+    sideTasksLoading,
+    onCreateSideTask: createEmptySideTask,
+    onOpenSideTask: openSideTask,
+    onCreateSideTaskSession: createSideTaskSession,
+    onSideTaskCreated: handleSideTaskCreated,
+    onSideTaskTitleChange: handleSideTaskTitleChange,
+    onNestedRightPanelOpen: handleTurnOutputOpen,
+    onNestedArtifactsChange: handlePaneArtifactsChange,
+    onError: reportError,
+    sessionWorkflowEnabled,
+    onOpenTerminal: openTerminalPanel,
+    onImageIngestionNotice: pushToast,
+    onClose: closeArtifactPanel,
+    fullscreen: artifactPanelFullscreen,
+    onToggleFullscreen: toggleArtifactPanelFullscreen,
+  };
+
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
@@ -8831,7 +9418,13 @@ export function App({
           data-web-shell-shadcn
           lang={selectedLanguage}
         >
-          {!onToast && <ToastHost toasts={toasts} onDismiss={dismissToast} />}
+          {!onToast && (
+            <ToastHost
+              toasts={toasts}
+              onDismiss={dismissToast}
+              elevated={artifactPanelFullscreen}
+            />
+          )}
           {showResumeDialog && (
             <DialogShell
               title={t('resume.title')}
@@ -9146,10 +9739,12 @@ export function App({
                   ? { role: 'dialog', 'aria-modal': 'true' as const }
                   : {})}
                 aria-label={t('sidebar.label')}
+                aria-hidden={artifactPanelFullscreen || undefined}
                 className={[
                   styles.mobileDrawer,
                   mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
                   forceMobileDrawer ? styles.mobileDrawerForced : undefined,
+                  artifactPanelFullscreen ? styles.chatViewHidden : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -9264,7 +9859,15 @@ export function App({
                 />
               </div>
             )}
-            <div className={styles.contextShell}>
+            <div
+              className={[
+                styles.contextShell,
+                artifactPanelFullscreen ? styles.chatViewHidden : undefined,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              aria-hidden={artifactPanelFullscreen || undefined}
+            >
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
@@ -9815,6 +10418,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
@@ -9849,19 +10453,26 @@ export function App({
                   // Marker class (no declarations): keeps the ':not(...)'
                   // exclusion in App.module.css matching.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
-                  activePanel || mainView !== 'chat'
+                  activePanel ||
+                  mainView !== 'chat' ||
+                  artifactPanelFullscreen
                     ? styles.chatViewHidden
                     : undefined,
                 ]
                   .filter(Boolean)
                   .join(' ')}
-                // Hide the outer chat whenever a panel or a full-page view (split
-                // / scheduled tasks) is up. `display:none` drops the subtree from
-                // layout and the tab order, and aria-hidden keeps AT out — so no
-                // keyboard/AT can reach the outer composer/toolbar behind the
-                // split. State is preserved (the node stays mounted).
+                // Hide the outer chat whenever a panel, a full-page view (split
+                // / scheduled tasks), or the fullscreen artifact panel covers
+                // it. `display:none` drops the subtree from layout and the tab
+                // order, and aria-hidden keeps AT out — so no keyboard/AT can
+                // reach the outer composer/toolbar behind the covering surface.
+                // State is preserved (the node stays mounted).
                 aria-hidden={
-                  activePanel || mainView !== 'chat' ? true : undefined
+                  activePanel ||
+                  mainView !== 'chat' ||
+                  artifactPanelFullscreen
+                    ? true
+                    : undefined
                 }
               >
                 {showMissingSessionState && (
@@ -10102,7 +10713,9 @@ export function App({
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
                             onOpen={
-                              showFloatingTodos ? openTasksPanel : undefined
+                              sessionWorkflowEnabled && showFloatingTodos
+                                ? openTasksPanel
+                                : undefined
                             }
                           />
                         </div>
@@ -10200,17 +10813,61 @@ export function App({
                             {t('editor.escClearHint')}
                           </div>
                         ) : null}
+                        {unknownPromptAdmission &&
+                          unknownPromptAdmission.sessionId ===
+                            connection.sessionId && (
+                          <div
+                            className={styles.composerActionTip}
+                            role="status"
+                            data-testid="prompt-admission-unknown"
+                          >
+                            <span
+                              className={styles.composerActionTipIcon}
+                              aria-hidden="true"
+                            >
+                              !
+                            </span>
+                            <span className={styles.composerActionTipText}>
+                              {t('queue.admissionUnknown')}
+                            </span>
+                            {unknownPromptAdmission.payloadAvailable && (
+                              <div
+                                className={styles.composerActionTipActions}
+                              >
+                                <button
+                                  type="button"
+                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                  onClick={restoreUnknownPromptPayload}
+                                >
+                                  {t('queue.restoreUnknown')}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={styles.composerActionTipButton}
+                                  onClick={discardUnknownPromptPayload}
+                                >
+                                  {t('queue.discardUnknown')}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <QueuedPromptDisplay
                           prompts={queuedPrompts}
                           t={t}
                           canMutateMidTurn={canMutateMidTurn}
                           onDelete={removeQueuedPrompt}
                           onEdit={editQueuedPrompt}
+                          onRestoreUnknown={restoreUnknownQueuedPrompt}
+                          onDiscardUnknown={discardUnknownQueuedPrompt}
                         />
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
                             <CustomComposerHeader
-                              disabled={isDisabled}
+                              disabled={
+                                isDisabled ||
+                                unknownPromptAdmission?.payloadAvailable === true
+                              }
                               isRunning={streamingState !== 'idle'}
                               currentMode={currentMode}
                               currentModel={currentModel}
@@ -10225,6 +10882,7 @@ export function App({
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
                           }
+                          onImageIngestionNotice={pushToast}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -10237,7 +10895,8 @@ export function App({
                             isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
-                            approvalOverlayActive
+                            approvalOverlayActive ||
+                            unknownPromptAdmission?.payloadAvailable === true
                           }
                           commands={commands}
                           skills={loadedSkills}
@@ -10284,6 +10943,9 @@ export function App({
                               ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
                               : DEFAULT_COMPOSER_TOOLBAR_ACTIONS)
                           }
+                          tokenCount={connection.tokenCount ?? 0}
+                          contextWindow={connection.contextWindow ?? 0}
+                          onShowContextUsage={handleShowContextUsage}
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
@@ -10448,7 +11110,7 @@ export function App({
             {environmentPanelMounted && (
               <EnvironmentPanel
                 floating={!environmentPanelFits}
-                hidden={!environmentPanelVisible}
+                hidden={!environmentPanelVisible || artifactPanelFullscreen}
                 workspaceCwd={sessionWorktree?.path ?? activeWorkspaceCwd}
                 gitWorkspaceCwd={
                   connection.sessionId ? gitDiffWorkspaceCwd : undefined
@@ -10470,7 +11132,7 @@ export function App({
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
-            {artifactPanelOpen && useFloatingArtifactPanel ? (
+            {artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
                 direction="right"
@@ -10479,97 +11141,99 @@ export function App({
                   if (!open) closeArtifactPanel();
                 }}
               >
-                <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]">
+                <DrawerContent
+                  className={
+                    artifactPanelFullscreen
+                      ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
+                      : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
+                  }
+                  onEscapeKeyDown={(event) => {
+                    if (event.isComposing || event.keyCode === 229) {
+                      // IME owns Escape; keep the dismiss layer from acting
+                      // on it. The preserveImeEscape mask above normally
+                      // hides composition Escapes from this handler entirely.
+                      event.preventDefault();
+                      return;
+                    }
+                    // Fullscreen is the topmost surface: Escape shrinks the
+                    // panel back to its drawer width. Without this the
+                    // drawer's dismiss layer would close the panel instead.
+                    if (!artifactPanelFullscreen) return;
+                    event.preventDefault();
+                    setArtifactPanelFullscreen(false);
+                  }}
+                >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <ArtifactPanel
-                    artifacts={artifactPanelArtifacts}
-                    tabs={artifactPanelTabs}
-                    activeTabId={activeArtifactPanelTabId}
-                    reviewChanges={reviewChanges}
-                    selectedReviewPath={selectedReviewPath}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    loading={artifactsLoading}
-                    error={artifactsError}
-                    onSelectTab={setActiveArtifactPanelTabId}
-                    onCloseTab={closeArtifactPanelTab}
-                    onOpenFilePreview={openFilePreview}
-                    latestReviewAvailable={latestReviewChanges.length > 0}
-                    onOpenLatestReview={openLatestReviewPanel}
-                    items={rightPanelItems}
-                    sideTaskAvailable={sideTasksAvailable}
-                    sideTasks={visibleSideTasks}
-                    sideTasksLoading={sideTasksLoading}
-                    onCreateSideTask={createEmptySideTask}
-                    onOpenSideTask={openSideTask}
-                    onCreateSideTaskSession={createSideTaskSession}
-                    onSideTaskCreated={handleSideTaskCreated}
-                    onSideTaskTitleChange={handleSideTaskTitleChange}
-                    onNestedRightPanelOpen={handleTurnOutputOpen}
-                    onNestedArtifactsChange={handlePaneArtifactsChange}
-                    onError={reportError}
-                    sessionWorkflowEnabled={sessionWorkflowEnabled}
-                    onOpenTerminal={openTerminalPanel}
-                    onClose={closeArtifactPanel}
+                    {...artifactPanelSharedProps}
                     variant="drawer"
                   />
                 </DrawerContent>
               </Drawer>
-            ) : null}
+            )}
               </div>
             </div>
-            {artifactPanelOpen && !useFloatingArtifactPanel && (
-              <div
-                className={styles.artifactPanelDock}
-                style={
-                  {
-                    '--artifact-panel-dock-width': `${artifactPanelWidth + 4}px`,
-                  } as CSSProperties
-                }
-              >
+            {/* Stays mounted even when the panel is closed: the fullscreen
+                effect moves it to the portal root, and React must never
+                delete it while it is parked there. */}
+            <div
+              ref={setArtifactPanelSlotEl}
+              className={styles.artifactPanelSlot}
+            />
+            {/* The wrapper portals into the slot above, and the fullscreen
+                effect moves that slot to the portal root (and back), so the
+                panel stays mounted across the mode change. While fullscreen
+                it is the modal surface: dialog role/name plus Tab containment
+                (what the floating variant gets from vaul's Radix dialog). */}
+            {artifactPanelOpen &&
+              !useFloatingArtifactPanel &&
+              artifactPanelSlotEl &&
+              createPortal(
                 <div
-                  className={styles.artifactResizeHandle}
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
-                  aria-valuemax={getMaxArtifactPanelWidth()}
-                  aria-valuenow={artifactPanelWidth}
-                  onPointerDown={handleArtifactPanelResizeStart}
-                />
-                <div className={styles.artifactPanelClip}>
-                  <ArtifactPanel
-                    artifacts={artifactPanelArtifacts}
-                    tabs={artifactPanelTabs}
-                    activeTabId={activeArtifactPanelTabId}
-                    reviewChanges={reviewChanges}
-                    selectedReviewPath={selectedReviewPath}
-                    panelWidth={artifactPanelWidth}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    loading={artifactsLoading}
-                    error={artifactsError}
-                    onSelectTab={setActiveArtifactPanelTabId}
-                    onCloseTab={closeArtifactPanelTab}
-                    onOpenFilePreview={openFilePreview}
-                    latestReviewAvailable={latestReviewChanges.length > 0}
-                    onOpenLatestReview={openLatestReviewPanel}
-                    items={rightPanelItems}
-                    sideTaskAvailable={sideTasksAvailable}
-                    sideTasks={visibleSideTasks}
-                    sideTasksLoading={sideTasksLoading}
-                    onCreateSideTask={createEmptySideTask}
-                    onOpenSideTask={openSideTask}
-                    onCreateSideTaskSession={createSideTaskSession}
-                    onSideTaskCreated={handleSideTaskCreated}
-                    onSideTaskTitleChange={handleSideTaskTitleChange}
-                    onNestedRightPanelOpen={handleTurnOutputOpen}
-                    onNestedArtifactsChange={handlePaneArtifactsChange}
-                    onError={reportError}
-                    sessionWorkflowEnabled={sessionWorkflowEnabled}
-                    onOpenTerminal={openTerminalPanel}
-                    onClose={closeArtifactPanel}
-                  />
-                </div>
-              </div>
-            )}
+                  ref={artifactPanelFullscreenSurfaceRef}
+                  tabIndex={-1}
+                  onKeyDown={handleArtifactPanelSurfaceKeyDown}
+                  {...(artifactPanelFullscreen
+                    ? { role: 'dialog' as const, 'aria-label': 'Right panel' }
+                    : {})}
+                  className={
+                    artifactPanelFullscreen
+                      ? styles.artifactPanelFullscreen
+                      : [
+                          styles.artifactPanelDock,
+                          suppressArtifactDockOpenAnimation
+                            ? styles.artifactPanelDockNoOpenAnimation
+                            : undefined,
+                        ]
+                          .filter(Boolean)
+                          .join(' ')
+                  }
+                  style={
+                    {
+                      '--artifact-panel-dock-width': `${artifactPanelWidth + 4}px`,
+                    } as CSSProperties
+                  }
+                >
+                  {!artifactPanelFullscreen && (
+                    <div
+                      className={styles.artifactResizeHandle}
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-valuemin={MIN_ARTIFACT_PANEL_WIDTH}
+                      aria-valuemax={getMaxArtifactPanelWidth()}
+                      aria-valuenow={artifactPanelWidth}
+                      onPointerDown={handleArtifactPanelResizeStart}
+                    />
+                  )}
+                  <div className={styles.artifactPanelClip}>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      panelWidth={artifactPanelWidth}
+                    />
+                  </div>
+                </div>,
+                artifactPanelSlotEl,
+              )}
           </div>
         </div>
         </WebShellPortalRootContext.Provider>

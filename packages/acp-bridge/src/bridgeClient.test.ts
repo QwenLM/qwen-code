@@ -2317,6 +2317,69 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('keeps abandoned restore notifications fenced beyond the tombstone TTL', async () => {
+    const sessionId = 'sess:abandoned-restore';
+    const publish = vi.fn().mockReturnValue(true);
+    const onGenerationEvent = vi.fn();
+    const client = new BridgeClient(
+      (() => ({ events: { publish } })) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      onGenerationEvent,
+    );
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValueOnce(1_000);
+      client.markRestoreAbandoned(sessionId);
+      now.mockReturnValue(61_001);
+
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'late' },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+      await client.extNotification('qwen/notify/session/generation/event', {
+        v: 1,
+        sessionId,
+        requestId: 'late-generation',
+        event: { type: 'started', model: 'qwen', modelSource: 'main' },
+      });
+
+      expect(publish).not.toHaveBeenCalled();
+      expect(onGenerationEvent).not.toHaveBeenCalled();
+      client.markRestoreInFlight(sessionId);
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'settled' },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+      await client.extNotification('qwen/notify/session/generation/event', {
+        v: 1,
+        sessionId,
+        requestId: 'settled-generation',
+        event: { type: 'started', model: 'qwen', modelSource: 'main' },
+      });
+      expect(publish).toHaveBeenCalledOnce();
+      expect(onGenerationEvent).toHaveBeenCalledOnce();
+      client.clearRestoreInFlight(sessionId);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('allows artifact events during an in-flight restore on this channel', async () => {
     const sessionId = 'sess:restore-artifact-event';
     const publish = vi.fn().mockReturnValue(true);

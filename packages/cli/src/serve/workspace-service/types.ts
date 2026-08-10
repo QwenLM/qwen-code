@@ -210,6 +210,13 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<WorkspaceSkillToggleResult>;
 
+  /** Toggle multiple skills with one settings write and one session refresh. */
+  setWorkspaceSkillsEnabled(
+    ctx: WorkspaceRequestContext,
+    skillNames: readonly string[],
+    enabled: boolean,
+  ): Promise<WorkspaceSkillBatchToggleResult>;
+
   /** Install a project- or user-level Skill from a bounded package. */
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
@@ -342,10 +349,50 @@ export interface WorkspaceSkillToggleResult {
   sessionsFailed: number;
 }
 
+export type WorkspaceSkillToggleErrorCode =
+  | 'skill_not_found'
+  | 'skill_not_toggleable'
+  | 'skill_inactive_extension';
+
+export interface WorkspaceSkillToggleError {
+  skillName: string;
+  code: WorkspaceSkillToggleErrorCode;
+  error: string;
+  reason?: WorkspaceSkillNotToggleableReason;
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+}
+
+export interface WorkspaceSkillBatchToggleItem {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+}
+
+export interface WorkspaceSkillBatchToggleResult {
+  enabled: boolean;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  results: WorkspaceSkillBatchToggleItem[];
+  errors: WorkspaceSkillToggleError[];
+}
+
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
   settingsChanges?: Array<{
+    key: 'skills.disabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
+
+export type PersistDisabledSkillsBatchOutcome =
+  | { skillName: string; changed: boolean }
+  | { skillName: string; error: WorkspaceSkillNotToggleableError };
+
+export interface PersistDisabledSkillsBatchResult {
+  outcomes: PersistDisabledSkillsBatchOutcome[];
+  settingsChanges: Array<{
     key: 'skills.disabled' | 'skills.enabled';
     value: string[] | undefined;
   }>;
@@ -376,6 +423,31 @@ export class WorkspaceSkillNotToggleableError extends Error {
     );
     this.name = 'WorkspaceSkillNotToggleableError';
   }
+}
+
+export function mapWorkspaceSkillToggleError(
+  error: unknown,
+): WorkspaceSkillToggleError | undefined {
+  if (error instanceof WorkspaceSkillNotFoundError) {
+    return {
+      skillName: error.skillName,
+      code: 'skill_not_found',
+      error: error.message,
+    };
+  }
+  if (error instanceof WorkspaceSkillNotToggleableError) {
+    return {
+      skillName: error.skillName,
+      code:
+        error.reason === 'inactive_extension'
+          ? 'skill_inactive_extension'
+          : 'skill_not_toggleable',
+      error: error.message,
+      reason: error.reason,
+      ...(error.lockedScope ? { lockedScope: error.lockedScope } : {}),
+    };
+  }
+  return undefined;
 }
 
 /** Discriminated union for MCP server restart outcomes. */
@@ -470,6 +542,14 @@ export interface DaemonWorkspaceServiceDeps {
     enabled: boolean,
     assertGenerationOpen?: () => void,
   ) => Promise<PersistDisabledSkillResult>;
+
+  /** Persist multiple skill changes under one settings lock. */
+  persistDisabledSkillsBatch: (
+    workspace: string,
+    skillNames: readonly string[],
+    enabled: boolean,
+    assertGenerationOpen?: () => void,
+  ) => Promise<PersistDisabledSkillsBatchResult>;
 
   persistSetting?: (
     workspace: string,

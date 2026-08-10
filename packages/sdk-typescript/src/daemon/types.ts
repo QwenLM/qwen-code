@@ -24,6 +24,8 @@ export interface DaemonCapabilitiesLimits {
   maxPendingPromptsPerSession?: number | null;
   maxSessionsPerWorkspace?: number | null;
   maxTotalSessions?: number | null;
+  /** Server-side deadline for ACP session load/resume. */
+  sessionRestoreTimeoutMs?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -1416,6 +1418,7 @@ export const DAEMON_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',
@@ -2580,6 +2583,34 @@ export interface DaemonSkillToggleResult {
   activation: DaemonSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
+}
+
+export type DaemonSkillBatchToggleErrorCode =
+  | 'skill_not_found'
+  | 'skill_not_toggleable'
+  | 'skill_inactive_extension';
+
+export interface DaemonSkillBatchToggleError {
+  skillName: string;
+  code: DaemonSkillBatchToggleErrorCode;
+  error: string;
+  reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
+  lockedScope?: 'system' | 'user' | 'systemDefaults';
+}
+
+export interface DaemonSkillBatchToggleResult {
+  enabled: boolean;
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  results: DaemonSkillBatchToggleItem[];
+  errors: DaemonSkillBatchToggleError[];
+}
+
+export interface DaemonSkillBatchToggleItem {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
 }
 
 export type DaemonSkillScope = 'workspace' | 'global';
@@ -3897,7 +3928,11 @@ export type DaemonExtensionInstallType =
   | 'github-release'
   | 'npm';
 
-export type DaemonExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type DaemonExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder';
 
 export interface DaemonExtensionCapabilities {
   mcpServerCount: number;
