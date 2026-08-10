@@ -3476,6 +3476,14 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(msg).toContain('ROUND CAP');
     expect(msg).toContain('round cap is 3');
+    // The load-bearing tail rules — the same verify-only / compose-floor
+    // contract the budget message's test pins and SKILL.md's round-cap
+    // bullet mirrors; a reword that drops any of these silently loosens
+    // the termination contract, so pin each.
+    expect(msg).toContain('agent-prompt --role verify');
+    expect(msg).toContain('never a hand-rolled agent');
+    expect(msg).toContain('compose floor');
+    expect(msg).toContain('Do NOT re-verify findings already');
     // The marker is on disk so compose-review caps without the relay.
     expect(readBudgetStop(plan)?.cause).toBe('round-cap');
     expect(readBudgetStop(plan)?.cap).toBe(3);
@@ -3658,6 +3666,51 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     const out = runRound(5); // odd → all skipped → converged
     expect(process.exitCode).toBe(5);
     expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
+  });
+
+  it('huge cap: a converged --chunk retry clears the stale cap marker too', () => {
+    // The --chunk gate threads the same convergence-first path with its own
+    // `args.plan`, but only the --all-chunks site's marker clear is pinned
+    // above: a converged per-chunk retry after a cap refusal must exit 5
+    // CONVERGED and clear the stale marker exactly like it, not exit 4 at
+    // the cap (the ordering) and not leave the marker capping a verdict the
+    // audit legitimately converged (the clear). Same retry-after-refusal
+    // history as the --all-chunks test.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    runRound(4); // even → retired chunks due cold checks → cap refuses
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+
+    process.exitCode = undefined;
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 5,
+    });
+    expect(process.exitCode).toBe(5);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(keysOf(5)).toHaveLength(0);
     const msg = (writeStderrLine as unknown as Mock).mock.calls
       .map((c) => c[0])
       .join('\n');

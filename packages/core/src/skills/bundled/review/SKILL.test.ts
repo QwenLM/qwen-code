@@ -81,6 +81,15 @@ describe('bundled review skill', () => {
     expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
 
+  it('pins the bounded-tail protocol on the round-cap bullet', () => {
+    // The ROUND CAP refusal message carries the same verify-only /
+    // compose-floor contract; a revert of the bullet's protocol hunk must
+    // fail a test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`agent-prompt --role verify` **only**');
+    expect(body).toContain('no fresh re-verification pass');
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either
