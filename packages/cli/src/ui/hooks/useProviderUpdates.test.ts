@@ -512,14 +512,77 @@ describe('useProviderUpdates', () => {
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
-  it('does not show prompt while the "later" cooldown is active', () => {
+  it('later persists the cooldown for all providers in one batched write', async () => {
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    const postponedAt = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(postponedAt);
+    try {
+      await result.current.providerUpdateRequest!.onConfirm('later');
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+    expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValues).toHaveBeenCalledWith([
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedVersion`,
+        value: chinaVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedAt`,
+        value: postponedAt,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.postponedVersion`,
+        value: tokenVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.postponedAt`,
+        value: postponedAt,
+      },
+    ]);
+  });
+
+  it('surfaces an error but still dismisses when persisting the cooldown fails', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
-      postponedVersion: chinaVersion,
-      postponedAt: Date.now(),
     };
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
@@ -533,17 +596,71 @@ describe('useProviderUpdates', () => {
       ),
     );
 
-    expect(result.current.providerUpdateRequest).toBeUndefined();
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    mockSettings.setValues.mockImplementationOnce(() => {
+      throw new Error('settings file is read-only');
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('later');
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('settings file is read-only'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('does not show prompt while the "later" cooldown is active', () => {
+    // Pin Date.now on the read side: 23h elapsed is still inside the 24h
+    // cooldown. Together with the 25h expiry test this pins the duration.
+    const now = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+        METADATA_KEY
+      ] = {
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        version: 'old-version-hash',
+        postponedVersion: chinaVersion,
+        postponedAt: now - 23 * 60 * 60 * 1000,
+      };
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: chinaTemplate,
+      };
+
+      const { result } = renderHook(() =>
+        useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it('shows prompt again after the "later" cooldown expires', async () => {
+    // Pin Date.now on the read side: 25h elapsed is past the 24h cooldown.
+    const now = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       version: 'old-version-hash',
       postponedVersion: chinaVersion,
-      postponedAt: Date.now() - 25 * 60 * 60 * 1000,
+      postponedAt: now - 25 * 60 * 60 * 1000,
     };
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
@@ -556,6 +673,39 @@ describe('useProviderUpdates', () => {
         mockAddItem,
       ),
     );
+    dateNowSpy.mockRestore();
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+  });
+
+  it('shows prompt when the clock stepped backward after postponement', async () => {
+    // A backward clock jump makes the elapsed time negative; the cooldown must
+    // be treated as expired rather than suppressing the prompt until the wall
+    // clock catches up with postponedAt.
+    const now = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: chinaVersion,
+      postponedAt: now + 60 * 60 * 1000,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+    dateNowSpy.mockRestore();
 
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeDefined();

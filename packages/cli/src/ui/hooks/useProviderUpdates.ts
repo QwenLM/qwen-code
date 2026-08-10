@@ -27,6 +27,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { getErrorMessage } from '../../utils/errors.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -212,9 +213,12 @@ function findAllPendingUpdates(
 
     // A "later" choice suppresses re-prompting for the same version while the
     // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
+    // Negative elapsed time (a backward clock jump) is treated as expired so
+    // the prompt is not suppressed until the wall clock catches up.
     if (
       metadata.postponedVersion === currentVersion &&
       typeof metadata.postponedAt === 'number' &&
+      Date.now() - metadata.postponedAt >= 0 &&
       Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
     ) {
       continue;
@@ -335,13 +339,11 @@ export function useProviderUpdates(
 
         return true;
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
         addItem(
           {
             type: 'error',
             text: t('Failed to update provider configuration: {{message}}', {
-              message: errorMessage,
+              message: getErrorMessage(error),
             }),
           },
           Date.now(),
@@ -411,8 +413,7 @@ export function useProviderUpdates(
               {
                 type: 'error',
                 text: t('Failed to save update postponement: {{message}}', {
-                  message:
-                    error instanceof Error ? error.message : String(error),
+                  message: getErrorMessage(error),
                 }),
               },
               Date.now(),
