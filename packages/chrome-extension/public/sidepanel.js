@@ -111,8 +111,8 @@ async function probeState(baseUrl, token) {
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
   const webBridgeConnected = features.includes('webbridge')
-    ? (await probeJson(`${baseUrl}/status`, token))?.extension_connected ===
-      true
+    ? (await probeJson(`${baseUrl}/webbridge/status`, token))
+        ?.extension_connected === true
     : undefined;
   let mcpSnapshot;
   if (

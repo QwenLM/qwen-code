@@ -42,5 +42,6 @@ export function registerWebBridgeRoutes(
   };
 
   app.get('/status', status);
+  app.get('/webbridge/status', status);
   app.post('/command', command);
 }

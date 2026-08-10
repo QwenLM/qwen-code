@@ -21,6 +21,7 @@ interface WebBridgeResultFrame {
   payload: {
     data?: unknown;
     error?: string;
+    timeout?: true;
     chunked?: boolean;
     encoding?: 'json';
   };
@@ -123,6 +124,9 @@ async function execute(
       responseToRequestId: requestId,
       payload: {
         error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof Error && error.name === 'WebBridgeTimeoutError'
+          ? { timeout: true }
+          : {}),
       },
     });
   }

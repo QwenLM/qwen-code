@@ -104,7 +104,13 @@ let attachGeneration = 0;
 const directEventListeners = new Set<CdpEventListener>();
 const directDetachListeners = new Set<CdpDetachListener>();
 const detachingTabIds = new Set<number>();
+const pendingDirectCommands = new Set<{
+  expire(): void;
+  cancel(error: Error): void;
+}>();
 let directOperationActive = false;
+let detachInProgress: Promise<void> | undefined;
+const DIRECT_OPERATION_TIMEOUT_MS = 55_000;
 
 /**
  * Keep the MV3 worker alive while the debugger is attached: it idles out after
@@ -209,21 +215,44 @@ function sendDebuggerCommand(
   tabId: number,
   method: string,
   params: Record<string, unknown> | undefined,
+  direct = false,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand(
-      { tabId },
-      method,
-      params ?? {},
-      (result?: object) => {
-        const err = chrome.runtime.lastError;
-        if (err) {
-          reject(new Error(err.message ?? 'CDP command failed'));
-          return;
-        }
-        resolve(result ?? {});
+    let settled = false;
+    let expired = false;
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (direct) pendingDirectCommands.delete(pending);
+      complete();
+    };
+    const pending = {
+      expire: () => {
+        expired = true;
       },
-    );
+      cancel: (error: Error) => finish(() => reject(error)),
+    };
+    if (direct) pendingDirectCommands.add(pending);
+    try {
+      chrome.debugger.sendCommand(
+        { tabId },
+        method,
+        params ?? {},
+        (result?: object) => {
+          if (expired) return;
+          const err = chrome.runtime.lastError;
+          finish(() =>
+            err
+              ? reject(new Error(err.message ?? 'CDP command failed'))
+              : resolve(result ?? {}),
+          );
+        },
+      );
+    } catch (error) {
+      finish(() =>
+        reject(error instanceof Error ? error : new Error(String(error))),
+      );
+    }
   });
 }
 
@@ -273,9 +302,16 @@ async function runDirectBrowserOperation<T>(
     throw new Error('CDP tunnel is currently controlling the browser');
   }
   directOperationActive = true;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
+    timeout = setTimeout(() => {
+      const error = new Error('WebBridge action timed out after 55s');
+      error.name = 'WebBridgeTimeoutError';
+      void detachCdpBridge(error);
+    }, DIRECT_OPERATION_TIMEOUT_MS);
     return await operation();
   } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
     directOperationActive = false;
   }
 }
@@ -294,7 +330,7 @@ export function withCdpTab<T>(
     await attachTab(tabId);
     directTabIds.add(tabId);
     return operation((method, params) =>
-      sendDebuggerCommand(tabId, method, params),
+      sendDebuggerCommand(tabId, method, params, true),
     );
   };
   // Whole WebBridge actions already hold this reservation.
@@ -494,7 +530,15 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
  * Tear down the bridge: detach the debugger and stop forwarding. Called when
  * the daemon socket closes so a stale attachment doesn't linger. Idempotent.
  */
-export function shutdownCdpBridge(): void {
+function detachCdpBridge(error: Error): Promise<void> {
+  for (const pending of pendingDirectCommands) pending.expire();
+  detachInProgress ??= performCdpDetach(error).finally(() => {
+    detachInProgress = undefined;
+  });
+  return detachInProgress;
+}
+
+async function performCdpDetach(error: Error): Promise<void> {
   attachGeneration++;
   // A release that races an in-flight handleAttach can't detach a tab the
   // debugger hasn't attached to yet. Record it so handleAttach tears down the
@@ -508,17 +552,29 @@ export function shutdownCdpBridge(): void {
   }
   teardownAttachments();
   activeSend = null;
+  const pendingDetaches: Promise<void>[] = [];
   for (const tabId of tabIds) {
     if (detachingTabIds.has(tabId)) continue;
     detachingTabIds.add(tabId);
-    try {
-      chrome.debugger.detach({ tabId }, () => {
-        void chrome.runtime.lastError;
-        detachingTabIds.delete(tabId);
-      });
-    } catch {
-      detachingTabIds.delete(tabId);
-      /* might already be detached */
-    }
+    pendingDetaches.push(
+      new Promise<void>((resolve) => {
+        const done = () => {
+          void chrome.runtime.lastError;
+          detachingTabIds.delete(tabId);
+          resolve();
+        };
+        try {
+          chrome.debugger.detach({ tabId }, done);
+        } catch {
+          done();
+        }
+      }),
+    );
   }
+  await Promise.all(pendingDetaches);
+  for (const pending of [...pendingDirectCommands]) pending.cancel(error);
+}
+
+export function shutdownCdpBridge(): void {
+  void detachCdpBridge(new Error('CDP bridge shut down'));
 }

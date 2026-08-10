@@ -21,9 +21,15 @@ interface ChromeHarness {
 function installChromeHarness(options?: {
   deferAttach?: boolean;
   deferDetach?: boolean;
-}): ChromeHarness & { finishAttach(): void; finishDetach(): void } {
+  deferSendCommand?: boolean;
+}): ChromeHarness & {
+  finishAttach(): void;
+  finishDetach(): void;
+  finishSendCommand(): void;
+} {
   let attachCallback: (() => void) | undefined;
   let detachCallback: (() => void) | undefined;
+  let sendCommandCallback: ((result?: object) => void) | undefined;
   const debuggerEventListeners: ChromeHarness['debuggerEventListeners'] = [];
   const debuggerDetachListeners: ChromeHarness['debuggerDetachListeners'] = [];
   const attach = vi.fn(
@@ -48,7 +54,10 @@ function installChromeHarness(options?: {
       _method: string,
       _params: object,
       callback: (result?: object) => void,
-    ) => callback({ value: 'ok' }),
+    ) => {
+      if (options?.deferSendCommand) sendCommandCallback = callback;
+      else callback({ value: 'ok' });
+    },
   );
 
   globalThis.chrome = {
@@ -92,6 +101,9 @@ function installChromeHarness(options?: {
     },
     finishDetach() {
       detachCallback?.();
+    },
+    finishSendCommand() {
+      sendCommandCallback?.({ value: 'late' });
     },
   };
 }
@@ -264,6 +276,49 @@ describe('CDP bridge', () => {
     ).rejects.toThrow('WebBridge action is already in progress');
     release();
     await first;
+  });
+
+  it('detaches before releasing a timed-out direct command', async () => {
+    const chromeHarness = installChromeHarness({
+      deferDetach: true,
+      deferSendCommand: true,
+    });
+    const bridge = await loadBridge();
+    const pending = bridge.withCdpTab(7, (send) =>
+      send('Runtime.evaluate', { expression: 'new Promise(() => {})' }),
+    );
+    let settled = false;
+    void pending
+      .finally(() => {
+        settled = true;
+      })
+      .catch(() => {});
+    const rejection = expect(pending).rejects.toThrow(
+      'WebBridge action timed out after 55s',
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.sendCommand).toHaveBeenCalledOnce(),
+    );
+
+    await vi.advanceTimersByTimeAsync(55_000);
+
+    expect(chromeHarness.detach).toHaveBeenCalledWith(
+      { tabId: 7 },
+      expect.any(Function),
+    );
+    chromeHarness.finishSendCommand();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await expect(
+      bridge.withDirectBrowserAction(async () => undefined),
+    ).rejects.toThrow('WebBridge action is already in progress');
+
+    chromeHarness.finishDetach();
+    await rejection;
+    await expect(
+      bridge.withDirectBrowserAction(async () => undefined),
+    ).resolves.toBeUndefined();
+    expect(chromeHarness.detach).toHaveBeenCalledOnce();
   });
 
   it('blocks WebBridge actions until raw CDP detach completes', async () => {

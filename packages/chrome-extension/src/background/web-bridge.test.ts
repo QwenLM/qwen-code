@@ -47,6 +47,32 @@ describe('WebBridge protocol', () => {
     );
   });
 
+  it('marks action deadline errors as timeouts', async () => {
+    const error = new Error('WebBridge action timed out after 55s');
+    error.name = 'WebBridgeTimeoutError';
+    actions.execute.mockRejectedValue(error);
+    const send = vi.fn();
+
+    handleWebBridgeFrame(
+      {
+        type: 'webbridge_call',
+        requestId: 'request-timeout',
+        payload: { name: 'evaluate', args: {} },
+      } as never,
+      send,
+    );
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+
+    expect(send).toHaveBeenCalledWith({
+      type: 'webbridge_result',
+      responseToRequestId: 'request-timeout',
+      payload: {
+        error: 'WebBridge action timed out after 55s',
+        timeout: true,
+      },
+    });
+  });
+
   it('chunks artifact data below the ACP WebSocket frame limit', async () => {
     actions.execute.mockResolvedValue({
       format: 'png',

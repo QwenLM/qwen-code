@@ -21383,6 +21383,27 @@ describe('createServeApp', () => {
       expect(res.status).toBe(401);
     });
 
+    it('exposes read-only WebBridge status to daemon-authenticated clients', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'daemon-secret' },
+        undefined,
+        { webBridgeToken: 'webbridge-secret' },
+      );
+
+      const daemon = await request(app)
+        .get('/webbridge/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer daemon-secret');
+      expect(daemon.status).toBe(200);
+      expect(daemon.body).toMatchObject({ extension_connected: false });
+
+      const routeScoped = await request(app)
+        .get('/webbridge/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(routeScoped.status).toBe(401);
+    });
+
     it('keeps trailing-slash WebBridge routes behind the route-scoped token', async () => {
       const app = createServeApp({ ...baseOpts, token: undefined }, undefined, {
         webBridgeToken: 'webbridge-secret',

@@ -99,6 +99,29 @@ describe('WebBridgeRegistry', () => {
     }
   });
 
+  it('preserves extension action timeout semantics', async () => {
+    const registry = new WebBridgeRegistry(1_000);
+    let requestId = '';
+    registry.register({
+      connectionId: 'extension-1',
+      send(frame) {
+        requestId = frame.requestId;
+      },
+    });
+
+    const pending = registry.call('evaluate', {});
+    registry.routeInbound('extension-1', {
+      type: 'webbridge_result',
+      responseToRequestId: requestId,
+      payload: {
+        error: 'WebBridge action timed out after 55s',
+        timeout: true,
+      },
+    });
+
+    await expect(pending).rejects.toBeInstanceOf(WebBridgeTimeoutError);
+  });
+
   it('reassembles chunked artifact results', async () => {
     const registry = new WebBridgeRegistry(1_000);
     let requestId = '';

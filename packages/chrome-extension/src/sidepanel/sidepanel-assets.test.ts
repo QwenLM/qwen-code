@@ -143,25 +143,29 @@ describe('side panel capability status assets', () => {
     `;
     vi.stubGlobal('chrome', {
       runtime: { id: 'test-extension' },
-      storage: { local: { get: vi.fn().mockResolvedValue({}) } },
+      storage: {
+        local: {
+          get: vi.fn().mockResolvedValue({
+            'qwen.daemon': { token: 'daemon-secret' },
+          }),
+        },
+      },
     });
     vi.stubGlobal('QwenCapabilityStatus', { deriveCapabilityStatus });
     let connected = false;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        return {
-          ok: true,
-          json: async () =>
-            url.endsWith('/capabilities')
-              ? { features: ['allow_origin', 'webbridge'] }
-              : url.endsWith('/status')
-                ? { extension_connected: connected }
-                : { status: 'ok' },
-        };
-      }),
-    );
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return {
+        ok: true,
+        json: async () =>
+          url.endsWith('/capabilities')
+            ? { features: ['allow_origin', 'webbridge'] }
+            : url.endsWith('/webbridge/status')
+              ? { extension_connected: connected }
+              : { status: 'ok' },
+      };
+    });
+    vi.stubGlobal('fetch', fetchImpl);
     let poll: (() => void | Promise<void>) | undefined;
     vi.stubGlobal('setInterval', (handler: () => void | Promise<void>) => {
       poll = handler;
@@ -178,6 +182,12 @@ describe('side panel capability status assets', () => {
       expect(document.getElementById('capability-warning')?.textContent).toBe(
         'WebBridge extension is not connected.',
       ),
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'http://127.0.0.1:4170/webbridge/status',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer daemon-secret' },
+      }),
     );
     connected = true;
     await poll?.();

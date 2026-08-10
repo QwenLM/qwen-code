@@ -27,6 +27,7 @@ export interface WebBridgeResultFrame {
   payload?: {
     data?: unknown;
     error?: string;
+    timeout?: true;
     chunked?: boolean;
     encoding?: 'json';
   };
@@ -162,7 +163,11 @@ export class WebBridgeRegistry {
       return true;
     }
     if (typeof payload['error'] === 'string') {
-      pending.reject(new Error(payload['error']));
+      pending.reject(
+        payload['timeout'] === true
+          ? new WebBridgeTimeoutError(payload['error'])
+          : new Error(payload['error']),
+      );
     } else {
       const data = payload['data'];
       if (payload['chunked'] !== true) {
