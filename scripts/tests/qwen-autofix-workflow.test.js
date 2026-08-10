@@ -9151,6 +9151,34 @@ exit 1
     expect(idleMixed.headline).toContain(
       'silent-sandbox (idle) timeouts that no budget increase can cure',
     );
+    // An ALL-idle window swaps the closing remedy for the sandbox
+    // investigation — mirroring the round-level split — instead of
+    // prescribing the budget increase the clause above declared useless.
+    expect(idleMixed.headline).toContain(
+      'A human should investigate the sandbox image and runner docker daemon',
+    );
+    expect(idleMixed.headline).not.toContain('raise the agent time budget');
+    // A MIXED window (any real budget timeout) keeps the budget remedy.
+    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleSome.terminal).toBe(true);
+    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
+    expect(idleSome.headline).toContain('raise the agent time budget');
+    // The CURRENT round's idle timeout is counted by the increment, not
+    // the grep: cap-1 budget priors plus an idle current round render
+    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
+    // suppresses the clause entirely (the grep sees no idle prior) and
+    // must fail here.
+    const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleCurrentOnly.terminal).toBe(true);
+    expect(idleCurrentOnly.headline).toContain(
+      '1 of those were silent-sandbox (idle) timeouts',
+    );
     // A window WITHOUT idle rounds keeps today's advice untouched.
     expect(interleaved.headline).not.toContain('silent-sandbox');
     // One short of the cap keeps retrying (current round not a timeout).
@@ -11292,6 +11320,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     baselineMsg = '',
     headMsg = '',
     extraRoundDiag = false,
+    extraBaselineDiag = false,
     restoreClash = false,
     hugeFail = false,
   }) => {
@@ -11379,6 +11408,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '      if [[ "$head" != "${BASELINE_SHA:-}" && "${EXTRA_ROUND_DIAG:-}" == "1" ]]; then',
           '        echo "src/g.ts(2,2): error TS7777: round-introduced defect"',
           '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${EXTRA_BASELINE_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(7,3): error TS8888: baseline-only defect"',
+          '      fi',
           '      exit 1',
           '    fi',
           '  done',
@@ -11437,6 +11469,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             BASELINE_MSG: baselineMsg,
             HEAD_MSG: headMsg,
             EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
+            EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
@@ -11553,6 +11586,24 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).not.toContain('preexisting=true');
   });
 
+  it('reports pre-existing when the baseline fails with a SUPERSET of the round signatures', () => {
+    // The other arm of the subset semantics: every failing signature of
+    // the round also fails at the baseline, which ADDITIONALLY carries a
+    // baseline-only diagnostic. Still pre-existing — the repair may only
+    // amend the round's fix, so the extra baseline diagnostic is equally
+    // beyond its reach. A set-equality comparator instead of the subset
+    // check would flip this round to retryable.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraBaselineDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.headAfter).toBe('feature');
+  });
+
   it('charges the round when the baseline fails for a DIFFERENT reason', () => {
     // A nonzero baseline is not identity: reason A there, reason B here —
     // reducing both to rc=1 would skip the only repair allowed to fix B.
@@ -11644,20 +11695,25 @@ describe('review verification gate: preexisting output is consumed', () => {
     expect(workflow).toContain(
       "PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'",
     );
-    // behind/diverged → base update; otherwise the branch's own pre-round
-    // code — an up-to-date branch cannot be cured by merging main.
+    // behind/diverged → base update; a MEASURED not-behind → the branch's
+    // own pre-round code (an up-to-date branch cannot be cured by merging
+    // main); an EMPTY CMP_R means the compare never ran (a transient API
+    // failure) and must not assert either — it says the base state could
+    // not be compared.
     expect(workflow).toContain('needs a base update (merge main)');
+    expect(workflow).toContain('the base state could not be compared');
     // The YAML embeds the apostrophe via shell quoting, so match around it.
     expect(workflow).toContain('own pre-round code needs attention');
     expect(workflow).toMatch(
       /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then/,
     );
-    // Correspondence, not just existence: swapping the two clause bodies
-    // must fail. Each {0,600} bound keeps the match inside this if/else —
-    // a swapped clause puts its anchor on the wrong side of `else`, more
-    // than 600 chars away.
+    expect(workflow).toMatch(/elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then/);
+    // Correspondence, not just existence: swapping the clause bodies must
+    // fail. Each {0,600} bound keeps the match inside this if/elif/else —
+    // a swapped clause puts its anchor on the wrong side of the arm it
+    // belongs to, more than 600 chars away.
     expect(workflow).toMatch(
-      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then[\s\S]{0,600}?needs a base update \(merge main\)[\s\S]{0,600}?else[\s\S]{0,600}?own pre-round code needs attention/,
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then[\s\S]{0,600}?needs a base update \(merge main\)[\s\S]{0,600}?elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then[\s\S]{0,600}?could not be compared[\s\S]{0,600}?else[\s\S]{0,600}?own pre-round code needs attention/,
     );
   });
 
@@ -11768,22 +11824,45 @@ describe('run-agent idle watchdog', () => {
     expect(r.failure).toBe('');
   });
 
-  it('ignores a non-positive QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
-    // Number('-1') is truthy, so a bare `|| default` guard would arm a
-    // negative window: Date.now() - lastOutputAt >= -1 is instantly true
-    // and every agent dies at the first idle tick.
+  it('never fires while the agent talks on stderr only', () => {
+    // The sandbox launcher emits ContainerName on stderr, and a cold
+    // runner's image pull or docker progress is a realistic stderr-only
+    // span with quiet stdout — the liveness contract covers both streams.
     const r = runAgent({
       stub: [
         '#!/bin/bash',
-        'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+        'for i in $(seq 1 8); do echo "tick $i" >&2; sleep 0.4; done',
         'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
         'echo done',
         'exit 0',
       ].join('\n'),
-      idleMs: -1,
+      idleMs: 1500,
     });
     expect(r.status).toBe(0);
     expect(r.failure).toBe('');
+  });
+
+  it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
+    // Number('-1') is truthy, so a bare `|| default` guard would arm a
+    // negative window: Date.now() - lastOutputAt >= -1 is instantly true
+    // and every agent dies at the first idle tick. `0` (an operator's
+    // "disable") arms a zero-length window that is true at the first tick,
+    // and NaN arms one too — every rejection class named in the parse
+    // guard's comment must fall back to the default.
+    for (const idleMs of [-1, 0, Number.NaN]) {
+      const r = runAgent({
+        stub: [
+          '#!/bin/bash',
+          'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+          'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+          'echo done',
+          'exit 0',
+        ].join('\n'),
+        idleMs,
+      });
+      expect(r.status).toBe(0);
+      expect(r.failure).toBe('');
+    }
   });
 });
 
@@ -11806,17 +11885,18 @@ describe('stale sandbox container cleanup', () => {
       const j = getWorkflowJob(workflow, jobId);
       expect(j, jobId).toContain(step);
       expect(j, jobId).toContain(
-        "docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead'",
+        "timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead'",
       );
-      expect(j, jobId).toContain('xargs -r docker rm -f');
       // Best-effort hygiene under bash -eo pipefail: a daemon blip, a
       // racing reap on another registration, or a container that refuses
-      // removal must not kill the round at setup.
+      // removal must not kill the round at setup — and an alive-but-wedged
+      // daemon must not block the step until the job timeout, so every
+      // docker call runs under `timeout`.
       expect(j, jobId).toContain(
-        "STALE=\"$(docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)\" || STALE=''",
+        "STALE=\"$(timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)\" || STALE=''",
       );
       expect(j, jobId).toContain(
-        'xargs -r docker rm -f > /dev/null 2>&1 || true',
+        'xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true',
       );
       // Before the sandbox can pick a colliding name.
       expect(j.indexOf(step)).toBeLessThan(
@@ -11825,12 +11905,11 @@ describe('stale sandbox container cleanup', () => {
     }
   });
 
-  it('a budget kill removes only the running sandbox its own agent launched', () => {
-    // The startup reaper stays restricted to exited/dead containers (a
-    // running one can belong to a concurrent job on another registration),
-    // so the running orphan a kill creates is removed by the kill path
-    // itself: run-agent.mjs captures the container name its child's
-    // launcher printed and force-removes exactly that one.
+  // The kill path is shared by the idle watchdog and the absolute budget
+  // timer (both fire escalateKill). Pin BOTH branches: a future edit that
+  // keeps the container removal on only one of them leaks the other's
+  // sandbox while a single-branch test still passes.
+  const runKillPath = (idleTimeoutMs, timeoutMs) => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-orphan-'));
     try {
       const workdir = join(dir, 'wd');
@@ -11873,20 +11952,46 @@ describe('stale sandbox container cleanup', () => {
             ...process.env,
             AGENT_WORKDIR: workdir,
             PATH: `${bin}:${process.env.PATH}`,
-            QWEN_IDLE_TIMEOUT_MS: '1200',
-            QWEN_TIMEOUT_MS: '60000',
+            QWEN_IDLE_TIMEOUT_MS: idleTimeoutMs,
+            QWEN_TIMEOUT_MS: timeoutMs,
           },
         },
       );
-      expect(res.status).not.toBe(0);
-      const calls = readFileSync(
-        join(workdir, 'docker-calls.txt'),
-        'utf8',
-      ).trim();
-      // The ONLY docker call is the owned container's removal.
-      expect(calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        calls: existsSync(join(workdir, 'docker-calls.txt'))
+          ? readFileSync(join(workdir, 'docker-calls.txt'), 'utf8').trim()
+          : '',
+      };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  };
+
+  it('an idle kill removes only the running sandbox its own agent launched', () => {
+    // The startup reaper stays restricted to exited/dead containers (a
+    // running one can belong to a concurrent job on another registration),
+    // so the running orphan a kill creates is removed by the kill path
+    // itself: run-agent.mjs captures the container name its child's
+    // launcher printed and force-removes exactly that one.
+    const r = runKillPath('1200', '60000');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // The ONLY docker call is the owned container's removal.
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+
+  it('a budget kill removes only the running sandbox its own agent launched', () => {
+    // The idle window sits far above the absolute budget, so the budget
+    // timer is the branch that fires here (the idle variant above pins the
+    // shared kill path from the other side).
+    const r = runKillPath('600000', '1200');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('timeout (1200ms)');
+    expect(r.failure).not.toContain('idle-timeout');
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
   });
 });

@@ -841,14 +841,18 @@ jobs:
           # leftovers can wedge the daemon). Every docker call here is
           # tolerated: this step is hygiene, and a daemon blip, a racing
           # reap on another registration, or a container that refuses
-          # removal must not kill the round at setup — the exact failure
-          # class this PR exists to eliminate.
+          # removal must not kill the round at setup. Every call also runs
+          # under `timeout` (GNU coreutils on the ubuntu runners): a daemon
+          # that is alive but wedged blocks `docker ps` indefinitely, and
+          # `|| STALE=''` catches only a nonzero exit, not a hang — the
+          # step would sit until the job timeout, a silent round
+          # reintroduced ahead of the very idle watchdog this PR adds.
           command -v docker > /dev/null || exit 0
-          STALE="$(docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)" || STALE=''
+          STALE="$(timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)" || STALE=''
           if [ -n "${STALE}" ]; then
             echo "removing stale sandbox containers:"
-            docker ps -a --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' --format '  {{.Names}} ({{.Status}})' || true
-            printf '%s\n' "${STALE}" | xargs -r docker rm -f > /dev/null 2>&1 || true
+            timeout 30 docker ps -a --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' --format '  {{.Names}} ({{.Status}})' || true
+            printf '%s\n' "${STALE}" | xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true
           fi
 
       - name: 'Reset autofix workspace'
@@ -3539,14 +3543,18 @@ jobs:
           # leftovers can wedge the daemon). Every docker call here is
           # tolerated: this step is hygiene, and a daemon blip, a racing
           # reap on another registration, or a container that refuses
-          # removal must not kill the round at setup — the exact failure
-          # class this PR exists to eliminate.
+          # removal must not kill the round at setup. Every call also runs
+          # under `timeout` (GNU coreutils on the ubuntu runners): a daemon
+          # that is alive but wedged blocks `docker ps` indefinitely, and
+          # `|| STALE=''` catches only a nonzero exit, not a hang — the
+          # step would sit until the job timeout, a silent round
+          # reintroduced ahead of the very idle watchdog this PR adds.
           command -v docker > /dev/null || exit 0
-          STALE="$(docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)" || STALE=''
+          STALE="$(timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)" || STALE=''
           if [ -n "${STALE}" ]; then
             echo "removing stale sandbox containers:"
-            docker ps -a --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' --format '  {{.Names}} ({{.Status}})' || true
-            printf '%s\n' "${STALE}" | xargs -r docker rm -f > /dev/null 2>&1 || true
+            timeout 30 docker ps -a --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' --format '  {{.Names}} ({{.Status}})' || true
+            printf '%s\n' "${STALE}" | xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true
           fi
 
       - name: 'Reset autofix workspace'
@@ -5387,10 +5395,17 @@ jobs:
                   # only renders when the stale-base auto-update above did NOT
                   # fire — which includes a branch current with main whose own
                   # pre-round commits carry the failure, where "merge main"
-                  # changes nothing. The compare already ran; use it.
+                  # changes nothing. CMP_R is assigned only when BOTH gh api
+                  # calls above succeed (each swallows failure into ''), so
+                  # an EMPTY CMP_R means the compare never ran — "measured
+                  # not-behind" and "never measured" get separate clauses:
+                  # the latter cannot assert the branch's own code is at
+                  # fault.
                   if [[ "${PREEXISTING}" == 'true' ]]; then
                     if [[ "${CMP_R:-}" == 'behind' || "${CMP_R:-}" == 'diverged' ]]; then
                       GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the branch needs a base update (merge main)'
+                    elif [[ -z "${CMP_R:-}" ]]; then
+                      GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the base state could not be compared (compare API failed), so check whether merging main resolves it before auditing the branch'"'"'s own pre-round code'
                     else
                       GATE_CLAUSE=' — the verification gate hit a PRE-EXISTING failure (present without this round'"'"'s commit); the repair pass may only amend the round'"'"'s own fix, so it cannot reach it — the branch'"'"'s own pre-round code needs attention'
                     fi
@@ -5539,7 +5554,14 @@ jobs:
                   if [[ "${IDLE_N}" -gt 0 ]]; then
                     IDLE_CLAUSE=" ${IDLE_N} of those were silent-sandbox (idle) timeouts that no budget increase can cure — investigate the sandbox image and runner docker daemon for those."
                   fi
-                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should split or reduce the PR (or raise the agent time budget AND its step backstop together), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  # Mirror the round-level split: when EVERY counted timeout
+                  # was idle, the closing remedy must not prescribe the
+                  # budget increase the clause above just declared useless.
+                  REMEDY='split or reduce the PR (or raise the agent time budget AND its step backstop together)'
+                  if [[ "${IDLE_N}" -ge "${TIMEOUT_N}" ]]; then
+                    REMEDY='investigate the sandbox image and runner docker daemon'
+                  fi
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should ${REMEDY}, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
                 fi
               fi
             fi

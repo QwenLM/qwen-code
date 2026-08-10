@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
   createWriteStream,
   existsSync,
@@ -204,6 +204,7 @@ function runQwen(options, prompt) {
   let timer;
   let killTimer;
   let idleTimer;
+  let sandboxRemoval = null;
 
   return new Promise((resolve) => {
     const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
@@ -227,6 +228,7 @@ function runQwen(options, prompt) {
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
         apiErrorKind: apiErrorInfo.kind,
+        sandboxRemoval,
       };
       if (log.destroyed) {
         resolve(payload);
@@ -279,15 +281,31 @@ function runQwen(options, prompt) {
         if (!settled) killQwen(child, 'SIGKILL');
       }, 10_000);
       if (sandboxName) {
-        const rm = spawnSync('docker', ['rm', '-f', '--', sandboxName], {
+        // Async, not spawnSync: a synchronous removal blocks the event loop
+        // for up to the spawn timeout, holding up the SIGKILL backstop
+        // queued above and the child's close/finish/log-flush — in exactly
+        // the wedged-daemon scenario this kill path exists for. The main
+        // flow awaits sandboxRemoval, so the leak warning and the kill-path
+        // reap stay deterministic without blocking the backstop.
+        const rm = spawn('docker', ['rm', '-f', '--', sandboxName], {
           stdio: 'ignore',
           timeout: 30_000,
         });
-        if (rm.error || rm.status !== 0) {
-          process.stderr.write(
-            `warning: leaked sandbox container ${sandboxName} could not be removed; it keeps running on this host\n`,
-          );
-        }
+        sandboxRemoval = new Promise((resolveRemoval) => {
+          let warned = false;
+          const warnLeak = () => {
+            if (warned) return;
+            warned = true;
+            process.stderr.write(
+              `warning: leaked sandbox container ${sandboxName} could not be removed; it keeps running on this host\n`,
+            );
+          };
+          rm.on('error', warnLeak);
+          rm.on('close', (code) => {
+            if (code !== 0) warnLeak();
+            resolveRemoval();
+          });
+        });
       }
     };
 
@@ -372,6 +390,10 @@ if (missingInputs.length > 0) {
 }
 
 const result = await runQwen(options, prompt);
+// Await the kill-path container removal (bounded by its own 30s spawn
+// timeout) so the leak warning and the removal itself settle before this
+// process exits and the next step inspects the host.
+if (result.sandboxRemoval) await result.sandboxRemoval;
 if (result.error || result.signal || result.status !== 0) {
   const detail = result.error
     ? result.error.message
