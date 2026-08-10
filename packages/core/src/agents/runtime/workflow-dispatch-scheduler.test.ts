@@ -412,6 +412,47 @@ describe('WorkflowDispatchScheduler', () => {
     expect(queued).not.toHaveBeenCalled();
   });
 
+  it('does not dispatch queued work from a dispatch that completes while settling', async () => {
+    // The fourth entrance, and the one that needs no pause at all: settlement
+    // normally begins from state 'running', so the completing in-flight job
+    // re-enters pump() from its own `.finally` and dispatches the next queued
+    // agent while the terminal manifest is still being written. The three
+    // pause-shaped guards never see this path.
+    let finish: (() => void) | undefined;
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+
+    const running = scheduler.run(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    // Second job stays queued behind the concurrency limit of 1.
+    const queued = vi.fn(async () => {});
+    const queuedResult = scheduler.run(queued);
+
+    // Settlement latches with the run still 'running' and still in flight —
+    // exactly what the runner's catch path does before its fsync + terminal
+    // persist, with `controller.abort()` only reached later in `finally`.
+    await scheduler.beginSettling();
+    expect(scheduler.snapshot().state).toBe('running');
+
+    finish?.();
+    await running;
+
+    await vi.waitFor(() => expect(scheduler.snapshot().inFlight).toBe(0));
+    expect(queued).not.toHaveBeenCalled();
+    expect(scheduler.snapshot().queued).toBe(1);
+
+    // And the queued job is not stranded: the settling caller's abort rejects
+    // it, which is the outcome it would have reached anyway had it dispatched.
+    controller.abort();
+    await expect(queuedResult).rejects.toThrow(/aborted/i);
+  });
+
   it('refuses pause() after the abort signal fired on a running scheduler', async () => {
     // Symmetric guard: an aborted running run must not transition into
     // pausing/paused.

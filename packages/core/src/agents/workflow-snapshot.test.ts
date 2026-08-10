@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Dirent } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -65,6 +65,25 @@ function task(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     result: { answer: 42 },
     ...overrides,
   };
+}
+
+/**
+ * A dirent as a filesystem without d_type reports it: the name is known, the
+ * type is not, so every predicate answers false. Node exposes no `isUnknown()`
+ * — that absence is the whole reason this case needs pinning.
+ */
+function typeErased(name: string): Dirent {
+  const no = () => false;
+  return {
+    name,
+    isFile: no,
+    isDirectory: no,
+    isSymbolicLink: no,
+    isBlockDevice: no,
+    isCharacterDevice: no,
+    isFIFO: no,
+    isSocket: no,
+  } as unknown as Dirent;
 }
 
 const EMPTY_JOURNAL: JournalCheckpoint = {
@@ -907,6 +926,54 @@ describe('durable workflow manifests', () => {
       /too large/i,
     );
     await expect(listWorkflowSnapshots(config)).resolves.toEqual([]);
+  });
+
+  it('lists runs whose dirent type readdir declined to report', async () => {
+    // Filesystems that omit d_type (sshfs/s3fs/rclone without readdirplus,
+    // some NFSv3 exports) hand back DT_UNKNOWN dirents, which Node models by
+    // answering false to every type predicate. Classifying by predicate alone
+    // brands valid legacy snapshots "unsafe" and skips valid run directories
+    // outright — durable history and resume vanish on exactly the setups where
+    // a shared workspace makes them matter most.
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_1eaa', status: 'completed', startTime: 1 }),
+    );
+    await writeWorkflowManifest(
+      config,
+      task({ runId: 'wf_2fbb', status: 'paused', startTime: 2 }),
+      { args: null, journal: EMPTY_JOURNAL },
+    );
+
+    // Baseline on a d_type-reporting filesystem, so the assertion below pins
+    // equivalence rather than merely "something came back".
+    const reported = await listWorkflowRunRecords(config);
+    expect(reported.map((record) => record.runId).sort()).toEqual([
+      'wf_1eaa',
+      'wf_2fbb',
+    ]);
+
+    const realReaddir = fs.readdir.bind(fs) as (
+      dir: string,
+      options?: { withFileTypes?: boolean },
+    ) => Promise<string[] | Dirent[]>;
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation((async (
+      dir: string,
+      options?: { withFileTypes?: boolean },
+    ) => {
+      const entries = await realReaddir(dir, options);
+      if (!options?.withFileTypes) return entries;
+      // Same names, same order, type erased — the one difference a
+      // d_type-less filesystem makes.
+      return (entries as Dirent[]).map((entry) => typeErased(entry.name));
+    }) as unknown as typeof fs.readdir);
+
+    try {
+      expect(await listWorkflowRunRecords(config)).toEqual(reported);
+    } finally {
+      readdirSpy.mockRestore();
+    }
   });
 
   it('rejects a terminal manifest that claims it can be resumed', async () => {

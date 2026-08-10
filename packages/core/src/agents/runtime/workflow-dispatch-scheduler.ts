@@ -142,6 +142,13 @@ export class WorkflowDispatchScheduler {
    * queued agent that settlement has forbidden — real token spend and tool
    * side effects, immediately aborted by the settling caller's `finally`, and
    * a `true` ack handed to a client for a run that is going terminal.
+   *
+   * `pump()` is the fourth, and it is the one that needs no pause at all:
+   * settlement usually begins from state 'running', so a dispatch completing
+   * inside the terminal write window re-enters `pump()` from its own
+   * `.finally` and dispatches the next queued agent directly. Guarding only
+   * the three pause entrances left the plain running case — the common one —
+   * spending tokens against a run already persisted terminal.
    */
   beginSettling(): Promise<void> {
     this.settling = true;
@@ -159,6 +166,11 @@ export class WorkflowDispatchScheduler {
   private pump(): void {
     while (
       this.state === 'running' &&
+      // Settlement is writing the terminal manifest. Queued jobs stay queued
+      // and are rejected by `abortPending()` when the settling caller's
+      // `finally` aborts the run, which is the outcome they would have got
+      // anyway — minus the dispatch.
+      !this.settling &&
       this.inFlight < this.limit &&
       this.queue.length > 0
     ) {

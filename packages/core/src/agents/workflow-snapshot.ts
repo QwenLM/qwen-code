@@ -321,6 +321,31 @@ function isLegacyRunId(runId: string): boolean {
   return /^wf_[A-Za-z0-9_-]{1,128}$/.test(runId);
 }
 
+/**
+ * True when `readdir` did not report the entry's type at all (DT_UNKNOWN):
+ * sshfs/s3fs/rclone without readdirplus, and some NFSv3 exports. Node models
+ * such a dirent by answering `false` to every predicate and exposes no
+ * `isUnknown()`, so "unknown" can only be read as the absence of every other
+ * answer — a device/FIFO/socket is a reported type and is not unknown.
+ *
+ * The listing loops use this to distinguish "the filesystem says this is the
+ * wrong kind of entry" from "the filesystem declined to say". Only the former
+ * is a real answer; the latter has to be resolved by the lstat that
+ * `readRegularFileNoFollow` and `resolveSafeRunDir` already perform, which is
+ * where the type is actually enforced.
+ */
+function isUnknownDirent(entry: Dirent): boolean {
+  return (
+    !entry.isFile() &&
+    !entry.isDirectory() &&
+    !entry.isSymbolicLink() &&
+    !entry.isBlockDevice() &&
+    !entry.isCharacterDevice() &&
+    !entry.isFIFO() &&
+    !entry.isSocket()
+  );
+}
+
 function assertLegacyRunId(runId: string): void {
   if (!isLegacyRunId(runId)) {
     throw new Error(`Invalid legacy workflow run id: ${runId}`);
@@ -1068,7 +1093,11 @@ export async function listWorkflowRunRecords(
     if (!isLegacyRunId(runId)) continue;
     const snapshotPath = path.join(storage.getWorkflowRunsDir(), entry.name);
     try {
-      if (!entry.isFile()) {
+      // An unreported type is not a verdict: `readRegularFileNoFollow` below
+      // lstats the path and rejects anything that is not a single-linked
+      // regular file, so deferring to it keeps valid snapshots readable on
+      // filesystems that omit d_type instead of branding them unsafe.
+      if (!entry.isFile() && !isUnknownDirent(entry)) {
         throw new Error(`Unsafe legacy workflow snapshot: ${snapshotPath}`);
       }
       const snapshot = parseLegacySnapshot(
@@ -1101,7 +1130,18 @@ export async function listWorkflowRunRecords(
   }
   for (const entry of entries) {
     if (!/^wf_[0-9a-f]+$/.test(entry.name)) continue;
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    // Symlinks are deliberately let through so `resolveSafeRunDir` rejects
+    // them into a visible invalid record rather than a silent skip; a
+    // DT_UNKNOWN dirent gets the same treatment for the opposite reason —
+    // skipping it here would drop a valid run directory, taking its durable
+    // history and its resume with it.
+    if (
+      !entry.isDirectory() &&
+      !entry.isSymbolicLink() &&
+      !isUnknownDirent(entry)
+    ) {
+      continue;
+    }
     try {
       const manifest = await readWorkflowManifest(config, entry.name);
       const legacy = byRunId.get(entry.name);
