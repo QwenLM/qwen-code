@@ -1895,6 +1895,51 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // The fast-path settings.env loop rejects hardcoded exclusions through the
+  // case-folded isHardcodedProjectEnvExclusion predicate. Every other
+  // settings.env fixture uses loader/allowlisted keys, so a regression to
+  // exact-case membership would ship green — this pins a lowercase hardcoded
+  // key (the entrypoint hijack) being rejected from settings.env.
+  it('never applies a case-variant hardcoded exclusion from settings.env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = [
+      'QWEN_CLI_ENTRY',
+      'qwen_cli_entry',
+      'node_extra_ca_certs',
+    ] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-hardcoded-')),
+    );
+
+    try {
+      loadServeFastPathEnvironment(
+        {
+          env: {
+            qwen_cli_entry: '/workspace-a/evil-entry-lower.js',
+            node_extra_ca_certs: '/workspace-a/evil-ca.pem',
+          },
+        },
+        tempWorkspace,
+      );
+      expect(process.env['qwen_cli_entry']).toBeUndefined();
+      expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+      expect(process.env['node_extra_ca_certs']).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
   // Daemon-side loadSettings() skips the .env load for untrusted workspaces
   // and only re-runs it later for trusted ones, so a loader key rejected at
   // boot would vanish without a breadcrumb unless the fast path reports it.
@@ -2011,6 +2056,11 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(join(secondWorkspace, '.env'), 'LD_PRELOAD=/hijack.so\n');
 
     try {
+      // The stash is a module-global; drain any residue left by earlier tests
+      // so this exact-match assertion does not depend on test declaration
+      // order (partial `-t` selection, --sequence.shuffle, or a new load-
+      // bearing test inserted before this one).
+      consumeServeFastPathRejectedLoaderKeys();
       loadServeFastPathEnvironment({}, firstWorkspace);
       loadServeFastPathEnvironment(
         { env: { LD_PRELOAD: '/hijack.so', NODE_OPTIONS: '--inspect' } },
