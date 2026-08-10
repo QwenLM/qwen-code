@@ -18,6 +18,7 @@ import type {
   DaemonChannelRuntimeState,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useChannels, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -51,7 +52,15 @@ import {
   EmptyTitle,
 } from '../ui/empty';
 import { Spinner } from '../ui/spinner';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 import { Switch } from '../ui/switch';
+import { workspaceLabel } from '../../utils/workspace';
 import { ChannelEditorDialog } from './ChannelEditorDialog';
 import styles from './ChannelsManagerPage.module.css';
 import {
@@ -91,6 +100,42 @@ export function ChannelsManagerPage({
   const workspace = useWorkspace();
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
+  const registeredWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+    const listed = (workspace.capabilities?.workspaces ?? []).filter(
+      (entry) => entry.kind !== 'live',
+    );
+    if (listed.length > 0) return listed;
+    if (!workspace.workspaceCwd) return [];
+    return [
+      {
+        id: 'primary',
+        cwd: workspace.workspaceCwd,
+        primary: true,
+        trusted: true,
+      },
+    ];
+  }, [workspace.capabilities?.workspaces, workspace.workspaceCwd]);
+  const defaultWorkspace =
+    registeredWorkspaces.find((entry) => entry.primary) ??
+    registeredWorkspaces.find((entry) => entry.trusted) ??
+    registeredWorkspaces[0];
+  const [managementWorkspaceCwd, setManagementWorkspaceCwd] = useState<
+    string | undefined
+  >();
+  const selectedManagementWorkspace =
+    registeredWorkspaces.find(
+      (entry) => entry.cwd === managementWorkspaceCwd,
+    ) ?? defaultWorkspace;
+  const [editor, setEditor] = useState<{
+    workspaceCwd: string;
+    descriptor: DaemonChannelTypeDescriptor;
+    instance?: DaemonChannelInstanceSnapshot;
+  }>();
+  const activeWorkspaceCwd =
+    editor?.workspaceCwd ?? selectedManagementWorkspace?.cwd;
+  const activeWorkspace = registeredWorkspaces.find(
+    (entry) => entry.cwd === activeWorkspaceCwd,
+  );
   const {
     catalog,
     snapshot,
@@ -108,18 +153,18 @@ export function ChannelsManagerPage({
   } = useChannels({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
+    workspaceCwd: activeWorkspaceCwd,
   });
-  const canManage = supportsManagement && Boolean(workspace.token);
+  const canManage =
+    supportsManagement &&
+    Boolean(workspace.token) &&
+    Boolean(activeWorkspaceCwd) &&
+    activeWorkspace?.trusted === true;
   const [busy, setBusy] = useState<{
     name: string;
     action: ChannelAction;
   } | null>(null);
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
-  const [editor, setEditor] = useState<{
-    workspaceCwd?: string;
-    descriptor: DaemonChannelTypeDescriptor;
-    instance?: DaemonChannelInstanceSnapshot;
-  }>();
   const [deleteTarget, setDeleteTarget] = useState<{
     workspaceCwd?: string;
     instance: DaemonChannelInstanceSnapshot;
@@ -130,11 +175,27 @@ export function ChannelsManagerPage({
   useEffect(() => {
     setBusy(null);
     setActionErrors({});
-    setEditor(undefined);
     setDeleteTarget(undefined);
     setDeleteError(undefined);
     setDeleting(false);
-  }, [workspace.workspaceCwd]);
+  }, [activeWorkspaceCwd]);
+
+  useEffect(() => {
+    if (
+      managementWorkspaceCwd &&
+      !registeredWorkspaces.some(
+        (entry) => entry.cwd === managementWorkspaceCwd,
+      )
+    ) {
+      setManagementWorkspaceCwd(undefined);
+    }
+    if (
+      editor &&
+      !registeredWorkspaces.some((entry) => entry.cwd === editor.workspaceCwd)
+    ) {
+      setEditor(undefined);
+    }
+  }, [editor, managementWorkspaceCwd, registeredWorkspaces]);
 
   const availablePlatforms = useMemo(
     () => catalog.filter(isChannelPlatformAvailable),
@@ -147,11 +208,9 @@ export function ChannelsManagerPage({
         .sort((left, right) => left.name.localeCompare(right.name)),
     [channels],
   );
-  const workspaceName =
-    workspace.workspaceCwd
-      ?.split(/[\\/]+/)
-      .filter(Boolean)
-      .at(-1) ?? t('channels.workspace.current');
+  const workspaceName = activeWorkspace
+    ? workspaceLabel(activeWorkspace)
+    : t('channels.workspace.current');
 
   const channelTypeLabel = useCallback(
     (channel: DaemonChannelInstanceSnapshot) => {
@@ -170,15 +229,20 @@ export function ChannelsManagerPage({
   );
 
   const saveChannel = useCallback(
-    (name: string, request: DaemonChannelUpsertRequest) =>
-      createOrUpdate(name, request),
-    [createOrUpdate],
+    async (name: string, request: DaemonChannelUpsertRequest) => {
+      const result = await createOrUpdate(name, request);
+      if (editor?.workspaceCwd) {
+        setManagementWorkspaceCwd(editor.workspaceCwd);
+      }
+      return result;
+    },
+    [createOrUpdate, editor?.workspaceCwd],
   );
 
   const deleteChannel = useCallback(async () => {
     if (
       !deleteTarget ||
-      deleteTarget.workspaceCwd !== workspace.workspaceCwd ||
+      deleteTarget.workspaceCwd !== activeWorkspaceCwd ||
       !snapshot ||
       deleting
     ) {
@@ -196,7 +260,7 @@ export function ChannelsManagerPage({
     } finally {
       setDeleting(false);
     }
-  }, [deleteTarget, deleting, remove, snapshot, workspace.workspaceCwd]);
+  }, [activeWorkspaceCwd, deleteTarget, deleting, remove, snapshot]);
 
   const runAction = useCallback(
     async (
@@ -300,6 +364,39 @@ export function ChannelsManagerPage({
             </p>
           </div>
         </div>
+        {registeredWorkspaces.length > 0 ? (
+          <div className={styles.workspacePicker}>
+            <span className={styles.workspacePickerLabel}>
+              {t('channels.workspace.label')}
+            </span>
+            <Select
+              value={selectedManagementWorkspace?.cwd ?? ''}
+              disabled={Boolean(editor) || loading || busy !== null || deleting}
+              onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
+            >
+              <SelectTrigger
+                className={styles.workspacePickerTrigger}
+                aria-label={t('channels.workspace.label')}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {registeredWorkspaces.map((entry) => (
+                  <SelectItem
+                    key={entry.id}
+                    value={entry.cwd}
+                    disabled={!entry.trusted}
+                  >
+                    {workspaceLabel(entry)}
+                    {entry.primary
+                      ? ` · ${t('channels.workspace.primary')}`
+                      : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
       </header>
 
       {!supportsManagement ? (
@@ -456,7 +553,7 @@ export function ChannelsManagerPage({
                           })}
                           onClick={() =>
                             setEditor({
-                              workspaceCwd: workspace.workspaceCwd,
+                              workspaceCwd: activeWorkspaceCwd!,
                               descriptor,
                               instance: channel,
                             })
@@ -477,7 +574,7 @@ export function ChannelsManagerPage({
                         onClick={() => {
                           setDeleteError(undefined);
                           setDeleteTarget({
-                            workspaceCwd: workspace.workspaceCwd,
+                            workspaceCwd: activeWorkspaceCwd,
                             instance: channel,
                           });
                         }}
@@ -517,7 +614,7 @@ export function ChannelsManagerPage({
                 })}
                 onClick={() =>
                   setEditor({
-                    workspaceCwd: workspace.workspaceCwd,
+                    workspaceCwd: activeWorkspaceCwd!,
                     descriptor: platform,
                   })
                 }
@@ -539,15 +636,23 @@ export function ChannelsManagerPage({
         </section>
       ) : null}
 
-      {editor && editor.workspaceCwd === workspace.workspaceCwd && snapshot ? (
+      {editor ? (
         <ChannelEditorDialog
           open
           descriptor={editor.descriptor}
           instance={editor.instance}
-          expectedRevision={snapshot.revision}
+          expectedRevision={snapshot?.revision ?? ''}
           existingNames={instances
             .filter((channel) => channel.name !== editor.instance?.name)
             .map((channel) => channel.name)}
+          workspaces={registeredWorkspaces}
+          workspaceCwd={editor.workspaceCwd}
+          workspaceLoading={loading}
+          onWorkspaceChange={(workspaceCwd) =>
+            setEditor((current) =>
+              current ? { ...current, workspaceCwd } : current,
+            )
+          }
           onOpenChange={(open) => {
             if (!open) setEditor(undefined);
           }}
@@ -562,7 +667,7 @@ export function ChannelsManagerPage({
 
       <AlertDialog
         open={Boolean(
-          deleteTarget && deleteTarget.workspaceCwd === workspace.workspaceCwd,
+          deleteTarget && deleteTarget.workspaceCwd === activeWorkspaceCwd,
         )}
         onOpenChange={(open) => {
           if (!open && !deleting) {

@@ -73,7 +73,17 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
     current: {
       workspaceCwd: '/workspace/demo',
       token: 'secret',
-      capabilities: { features: ['channel_management'] },
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [] as Array<{
+          id: string;
+          cwd: string;
+          displayName?: string;
+          primary: boolean;
+          trusted: boolean;
+          kind?: 'live';
+        }>,
+      },
     },
   },
 }));
@@ -188,7 +198,7 @@ beforeEach(() => {
   workspaceState.current = {
     workspaceCwd: '/workspace/demo',
     token: 'secret',
-    capabilities: { features: ['channel_management'] },
+    capabilities: { features: ['channel_management'], workspaces: [] },
   };
 });
 
@@ -259,6 +269,58 @@ describe('ChannelsManagerPage', () => {
     expect(document.body.textContent).toContain('Configure DingTalk');
     expect(document.body.textContent).toContain('Client ID (AppKey)');
     expect(document.body.textContent).toContain('Client Secret (AppSecret)');
+  });
+
+  it('manages the primary workspace by default and switches to a registered workspace', async () => {
+    workspaceState.current = {
+      ...workspaceState.current,
+      workspaceCwd: '/workspace/secondary',
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/workspace/main',
+            displayName: 'Main repo',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/workspace/secondary',
+            displayName: 'Secondary repo',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await renderPage();
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/main',
+    });
+
+    const trigger = document.querySelector<HTMLElement>(
+      '[aria-label="Workspace"]',
+    );
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const secondary = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Secondary repo');
+    await act(async () => {
+      secondary?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/secondary',
+    });
   });
 
   it('opens an existing Channel for editing', async () => {
@@ -378,6 +440,7 @@ describe('ChannelsManagerPage', () => {
     expect(useChannelsMock).toHaveBeenLastCalledWith({
       autoLoad: false,
       enabled: false,
+      workspaceCwd: '/workspace/demo',
     });
   });
 });

@@ -43,6 +43,24 @@
   white-space: nowrap;
 }
 
+.workspacePicker {
+  display: flex;
+  min-width: 220px;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.workspacePickerLabel {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.workspacePickerTrigger {
+  width: 100%;
+  background: var(--background);
+}
+
 .section {
   display: flex;
   min-width: 0;
@@ -206,6 +224,10 @@
 @container panel-body (max-width: 440px) {
   .pageHeader {
     flex-direction: column;
+  }
+
+  .workspacePicker {
+    width: 100%;
   }
 
   .channelGrid {

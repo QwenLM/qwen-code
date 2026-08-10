@@ -22,9 +22,11 @@ import type {
   DaemonChannelPairingRevocationResult,
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { workspaceLabel } from '../../utils/workspace';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
 import {
@@ -114,6 +116,10 @@ export interface ChannelEditorDialogProps {
   instance?: DaemonChannelInstanceSnapshot;
   expectedRevision: string;
   existingNames: readonly string[];
+  workspaces: readonly DaemonWorkspaceCapability[];
+  workspaceCwd: string;
+  workspaceLoading?: boolean;
+  onWorkspaceChange: (workspaceCwd: string) => void;
   onOpenChange: (open: boolean) => void;
   onSave: (
     name: string,
@@ -196,6 +202,10 @@ export function ChannelEditorDialog({
   instance,
   expectedRevision,
   existingNames,
+  workspaces,
+  workspaceCwd,
+  workspaceLoading = false,
+  onWorkspaceChange,
   onOpenChange,
   onSave,
   onReload,
@@ -658,6 +668,44 @@ export function ChannelEditorDialog({
                   }
                 />
               </FieldShell>
+              <FieldShell
+                id={`${formId}-workspace`}
+                label={t('channels.editor.workspace')}
+                required
+                description={t(
+                  instance
+                    ? 'channels.editor.workspace.lockedDescription'
+                    : 'channels.editor.workspace.description',
+                )}
+              >
+                <Select
+                  value={workspaceCwd}
+                  disabled={Boolean(instance) || workspaceLoading}
+                  onValueChange={onWorkspaceChange}
+                >
+                  <SelectTrigger
+                    id={`${formId}-workspace`}
+                    className="w-full"
+                    aria-required
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {workspaces.map((entry) => (
+                      <SelectItem
+                        key={entry.id}
+                        value={entry.cwd}
+                        disabled={!entry.trusted}
+                      >
+                        {workspaceLabel(entry)}
+                        {entry.primary
+                          ? ` · ${t('channels.workspace.primary')}`
+                          : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FieldShell>
             </section>
 
             <section className={styles.section}>
@@ -876,7 +924,12 @@ export function ChannelEditorDialog({
             >
               {t('channels.editor.cancel')}
             </Button>
-            <Button type="submit" disabled={saving || reloading}>
+            <Button
+              type="submit"
+              disabled={
+                saving || reloading || workspaceLoading || !expectedRevision
+              }
+            >
               {saving ? <Spinner /> : null}
               {t('channels.editor.save')}
             </Button>

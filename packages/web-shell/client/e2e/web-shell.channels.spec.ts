@@ -26,6 +26,22 @@ test('creates and deletes a typed Channel configuration', async ({
         'workspace_voice',
         'channel_management',
       ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/qwen-web-shell-e2e',
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/qwen-channel-secondary',
+          displayName: 'Release workspace',
+          primary: false,
+          trusted: true,
+        },
+      ],
     },
     channelTypes: [
       {
@@ -142,6 +158,13 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(
     page.getByRole('heading', { name: 'Configure DingTalk' }),
   ).toBeVisible();
+  const editor = page.getByRole('dialog');
+  await expect(editor.getByLabel('Workspace')).toContainText('Main workspace');
+  await editor.getByLabel('Workspace').click();
+  await page.getByRole('option', { name: 'Release workspace' }).click();
+  await expect(editor.getByLabel('Workspace')).toContainText(
+    'Release workspace',
+  );
   await page.getByLabel('Instance name').fill('release-bot');
   await page.getByLabel('Client ID (AppKey)').fill('ding-client-id');
   await page.getByLabel('Client Secret (AppSecret)').fill('ding-client-secret');
@@ -171,7 +194,8 @@ test('creates and deletes a typed Channel configuration', async ({
       daemon.requests.filter(
         (request) =>
           request.method === 'PUT' &&
-          request.path.endsWith('/channels/release-bot'),
+          request.path ===
+            '/workspaces/%2Ftmp%2Fqwen-channel-secondary/channels/release-bot',
       ),
     )
     .toEqual([

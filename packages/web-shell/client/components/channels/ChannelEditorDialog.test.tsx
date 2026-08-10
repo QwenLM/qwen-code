@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonChannelInstanceSnapshot,
   DaemonChannelTypeDescriptor,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -174,6 +175,23 @@ const PAIRING_INSTANCE: DaemonChannelInstanceSnapshot = {
   },
 };
 
+const WORKSPACES: DaemonWorkspaceCapability[] = [
+  {
+    id: 'primary',
+    cwd: '/workspace/main',
+    displayName: 'Main repo',
+    primary: true,
+    trusted: true,
+  },
+  {
+    id: 'secondary',
+    cwd: '/workspace/secondary',
+    displayName: 'Secondary repo',
+    primary: false,
+    trusted: true,
+  },
+];
+
 const { ChannelEditorDialog } = await import('./ChannelEditorDialog');
 const { I18nProvider } = await import('../../i18n');
 
@@ -191,6 +209,9 @@ async function renderDialog(
           descriptor={DINGTALK}
           expectedRevision="revision-1"
           existingNames={[]}
+          workspaces={WORKSPACES}
+          workspaceCwd="/workspace/main"
+          onWorkspaceChange={vi.fn()}
           onOpenChange={vi.fn()}
           onSave={vi.fn().mockResolvedValue(undefined)}
           onReload={vi.fn().mockResolvedValue(undefined)}
@@ -266,6 +287,18 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('defaults to the primary workspace and allows a registered workspace', async () => {
+    const onWorkspaceChange = vi.fn();
+    await renderDialog({ onWorkspaceChange });
+
+    expect(fieldByLabel('Workspace')?.textContent).toContain('Main repo');
+    expect(fieldByLabel('Workspace')?.textContent).toContain('Primary');
+
+    await selectOption('Workspace', 'Secondary repo');
+
+    expect(onWorkspaceChange).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
   it('does not render object metadata as a text field', async () => {
     await renderDialog();
 
@@ -279,6 +312,7 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain('Stored in environment');
     expect(document.body.textContent).not.toContain('Clear');
     expect(inputByLabel('Client Secret')).toBeNull();
+    expect(fieldByLabel('Workspace')).toHaveProperty('disabled', true);
 
     const replace = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Replace',

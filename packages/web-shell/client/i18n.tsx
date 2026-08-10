@@ -2536,6 +2536,8 @@ const EN: Messages = {
   'channels.summary': (v) =>
     `${v?.workspace ?? ''} · ${v?.count ?? 0} configured`,
   'channels.workspace.current': 'Current workspace',
+  'channels.workspace.label': 'Workspace',
+  'channels.workspace.primary': 'Primary',
   'channels.loading': 'Loading channels',
   'channels.configured': 'Configured channels',
   'channels.availablePlatforms': 'Available platforms',
@@ -2580,7 +2582,7 @@ const EN: Messages = {
   'channels.editor.addTitle': (v) => `Configure ${v?.platform ?? 'Channel'}`,
   'channels.editor.editTitle': (v) => `Edit ${v?.platform ?? 'Channel'}`,
   'channels.editor.addDescription':
-    'Connect this workspace with an existing platform application.',
+    'Connect a registered workspace with an existing platform application.',
   'channels.editor.editDescription':
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
@@ -2592,6 +2594,11 @@ const EN: Messages = {
   'channels.editor.session.isolation': 'Conversation isolation',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
+  'channels.editor.workspace': 'Workspace',
+  'channels.editor.workspace.description':
+    'Messages, sessions, and Channel settings belong to this workspace. The primary workspace is selected by default.',
+  'channels.editor.workspace.lockedDescription':
+    'A configured Channel stays bound to its workspace. Create another instance to use a different workspace.',
   'channels.editor.environmentReference': '$ENV_VAR supported',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
@@ -5252,6 +5259,8 @@ const ZH: Messages = {
   'channels.summary': (v) =>
     `${v?.workspace ?? ''} · 已配置 ${v?.count ?? 0} 个`,
   'channels.workspace.current': '当前工作区',
+  'channels.workspace.label': '工作区',
+  'channels.workspace.primary': '主工作区',
   'channels.loading': '正在加载频道',
   'channels.configured': '已配置频道',
   'channels.availablePlatforms': '可连接平台',
@@ -5292,7 +5301,7 @@ const ZH: Messages = {
   'channels.delete.error': '未能删除频道',
   'channels.editor.addTitle': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.editor.editTitle': (v) => `编辑${v?.platform ?? '频道'}`,
-  'channels.editor.addDescription': '连接当前工作区与已有的平台应用。',
+  'channels.editor.addDescription': '将已注册的工作区连接到已有的平台应用。',
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
@@ -5303,6 +5312,11 @@ const ZH: Messages = {
   'channels.editor.session.isolation': '会话隔离方式',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
+  'channels.editor.workspace': '工作区',
+  'channels.editor.workspace.description':
+    '机器人消息、会话和频道配置都归属此工作区；默认选择主工作区。',
+  'channels.editor.workspace.lockedDescription':
+    '已配置的频道会固定归属当前工作区；如需更换，请新建一个频道实例。',
   'channels.editor.environmentReference': '支持 $ENV_VAR',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
