@@ -16,14 +16,17 @@ import { parse } from 'yaml';
 // it covers inside a green required check. Pin the step's existence, its
 // condition, and its load-bearing properties.
 // Logical lines the way BASH builds them, scanned character by character so
-// the pins run on the text bash actually executes. Three rules the previous
+// the pins run on the text bash actually executes. Four rules the previous
 // line-at-a-time version got wrong, each probe-verified against bash:
 //   - a `#` inside quotes is LITERAL, not a comment (a stripped quoted `#`
 //     hid a trailing `&& exit 1` from every advisory pin);
 //   - only an ODD run of trailing backslashes continues a line (`\\` is an
 //     escaped backslash, and the following line is its own command);
 //   - a COMMENT never continues, whatever it ends with (`# note \` followed
-//     by `exit 1` leaves the exit as its own logical line).
+//     by `exit 1` leaves the exit as its own logical line);
+//   - an incomplete LIST continues: a line ending in `&&`, `||` or a bare
+//     pipeline `|` joins the next physical line at runtime (a trailing `&`
+//     backgrounds, no join).
 // Quoted strings spanning a newline fold into one logical line, as bash does.
 function logicalLinesOf(run) {
   const lines = [];
@@ -75,6 +78,17 @@ function logicalLinesOf(run) {
         continue;
       }
       cur += c;
+    }
+    // The fourth continuation: outside quotes and comments, a line whose
+    // last token is `&&`, `||`, or a bare pipeline `|` is an incomplete
+    // list — bash splices the next physical line into it. A lone trailing
+    // `&` is the background separator and does not continue.
+    if (!quote && !pending) {
+      const tail = cur.replace(/\s+$/, '');
+      if (tail.endsWith('|') || tail.endsWith('&&')) {
+        cur = `${tail} `;
+        pending = true;
+      }
     }
     if (pending) continue;
     if (quote) {
@@ -143,24 +157,42 @@ function envAssignmentsOf(stmt) {
   }
 }
 
-// The seconds `timeout` bounds this statement with — null when it carries
-// no `timeout` wrapper. Speaks the same grammar unwrapCommand strips:
-// options before the bare duration, attached (`--signal=KILL`) or as the
-// next token (`-k 9`), and the duration's optional s/m/h/d suffix — a
-// bare-integer pin reddened `timeout 140s` and `timeout -k 9 140`, both
-// bounded at exactly 140 s.
+// The worst-case wall-clock seconds `timeout` bounds this statement with —
+// null when it carries no `timeout` wrapper. The main duration PLUS any
+// `-k/--kill-after` value: a TERM-ignoring process only dies on the
+// follow-up signal, running duration + kill-after (measured on GNU
+// coreutils 9.4: `timeout -k 2 1` → 3.00 s wall) — a budget that summed
+// durations alone undercounted every kill-after by its own value. Speaks
+// the same grammar unwrapCommand strips: options before the bare duration,
+// attached (`--signal=KILL`) or as the next token (`-k 9`), and the
+// duration's optional s/m/h/d suffix.
 const TIMEOUT_UNITS = { s: 1, m: 60, h: 3600, d: 86400 };
 function timeoutSeconds(stmt) {
   const tokens = stmt.trim().split(/\s+/);
   if (tokens[0] !== 'timeout') return null;
   let i = 1;
+  let killAfter = 0;
   while (i < tokens.length && tokens[i].startsWith('-')) {
-    // -k/--kill-after and -s/--signal consume the next token as their
-    // value; every other option stands alone.
-    i += /^--?(kill-after|signal|k|s)$/.test(tokens[i]) ? 2 : 1;
+    // -k/--kill-after consumes the next token as its value (or carries it
+    // attached, `--kill-after=9`); -s/--signal likewise; every other
+    // option stands alone. The kill-after seconds are WORST CASE too: a
+    // TERM-ignoring process runs duration + kill-after before KILL lands.
+    let value;
+    if (/^--?(kill-after|k)$/.test(tokens[i])) {
+      value = tokens[i + 1];
+      i += 2;
+    } else if (/^--kill-after=\S+$/.test(tokens[i])) {
+      value = tokens[i].split('=')[1];
+      i += 1;
+    } else {
+      i += /^--?(signal|s)$/.test(tokens[i]) ? 2 : 1;
+      continue;
+    }
+    const k = value?.match(/^(\d+(?:\.\d+)?)([smhd])?$/);
+    if (k) killAfter = Number(k[1]) * (TIMEOUT_UNITS[k[2]] ?? 1);
   }
   const m = tokens[i]?.match(/^(\d+(?:\.\d+)?)([smhd])?$/);
-  return m ? Number(m[1]) * (TIMEOUT_UNITS[m[2]] ?? 1) : null;
+  return m ? Number(m[1]) * (TIMEOUT_UNITS[m[2]] ?? 1) + killAfter : null;
 }
 
 // The statement with quoted spans blanked out, for questions about SHELL
@@ -186,10 +218,45 @@ function outsideQuotes(stmt) {
   return out;
 }
 
-// The shell separator alphabet, defined ONCE. It was encoded three times —
-// a quote-aware char loop, a quote-blind regex, and the guard walk's `ops`
-// — and the copies had already drifted; a pin whose model of bash depends
-// on which function you ask is not a model.
+// The statement with its single-quoted spans blanked — for asking what
+// bash still EXPANDS there: single quotes are inert, but double-quoted
+// spans stay live, because bash executes `"$(…)"` while building argv.
+function outsideSingleQuotes(stmt) {
+  let out = '';
+  let quote = null;
+  for (const c of stmt) {
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      out += ' ';
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = null;
+      else out += c;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      out += ' ';
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+// Expansion syntax bash EXECUTES while building argv — command
+// substitution, backticks, and process substitution in either direction.
+// `<(` carries no `>`, so the redirect pin cannot see a payload hidden in
+// it, and a `$(…)` in the guard's own message runs while the annotation
+// is still visibly emitted.
+const RUNTIME_EXPANSION = /\$\(|`|<\(|>\(/;
+
+// The shell separator alphabet for QUOTE-BLIND questions (the guard walk
+// below). rawStatementsOf's char loop mirrors the same alphabet quote-
+// aware — the two encodings are NOT shared and must stay in sync; they
+// drifted once before, and a pin whose model of bash depends on which
+// function you ask is not a model.
 const SEPARATORS = /(\|\||&&|;|\||(?<!>)&(?!>))/;
 
 // Does this statement reach its command through sudo? The wrappers stack
@@ -229,6 +296,14 @@ function rawStatementsOf(line) {
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote) {
+      // A backslash-escaped quote inside double quotes is literal text,
+      // not the string's end — closing there re-opens a phantom quote that
+      // swallows every separator after it. Single quotes have no escapes.
+      // Mirrors logicalLinesOf's double-quote rule.
+      if (quote === '"' && c === '\\' && i + 1 < line.length) {
+        cur += c + line[++i];
+        continue;
+      }
       cur += c;
       if (c === quote) quote = null;
       continue;
@@ -374,6 +449,15 @@ const SAFE_APT_ENV = /^(DEBIAN_FRONTEND|LC_ALL|LANG)=/;
 // `exit foo` errors to a status continue-on-error absorbs — both silent.
 const HARD_FAIL = /^(exit(\s.*)?|false|return(\s.*)?|exec(\s.*)?)$/;
 
+// The only statements a branch body may execute: the apt calls, the
+// guard/fallback echoes, and the three already-installed probes (each
+// pinned as an invocation elsewhere). Anything else there executes
+// unpinned — a wrapper-shadowing function, a budget-eating sleep, an EXIT
+// trap, a self-kill — silent, green, unannotated. `(\s|$)` after the probe
+// flags: `tmux -V(` is a function definition, not a probe.
+const BRANCH_STATEMENT =
+  /^(apt-get\s+(update|install)\b|echo\b|(tmux|zip|unzip)\s+-(V|v)(\s|$))/;
+
 // A branch condition that can be satisfied without the tools it claims to
 // test: a literal constant, or bash's null command `:` (status 0 always).
 function hasForcingTerm(line) {
@@ -424,6 +508,15 @@ describe('the bash model these pins run on', () => {
     // A quoted string spanning a newline folds into one logical line, as
     // bash does (the model joins the fold with a space).
     expect(logicalLinesOf("echo 'a\nb'")).toEqual(["echo 'a b'"]);
+    // An incomplete LIST continues: a trailing `&&`, `||`, or bare `|`
+    // joins the next physical line; a trailing `&` backgrounds, no join.
+    expect(logicalLinesOf('echo a &&\nexit 1')).toEqual(['echo a && exit 1']);
+    expect(logicalLinesOf('echo a ||\nexit 1')).toEqual(['echo a || exit 1']);
+    expect(logicalLinesOf('echo a |\nwc -c')).toEqual(['echo a | wc -c']);
+    expect(logicalLinesOf('sleep 1 &\nexit 1')).toEqual([
+      'sleep 1 &',
+      'exit 1',
+    ]);
   });
 
   it('splits statements on real separators only', () => {
@@ -442,6 +535,13 @@ describe('the bash model these pins run on', () => {
     expect(statementsOf('if [ x ]; then (exit 1); fi')).toEqual([
       'if [ x ]',
       'exit 1',
+    ]);
+    // A backslash-escaped quote inside double quotes is literal text, not
+    // the string's end — closing there re-opens a phantom quote that
+    // swallowed every separator after it.
+    expect(statementsOf('echo "a\\" b" && rm -rf x')).toEqual([
+      'echo "a\\" b"',
+      'rm -rf x',
     ]);
   });
 
@@ -543,7 +643,12 @@ describe('the bash model these pins run on', () => {
     expect(timeoutSeconds('timeout 140 apt-get update -qq')).toBe(140);
     expect(timeoutSeconds('timeout 140s apt-get update -qq')).toBe(140);
     expect(timeoutSeconds('timeout 2m apt-get update -qq')).toBe(120);
-    expect(timeoutSeconds('timeout -k 9 140 apt-get update -qq')).toBe(140);
+    // Worst case is duration PLUS kill-after: `timeout -k 9 140` can run
+    // 149 s wall against a TERM-ignoring process.
+    expect(timeoutSeconds('timeout -k 9 140 apt-get update -qq')).toBe(149);
+    expect(timeoutSeconds('timeout --kill-after=100 140 apt-get update')).toBe(
+      240,
+    );
     expect(timeoutSeconds('timeout --signal=KILL 5 apt-get update')).toBe(5);
     expect(timeoutSeconds('timeout 0 apt-get update')).toBe(0);
     expect(timeoutSeconds('apt-get update')).toBe(null);
@@ -756,19 +861,50 @@ describe('ci.yml capture tooling', () => {
         }
       }
     }
-    // Nothing foreign may sit on the install's chain: only apt-get calls
-    // and the guard's echo, so no prefixed command can short-circuit it.
-    for (const line of installLines) {
-      if (!/apt-get\s+install\b/.test(line)) continue;
-      for (const stmt of rawStatementsOf(line)) {
-        const bare = unwrapCommand(stmt);
-        // Subcommand too, not just the leading word: `apt-get remove -y
-        // tmux` appended to the chain passed a word-only allowlist while
-        // undoing the install it sits next to.
+    // Nothing foreign may EXECUTE anywhere in the step: allowlist every
+    // statement of every branch body. Nothing else pins the bodies' other
+    // statements — `function timeout { :; }` shadows the chain's wrapper
+    // into a no-op, `sleep 295` eats the step budget before apt starts,
+    // `trap 'rm …' EXIT` defers deletion past a fully green step, and
+    // `kill -9 $$` SIGKILLs the runner shell: silent, green, unannotated.
+    // (Statements before the `if` and after the `fi` are closed by the
+    // boundary pins; the branch conditions are pinned whole, verbatim.)
+    const ifIdx = installLines.findIndex((l) => l.startsWith('if '));
+    const fiIdx = installLines.findIndex((l) => l === 'fi');
+    const bodies = [
+      { name: 'already-installed', from: ifIdx, to: elifIdxs[0] },
+      { name: 'root', from: elifIdxs[0], to: elifIdxs[1] },
+      { name: 'sudo', from: elifIdxs[1], to: elseLineIdx },
+      {
+        name: 'else',
+        from: elseLineIdx,
+        to: fiIdx === -1 ? installLines.length : fiIdx,
+      },
+    ];
+    for (const body of bodies) {
+      for (const stmt of statementsBetween(body.from, body.to).map(
+        unwrapCommand,
+      )) {
+        // Subcommand and shape alike: `apt-get remove` is not an install,
+        // `echo() {…;}` is not an echo.
         expect(
-          /^(apt-get\s+(update|install)\b|echo\b)/.test(bare),
-          `${bare} shares the install chain`,
+          BRANCH_STATEMENT.test(stmt),
+          `${body.name} branch executes ${stmt}`,
         ).toBe(true);
+        // Interior grouping is a function definition or a syntax error —
+        // either executes nothing the pins describe. Leading/trailing
+        // grouping already came off in the unwrap.
+        expect(
+          outsideQuotes(stmt),
+          `${stmt} smuggles grouping into the ${body.name} branch`,
+        ).not.toMatch(/[()]/);
+        // Expansion syntax bash runs while building argv — including
+        // inside the guard's own message: the offending statement IS the
+        // allowlisted echo.
+        expect(
+          RUNTIME_EXPANSION.test(outsideSingleQuotes(stmt)),
+          `runtime expansion in the ${body.name} branch :: ${stmt}`,
+        ).toBe(false);
       }
     }
     // And it must really install: `-s`/`--download-only` and friends exit 0
@@ -784,6 +920,13 @@ describe('ci.yml capture tooling', () => {
           expect(
             NO_OP_INSTALL_FLAGS.has(token) || NO_OP_INSTALL_CLUSTER.test(token),
             `${token} makes the install a no-op :: ${line}`,
+          ).toBe(false);
+          // A no-op flag smuggled through expansion (`EVIL=--simulate` +
+          // `… $EVIL`) is invisible as a literal token — reject the
+          // indirection itself; the shipped install takes no variables.
+          expect(
+            /[$`]/.test(token),
+            `runtime indirection in install argument :: ${token}`,
           ).toBe(false);
         }
       }
@@ -815,8 +958,13 @@ describe('ci.yml capture tooling', () => {
     expect(install['timeout-minutes']).toBe(5);
     // The interpreter that parses the whole run block: every pin in this
     // file reasons in bash, and `shell: powershell` would leave them
-    // describing a script nothing runs.
-    expect(install['shell'] ?? 'bash').toMatch(/^bash/);
+    // describing a script nothing runs. A step with no `shell:` key
+    // inherits defaults.run.shell, so follow GitHub's resolution chain —
+    // a literal fallback let a pwsh default pass while PowerShell parsed
+    // the block and the script died before its first branch.
+    expect(install['shell'] ?? doc.defaults?.run?.shell ?? 'bash').toMatch(
+      /^bash/,
+    );
   });
 
   it('keeps the install branch REACHABLE — the conditions, not just the lines', () => {
@@ -877,8 +1025,13 @@ describe('ci.yml capture tooling', () => {
     // this pin's own first version passed that mutant for exactly that
     // reason.
     for (const probe of ['tmux -V', 'zip -v', 'unzip -v']) {
-      const at = new RegExp(`(^|\\s)${probe.replace(' ', '\\s+')}\\b`);
-      const line = thenBody.find((l) => at.test(l));
+      // As an INVOCATION, not a mention: the probe must BE a statement's
+      // command — an echo that merely names the probe in its message
+      // satisfied the old text anchor while the probe never ran.
+      const at = new RegExp(`^${probe.replace(' ', '\\s+')}(\\s|$)`);
+      const line = thenBody.find((l) =>
+        statementsOf(l).some((s) => at.test(s)),
+      );
       expect(
         line,
         `the already-installed branch never runs ${probe}`,
@@ -891,9 +1044,20 @@ describe('ci.yml capture tooling', () => {
     // passed every other pin.
     const elseIdx = lines.findIndex((l) => l === 'else');
     expect(elseIdx, 'no `else` fallback branch').toBeGreaterThan(-1);
-    // And the conditional is CLOSED: without `fi`, bash rejects the block
-    // and the step runs nothing at all — which passed every other pin.
-    expect(lines, 'the if/elif/else block is never closed').toContain('fi');
+    // And the conditional is CLOSED and BOUNDED: without `fi`, bash
+    // rejects the block and the step runs nothing at all — which passed
+    // every other pin. EXACTLY one `fi`, and nothing outside it: a stray
+    // second `fi` is a syntax error the runner absorbs, and a statement
+    // before the `if` or after the `fi` executes where no pin looks.
+    expect(
+      lines.filter((l) => l === 'fi').length,
+      'expected exactly one fi closing the block',
+    ).toBe(1);
+    expect(
+      lines[lines.length - 1],
+      'statements may follow the closing fi',
+    ).toBe('fi');
+    expect(lines[0], 'statements may precede the if').toBe(ifLine);
     expect(
       lines
         .slice(elseIdx + 1)
@@ -959,9 +1123,11 @@ describe('ci.yml capture tooling', () => {
         // status the pipeline's last command: either one ends the guard's
         // reach, and the apt-get is unguarded.
         let guarded = false;
-        // The ONE alphabet, shared with statementsOf — `2>&1` and `&>` are
-        // redirections, not separators, and a copy of this rule that drifts
-        // from the other is how a guarded chain got misread as unguarded.
+        // SEPARATORS again — rawStatementsOf's quote-aware char loop
+        // mirrors the same alphabet (the two are not shared; keep them in
+        // sync). `2>&1` and `&>` are redirections, not separators, and a
+        // copy of this rule that drifts from the other is how a guarded
+        // chain got misread as unguarded.
         const ops = new RegExp(SEPARATORS.source, 'g');
         for (let m = ops.exec(rest); m !== null; m = ops.exec(rest)) {
           if (m[1] === '&&') continue;
