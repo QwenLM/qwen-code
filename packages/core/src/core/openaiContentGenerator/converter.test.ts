@@ -5402,6 +5402,53 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('should keep nested balanced thinking blocks out of visible content', () => {
+      const context = withTaggedThinkingStreamParser();
+      context.responseParsingOptions = {
+        taggedThinkingTags: true,
+        contentOnlyThinkingTagLeaks: true,
+      };
+
+      const chunks = [
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-nested-thinking-1',
+          created: 456,
+          choices: [
+            {
+              index: 0,
+              delta: { content: '<thinking><thinking>x</thinking>' },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+          model: 'test-model',
+        },
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-nested-thinking-2',
+          created: 457,
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'y</thinking>' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          model: 'test-model',
+        },
+      ] as unknown as OpenAI.Chat.ChatCompletionChunk[];
+      const parts = chunks.flatMap(
+        (chunk) =>
+          converter.convertOpenAIChunkToGemini(chunk, context).candidates?.[0]
+            ?.content?.parts ?? [],
+      );
+
+      expect(parts.every((part) => part.thought === true)).toBe(true);
+      expect(parts.map((part) => part.text).join('')).toBe('xy');
+    });
+
     it('should suppress reasoning_content when the same streaming chunk has tagged thinking content', () => {
       const context = withTaggedThinkingStreamParser();
 
