@@ -2257,6 +2257,125 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     );
   });
 
+  it('stays exit 0 when STDIO fails after the evidence is on disk', async () => {
+    // The success tail's writes were the only contract writes with no stdio
+    // protection, and the broken-pipe guard rethrows every non-EPIPE
+    // 'error' — so a full disk on a file-backed stdout flipped a COMPLETED
+    // capture to exit 1, .ans and manifest both written.
+    //
+    // The error is queued on the reap WARNING, which is written during the
+    // synchronous stretch BEFORE the tail: it therefore dispatches inside
+    // the drain that follows, which is exactly where the completion flag
+    // has to be armed already. Arming it after the drain — as it was —
+    // leaves the guard rethrowing at that moment, so this test measures the
+    // arming POINT and not merely the guard's existence.
+    let captureTuiTs = join(
+      process.cwd(),
+      'src/commands/review/capture-tui.ts',
+    );
+    if (!existsSync(captureTuiTs)) {
+      captureTuiTs = join(
+        process.cwd(),
+        'packages/cli/src/commands/review/capture-tui.ts',
+      );
+    }
+    const binDir = join(dir, 'fakebin-stdio');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, 'tmux'),
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'stdio.holder-ready')}"; done\necho ""\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const patch = join(dir, 'stdio-enospc.cjs');
+    writeFileSync(
+      patch,
+      [
+        'const real = process.stderr.write.bind(process.stderr);',
+        'let armed = false;',
+        'process.stderr.write = function (chunk, ...rest) {',
+        "  if (!armed && String(chunk).includes('WARNING')) {",
+        '    armed = true;',
+        '    process.nextTick(() =>',
+        "      process.stderr.emit('error', Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' })),",
+        '    );',
+        '    return true;',
+        '  }',
+        '  return real(chunk, ...rest);',
+        '};',
+      ].join('\n'),
+    );
+    const driver = join(dir, 'driver-stdio.mts');
+    writeFileSync(
+      driver,
+      [
+        `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
+        `mod.probes.freeze = () => ({ status: 'absent' });`,
+        `await mod.runCaptureTui({ command: 'printf hi', cwd: ${JSON.stringify(dir)}, cols: 80, rows: 24, settleMs: 0, until: undefined, keys: undefined, out: ${JSON.stringify(join(dir, 'stdio'))}, timeoutMs: 5_000 } as never);`,
+      ].join('\n'),
+    );
+    const { spawn } = await import('node:child_process');
+    const child = spawn(
+      process.execPath,
+      ['--require', patch, '--import', 'tsx', driver],
+      {
+        cwd: process.cwd(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, PATH: `${binDir}:${process.env['PATH'] ?? ''}` },
+      },
+    );
+    const code = await new Promise<number | null>((resolve) =>
+      child.once('exit', (c) => resolve(c)),
+    );
+    // A completed capture is a success, whatever happened to stdio after.
+    expect(code).toBe(0);
+    expect(existsSync(join(dir, 'stdio.ans'))).toBe(true);
+    expect(existsSync(join(dir, 'stdio.json'))).toBe(true);
+  }, 60_000);
+
+  it('does not inherit a previous run REFUSAL exit code', async () => {
+    // runCaptureTui is exported and driven repeatedly in-process, so a
+    // refusal that left exitCode 3 standing made the NEXT successful
+    // capture report failure with its artifacts on disk (probe-observed).
+    // The disposition is per run, like the completion flag beside it.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    await withStdio(() =>
+      runCaptureTui({
+        command: 'printf hi',
+        cwd: undefined,
+        cols: 0,
+        rows: 24,
+        settleMs: 0,
+        until: undefined,
+        keys: undefined,
+        out: join(dir, 'inherit-refusal'),
+        timeoutMs: 1000,
+      } as never),
+    );
+    expect(process.exitCode).toBe(3);
+    probes.tmux = realTmuxProbe;
+    probes.freeze = () => ({ status: 'absent' }) as const;
+    await withStdio(() => run({ settleMs: 0 }));
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('names the until marker as NEVER SEARCHED when --ready times out', async () => {
+    // The manifest records `until` and settledBy 'timeout', which reads as
+    // "searched and not found" — but the poll never ran. Measured with the
+    // marker present in the pane for the whole run: a reader deciding the
+    // marker never appears would decide from a search that never happened.
+    probes.freeze = () => ({ status: 'absent' }) as const;
+    await run({
+      command: 'printf "PRESENT\n"; sleep 30',
+      ready: 'NEVER-MATCHES-THIS',
+      until: 'PRESENT',
+      settleMs: 0,
+      timeoutMs: 1200,
+    });
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.degradedBecause).toContain('--ready never matched');
+    expect(manifest.degradedBecause).toContain('never searched for');
+  });
+
   it('refuses a DANGLING SYMLINK at a mandatory path — writes must not escape', async () => {
     // existsSync and statSync follow links, so a dangling one read as
     // "nothing here": the collision gate never fired and writeFileSync's

@@ -277,8 +277,13 @@ function guardBrokenPipes(): void {
 
 export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // Per RUN, not per process: the guard is installed once, but a second
-  // capture in the same process must not inherit the first one's completion.
+  // capture in the same process must not inherit the first one's completion
+  // — nor its DISPOSITION. `runCaptureTui` is exported and the tests drive
+  // it repeatedly, so a refusal left exitCode 3 standing and the next
+  // SUCCESSFUL run reported failure with its artifacts on disk
+  // (probe-observed: refuse → 3, then a clean capture → still 3).
   artifactsComplete = false;
+  process.exitCode = undefined;
   guardBrokenPipes();
   const refuse = (reason: string): void => {
     // Exit code FIRST: it is the disposition a harness reads, and the
@@ -1077,6 +1082,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         keysSent === false ? 'keys were NOT sent, ' : ''
       }late frame captured`,
     );
+    // ...and --until never ran at all. The manifest records `until` and
+    // `settledBy: 'timeout'`, which reads as "searched and not found" —
+    // measured with the marker present in the pane for the whole run. A
+    // reader deciding the marker never appears would be deciding from a
+    // search that never happened.
+    if (args.until !== undefined) {
+      degradations.push(
+        `--until was never searched for: the ready gate consumed the budget first`,
+      );
+    }
   } else if (settledBy === 'timeout') {
     // The window ACTUALLY spent on the marker, not the whole budget: ONE
     // deadline covers the ready gate and the until poll, so with --ready
@@ -1281,11 +1296,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     );
     return;
   }
-  await drainSignalsThenRelease();
-
-  // The evidence is on disk and described. Whatever happens to stdio now,
-  // this run SUCCEEDED.
+  // BEFORE the drain, not after: the drain is the first event-loop turn
+  // following a long synchronous stretch, so an async stdio 'error' queued
+  // during that stretch dispatches INSIDE it — with the flag still false,
+  // the guard rethrew and a completed capture exited 1 with its .ans and
+  // manifest both written. The evidence is on disk and described by the
+  // time we get here; nothing stdio does after that changes what happened.
   artifactsComplete = true;
+  await drainSignalsThenRelease();
   writeStderrLineSafe(
     `capture-tui: ${manifest.evidence} at ${args.cols}x${args.rows} ` +
       `(settled by ${settledBy})${degradedBecause ? ` — ${degradedBecause}` : ''}`,
