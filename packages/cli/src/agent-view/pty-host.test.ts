@@ -199,9 +199,13 @@ describe('launchAgentViewPtyHost', () => {
     const previousToken = process.env[PTY_HOST_AUTH_TOKEN_ENV];
     const previousTerm = process.env['TERM'];
     const previousMarker = process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'];
+    const previousTmux = process.env['TMUX'];
+    const previousColumns = process.env['COLUMNS'];
     process.env[PTY_HOST_AUTH_TOKEN_ENV] = 'host-secret';
     process.env['TERM'] = 'ambient-term';
     process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'] = 'ambient-value';
+    process.env['TMUX'] = '/tmp/tmux-501/default,123,0';
+    process.env['COLUMNS'] = '200';
     try {
       await launchAgentViewPtyHost(createLaunch(), { pty });
     } finally {
@@ -220,6 +224,16 @@ describe('launchAgentViewPtyHost', () => {
       } else {
         process.env['QWEN_AGENT_VIEW_AMBIENT_MARKER'] = previousMarker;
       }
+      if (previousTmux === undefined) {
+        delete process.env['TMUX'];
+      } else {
+        process.env['TMUX'] = previousTmux;
+      }
+      if (previousColumns === undefined) {
+        delete process.env['COLUMNS'];
+      } else {
+        process.env['COLUMNS'] = previousColumns;
+      }
     }
 
     expect(pty.spawnCalls[0]?.options.env).toEqual(
@@ -232,6 +246,8 @@ describe('launchAgentViewPtyHost', () => {
     expect(
       pty.spawnCalls[0]?.options.env[PTY_HOST_AUTH_TOKEN_ENV],
     ).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['TMUX']).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['COLUMNS']).toBeUndefined();
   });
 
   it('strips host-only secrets even when the launch env re-adds them', async () => {
@@ -243,6 +259,8 @@ describe('launchAgentViewPtyHost', () => {
         env: {
           QWEN_AGENT_VIEW_WORKER: '1',
           [PTY_HOST_AUTH_TOKEN_ENV]: 'injected-token',
+          TMUX: '/tmp/tmux-501/default,456,0',
+          LINES: '60',
         },
       },
       { pty },
@@ -254,6 +272,8 @@ describe('launchAgentViewPtyHost', () => {
     expect(
       pty.spawnCalls[0]?.options.env[PTY_HOST_AUTH_TOKEN_ENV],
     ).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['TMUX']).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['LINES']).toBeUndefined();
   });
 
   it('kills the PTY process when disposed', async () => {

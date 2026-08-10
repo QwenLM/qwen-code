@@ -383,6 +383,46 @@ describe('worker sideband env', () => {
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
   });
 
+  it('serializes concurrent state reports before recording dedupe keys', async () => {
+    const env = createAgentViewWorkerSidebandEnv({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/qwen-agent-view.sock',
+      token: 'token-1',
+      activeCwd: '/repo',
+    });
+    let resolveFirst: (value: unknown) => void = () => {};
+    mockCallAgentViewSupervisor
+      .mockImplementationOnce(
+        () =>
+          new Promise<unknown>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({ accepted: true })
+      .mockResolvedValueOnce({ accepted: true });
+
+    const first = reportAgentViewWorkerState({ sessionState: 'working' }, env);
+    const second = reportAgentViewWorkerState(
+      { sessionState: 'needs_input' },
+      env,
+    );
+
+    await Promise.resolve();
+    expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ accepted: true });
+    await Promise.all([first, second]);
+    await reportAgentViewWorkerState({ sessionState: 'working' }, env);
+
+    expect(
+      mockCallAgentViewSupervisor.mock.calls.map(
+        (call) =>
+          ((call as unknown[])[2] as { sessionState?: string } | undefined)
+            ?.sessionState,
+      ),
+    ).toEqual(['working', 'needs_input', 'working']);
+  });
+
   it('skips worker state reports outside worker mode', async () => {
     await reportAgentViewWorkerState({ sessionState: 'idle' }, {});
 

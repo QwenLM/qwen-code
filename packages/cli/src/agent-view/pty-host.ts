@@ -9,7 +9,17 @@ import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import type { AgentViewLaunchFile } from './protocol.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
-const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([PTY_HOST_AUTH_TOKEN_ENV]);
+const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
+  PTY_HOST_AUTH_TOKEN_ENV,
+  'TMUX',
+  'TMUX_PANE',
+  'STY',
+  'WINDOW',
+  'WINDOWID',
+  'TERMCAP',
+  'COLUMNS',
+  'LINES',
+]);
 
 export interface AgentViewPtySpawnOptions {
   cwd: string;

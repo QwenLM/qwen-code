@@ -31,7 +31,9 @@ describe('Agent View PTY host process server', () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
     await Promise.all(
       [...socketDirs].map((dir) =>
-        fs.rm(dir, { recursive: true, force: true }),
+        isWindowsPipePath(dir)
+          ? Promise.resolve()
+          : fs.rm(dir, { recursive: true, force: true }),
       ),
     );
     socketDirs.clear();
@@ -576,34 +578,37 @@ describe('Agent View PTY host process server', () => {
     expect(Buffer.byteLength(fallbackPath)).toBeLessThan(100);
   });
 
-  it('skips an unusable fallback socket directory', async () => {
-    const tmpRoot = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pty-bad-tmp-'),
-    );
-    const tmpFile = path.join(tmpRoot, 'tmp-file');
-    const previousTmpDir = process.env['TMPDIR'];
-    await fs.writeFile(tmpFile, 'not a directory');
-    process.env['TMPDIR'] = tmpFile;
-    try {
-      const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
-        globalDir: path.join('/very-long-path'.repeat(20), '.qwen'),
-        platform: 'linux',
-      });
-      const uid =
-        typeof process.getuid === 'function' ? process.getuid() : 'user';
-
-      expect(path.dirname(fallbackPath)).toBe(
-        path.join('/tmp', `qwen-avp-${uid}`),
+  it.skipIf(process.platform === 'win32')(
+    'skips an unusable fallback socket directory',
+    async () => {
+      const tmpRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pty-bad-tmp-'),
       );
-    } finally {
-      if (previousTmpDir === undefined) {
-        delete process.env['TMPDIR'];
-      } else {
-        process.env['TMPDIR'] = previousTmpDir;
+      const tmpFile = path.join(tmpRoot, 'tmp-file');
+      const previousTmpDir = process.env['TMPDIR'];
+      await fs.writeFile(tmpFile, 'not a directory');
+      process.env['TMPDIR'] = tmpFile;
+      try {
+        const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
+          globalDir: path.join('/very-long-path'.repeat(20), '.qwen'),
+          platform: 'linux',
+        });
+        const uid =
+          typeof process.getuid === 'function' ? process.getuid() : 'user';
+
+        expect(path.dirname(fallbackPath)).toBe(
+          path.join('/tmp', `qwen-avp-${uid}`),
+        );
+      } finally {
+        if (previousTmpDir === undefined) {
+          delete process.env['TMPDIR'];
+        } else {
+          process.env['TMPDIR'] = previousTmpDir;
+        }
+        await fs.rm(tmpRoot, { recursive: true, force: true });
       }
-      await fs.rm(tmpRoot, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
   it('rejects oversized PTY host responses', async () => {
     const socketPath = shortSocketPath();
