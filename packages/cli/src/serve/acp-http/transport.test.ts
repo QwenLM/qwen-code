@@ -7390,6 +7390,93 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('session mutations invalidate active and archived organized catalogs', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440017';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+
+        const list = async (
+          id: number,
+          archiveState: 'active' | 'archived',
+        ) => {
+          await post(connId, {
+            jsonrpc: '2.0',
+            id,
+            method: 'session/list',
+            params: {
+              workspaceCwd: TEST_WORKSPACE,
+              view: 'organized',
+              archiveState,
+            },
+          });
+          return reader.next();
+        };
+
+        await expect(list(75, 'active')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId }] },
+        });
+        await expect(list(76, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 77,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 77,
+          result: { archived: [sessionId], errors: [] },
+        });
+
+        await expect(list(78, 'active')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        await expect(list(79, 'archived')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId, isArchived: true }] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/sessions/unarchive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 80,
+          result: { unarchived: [sessionId], errors: [] },
+        });
+        await expect(list(81, 'active')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId, isArchived: false }] },
+        });
+        await expect(list(82, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 83,
+          result: { removed: [sessionId], errors: [] },
+        });
+        await expect(list(84, 'active')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        await expect(list(85, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
     it('_qwen/session/update_organization assigns a color echoed by session/list', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440011';

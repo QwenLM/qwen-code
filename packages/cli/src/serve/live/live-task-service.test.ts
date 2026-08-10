@@ -247,6 +247,7 @@ function makeHarness() {
   const runtime = {
     workspaceId: 'conversations',
     workspaceCwd: '/conversations',
+    sessionRuntimeBaseDir: '/runtime/conversations',
     provenance: 'live-conversation',
     bridge,
   } as WorkspaceRuntime;
@@ -254,6 +255,7 @@ function makeHarness() {
   const projectRuntime = {
     workspaceId: 'project-1',
     workspaceCwd: '/project',
+    sessionRuntimeBaseDir: '/runtime/project',
     bridge: projectBridge,
   } as WorkspaceRuntime;
   const registry = {
@@ -365,6 +367,20 @@ describe('LiveTaskService', () => {
       ],
       threads: [{ id: 'ordinary', status: 'idle', updatedAt: 1_785_369_601 }],
     });
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      1,
+      harness.bridge,
+      '/conversations',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/conversations' },
+    );
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      '/project',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/project' },
+    );
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
