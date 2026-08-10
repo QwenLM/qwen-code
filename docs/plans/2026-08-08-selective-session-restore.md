@@ -328,8 +328,9 @@ returns the requested replay semantics.
 - Exercise scheduled-task rehydration/keepalive and direct/daemon channel
   restoration through resume/none. Scheduled-task rehydration must restore cron
   and Goal runtime state; both channel adapters must remain promptable and
-  receive post-resume updates. None may collect historical replay frames.
-  Generic load and branch clients retain their explicit replay behavior.
+  receive post-resume updates, including available-command refresh. None may
+  collect historical replay frames. Generic load and branch clients retain
+  their explicit replay behavior.
 - Rebase onto #8824 and run its transactional integration coverage with
   selective-restore 409, 413, timeout/504, cancellation, and staging failures.
   Assert the committed session-id and workspace-cwd source tuple remains attached
@@ -487,8 +488,9 @@ returns the requested replay semantics.
       resume ignore the field consistently for warm and cold Sessions.
 - [ ] Scheduled-task rehydration/keepalive and direct/daemon channel restoration
       use resume/none and collect no historical replay. Scheduled tasks retain
-      cron/Goal recovery; channels retain prompt/live-update behavior; generic
-      and branch loads keep their required replay.
+      cron/Goal recovery; channels retain prompt/live-update and
+      available-command behavior; generic and branch loads keep their required
+      replay.
 - [ ] Both intentional caps (256 MiB transcript index and 32 MiB transformed
       explicit-page replay) have maintainer sign-off.
 - [ ] The fixed 32 MiB explicit-replay policy has no configuration, transformed

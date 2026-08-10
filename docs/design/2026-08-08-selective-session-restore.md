@@ -557,7 +557,8 @@ use compatibility-mode `all` merely to make a runtime resident:
 
 Tests must prove scheduled-task rehydration still restores cron/Goal runtime
 state, while both channel adapters remain promptable and receive post-resume
-live updates. None may collect historical replay frames. Standalone
+live updates, including the available-command refresh they currently learn after
+registration. None may collect historical replay frames. Standalone
 `qwen/session/loadUpdates`, session export, and callers explicitly asking for
 prior UI history retain their documented full-read behavior outside this
 migration.
