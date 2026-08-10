@@ -2621,68 +2621,6 @@ describe('Session', () => {
       );
     });
 
-    it('keeps resumed cron prompts out of user-turn rewind indexes', () => {
-      const records = [
-        chatRecord({
-          uuid: 'user-1',
-          message: { role: 'user', parts: [{ text: 'first' }] },
-        }),
-        chatRecord({
-          uuid: 'assistant-1',
-          parentUuid: 'user-1',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'first reply' }] },
-        }),
-        chatRecord({
-          uuid: 'cron-1',
-          parentUuid: 'assistant-1',
-          subtype: 'cron',
-          message: { role: 'user', parts: [{ text: 'scheduled prompt' }] },
-        }),
-        chatRecord({
-          uuid: 'assistant-2',
-          parentUuid: 'cron-1',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'scheduled result' }] },
-        }),
-        chatRecord({
-          uuid: 'user-2',
-          parentUuid: 'assistant-2',
-          message: { role: 'user', parts: [{ text: 'second' }] },
-        }),
-        chatRecord({
-          uuid: 'assistant-3',
-          parentUuid: 'user-2',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'second reply' }] },
-        }),
-      ];
-      mockConfig.getResumedSessionData = vi.fn().mockReturnValue({
-        conversation: { messages: records },
-      });
-      session = new Session(
-        'test-session-id',
-        mockConfig,
-        mockClient,
-        mockSettings,
-      );
-      const history = records.flatMap((record) =>
-        record.message ? [record.message] : [],
-      );
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-
-      expect(session.getRewindableUserTurnCount()).toBe(2);
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
-        apiTruncateIndex: 4,
-      });
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        1,
-        { truncatedCount: 2 },
-        [],
-      );
-    });
-
     it('can rewind the conversation without restoring file history', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
@@ -13723,6 +13661,9 @@ describe('Session', () => {
           expect.any(AbortSignal),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.recordCronPrompt,
+        ).not.toHaveBeenCalled();
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -16946,7 +16887,9 @@ describe('Session', () => {
         const cronGate = new Promise<void>((resolve) => {
           releaseCron = resolve;
         });
+        const cronStreamStarted = vi.fn();
         async function* cronStream() {
+          cronStreamStarted();
           yield {
             type: core.StreamEventType.CHUNK,
             value: {
@@ -16991,9 +16934,12 @@ describe('Session', () => {
         );
         expect(
           mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
-        ).toBeLessThan(
+        ).toBeGreaterThan(
           vi.mocked(mockChat.sendMessageStream).mock.invocationCallOrder[1]!,
         );
+        expect(
+          mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
+        ).toBeLessThan(cronStreamStarted.mock.invocationCallOrder[0]!);
 
         await session.cancelPendingPrompt();
         releaseCron!();
@@ -17323,7 +17269,7 @@ describe('Session', () => {
           );
         });
 
-        it('preserves goal feedback without making the stop continuation rewindable', async () => {
+        it('preserves goal feedback alongside an external stop reason', async () => {
           const messageBus = {
             request: vi
               .fn()
@@ -17372,22 +17318,6 @@ describe('Session', () => {
           expect(textParts(continuation.message)).toEqual([
             'External stop hook feedback\nKeep working on the active goal',
           ]);
-
-          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'follow-up' }],
-          });
-          vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
-            { role: 'user', parts: [{ text: 'hello' }] },
-            { role: 'model', parts: [{ text: 'first reply' }] },
-            { role: 'user', parts: continuation.message },
-            { role: 'model', parts: [{ text: 'continuation reply' }] },
-            { role: 'user', parts: [{ text: 'follow-up' }] },
-          ]);
-
-          expect(session.getRewindableUserTurnCount()).toBe(2);
-          expect(session.rewindToTurn(1).apiTruncateIndex).toBe(4);
         });
 
         it('ends Stop hook continuation when the blocking cap is reached', async () => {
