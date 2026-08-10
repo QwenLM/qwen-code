@@ -39,6 +39,15 @@
   padding: 12px;
 }
 
+.container[data-image-drag-active] .content {
+  border-color: var(--primary);
+  background: color-mix(
+    in srgb,
+    var(--primary) 6%,
+    var(--chat-editor-bg-primary)
+  );
+}
+
 .specularEffect {
   position: absolute;
   inset: -20px;
@@ -1816,9 +1825,14 @@
   border-radius: 0 0 0 4px;
 }
 
-.imageRemove:hover {
+.imageRemove:not(:disabled):hover {
   background: var(--error-color);
   color: var(--chat-editor-text-primary);
+}
+
+.imageRemove:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .searchPanel {

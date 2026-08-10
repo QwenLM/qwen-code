@@ -210,6 +210,7 @@ interface ChatEditorProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -1255,6 +1256,7 @@ export const ChatEditor = memo(
       composerTagIcons,
       voiceTarget,
       voiceStatusRevision,
+      onImageIngestionNotice,
     } = props;
 
     const {
@@ -1297,6 +1299,7 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      onImageIngestionNotice,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -1740,6 +1743,7 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
+    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
     const mobileVoiceActive = showQuickActions && voiceActive;
 
     useEffect(() => {
@@ -1933,6 +1937,9 @@ export const ChatEditor = memo(
           className={styles.container}
           data-web-shell-composer-surface
           data-typewriter-visible={showTypewriterPlaceholder || undefined}
+          data-image-drag-active={core.imageDragActive || undefined}
+          aria-busy={core.pendingImageBatchCount > 0 || undefined}
+          {...core.imageTransferHandlers}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -2065,9 +2072,12 @@ export const ChatEditor = memo(
                           alt=""
                         />
                         <button
+                          type="button"
                           className={styles.imageRemove}
+                          disabled={disabled}
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (disabled) return;
                             core.removeImage(i);
                           }}
                         >
@@ -2137,7 +2147,6 @@ export const ChatEditor = memo(
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
                   onBlur={core.mobileComposer.onBlur}
-                  onPaste={core.mobileComposer.onPaste}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
                   rows={1}
@@ -2484,23 +2493,23 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    isPreparing || showCancelButton
+                    composerPreparing || showCancelButton
                       ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                           cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                         }`
                       : styles.sendBtn
                   }
                   disabled={
-                    isPreparing
+                    composerPreparing
                       ? true
                       : showCancelButton
                         ? !onCancel
-                        : core.disabled || !core.hasContent
+                        : !core.canSubmit
                   }
                   data-web-shell-composer-submit
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isPreparing) {
+                    if (composerPreparing) {
                       return;
                     }
                     if (showCancelButton) {
@@ -2510,7 +2519,7 @@ export const ChatEditor = memo(
                     core.submitText();
                   }}
                   aria-label={
-                    isPreparing
+                    composerPreparing
                       ? t('common.loading')
                       : showCancelButton
                         ? cancelArmed
@@ -2524,7 +2533,7 @@ export const ChatEditor = memo(
                       : undefined
                   }
                 >
-                  {isPreparing ? (
+                  {composerPreparing ? (
                     <LoadingIcon />
                   ) : showCancelButton ? (
                     cancelArmed ? (
