@@ -1443,21 +1443,88 @@ it -C ${outsideRepo} reset --hard`,
     });
 
     it('contains a sub-agent to the worktree it reports', async () => {
-      const owned = GitWorktreeService.getWorktreesDir('session-1');
+      // A session id unique to this test: `getWorktreesDir` resolves under the
+      // user's global Qwen dir, so a shared id would have this test create and
+      // delete real directories belonging to someone's session.
+      const isolatedSessionId = `daemon-guard-${process.pid}-worktree`;
+      const owned = GitWorktreeService.getWorktreesDir(isolatedSessionId);
       const agentWorktree = path.join(owned, 'agent-a');
       await mkdir(path.join(agentWorktree, 'src'), { recursive: true });
 
       const guard = createDaemonToolGuard();
-      // Its own worktree is the boundary: work inside it is allowed...
-      await expect(
-        guard(call('cd src && git commit -m x', agentWorktree)),
-      ).resolves.toEqual({ allowed: true });
-      // ...while reaching back into the parent checkout is not.
-      await expect(
-        guard(call(`git -C ${effectiveCwd} reset --hard`, agentWorktree)),
-      ).resolves.toMatchObject({ allowed: false });
-      await rm(owned, { recursive: true, force: true });
+      const inWorktree = (command: string): ExternalToolGuardPrepareRequest =>
+        ({
+          ...call(command, agentWorktree),
+          sessionId: isolatedSessionId,
+        }) as ExternalToolGuardPrepareRequest;
+      try {
+        // Its own worktree is the boundary: work inside it is allowed...
+        await expect(
+          guard(inWorktree('cd src && git commit -m x')),
+        ).resolves.toEqual({ allowed: true });
+        // ...while reaching back into the parent checkout is not.
+        await expect(
+          guard(inWorktree(`git -C ${effectiveCwd} reset --hard`)),
+        ).resolves.toMatchObject({ allowed: false });
+      } finally {
+        await rm(GitWorktreeService.getSessionDir(isolatedSessionId), {
+          recursive: true,
+          force: true,
+        });
+      }
     });
+  });
+
+  it.each([
+    // Env vars git executes as programs, and its config-injection channels.
+    () => `GIT_SSH_COMMAND='touch /tmp/x' git fetch`,
+    () => `GIT_EDITOR='touch /tmp/x' git commit`,
+    () => `GIT_ASKPASS='touch /tmp/x' git fetch`,
+    () => `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager git status`,
+    // Config keys git runs through a shell.
+    () => `git -c diff.external='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+    () => `git -c core.gitProxy='touch /tmp/x' -C ${outsideRepo} rev-parse`,
+    // An unrecognized wrapper does not launder that config.
+    () => `nice git -c alias.pwn='!cd ${outsideRepo} && git reset --hard' pwn`,
+    // `-execdir` runs git with the cwd of each directory it visits.
+    () => `find ${outsideRepo} -execdir git reset --hard ;`,
+    // An archive decides where it writes, so the extraction directory is
+    // what became untrustworthy.
+    () => `tar -xf evil.tar && git -C nested reset --hard`,
+    // A body defined earlier runs where the later bare word appears.
+    () => `alias g='git reset --hard'; cd ${outsideRepo}; g`,
+    () => `f() { git reset --hard; }; cd ${outsideRepo}; f`,
+  ])('closes the round-6 escapes %#', async (build) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  // Each of these was denied by a rule that was too broad.
+  it('keeps ordinary commands out of the round-6 rules', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      // `SHELLOPTS` is bash's own options state, not a git redirection.
+      'SHELLOPTS=errexit git status',
+      'env --ignore-environment git status',
+      'env --null git status',
+      // `curl -C -` resumes a download; it is not `git -C`.
+      'curl -C - -o pkg.tgz https://git.example.com/pkg.tgz',
+      "env -iS 'git status'",
+      // A `cd` target the guard already knows the value of.
+      `d=${insideNested}; cd $d; git status`,
+      // `set +a` turns allexport back off.
+      `set -a; set +a; GIT_WORK_TREE=${outsideRepo}; echo done`,
+      // Definitions used inside the boundary stay allowed.
+      'f() { git status; }; cd nested; f',
+      "alias g='git status'; cd nested; g",
+      'tar -xf a.tar && git commit -m x',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
   });
 
   // The shell-executing set pins ToolNames literals in acp-bridge, which
