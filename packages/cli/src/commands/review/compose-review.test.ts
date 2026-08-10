@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
-import { writeBudgetStop } from './lib/deadline.js';
+import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
@@ -693,6 +693,29 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.body).not.toContain('LGTM');
     expect(r.body).not.toContain('no blockers');
+  });
+
+  it('a round-cap marker caps the verdict and dedups against the relayed entry', () => {
+    // A huge diff's reverse audit ran its full 3 rounds without converging;
+    // the builder refused round 4 and wrote a round-cap marker. compose-review
+    // caps on it whether or not the orchestrator relays — and says it once
+    // when the orchestrator does relay.
+    const plan = coveredPlan();
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview(base({ planPath: plan }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.body).not.toContain('LGTM');
+
+    const r2 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'reverse audit — did not converge within the reverse-audit round cap of 3',
+        ],
+      }),
+    );
+    expect(r2.body.split('reverse-audit round cap').length - 1).toBe(1);
   });
 
   it('a budget-stop marker caps APPROVE at COMMENT with nothing relayed by the caller', () => {
