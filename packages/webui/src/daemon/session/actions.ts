@@ -244,6 +244,8 @@ export function createDaemonSessionActions({
               if (pendingSessionLoadRef.current?.id === loadId) {
                 pendingSessionLoadRef.current = undefined;
                 if (sessionRef.current?.sessionId !== sessionId) {
+                  manualSessionClearRef.current = true;
+                  setRestoreSessionId(undefined);
                   setConnection((current) =>
                     current.status === 'connecting' &&
                     current.sessionId === sessionId
