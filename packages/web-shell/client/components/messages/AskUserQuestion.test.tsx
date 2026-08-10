@@ -910,6 +910,32 @@ describe('AskUserQuestion multi-select', () => {
     });
   });
 
+  it('cancels a selection when the same option is clicked twice rapidly', () => {
+    render(undefined, multiRequest);
+    const optionB = optionButtons()[1]!;
+
+    act(() => {
+      optionB.click();
+      optionB.click();
+    });
+
+    expect(optionB.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('preserves each selection when different options are clicked rapidly', () => {
+    render(undefined, multiRequest);
+    const options = optionButtons();
+
+    act(() => {
+      options[1]!.click();
+      options[2]!.click();
+    });
+
+    expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(options[2]!.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('uses Space to toggle and Enter to advance without toggling', () => {
     const requestWithNextQuestion: PermissionRequest = {
       ...multipleQuestionsRequest,
