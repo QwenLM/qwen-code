@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { QWEN_CODE_SERVE_ENV } from './acp-channel-fallback.js';
 import {
   SHARED_CHROME_BRIDGE_OPT_OUT_ENV,
   cdpWsEndpointFor,
@@ -216,6 +217,23 @@ const USABLE: CdpStatusResponse = {
 };
 
 describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
+  it('does not reroute daemon-owned ACP children', async () => {
+    const { config, setMcpServers } = configStub({
+      'chrome-devtools': AUTO_CONNECT_SERVER,
+    });
+    const fetchImpl = vi.fn();
+
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      { [QWEN_CODE_SERVE_ENV]: '1' },
+      () => {},
+      fetchImpl,
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(setMcpServers).not.toHaveBeenCalled();
+  });
+
   it('applies the rewrite when the probe reports a usable bridge', async () => {
     const { config, setMcpServers } = configStub({
       'chrome-devtools': AUTO_CONNECT_SERVER,

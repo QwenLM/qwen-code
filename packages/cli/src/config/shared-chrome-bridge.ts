@@ -22,6 +22,7 @@
  */
 
 import type { Config, MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { QWEN_CODE_SERVE_ENV } from './acp-channel-fallback.js';
 import { QWEN_DAEMON_URL_ENV } from '../serve/channel-worker-env.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
@@ -165,6 +166,7 @@ export async function maybeRouteChromeDevToolsViaDaemonBridge(
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   try {
+    if (env[QWEN_CODE_SERVE_ENV] === '1') return;
     if (env[SHARED_CHROME_BRIDGE_OPT_OUT_ENV]) return;
     if (config.isSafeMode() || config.getBareMode()) return;
 
