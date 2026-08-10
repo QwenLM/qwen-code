@@ -2737,7 +2737,7 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
-    if (this.rewindApiUserTurns) {
+    if (this.rewindApiUserTurns !== null) {
       const keptMappedTurns = apiHistory
         .slice(
           getStartupContextLength(apiHistory, { includeCompressed: true }),
@@ -2788,7 +2788,7 @@ export class Session implements SessionContext {
   }
 
   getRewindableUserTurnCount(): number {
-    if (this.rewindApiUserTurns) {
+    if (this.rewindApiUserTurns !== null) {
       return this.rewindApiUserTurns.filter(Boolean).length;
     }
 
@@ -2832,7 +2832,7 @@ export class Session implements SessionContext {
       includeCompressed: true,
     });
 
-    if (this.rewindApiUserTurns) {
+    if (this.rewindApiUserTurns !== null) {
       let mappedUserIndex = 0;
       let realUserIndex = 0;
       for (let i = startIndex; i < apiHistory.length; i++) {
@@ -5301,51 +5301,29 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    const chat = this.#getCurrentChat();
-    const historyBeforeSend = chat.getHistoryShallow?.();
-    const userTurnCountBeforeSend = historyBeforeSend?.filter((content) =>
-      this.#isUserTextContent(content),
-    ).length;
-    let responseStream: Awaited<ReturnType<GeminiChat['sendMessageStream']>>;
-    try {
-      responseStream = await chat.sendMessageStream(
-        options.getModelOverride?.() ??
-          options.modelOverride ??
-          this.config.getModel(),
-        {
-          message,
-          config: {
-            abortSignal,
-          },
+    const responseStream = await this.#getCurrentChat().sendMessageStream(
+      options.getModelOverride?.() ??
+        options.modelOverride ??
+        this.config.getModel(),
+      {
+        message,
+        config: {
+          abortSignal,
         },
-        promptId,
-      );
-    } catch (error) {
-      if (
-        Object.hasOwn(options, 'rewindableUserTurn') &&
-        userTurnCountBeforeSend !== undefined &&
-        (chat.getHistoryShallow?.() ?? []).filter((content) =>
-          this.#isUserTextContent(content),
-        ).length > userTurnCountBeforeSend
-      ) {
-        this.#trackRewindApiUserTurn(options.rewindableUserTurn === true);
-      }
-      throw error;
-    }
-    if (Object.hasOwn(options, 'rewindableUserTurn')) {
-      this.#trackRewindApiUserTurn(options.rewindableUserTurn === true);
+      },
+      promptId,
+    );
+    if (options.rewindableUserTurn !== undefined) {
+      this.#trackRewindApiUserTurn(options.rewindableUserTurn);
     }
     return { responseStream };
   }
 
   #trackRewindApiUserTurn(rewindable: boolean): void {
     if (this.rewindApiUserTurns === null) {
-      const chat = this.#getCurrentChat();
-      const history = chat.getHistoryShallow?.();
-      if (!history) return;
-      const userTurnCount = history.filter((content) =>
-        this.#isUserTextContent(content),
-      ).length;
+      const userTurnCount = this.#getCurrentChat()
+        .getHistoryShallow()
+        .filter((content) => this.#isUserTextContent(content)).length;
       if (userTurnCount > 1) return;
       this.rewindApiUserTurns = [];
     }
