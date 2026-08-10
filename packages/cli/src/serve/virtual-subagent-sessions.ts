@@ -27,6 +27,7 @@ import { replayTranscriptRecordPage } from '../acp-integration/session/history-r
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const PREFIX = 'subagent.';
+const MAX_VIRTUAL_SESSION_ID_PART_LENGTH = 500;
 const MAX_VIRTUAL_SESSION_ID_LENGTH = 2_000;
 const POLL_INTERVAL_MS = 250;
 const TARGET_RETENTION_MS = 60_000;
@@ -206,13 +207,17 @@ function decodePart(value: string): string | undefined {
 }
 
 function isValidVirtualParentSessionId(value: string): boolean {
-  return /^[a-zA-Z0-9_-]{1,500}$/.test(value);
+  return (
+    value.length > 0 &&
+    value.length <= MAX_VIRTUAL_SESSION_ID_PART_LENGTH &&
+    /^[a-zA-Z0-9_-]+$/.test(value)
+  );
 }
 
 function isValidVirtualAgentId(value: string): boolean {
   return (
     value.length > 0 &&
-    value.length <= 500 &&
+    value.length <= MAX_VIRTUAL_SESSION_ID_PART_LENGTH &&
     decodePart(encodePart(value)) === value
   );
 }
