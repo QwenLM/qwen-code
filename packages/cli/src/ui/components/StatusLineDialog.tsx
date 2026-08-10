@@ -176,9 +176,12 @@ export function StatusLineDialog({
 
   const handleConfirm = useCallback(() => {
     const effectiveScope = getEffectiveStatusLineScope(settings);
-    const hideContextIndicator = normalizeStatusLinePresetConfig(
-      settings.forScope(effectiveScope).settings.ui?.statusLine,
-    )?.hideContextIndicator;
+    const statusLine =
+      settings.forScope(effectiveScope).settings.ui?.statusLine;
+    const hideContextIndicator =
+      statusLine && typeof statusLine === 'object'
+        ? statusLine.hideContextIndicator
+        : undefined;
     const savedConfig = {
       ...presetConfig,
       ...(typeof hideContextIndicator === 'boolean'

@@ -234,7 +234,10 @@ function buildMetricsPayload(
  * on a timer so external data (git branch, quota, clock) stays fresh even
  * when no Agent state has changed.
  */
-export function useStatusLine(keepAutomaticContextIndicator = false): {
+export function useStatusLine(
+  keepAutomaticContextIndicator = false,
+  availableWidth?: number,
+): {
   lines: string[];
   useThemeColors: boolean;
   respectUserColors: boolean;
@@ -777,8 +780,7 @@ export function useStatusLine(keepAutomaticContextIndicator = false): {
         output.some(
           (line) =>
             getCachedStringWidth(line) >
-            // Footer uses two columns of horizontal padding on each side.
-            MAX_STATUS_LINES * Math.max(1, terminalWidth - 4),
+            MAX_STATUS_LINES * Math.max(1, availableWidth ?? terminalWidth - 4),
         ),
     ),
   };

@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { useRef } from 'react';
+import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -55,13 +56,19 @@ export const Footer: React.FC = () => {
   const { vimEnabled, vimMode } = useVimModeState();
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
+  const statusLineRef = useRef<DOMElement>(null);
+  const { width: statusLineWidth, hasMeasured: hasMeasuredStatusLine } =
+    useBoxMetrics(statusLineRef);
   const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
     respectUserColors,
     hideContextIndicator,
-  } = useStatusLine(isNarrow);
+  } = useStatusLine(
+    isNarrow,
+    hasMeasuredStatusLine ? statusLineWidth : undefined,
+  );
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -210,6 +217,7 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box
+        ref={statusLineRef}
         flexDirection="column"
         flexGrow={1}
         flexShrink={isNarrow ? 0 : 1}

@@ -101,6 +101,10 @@ vi.mock('../contexts/VimModeContext.js', () => ({
   useVimMode: () => mockVimMode,
 }));
 
+vi.mock('./useTerminalSize.js', () => ({
+  useTerminalSize: () => ({ columns: 110, rows: 24 }),
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -396,9 +400,13 @@ describe('useStatusLine', () => {
       expect(result.current.hideContextIndicator).toBe(true);
     });
 
-    it('keeps an automatic indicator when a long preset is clipped', () => {
-      mockUIState.branchName = `feature/${'very-long-branch-'.repeat(10)}`;
-      const { result } = renderHook(() => useStatusLine());
+    it('keeps an automatic indicator when the rendered footer column clips it', () => {
+      mockUIState.branchName = `feature/${'x'.repeat(145)}`;
+      const fullWidth = renderHook(() => useStatusLine());
+      expect(fullWidth.result.current.hideContextIndicator).toBe(true);
+      fullWidth.unmount();
+
+      const { result } = renderHook(() => useStatusLine(false, 99));
 
       expect(result.current.hideContextIndicator).toBe(false);
     });

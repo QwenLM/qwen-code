@@ -259,6 +259,40 @@ describe('StatusLineDialog', () => {
     },
   );
 
+  it('preserves an explicit command indicator setting when saving a preset', async () => {
+    const settings = createSettings();
+    settings.workspace.settings.ui = {
+      statusLine: {
+        type: 'command',
+        command: 'echo status',
+        hideContextIndicator: false,
+      },
+    };
+    settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
+    settings.recomputeMerged();
+    const { stdin } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
+    );
+
+    act(() => {
+      stdin.write('\r');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(
+      settings.forScope(SettingScope.Workspace).settings.ui?.statusLine,
+    ).toHaveProperty('hideContextIndicator', false);
+  });
+
   it('does not copy a user override into workspace settings', async () => {
     const settings = createSettings();
     settings.user.settings.ui = {
