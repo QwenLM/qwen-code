@@ -128,11 +128,9 @@ export class DefaultOpenAICompatibleProvider
     // Hybrid-thinking models occasionally bypass the reasoning channel and
     // emit their thinking as literal <think>/<thinking> tags inside content
     // (observed in production on qwen3-class models, issue #6666). Enable
-    // the conservative content-only leak fallback for every OpenAI-compatible
-    // endpoint: the converter gates it to turns that START with a thinking
-    // tag and carry no structured reasoning or prior visible content, so
-    // literal tag text inside normal replies is untouched.
-    return { contentOnlyThinkingTagLeaks: true };
+    // both tagged parsing and the conservative malformed-stream fallback for
+    // every OpenAI-compatible endpoint.
+    return { taggedThinkingTags: true, contentOnlyThinkingTagLeaks: true };
   }
 
   /**
