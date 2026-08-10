@@ -59,6 +59,7 @@ interface ProviderMetadata {
   version?: string;
   baseUrl?: string;
   ignoredVersion?: string;
+  builtinIds?: string[];
 }
 
 function getProviderMetadata(
@@ -240,9 +241,20 @@ export function useProviderUpdates(
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
+        //
+        // Distinguish true user-custom models from stale built-ins that were
+        // renamed/removed upstream (e.g. deepseek-v4-flash → -0731). A model is
+        // "custom" only if it is not a current default AND was not part of the
+        // built-in list at the last install (metadata.builtinIds). Stale
+        // built-ins are dropped so they get cleaned up instead of persisting
+        // forever.
         const defaultIds = getDefaultModelIds(providerCfg);
+        const metadataKey = resolveMetadataKey(providerCfg);
+        const previousBuiltinIds = metadataKey
+          ? (getProviderMetadata(settings, metadataKey).builtinIds ?? [])
+          : [];
         const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
+          (id) => !defaultIds.includes(id) && !previousBuiltinIds.includes(id),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,

@@ -244,6 +244,10 @@ function resolveProviderState(
       [`${PROVIDER_METADATA_NS}.${key}`]: {
         version: computeModelListVersion(template),
         baseUrl,
+        // Record the built-in ids at install time so a later update can tell
+        // stale built-ins (renamed/removed upstream) apart from true
+        // user-custom models and clean the former up.
+        builtinIds: getDefaultModelIds(config),
       },
     };
   }
