@@ -7,8 +7,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   accessSync,
+  closeSync,
   constants as fsConstants,
   lstatSync,
+  openSync,
   statSync,
 } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -82,6 +84,7 @@ export interface AgentViewPtyHostProcessOptions {
   spawnProcess?: (
     args: readonly string[],
     env: Readonly<Record<string, string>>,
+    stderrLogPath?: string,
   ) => ChildProcess;
 }
 
@@ -101,9 +104,11 @@ export async function launchAgentViewPtyHostProcess(
   const launchPath = getAgentViewSessionPaths(launch.sessionId, {
     ...(options.globalDir ? { globalDir: options.globalDir } : {}),
   }).launchPath;
+  const stderrLogPath = `${launchPath}.host-stderr.log`;
   const child = (options.spawnProcess ?? defaultSpawnPtyHost)(
     [INTERNAL_AGENT_VIEW_PTY_HOST_ARG, launchPath, socketPath],
     { [PTY_HOST_AUTH_TOKEN_ENV]: authToken },
+    stderrLogPath,
   );
   child.unref?.();
 
@@ -112,7 +117,7 @@ export async function launchAgentViewPtyHostProcess(
     status = await waitForSpawnedPtyHost(socketPath, child, authToken);
   } catch (error) {
     child.kill?.('SIGKILL');
-    throw error;
+    throw await withHostStderrTail(error, stderrLogPath);
   }
   return createRemotePtyHostHandle({
     socketPath,
@@ -535,19 +540,20 @@ export function createAgentViewPtyHostServer(
     socket.setTimeout(5000, () => {
       socket.destroy();
     });
-    socket.setEncoding('utf8');
-    let buffer = '';
-    socket.on('data', (chunk) => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, 'utf8') > MAX_PTY_HOST_REQUEST_LINE_BYTES) {
+    // Byte-transparent framing: only the request line is decoded, so
+    // coalesced keystrokes after an attach request reach the worker verbatim.
+    let buffer = Buffer.alloc(0);
+    socket.on('data', (chunk: Buffer) => {
+      buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+      if (buffer.length > MAX_PTY_HOST_REQUEST_LINE_BYTES) {
         socket.destroy();
         return;
       }
-      const newline = buffer.indexOf('\n');
+      const newline = buffer.indexOf(0x0a);
       if (newline === -1) return;
-      const line = buffer.slice(0, newline);
-      const leftover = buffer.slice(newline + 1);
-      buffer = '';
+      const line = buffer.toString('utf8', 0, newline);
+      const leftover = Buffer.from(buffer.subarray(newline + 1));
+      buffer = Buffer.alloc(0);
       socket.pause();
       void respondToHostLine(
         host,
@@ -562,23 +568,33 @@ export function createAgentViewPtyHostServer(
     });
   });
 
+  let releaseLock: (() => Promise<void>) | undefined;
   return {
     async listen() {
-      await prepareSocketPath(socketPath);
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject);
-        server.listen(socketPath, () => {
-          server.off('error', reject);
-          server.on('error', () => {});
-          if (isWindowsPipePath(socketPath)) {
-            resolve();
-            return;
-          }
-          fs.chmod(socketPath, 0o600).then(resolve, (error) => {
-            server.close(() => reject(error));
+      if (!isWindowsPipePath(socketPath)) {
+        releaseLock = await acquireSocketPathLock(socketPath);
+      }
+      try {
+        await prepareSocketPath(socketPath);
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen(socketPath, () => {
+            server.off('error', reject);
+            server.on('error', () => {});
+            if (isWindowsPipePath(socketPath)) {
+              resolve();
+              return;
+            }
+            fs.chmod(socketPath, 0o600).then(resolve, (error) => {
+              server.close(() => reject(error));
+            });
           });
         });
-      });
+      } catch (error) {
+        await releaseLock?.();
+        releaseLock = undefined;
+        throw error;
+      }
     },
     async close() {
       attachState.activeAttachSocket?.destroy();
@@ -593,6 +609,8 @@ export function createAgentViewPtyHostServer(
         server.close((error) => (error ? reject(error) : resolve()));
       });
       await removeOwnedSocketPath(socketPath);
+      await releaseLock?.();
+      releaseLock = undefined;
     },
   };
 }
@@ -604,7 +622,7 @@ async function respondToHostLine(
   attachState: {
     activeAttachSocket: net.Socket | undefined;
   },
-  leftover = '',
+  leftover: Buffer = Buffer.alloc(0),
   authToken?: string,
 ): Promise<void> {
   const request = parseHostRequest(line);
@@ -659,9 +677,9 @@ async function respondToHostLine(
           result: { attached: true },
         })}\n`,
       );
-      if (leftover) {
+      if (leftover.length > 0) {
         // Forward keystrokes that were coalesced with the attach request.
-        host.write(Buffer.from(leftover, 'utf8'));
+        host.write(leftover);
       }
       await bridgeAgentViewTerminal({
         stdin: socket,
@@ -829,17 +847,45 @@ async function waitForPtyHost(
 function defaultSpawnPtyHost(
   args: readonly string[],
   env: Readonly<Record<string, string>>,
+  stderrLogPath?: string,
 ): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
-  return spawn(argv[0]!, argv.slice(1), {
-    detached: true,
-    stdio: 'ignore',
-    env: {
-      ...process.env,
-      ...env,
-      QWEN_CODE_NO_RELAUNCH: '1',
-    },
-  });
+  // Route stderr to a per-session file so fail-closed startup errors stay
+  // observable; a pipe would tie the detached host's lifetime to ours.
+  let stderrFd: number | undefined;
+  if (stderrLogPath) {
+    try {
+      stderrFd = openSync(stderrLogPath, 'w', 0o600);
+    } catch {
+      // Fall back to discarding stderr.
+    }
+  }
+  try {
+    return spawn(argv[0]!, argv.slice(1), {
+      detached: true,
+      stdio: ['ignore', 'ignore', stderrFd ?? 'ignore'],
+      env: {
+        ...process.env,
+        ...env,
+        QWEN_CODE_NO_RELAUNCH: '1',
+      },
+    });
+  } finally {
+    if (stderrFd !== undefined) closeSync(stderrFd);
+  }
+}
+
+async function withHostStderrTail(
+  error: unknown,
+  stderrLogPath: string,
+): Promise<Error> {
+  const base = error instanceof Error ? error : new Error(String(error));
+  const tail = await fs
+    .readFile(stderrLogPath, 'utf8')
+    .then((text) => text.trim().slice(-2048))
+    .catch(() => '');
+  if (!tail) return base;
+  return new Error(`${base.message} Host stderr: ${tail}`, { cause: base });
 }
 
 function parseHostRequest(line: string): AgentViewPtyHostRequest | undefined {
@@ -912,6 +958,48 @@ function errorResponse(
   message: string,
 ): AgentViewPtyHostResponse {
   return { id, ok: false, error: { code, message } };
+}
+
+// A pid lockfile makes the prepare->listen sequence mutually exclusive:
+// canConnect alone is a false-negative-prone liveness oracle, so two
+// concurrent launches could both unlink and bind the same session path.
+async function acquireSocketPathLock(
+  socketPath: string,
+): Promise<() => Promise<void>> {
+  const lockPath = `${socketPath}.lock`;
+  await fs.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await fs.writeFile(lockPath, String(process.pid), { flag: 'wx' });
+      return async () => {
+        await fs.rm(lockPath, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const raw = await fs.readFile(lockPath, 'utf8').catch(() => '');
+      const holderPid = Number.parseInt(raw, 10);
+      // Fail closed on unreadable holders; only a confirmed-dead pid is stale.
+      if (Number.isInteger(holderPid) && !isProcessAlive(holderPid)) {
+        await fs.rm(lockPath, { force: true });
+        continue;
+      }
+      break;
+    }
+  }
+  const busy = new Error(
+    `Agent View PTY host socket is already in use: ${socketPath}`,
+  ) as NodeJS.ErrnoException;
+  busy.code = 'EADDRINUSE';
+  throw busy;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 async function prepareSocketPath(socketPath: string): Promise<void> {

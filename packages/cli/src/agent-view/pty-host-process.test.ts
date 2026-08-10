@@ -145,6 +145,60 @@ describe('Agent View PTY host process server', () => {
     expect(host.killedWith).toBe('SIGTERM');
   });
 
+  it('forwards attach input bytes without UTF-8 re-encoding', async () => {
+    const host = fakeHost();
+    const rawWrites: Buffer[] = [];
+    host.write = (data: Buffer) => {
+      rawWrites.push(Buffer.from(data));
+    };
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const socket = net.createConnection(socketPath);
+    await new Promise<void>((resolve) => socket.once('connect', resolve));
+    const request = Buffer.from(
+      `${JSON.stringify({ id: 'attach-1', op: 'attachStream' })}\n`,
+      'utf8',
+    );
+    // Latin-1 'e-acute' + 'A': invalid UTF-8 that a transparent
+    // transport must deliver verbatim.
+    const keystrokes = Buffer.from([0xe9, 0x41]);
+    socket.write(Buffer.concat([request, keystrokes]));
+    await waitFor(() => rawWrites.length > 0);
+    socket.write(Buffer.from([0xff, 0x00]));
+    await waitFor(() => Buffer.concat(rawWrites).length === 4);
+
+    expect([...Buffer.concat(rawWrites)]).toEqual([0xe9, 0x41, 0xff, 0x00]);
+
+    socket.destroy();
+  });
+
+  it('reclaims a stale socket lock left by a dead process', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
+    await fs.writeFile(`${socketPath}.lock`, '2147483647');
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+
+    await expect(server.listen()).resolves.toBeUndefined();
+  });
+
+  it('releases the socket lock on close so the path can be reused', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const first = createAgentViewPtyHostServer(host, socketPath);
+    await first.listen();
+    const second = createAgentViewPtyHostServer(fakeHost(), socketPath);
+    servers.push(second);
+
+    await expect(second.listen()).rejects.toThrow('already in use');
+    await first.close();
+    await expect(second.listen()).resolves.toBeUndefined();
+  });
+
   it('rejects non-positive or non-integer resize dimensions', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -779,6 +833,7 @@ describe('Agent View PTY host process server', () => {
             /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
           ),
         }),
+        expect.stringContaining('host-stderr.log'),
       );
     } finally {
       server.close();

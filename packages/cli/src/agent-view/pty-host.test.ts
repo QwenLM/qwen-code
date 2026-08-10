@@ -284,6 +284,12 @@ describe('launchAgentViewPtyHost', () => {
           QWEN_AGENT_VIEW_WORKER: '1',
           [PTY_HOST_AUTH_TOKEN_ENV]: 'injected-token',
           TMUX: '/tmp/tmux-501/default,456,0',
+          TMUX_PANE: '%1',
+          STY: '12345.pts-0.host',
+          WINDOW: '2',
+          WINDOWID: '77594631',
+          TERMCAP: 'SC|screen|VT 100/ANSI X3.64 virtual terminal',
+          COLUMNS: '80',
           LINES: '60',
         },
       },
@@ -293,11 +299,82 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.spawnCalls[0]?.options.env).toEqual(
       expect.objectContaining({ QWEN_AGENT_VIEW_WORKER: '1' }),
     );
-    expect(
-      pty.spawnCalls[0]?.options.env[PTY_HOST_AUTH_TOKEN_ENV],
-    ).toBeUndefined();
-    expect(pty.spawnCalls[0]?.options.env['TMUX']).toBeUndefined();
-    expect(pty.spawnCalls[0]?.options.env['LINES']).toBeUndefined();
+    for (const key of [
+      PTY_HOST_AUTH_TOKEN_ENV,
+      'TMUX',
+      'TMUX_PANE',
+      'STY',
+      'WINDOW',
+      'WINDOWID',
+      'TERMCAP',
+      'COLUMNS',
+      'LINES',
+    ]) {
+      expect(pty.spawnCalls[0]?.options.env[key]).toBeUndefined();
+    }
+  });
+
+  it('strips the inherited sideband identity but honors the launch env', async () => {
+    const pty = createFakePty();
+    const savedEnv: Record<string, string | undefined> = {};
+    const outerKeys = [
+      'QWEN_AGENT_VIEW_WORKER',
+      'QWEN_AGENT_VIEW_SESSION_ID',
+      'QWEN_AGENT_VIEW_SIDEBAND',
+      'QWEN_AGENT_VIEW_TOKEN',
+      'QWEN_AGENT_VIEW_ACTIVE_CWD',
+    ];
+    for (const key of outerKeys) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = `outer-${key}`;
+    }
+    try {
+      await launchAgentViewPtyHost(
+        {
+          ...createLaunch(),
+          env: {
+            QWEN_AGENT_VIEW_WORKER: '1',
+            QWEN_AGENT_VIEW_TOKEN: 'inner-token',
+          },
+        },
+        { pty },
+      );
+    } finally {
+      for (const key of outerKeys) {
+        if (savedEnv[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = savedEnv[key];
+        }
+      }
+    }
+
+    const env = pty.spawnCalls[0]?.options.env ?? {};
+    expect(env['QWEN_AGENT_VIEW_TOKEN']).toBe('inner-token');
+    expect(env['QWEN_AGENT_VIEW_WORKER']).toBe('1');
+    expect(env['QWEN_AGENT_VIEW_SESSION_ID']).toBeUndefined();
+    expect(env['QWEN_AGENT_VIEW_SIDEBAND']).toBeUndefined();
+    expect(env['QWEN_AGENT_VIEW_ACTIVE_CWD']).toBeUndefined();
+  });
+
+  it('passes kill signals through to the PTY process', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+
+    handle.kill('SIGKILL');
+
+    expect(pty.process.killCalls).toEqual(['SIGKILL']);
+  });
+
+  it('stops capturing output after dispose', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+    pty.process.emitData('before');
+
+    handle.dispose();
+    pty.process.emitData('leak');
+
+    expect(handle.output.toString()).toBe('before');
   });
 
   it('kills the PTY process when disposed', async () => {

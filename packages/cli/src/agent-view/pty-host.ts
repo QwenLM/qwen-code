@@ -6,6 +6,7 @@
 
 import { StringDecoder } from 'node:string_decoder';
 import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { AGENT_VIEW_WORKER_ENV_KEYS } from './worker-sideband.js';
 import type { AgentViewLaunchFile } from './protocol.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
@@ -311,8 +312,15 @@ export async function launchAgentViewPtyHost(
   const output = new BoundedOutputRing(
     options.maxOutputBytes ?? DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES,
   );
+  // Strip the outer session's sideband identity from the inherited env so a
+  // nested host cannot leak its token/endpoint into the inner worker; the
+  // launch env intentionally carries the inner worker's own sideband keys.
+  const inheritedEnv = stringProcessEnv(process.env);
+  for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
+    delete inheritedEnv[key];
+  }
   const workerEnv: Record<string, string> = {
-    ...stringProcessEnv(process.env),
+    ...inheritedEnv,
     ...launch.env,
     TERM: 'xterm-256color',
   };
