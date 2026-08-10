@@ -519,29 +519,35 @@ export function AskUserQuestion({
   const displayIdx = Math.min(currentIdx, questions.length - 1);
   const isLastQuestion = currentIdx === questions.length - 1;
   const isSingleQuestion = questions.length === 1;
-  const shortcutHint = customFocused
-    ? t(
-        isSingleQuestion
-          ? 'askUser.shortcuts.inputSingle'
-          : isLastQuestion
-            ? 'askUser.shortcuts.inputFinal'
-            : 'askUser.shortcuts.inputNext',
-      )
-    : isMulti
+  const isEmptyCustomTrigger =
+    !customFocused &&
+    selectedIdx === current.options.length &&
+    !customInputs[currentIdx];
+  const shortcutHint = isEmptyCustomTrigger
+    ? t('askUser.shortcuts.customTrigger')
+    : customFocused
       ? t(
           isSingleQuestion
-            ? 'askUser.shortcuts.multiSingle'
+            ? 'askUser.shortcuts.inputSingle'
             : isLastQuestion
-              ? 'askUser.shortcuts.multiFinal'
-              : 'askUser.shortcuts.multiNext',
+              ? 'askUser.shortcuts.inputFinal'
+              : 'askUser.shortcuts.inputNext',
         )
-      : t(
-          isSingleQuestion
-            ? 'askUser.shortcuts.optionsSingle'
-            : isLastQuestion
-              ? 'askUser.shortcuts.optionsFinal'
-              : 'askUser.shortcuts.optionsNext',
-        );
+      : isMulti
+        ? t(
+            isSingleQuestion
+              ? 'askUser.shortcuts.multiSingle'
+              : isLastQuestion
+                ? 'askUser.shortcuts.multiFinal'
+                : 'askUser.shortcuts.multiNext',
+          )
+        : t(
+            isSingleQuestion
+              ? 'askUser.shortcuts.optionsSingle'
+              : isLastQuestion
+                ? 'askUser.shortcuts.optionsFinal'
+                : 'askUser.shortcuts.optionsNext',
+          );
 
   return (
     <div

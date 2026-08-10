@@ -571,6 +571,7 @@ const EN: Messages = {
     '↑↓ select · Space toggle · Enter next · Esc ignore · ⌘/Ctrl+Enter submit',
   'askUser.shortcuts.multiFinal':
     '↑↓ select · Space toggle · Enter submit · Esc ignore',
+  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit · Esc ignore',
   'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
   'askUser.shortcuts.inputNext':
     'Enter next · Esc stop editing · ⌘/Ctrl+Enter submit',
@@ -3404,6 +3405,7 @@ const ZH: Messages = {
     '↑↓ 选择 · Space 切换 · Enter 下一题 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
   'askUser.shortcuts.multiFinal':
     '↑↓ 选择 · Space 切换 · Enter 提交 · Esc 忽略',
+  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑 · Esc 忽略',
   'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
   'askUser.shortcuts.inputNext':
     'Enter 下一题 · Esc 退出编辑 · ⌘/Ctrl+Enter 提交',
