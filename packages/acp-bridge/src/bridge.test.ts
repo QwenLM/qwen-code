@@ -21510,8 +21510,9 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
 
     await new Promise((r) => setTimeout(r, 10));
     release();
-    await new Promise((r) => setTimeout(r, 10));
-    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
     await bridge.shutdown();
   });
 
@@ -21946,8 +21947,9 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toContain('promoted-delete');
 
     releases[1]!();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    await vi.waitFor(() =>
+      expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
+    );
     await bridge.shutdown();
   });
 
