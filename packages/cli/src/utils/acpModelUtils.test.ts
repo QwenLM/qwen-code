@@ -324,6 +324,20 @@ describe('acpModelUtils', () => {
     // as a single userinfo run, while '\' terminates the authority for prose.
     ['https://DOMAIN\\user:pass@proxy', 'https://proxy'],
     ['https://user:pass@host\\path', 'https://host\\path'],
+    // #8136 R5-3: an '@' in the password with an underscore host still strips -
+    // CLEAN_HOST_AFTER accepts underscore-leading hosts.
+    ['https://user:p@ss@_host', 'https://_host'],
+    ['https://user:pass@_host:8080', 'https://_host:8080'],
+    // #8136 R5-14: URL schemes are case-insensitive; uppercase must still strip.
+    ['HTTPS://user:pass@host/v1', 'HTTPS://host/v1'],
+    ['HTTP://user:pass@host', 'HTTP://host'],
+    // #8136 R5-2: a leading '@' (empty userinfo) does not loop and is a no-op.
+    ['https://@host', 'https://host'],
+    // #8136 R5-1/R5-7 KNOWN RESIDUAL: a dotted username + digit-prefix password
+    // followed by space is locally indistinguishable from a dotted host + port
+    // + prose email; the veto fires and the credential leaks. Same tradeoff as
+    // R1-2, pending maintainer sign-off.
+    ['https://foo.bar:1234 secret@host', 'https://foo.bar:1234 secret@host'],
     // #8136 repro-1 (with-path port + prose email): must stay unchanged - the
     // path bounds the authority, so the prose '@' is never the strip point.
     [

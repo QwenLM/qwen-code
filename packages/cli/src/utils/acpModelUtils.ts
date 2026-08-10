@@ -215,11 +215,15 @@ function isLikelyPortProseMisparse(
   const wsInAfter = afterColon.search(/\s/);
   const portCandidate =
     wsInAfter === -1 ? afterColon : afterColon.slice(0, wsInAfter);
+  // Accept a digit run that ends at whitespace; the slicer already strips the
+  // trailing segment. All-digit is the port guard (e.g. `8443`); `8443,`/`8443.`
+  // are port-followed-by-punctuation, which slice to `8443` at the next
+  // whitespace boundary. #8136 R1-7.
   return /^\d+$/.test(portCandidate);
 }
 
 /** A clean hostname (with optional numeric port) to the end of the authority. */
-const CLEAN_HOST_AFTER = /^[A-Za-z0-9.-]+(:\d+)?$/;
+const CLEAN_HOST_AFTER = /^[A-Za-z0-9._-]+(:\d+)?$/;
 
 /**
  * Locate the userinfo terminator '@' to strip, or -1 when stripping would be
@@ -301,13 +305,13 @@ function findUserInfoStripPoint(
   // contains '@' (`user:p@ss word@host`), and the LAST '@' with a clean
   // hostname after it is the terminator. #8136 R3-5.
   const afterFirstAt = authority.slice(firstAt + 1);
-  const firstHost = afterFirstAt.match(/^([A-Za-z0-9.-]+)(?::\d+)?(?:\s|$)/);
+  const firstHost = afterFirstAt.match(/^([A-Za-z0-9._-]+)(?::\d+)?(?:\s|$)/);
   if (firstHost !== null && firstHost[1]!.includes('.')) {
     return authorityStart + firstAt;
   }
   for (
     let i = authority.lastIndexOf('@');
-    i !== -1;
+    i > firstAt;
     i = authority.lastIndexOf('@', i - 1)
   ) {
     if (CLEAN_HOST_AFTER.test(authority.slice(i + 1))) {
@@ -332,9 +336,10 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
   // WHATWG treats '\' as a path separator on special schemes (http/https/ws/
   // wss/ftp/file), so it terminates the authority too - UNLESS it introduces a
   // Windows `domain\user:pass@` credential shape, which is a single userinfo
-  // run. #8136 R4-5.
+  // run. URL schemes are case-insensitive, so match case-insensitively. #8136
+  // R4-5/R5-14.
   const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//)?.[0] ?? '';
-  if (/^(https?|wss?|ftp|file):\/\//.test(scheme)) {
+  if (/^(https?|wss?|ftp|file):\/\//i.test(scheme)) {
     const backslash = baseUrl.indexOf('\\', authorityStart);
     if (backslash !== -1) {
       const colonAfter = baseUrl.indexOf(':', backslash + 1);
