@@ -304,7 +304,12 @@ fn enable_local_control(
         .as_ref()
         .map(|runtime| (runtime.base_url().clone(), runtime.token().to_string()))
         .ok_or_else(|| "Start a Desktop workspace before enabling Local Control.".to_string())?;
-    let session = LocalControlSession::start(&runtime_url, &runtime_token)?;
+    let current_url = app
+        .get_webview_window("main")
+        .and_then(|window| window.url().ok())
+        .filter(|url| is_same_origin(url, &runtime_url))
+        .unwrap_or_else(|| runtime_url.clone());
+    let session = LocalControlSession::start(&runtime_url, &runtime_token, &current_url)?;
     let info = session.info();
     *local_control = Some(session);
     set_local_control_menu_state(&app, true);
