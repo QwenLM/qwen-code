@@ -24,6 +24,7 @@ import type {
   ExtensionOriginSource,
 } from '../config/config.js';
 import {
+  AGENT_PLUGIN_MANIFEST,
   AGENT_PLUGIN_SCHEMA,
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
@@ -81,6 +82,11 @@ export async function convertCompatibleExtension(
       signal,
     );
     newExtensionDir = converted.convertedDir;
+    if (getAgentPluginSchemaStatus(newExtensionDir) !== 'unrelated') {
+      fs.rmSync(path.join(newExtensionDir, AGENT_PLUGIN_MANIFEST), {
+        force: true,
+      });
+    }
     originSource = 'Claude';
     externalContent = converted.externalContent;
   } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {

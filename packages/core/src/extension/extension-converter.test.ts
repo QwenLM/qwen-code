@@ -111,6 +111,13 @@ describe('Agent Plugins extension conversion', () => {
       path.join(selectedRoot, '.claude-plugin', 'plugin.json'),
       JSON.stringify({ name: 'requested-plugin', version: '2.0.0' }),
     );
+    fs.writeFileSync(
+      path.join(selectedRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'carried-agent-plugin',
+      }),
+    );
 
     const selected = await convertCompatibleExtension(
       pluginRoot,
@@ -124,6 +131,9 @@ describe('Agent Plugins extension conversion', () => {
       ),
     ) as Record<string, unknown>;
     expect(selectedConfig['name']).toBe('requested-plugin');
+    expect(fs.existsSync(path.join(selected.extensionDir, 'plugin.json'))).toBe(
+      false,
+    );
     fs.rmSync(selected.extensionDir, { recursive: true, force: true });
 
     fs.writeFileSync(
@@ -133,11 +143,23 @@ describe('Agent Plugins extension conversion', () => {
         name: 'future-root-agent-plugin',
       }),
     );
+    fs.writeFileSync(
+      path.join(selectedRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: `${AGENT_PLUGIN_SCHEMA_PREFIX}2.0.0/plugin.schema.json`,
+        name: 'future-carried-agent-plugin',
+      }),
+    );
     const selectedWithFutureRoot = await convertCompatibleExtension(
       pluginRoot,
       'requested-plugin',
     );
     expect(selectedWithFutureRoot.originSource).toBe('Claude');
+    expect(
+      fs.existsSync(
+        path.join(selectedWithFutureRoot.extensionDir, 'plugin.json'),
+      ),
+    ).toBe(false);
     fs.rmSync(selectedWithFutureRoot.extensionDir, {
       recursive: true,
       force: true,

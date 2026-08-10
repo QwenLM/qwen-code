@@ -604,7 +604,7 @@ describe('FileCommandLoader', () => {
       expect(extCommand?.description).toMatch(/^\[test-ext\]/);
     });
 
-    it('ignores commands bundled in Agent Plugins', async () => {
+    it('ignores commands bundled in manually discovered Agent Plugins', async () => {
       const extensionDir = path.join(
         process.cwd(),
         '.qwen/extensions/agent-plugin',
@@ -624,7 +624,7 @@ describe('FileCommandLoader', () => {
             version: '1.0.0',
             isActive: true,
             path: extensionDir,
-            installMetadata: { originSource: 'AgentPlugins' },
+            format: 'agent-plugins-v1',
           },
         ]),
         getFolderTrustFeature: vi.fn(() => false),

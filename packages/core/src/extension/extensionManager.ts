@@ -117,7 +117,7 @@ import { resolveContainedExistingPath } from './agent-plugins-v1/paths.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
 
-type ExtensionPackageFormat = 'qwen' | 'agent-plugins-v1';
+export type ExtensionPackageFormat = 'qwen' | 'agent-plugins-v1';
 
 interface LoadedExtensionManifest {
   format: ExtensionPackageFormat;
@@ -152,6 +152,7 @@ export interface Extension {
   isActive: boolean;
   path: string;
   config: ExtensionConfig;
+  format?: ExtensionPackageFormat;
   installMetadata?: ExtensionInstallMetadata;
 
   mcpServers?: Record<string, MCPServerConfig>;
@@ -1193,7 +1194,9 @@ export class ExtensionManager {
       const extensionRoot = path.join(this.configDir, entry);
       const installMetadata = this.loadInstallMetadata(extensionRoot);
       const effectiveRoot =
-        installMetadata?.type === 'link'
+        installMetadata?.type === 'link' &&
+        typeof installMetadata.source === 'string' &&
+        installMetadata.source.length > 0
           ? installMetadata.source
           : extensionRoot;
       const manifestName =
@@ -1375,7 +1378,11 @@ export class ExtensionManager {
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
 
-    if (installMetadata?.type === 'link') {
+    if (
+      installMetadata?.type === 'link' &&
+      typeof installMetadata.source === 'string' &&
+      installMetadata.source.length > 0
+    ) {
       effectiveExtensionPath = installMetadata.source;
     }
 
@@ -1409,6 +1416,7 @@ export class ExtensionManager {
           installMetadata?.marketplaceConfig?.metadata?.version ||
           '1.0.0',
         path: effectiveExtensionPath,
+        format: loadedManifest.format,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
         config,

@@ -294,6 +294,7 @@ describe('extension tests', () => {
       );
 
       expect(extension.version).toBe('1.0.0');
+      expect(extension.format).toBe('agent-plugins-v1');
       expect(extension.installMetadata?.originSource).toBe('AgentPlugins');
       expect(extension.skills?.map((skill) => skill.name)).toEqual(['direct']);
       expect(extension.skills?.[0]?.allowedTools).toBeUndefined();
@@ -451,6 +452,27 @@ describe('extension tests', () => {
         INSTALL_METADATA_FILENAME,
       ]);
     });
+
+    it.each([undefined, 42, ''])(
+      'isolates link metadata with invalid source %s during refresh',
+      async (source) => {
+        const brokenLink = path.join(userExtensionsDir, 'broken-link');
+        fs.mkdirSync(brokenLink, { recursive: true });
+        fs.writeFileSync(
+          path.join(brokenLink, INSTALL_METADATA_FILENAME),
+          JSON.stringify({ type: 'link', source }),
+        );
+        createAgentPlugin(path.join(userExtensionsDir, 'valid-plugin'), {
+          name: 'valid-plugin',
+        });
+
+        const manager = createExtensionManager();
+        await expect(manager.refreshCache()).resolves.toBeUndefined();
+        expect(manager.getLoadedExtensions().map(({ name }) => name)).toEqual([
+          'valid-plugin',
+        ]);
+      },
+    );
 
     it('installs an Agent Plugin from an archive', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'portable-plugin.zip');
@@ -1253,6 +1275,13 @@ describe('extension tests', () => {
           path.join(pluginConfigDir, 'plugin.json'),
           JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
         );
+        fs.writeFileSync(
+          path.join(path.dirname(pluginConfigDir), 'plugin.json'),
+          JSON.stringify({
+            $schema: AGENT_PLUGIN_SCHEMA,
+            name: 'carried-agent-plugin',
+          }),
+        );
       });
       mockGit.getRemotes.mockResolvedValue([
         {
@@ -1275,9 +1304,13 @@ describe('extension tests', () => {
       );
 
       expect(extension.name).toBe('sample-plugin');
+      expect(extension.format).toBe('qwen');
       expect(extension.installMetadata?.originSource).toBe('Claude');
       expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
       expect(extension.installMetadata?.externalContent).toBe(false);
+      expect(fs.existsSync(path.join(extension.path, 'plugin.json'))).toBe(
+        false,
+      );
     });
 
     it('should drop the recorded commit when a marketplace plugin resolves from an external source', async () => {
