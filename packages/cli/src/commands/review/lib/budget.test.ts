@@ -97,6 +97,17 @@ describe('reviewBudget — domain specialists', () => {
   it('read source lines only — a test-heavy diff does not unlock them', () => {
     expect(budget(20, 3000).specialistCap).toBe(0);
   });
+
+  it('shed on a huge non-source diff — the gate keys on effective, not src', () => {
+    // A docs/lockfile-dominated diff (small src, enormous total) is huge by the
+    // effective measure, so Agent 8 sheds even though src alone clears the 80
+    // floor. Pins `effective < HUGE_DIFF_FLOOR` against a slip back to `src`,
+    // which would restore specialistCap: 2 in exactly the timeout band this
+    // gate exists to shed it from.
+    expect(
+      reviewBudget({ srcDiffLines: 100, diffLines: 30_000 }).specialistCap,
+    ).toBe(0);
+  });
 });
 
 describe('reviewBudget — the verify shard is flat', () => {
@@ -383,7 +394,8 @@ describe('reviewBudget — the reverse-audit round cap', () => {
     // A reverse-audit round re-reads the whole diff against a growing
     // findings list (~90 min on a 4,000-line PR); five rounds cannot finish
     // the huge PRs that timed out to zero, so a huge diff caps at three —
-    // the smallest loop the two-consecutive-dry rule still converges.
+    // one audit round above the convergence floor of two (the all-dry
+    // rounds-1-and-2 shape converges under any cap of two or more).
     expect(
       reviewBudget({ srcDiffLines: 100, diffLines: 100 }).reverseAuditRounds,
     ).toBe(5);
@@ -423,13 +435,17 @@ describe('reviewBudget — the reverse-audit round cap', () => {
 
 describe('reverseAuditRoundCap — the one reader of the plan field', () => {
   it('passes a valid cap through and defaults everything else to the max', () => {
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 1 })).toBe(1);
     expect(reverseAuditRoundCap({ reverseAuditRounds: 3 })).toBe(3);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 5 })).toBe(5);
     // Absent, out-of-band and garbled all read as the full cap: an old or
-    // hand-edited plan errs toward more auditing, never less.
+    // hand-edited plan errs toward more auditing, never less. The range is
+    // floored at HUGE_REVERSE_AUDIT_ROUNDS (3) — the smallest cap the CLI
+    // writes — so 1 and 2 read as the full cap, not as themselves.
     expect(reverseAuditRoundCap(undefined)).toBe(5);
     expect(reverseAuditRoundCap({})).toBe(5);
     expect(reverseAuditRoundCap({ reverseAuditRounds: 0 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 1 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 2 })).toBe(5);
     expect(reverseAuditRoundCap({ reverseAuditRounds: 6 })).toBe(5);
     expect(reverseAuditRoundCap({ reverseAuditRounds: 2.5 })).toBe(5);
     expect(reverseAuditRoundCap({ reverseAuditRounds: '1' })).toBe(5);

@@ -469,6 +469,26 @@ describe('writeRoundCapStop — the round-cap marker', () => {
     expect(roundCapStopDisclosure(3).reason).toContain('of 3');
     expect(roundCapStopEntryZh(3)).toContain('3');
   });
+
+  it('writes round as an explicit null when the caller passes undefined', () => {
+    // The chunkless call site (agent-prompt.ts) passes `round: undefined`; the
+    // `?? null` fallback must keep the key PRESENT with a null value, not let
+    // JSON.stringify drop it — a consumer that distinguishes null from an
+    // absent key would otherwise misread the marker.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, undefined, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop).not.toBeNull();
+      expect(stop && 'round' in stop).toBe(true);
+      expect(stop?.round).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('verifyBudgetExhausted — the compose floor the verifier answers to', () => {

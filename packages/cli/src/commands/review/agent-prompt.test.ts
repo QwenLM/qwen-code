@@ -3424,6 +3424,30 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('retirement:');
   });
 
+  it('huge cap: a chunk dry in rounds 1 and 2 retires with a final certificate', () => {
+    // Under the reduced 3-round cap, chunk 13's next cold check (round 4) is
+    // past the cap, so the retirement note must read `certificate final`, not
+    // `next cold check round 4` — the same builder's admission gate refuses a
+    // round-4 build. Pins the plan-cap comparison (`nextColdCheck >
+    // planRoundCap`) at cap 3; the only other cap-3 test keeps every chunk
+    // yielding, so nothing retires there.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+    expect(out).toContain('certificate final');
+    expect(out).not.toContain('next cold check round 4');
+  });
+
   it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {
     // A huge diff caps at 3 rounds. Rounds 1-3 never converge (every chunk
     // keeps yielding), so round 4 is refused at the cap: exit 4, nothing
@@ -3449,6 +3473,80 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(msg).toContain('ROUND CAP');
     expect(msg).toContain('round cap is 3');
     // The marker is on disk so compose-review caps without the relay.
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+    expect(readBudgetStop(plan)?.cap).toBe(3);
+  });
+
+  it('huge cap: a --chunk build past the cap is refused too — the per-chunk gate', () => {
+    // The round-cap gate must fire on the per-chunk call site, not only
+    // through --all-chunks: a huge-diff review whose rounds are built or
+    // repaired per chunk would otherwise admit round 4+ against the cap and
+    // run ~90-minute rounds in the exact timeout band this cap sheds. Rounds
+    // 1-3 are built (non-converging), then a `--chunk 13 --round 4` build —
+    // an unadmitted round, so its first chunk build IS the round's admission
+    // — must be refused at the cap, writing the round-cap marker.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 4,
+    });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(keysOf(4)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 3');
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+    expect(readBudgetStop(plan)?.cap).toBe(3);
+    // The refusal precedes admission — no round-4 stamp is left behind.
+    expect(readRoundStamps(plan).some((s) => s.round === 4)).toBe(false);
+  });
+
+  it('huge cap: a chunkless single build past the cap is refused too — the 3A gate', () => {
+    // The chunkless whole-diff gate (Step 5's 3A single auditor) is the third
+    // call site the cap passes through. No history is needed — round 4 > cap
+    // 3 alone refuses it, exit 4 with the round-cap marker.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      round: 4,
+    });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 3');
     expect(readBudgetStop(plan)?.cause).toBe('round-cap');
     expect(readBudgetStop(plan)?.cap).toBe(3);
   });

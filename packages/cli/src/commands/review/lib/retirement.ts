@@ -48,11 +48,7 @@ import {
   promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
-import {
-  stripBudgetGapLines,
-  INLINE_BUDGET_GAP_RE,
-  MAX_REVERSE_AUDIT_ROUNDS,
-} from './budget.js';
+import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -76,15 +72,6 @@ export interface RoundSchedule {
   /** Every chunk is retired and none is due: the audit has converged. */
   converged: boolean;
 }
-
-/**
- * The loop's full round cap (SKILL.md Step 5: "stop at the plan's
- * `reverseAuditRounds` cap"). The number lives in `budget.ts` beside the
- * huge-diff tier that lowers it to 3 (`reverseAuditRounds`); the admission
- * gate in `agent-prompt` enforces the PLAN's cap, and the retirement note
- * here must not promise a cold check the cap has already forbidden.
- */
-export const REVERSE_AUDIT_MAX_ROUNDS = MAX_REVERSE_AUDIT_ROUNDS;
 
 /**
  * The round part of a per-chunk reverse-audit record key, as `runAllChunks`
@@ -572,8 +559,9 @@ export function scheduleReverseAuditRound(
         dryRounds: [lastTwo[0].round, lastTwo[1].round],
         // The next even round — this branch only runs on odd rounds, so
         // that is always round + 1. Whether the cap allows it is the note
-        // composer's question, not the schedule's (see
-        // REVERSE_AUDIT_MAX_ROUNDS).
+        // composer's question, not the schedule's: the plan's cap
+        // (`reverseAuditRoundCap` in budget.ts, floored at the huge-diff
+        // tier's 3) is what the admission gate enforces.
         nextColdCheck: round + 1,
       });
     }

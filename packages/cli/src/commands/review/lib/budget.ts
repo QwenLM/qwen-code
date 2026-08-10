@@ -109,12 +109,14 @@ export interface ReviewBudget {
    * are even counted. In a time-budgeted CI run the deadline gate already
    * refuses a round that will not fit; this static cap is the belt it works
    * under and the ONLY bound a local run (no deadline) has. Reduced to
-   * three, not two: two forces the convergence pair, three is the smallest
-   * loop that still lets the two-consecutive-dry rule converge.
+   * three, not two — not because two cannot converge (the all-dry
+   * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
+   * cap of two or more, since the convergence check runs before the cap
+   * gate) but to buy hot chunks one extra audit round before the cap.
    *
-   * Never below the convergence minimum: the reverse audit is a dimension
-   * of the high-effort contract, and the budget tunes how many rounds it
-   * runs, never whether it runs.
+   * The budget tunes how many rounds the loop runs, never whether it runs:
+   * the reverse audit is a dimension of the high-effort contract. The CLI
+   * only ever writes three or five here.
    */
   reverseAuditRounds: number;
 }
@@ -133,9 +135,11 @@ const SWEEP_FLOOR = 25;
 export const MAX_REVERSE_AUDIT_ROUNDS = 5;
 
 /**
- * The reduced cap for a huge diff — three, the smallest loop the
- * two-consecutive-dry convergence rule can still satisfy (a chunk dry in
- * rounds 2 and 3 retires).
+ * The reduced cap for a huge diff — three, one audit round above the
+ * convergence floor of two, spent on hot chunks before the cap stops the
+ * loop. Not a convergability minimum: the all-dry rounds-1-and-2 shape
+ * reaches CONVERGED under any cap of two or more, because the reverse
+ * audit's convergence check runs before the round-cap gate.
  */
 export const HUGE_REVERSE_AUDIT_ROUNDS = 3;
 
@@ -232,13 +236,19 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
  * scheduler, the cold-check note). A plan without the field — an older
  * CLI — or a garbled value reads as the full cap: an old plan errs toward
  * more auditing, never less, exactly like every other budget fallback.
+ *
+ * The accepted range is floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the
+ * smallest cap the CLI ever writes. A value of one or two is out of band
+ * (a hand-edited plan): honouring it would force a non-converged round-cap
+ * stop where the full loop would have kept auditing, so it too falls back
+ * to the full cap — never less.
  */
 export function reverseAuditRoundCap(budget: unknown): number {
   const v = (budget as { reverseAuditRounds?: unknown } | undefined)
     ?.reverseAuditRounds;
   return typeof v === 'number' &&
     Number.isInteger(v) &&
-    v >= 1 &&
+    v >= HUGE_REVERSE_AUDIT_ROUNDS &&
     v <= MAX_REVERSE_AUDIT_ROUNDS
     ? v
     : MAX_REVERSE_AUDIT_ROUNDS;
