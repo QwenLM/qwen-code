@@ -4563,6 +4563,7 @@ describe('Gemini Client (client.ts)', () => {
       SendMessageType.Cron,
       SendMessageType.Notification,
       SendMessageType.Teammate,
+      SendMessageType.Peer,
     ])('checks session writer admission before a %s turn', async (type) => {
       const failure = new Error('writer admission failed');
       vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(failure);
@@ -4661,6 +4662,54 @@ describe('Gemini Client (client.ts)', () => {
         );
 
         expect(reset).toHaveBeenCalledWith('prompt-peer-loop');
+      });
+
+      it('starts an automatic Todo work chain for a peer turn', async () => {
+        // The chain is what keeps an active Todo list attached to work the
+        // user did not type. Cron, notification and teammate turns all join
+        // it; leaving Peer out meant a peer-driven turn ran outside any
+        // chain, so `activeTodoWorkChainPromptId` still pointed at whatever
+        // the user was last doing and the reminder below never rode along.
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: '<cross_session_message>hi</cross_session_message>' }],
+            new AbortController().signal,
+            'prompt-peer-chain',
+            { type: SendMessageType.Peer },
+          ),
+        );
+
+        // `undefined` for the parent chain, matching Cron and Notification:
+        // only Teammate threads a peer turn onto the user's current chain,
+        // because teammate traffic is this session's own coordination.
+        // Peer content came from somewhere else and starts its own.
+        expect(
+          mockConfig.startAutomaticActiveTodoWorkChain,
+        ).toHaveBeenCalledWith('prompt-peer-chain', undefined);
+      });
+
+      it('carries the active Todo reminder into a peer turn', async () => {
+        // Same omission one step later: `takeActiveTodoReminder` is what
+        // injects the list into the request, and it is gated on the same
+        // type set. Without it a peer turn is told to continue work it
+        // cannot see.
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(
+          'ACTIVE TODO LIST',
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: '<cross_session_message>hi</cross_session_message>' }],
+            new AbortController().signal,
+            'prompt-peer-reminder',
+            { type: SendMessageType.Peer },
+          ),
+        );
+
+        expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+          'prompt-peer-reminder',
+          true,
+        );
       });
     });
 

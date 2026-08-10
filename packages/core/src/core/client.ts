@@ -2077,7 +2077,8 @@ export class GeminiClient {
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer
     ) {
       await this.config.assertCanStartTurn();
     }
@@ -2511,7 +2512,8 @@ export class GeminiClient {
     } else if (
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer
     ) {
       this.config.startAutomaticActiveTodoWorkChain(
         prompt_id,
@@ -2997,7 +2999,8 @@ export class GeminiClient {
         messageType === SendMessageType.Retry ||
         messageType === SendMessageType.Cron ||
         messageType === SendMessageType.Notification ||
-        messageType === SendMessageType.Teammate
+        messageType === SendMessageType.Teammate ||
+        messageType === SendMessageType.Peer
       ) {
         const activeTodoReminder = this.config.takeActiveTodoReminder(
           prompt_id,
