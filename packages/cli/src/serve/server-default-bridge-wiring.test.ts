@@ -14,6 +14,7 @@ import {
   type BridgeSessionSummary,
 } from './acp-session-bridge.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 
 const WS_BOUND = path.resolve('/work/bound');
@@ -86,6 +87,19 @@ describe('createServeApp default bridge wiring', () => {
     expect(bridgeOptions).toMatchObject({
       delegateReadTextFileToClient: false,
     });
+    await expect(
+      bridgeOptions!.fileSystem!.writeText({
+        path: '/var/tmp/qwen-default-embed-external.txt',
+        content: 'must-not-write',
+        sessionId: 'session-default-embed',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ kind: 'untrusted_workspace' });
     liveSessionIds.add('session-indexed');
     sessionLifecycle!({
       type: 'registered',
@@ -111,6 +125,63 @@ describe('createServeApp default bridge wiring', () => {
     ).toEqual({
       kind: 'not_found',
     });
+  }, 15_000);
+
+  it('keeps the same-host write route disabled for an injected filesystem factory', async () => {
+    let bridgeOptions: BridgeOptions | undefined;
+    const bridge = makeBridge();
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
+          bridgeOptions = opts;
+          return bridge;
+        }),
+      };
+    });
+    const boundaryError = Object.assign(new Error('outside workspace'), {
+      kind: 'path_outside_workspace',
+    });
+    const writeSameHostToolText = vi.fn(async () => undefined);
+    const fsFactory = {
+      assertCanWrite: vi.fn(),
+      writeSameHostToolText,
+      forRequest: () =>
+        ({
+          resolve: vi.fn(async () => {
+            throw boundaryError;
+          }),
+        }) as never,
+    } satisfies WorkspaceFileSystemFactory;
+
+    const { createServeApp } = await import('./server.js');
+    createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { fsFactory },
+    );
+
+    await expect(
+      bridgeOptions!.fileSystem!.writeText({
+        path: '/var/tmp/qwen-injected-factory-external.txt',
+        content: 'must-not-write',
+        sessionId: 'session-injected-factory',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      }),
+    ).rejects.toBe(boundaryError);
+    expect(writeSameHostToolText).not.toHaveBeenCalled();
   }, 15_000);
 
   it('wires total admission into the internally-created bridge', async () => {
