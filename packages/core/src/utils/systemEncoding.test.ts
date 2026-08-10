@@ -24,6 +24,17 @@ import {
   decodeProcessOutput,
 } from './systemEncoding.js';
 
+// Node's Buffer has no 'utf16be' encoding, so build big-endian bytes from the
+// little-endian encoding by swapping each 16-bit code unit.
+function swapEndian(buf: Buffer): Buffer {
+  const out = Buffer.alloc(buf.length);
+  for (let i = 0; i < buf.length; i += 2) {
+    out[i] = buf[i + 1];
+    out[i + 1] = buf[i];
+  }
+  return out;
+}
+
 describe('Shell Command Processor - Encoding Functions', () => {
   let mockedExecSync: ReturnType<typeof vi.mocked<typeof execSync>>;
   let mockedOsPlatform: ReturnType<typeof vi.mocked<() => string>>;
@@ -137,23 +148,29 @@ describe('Shell Command Processor - Encoding Functions', () => {
     it('should sample both head and tail for buffers larger than the chardet sample cap', () => {
       // A buffer larger than CHARDET_SAMPLE_BYTES must feed chardet a
       // bounded head+tail sample, not a head-only one, so a pure-ASCII head
-      // followed by foreign-encoded bulk is still detected correctly.
+      // followed by foreign-encoded bulk is still detected correctly. The
+      // foreign bytes are placed inside the tail window the sample actually
+      // reaches, and the assertion checks the sample CONTAINS them (not just
+      // the call shape), so a regression that drops the tail window turns red.
       const chunk = Buffer.alloc(64 * 1024, 0x61); // 'a'
       const buffer = Buffer.concat([
         chunk,
-        Buffer.from('тест', 'utf-8'),
         chunk,
+        Buffer.from('тест', 'utf-8'),
       ]);
       mockedChardetDetect.mockReturnValue('UTF-8');
 
       detectEncodingFromBuffer(buffer);
 
-      expect(mockedChardetDetect).toHaveBeenCalledWith(
-        Buffer.concat([
-          buffer.subarray(0, 64 * 1024),
-          buffer.subarray(buffer.length - 64 * 1024),
-        ]),
-      );
+      const expectedSample = Buffer.concat([
+        buffer.subarray(0, 64 * 1024),
+        buffer.subarray(buffer.length - 64 * 1024),
+      ]);
+      expect(mockedChardetDetect).toHaveBeenCalledWith(expectedSample);
+      // The tail window must actually carry the foreign bytes.
+      expect(
+        expectedSample.subarray(expectedSample.length - 8).toString('utf8'),
+      ).toBe('тест');
     });
   });
 
@@ -272,7 +289,35 @@ describe('Shell Command Processor - Encoding Functions', () => {
       process.env['LANG'] = 'C';
 
       const result = getSystemEncoding();
-      expect(result).toBe('c');
+      expect(result).toBe(null);
+    });
+
+    it('should treat POSIX locale as having no decodable encoding', () => {
+      process.env['LANG'] = 'POSIX';
+
+      const result = getSystemEncoding();
+      expect(result).toBe(null);
+    });
+
+    it('should normalize the utf8 alias to utf-8', () => {
+      // Debian/locale spellings like en_US.utf8 produce the codeset 'utf8',
+      // a valid TextDecoder label but NOT the string 'utf-8' — the system
+      // gate compares against 'utf-8', so it must be normalized or the gate
+      // would wrongly treat a UTF-8 system as non-UTF-8.
+      process.env['LANG'] = 'en_US.utf8';
+
+      const result = getSystemEncoding();
+      expect(result).toBe('utf-8');
+    });
+
+    it('should treat ANSI_X3.4-1968 charmap (C locale) as no encoding', () => {
+      // LANG unset falls back to `locale charmap`, which on a C/POSIX host
+      // reports 'ANSI_X3.4-1968' (plain ASCII). That is not a WHATWG
+      // TextDecoder label, so it must become null to fall through to chardet.
+      mockedExecSync.mockReturnValue('ANSI_X3.4-1968\n');
+
+      const result = getSystemEncoding();
+      expect(result).toBe(null);
     });
 
     it('should handle empty locale environment variables', () => {
@@ -285,11 +330,11 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe('utf-8');
     });
 
-    it('should return locale as-is when locale format has no dot', () => {
+    it('should return null when locale format has no codeset', () => {
       process.env['LANG'] = 'invalid_format';
 
       const result = getSystemEncoding();
-      expect(result).toBe('invalid_format');
+      expect(result).toBe(null);
     });
 
     it('should prioritize LC_ALL over other environment variables', () => {
@@ -592,6 +637,26 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe('utf-16');
       expect(mockedChardetDetect).not.toHaveBeenCalled();
     });
+
+    it('detects UTF-16BE BOM output as utf-16be, not utf-16', () => {
+      // Big-endian UTF-16 (PowerShell 5.1 Out-File -Encoding BigEndianUnicode,
+      // Notepad, MSVC tooling) emits a FE FF BOM. Node's WHATWG TextDecoder
+      // treats 'utf-16' as an alias of utf-16le that does NOT read the byte
+      // order from the BOM, so returning 'utf-16' here would decode the
+      // big-endian payload byte-swapped. The FE FF branch must return the
+      // explicit 'utf-16be' label.
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 866');
+      const buffer = Buffer.concat([
+        Buffer.from([0xfe, 0xff]),
+        swapEndian(Buffer.from('Hello', 'utf16le')),
+      ]);
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('utf-16be');
+      expect(mockedChardetDetect).not.toHaveBeenCalled();
+    });
   });
 
   describe('Cross-platform behavior', () => {
@@ -754,6 +819,18 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const buffer = Buffer.concat([
         Buffer.from([0xff, 0xfe]),
         Buffer.from('Ошибка чтения файла', 'utf16le'),
+      ]);
+
+      expect(decodeProcessOutput(buffer)).toBe('Ошибка чтения файла');
+    });
+
+    it('decodes UTF-16BE BOM output to the exact text', () => {
+      // Mirrors the UTF-16LE test above for big-endian output (FE FF BOM),
+      // where TextDecoder('utf-16') — an implicit utf-16le — would decode
+      // the payload byte-swapped with a leading U+FFFE.
+      const buffer = Buffer.concat([
+        Buffer.from([0xfe, 0xff]),
+        swapEndian(Buffer.from('Ошибка чтения файла', 'utf16le')),
       ]);
 
       expect(decodeProcessOutput(buffer)).toBe('Ошибка чтения файла');

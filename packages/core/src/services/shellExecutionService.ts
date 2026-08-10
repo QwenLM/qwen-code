@@ -1460,9 +1460,9 @@ export class ShellExecutionService {
           // handoff to reuse. Deliberate extra concat: decoding requires one
           // additional full-output-sized allocation at cleanup peak
           // (bounded, GC-eligible after return). Detection CPU stays bounded
-          // — chardet's O(n) statistical pass runs on a capped head sample
-          // (CHARDET_SAMPLE_BYTES), so even a max-size buffer pays only a
-          // constant detection cost in the 'exit' handler.
+          // — chardet's O(n) statistical pass runs on a capped head+tail
+          // sample (at most 2 × CHARDET_SAMPLE_BYTES), so even a max-size
+          // buffer pays only a constant detection cost in the 'exit' handler.
           if (stdoutChunks.length > 0) {
             const concatenated = Buffer.concat(stdoutChunks);
             detectedStdoutEncoding = getCachedEncodingForBuffer(concatenated);

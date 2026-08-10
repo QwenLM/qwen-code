@@ -352,6 +352,11 @@ export async function start_sandbox(
       process.on('SIGTERM', stopProxy);
 
       // Proxy stdout is intentionally not piped — it disrupts ink rendering.
+      // Diagnostic stderr is decoded per 'data' chunk (not accumulated): it
+      // is display-only, and a multi-byte character split across two OS
+      // reads can decode to U+FFFD rather than the full text. This is
+      // accepted here; the complete-buffer contract of decodeProcessOutput
+      // still holds for full-output consumers like imageExists below.
       proxyProcess.stderr?.on('data', (data) => {
         writeStderrLine(decodeProcessOutput(data));
       });
@@ -898,6 +903,8 @@ export async function start_sandbox(
     process.on('SIGTERM', stopProxy);
 
     // Proxy stdout is intentionally not piped — it disrupts ink rendering.
+    // stderr is display-only and decoded per 'data' chunk (see the proxy
+    // stderr handler above for why per-chunk decode is accepted here).
     proxyProcess.stderr?.on('data', (data) => {
       writeStderrLine(decodeProcessOutput(data).trim());
     });
@@ -982,6 +989,8 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
     const pullProcess = spawn(sandbox, args, { stdio: 'pipe' });
 
     const onStdoutData = (data: Buffer) => {
+      // Pull progress is display-only and decoded per 'data' chunk (see the
+      // proxy stderr handler above for why per-chunk decode is accepted).
       writeStderrLine(decodeProcessOutput(data).trim()); // Show pull progress
     };
 

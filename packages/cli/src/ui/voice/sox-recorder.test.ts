@@ -39,15 +39,24 @@ vi.mock('node:fs/promises', () => ({
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  // Deterministic CP-866 decode so the suite can distinguish the recorder
-  // routing sox stderr through decodeProcessOutput from a naive
-  // chunk.toString() (which yields U+FFFD for these bytes). CP-866 is
-  // ASCII-compatible in 0x00-0x7F, so the ASCII stderr used by the other
-  // tests decodes identically.
+  // Encoding-aware decode so the suite can distinguish the recorder routing
+  // sox stderr through decodeProcessOutput from a naive chunk.toString()
+  // (which yields U+FFFD for these bytes). Valid UTF-8 (ASCII, or a UTF-8
+  // multi-byte sequence) decodes as utf-8; anything else decodes as the
+  // cp866 system code page. This mirrors shellExecutionService.test.ts.
   decodeProcessOutput: (buffer: Buffer | string) => {
     if (!Buffer.isBuffer(buffer)) return String(buffer);
     if (buffer.length === 0) return '';
-    return new TextDecoder('cp866').decode(buffer);
+    const strict = new TextDecoder('utf-8', { fatal: true });
+    const isUtf8 = (() => {
+      try {
+        strict.decode(buffer);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    return new TextDecoder(isUtf8 ? 'utf-8' : 'cp866').decode(buffer);
   },
 }));
 
@@ -164,6 +173,29 @@ describe('createSoxRecorder', () => {
 
     await expect(recorder.stop()).rejects.toThrow(
       'Voice recorder failed with exit code 2: Ошибка.',
+    );
+  });
+
+  it('decodes a UTF-8 multi-byte sequence split across data chunks', async () => {
+    const child = new FakeChildProcess();
+    mocks.spawn.mockReturnValue(child);
+    mocks.mkdtemp.mockResolvedValue('/tmp/qwen-voice-abc');
+
+    const recorder = createSoxRecorder();
+    await startRecorder(recorder);
+    // A UTF-8 file path whose 2-byte Cyrillic char straddles two OS pipe
+    // reads (e.g. a SoX error message). Per-chunk decodeProcessOutput would
+    // decode each fragment independently — the split 0xD1 0x84|0x... byte is
+    // not valid UTF-8, so it would be decoded through the cp866 system code
+    // page as silent Cyrillic mojibake. The recorder must buffer the chunks
+    // and decode once, on the complete buffer.
+    const text = Buffer.from('файл not found', 'utf-8');
+    child.stderr.emit('data', text.subarray(0, 3));
+    child.stderr.emit('data', text.subarray(3));
+    child.emit('close', 2);
+
+    await expect(recorder.stop()).rejects.toThrow(
+      'Voice recorder failed with exit code 2: файл not found.',
     );
   });
 

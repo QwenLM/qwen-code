@@ -29,17 +29,17 @@ export function resetEncodingCache(): void {
  * full O(n) scan with no sampling, so handing it the entire output buffer
  * (up to `maxBufferedOutputBytes`, 64 MiB by default) can stall the event
  * loop for seconds in the 'exit' handler. Detection confidence is
- * statistical, so a fixed head sample is enough (~11 ms at 64 KiB
- * regardless of total size).
+ * statistical, so a bounded head+tail sample is enough (at most
+ * 2 × CHARDET_SAMPLE_BYTES scanned, regardless of total size).
  */
 const CHARDET_SAMPLE_BYTES = 64 * 1024;
 
 /**
  * Detects the encoding of a buffer.
  *
- * Strategy: try strict UTF-8, then UTF-8 with replacement for
- * mostly-valid buffers, then the system encoding (when non-UTF-8), then
- * chardet.
+ * Strategy: try strict UTF-8, then the UTF-16 BOM, then the system encoding
+ * (when non-UTF-8), then UTF-8 with replacement for mostly-valid buffers,
+ * then chardet.
  * UTF-8 is tried first because modern developer tools, PowerShell Core,
  * git, node, and most CLI tools output UTF-8. Legacy codepage bytes
  * (0x80-0xFF) rarely form valid multi-byte UTF-8 sequences by accident.
@@ -60,13 +60,15 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
   // this short-circuit the replacement-ratio heuristic below would count only
   // the 2 invalid BOM bytes (FF FE / FE FF) and classify ASCII-range UTF-16
   // text (char + NUL — valid UTF-8) as utf-8, silently NUL-interleaving the
-  // output. TextDecoder('utf-16') reads the byte order from the BOM and drops
-  // it. (UTF-32 is not covered: WHATWG TextDecoder has no utf-32 label.)
+  // output. Node's TextDecoder('utf-16') is an alias of utf-16le that does
+  // NOT read the byte order from the BOM, so the LE (FF FE) branch uses it
+  // and the BE (FE FF) branch must use the explicit 'utf-16be' label. (UTF-32
+  // is not covered: WHATWG TextDecoder has no utf-32 label.)
   if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
     return 'utf-16';
   }
   if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
-    return 'utf-16';
+    return 'utf-16be';
   }
 
   // Substantially invalid UTF-8. On Windows, native CLI tools (cmd.exe,
@@ -188,6 +190,7 @@ export function getSystemEncoding(): string | null {
   // be set or accurate. Handle cases where none of these variables are set.
   const env = process.env;
   let locale = env['LC_ALL'] || env['LC_CTYPE'] || env['LANG'] || '';
+  let fromCharmap = false;
 
   // Fallback to querying the system directly when environment variables are missing
   if (!locale) {
@@ -195,23 +198,41 @@ export function getSystemEncoding(): string | null {
       locale = execSync('locale charmap', { encoding: 'utf8' })
         .toString()
         .trim();
+      fromCharmap = true;
     } catch (_e) {
       debugLogger.warn('Failed to get locale charmap.');
       return null;
     }
   }
 
-  const match = locale.match(/\.(.+)/); // e.g., "en_US.UTF-8"
-  if (match && match[1]) {
-    return match[1].toLowerCase();
+  // Extract the codeset (the part after the LAST dot of a locale name like
+  // "en_US.UTF-8"). `locale charmap` output is already just the codeset, so
+  // it needs no dot parsing. A locale without a codeset (LANG=C, LANG=POSIX)
+  // or a C-locale charmap (ANSI_X3.4-1968, plain ASCII) has no decodable
+  // non-UTF-8 label: returning those names unvalidated would make the system
+  // gate authoritative for a label TextDecoder rejects and silently corrupt
+  // output. Returning null lets detection fall through to chardet instead.
+  let codeset: string | null;
+  if (fromCharmap) {
+    codeset = locale.split('@')[0].toLowerCase();
+  } else {
+    const dot = locale.lastIndexOf('.');
+    codeset =
+      dot === -1
+        ? null
+        : locale
+            .slice(dot + 1)
+            .split('@')[0]
+            .toLowerCase();
   }
 
-  // Handle cases where locale charmap returns just the encoding name (e.g., "UTF-8")
-  if (locale && !locale.includes('.')) {
-    return locale.toLowerCase();
+  if (!codeset) return null;
+  if (codeset === 'utf8') return 'utf-8';
+  if (codeset === 'c' || codeset === 'posix' || codeset === 'ansi_x3.4-1968') {
+    return null;
   }
 
-  return null;
+  return codeset;
 }
 
 /**
@@ -250,6 +271,15 @@ export function windowsCodePageToEncoding(cp: number): string | null {
 
   if (map[cp]) {
     return map[cp];
+  }
+
+  // These pages are deliberately skipped (no WHATWG TextDecoder label), not
+  // unknown — return null silently so an intentional design decision is not
+  // logged as a detection failure. Known-but-skipped pages on the hosts this
+  // OEM-decoding work targets (437 on US English, 850 in Western Europe)
+  // would otherwise spam the warn on every process's first non-UTF-8 output.
+  if (cp === 437 || cp === 850 || cp === 852) {
+    return null;
   }
 
   debugLogger.warn(`Unable to determine encoding for windows code page ${cp}.`);
