@@ -130,11 +130,17 @@ const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 // the bundle consumes the rest of it and `-c` is not present.
 function shellBundleRequestsCommand(flag: string): boolean {
   if (!flag.startsWith('-') || flag.startsWith('--')) return false;
+  return flag.slice(1).includes('c');
+}
+
+/** How many argv entries the value-taking flags before `c` consume. */
+function shellBundleValueFlagsBeforeCommand(flag: string): number {
+  let consumed = 0;
   for (const character of flag.slice(1)) {
-    if (character === 'o' || character === 'O') return false;
-    if (character === 'c') return true;
+    if (character === 'c') return consumed;
+    if (character === 'o' || character === 'O') consumed++;
   }
-  return false;
+  return consumed;
 }
 
 const ENV_CHDIR_FLAGS = new Set(['-C', '--chdir']);
@@ -247,6 +253,9 @@ interface GuardToken {
   // relocation markers — a here-string carries a whole command — but it is
   // never argv, so payload joins (`eval …`, `env -S …`) must skip it.
   readonly redirect?: boolean;
+  // A bare digit before a redirection: a file descriptor or an argv word,
+  // indistinguishable here.
+  readonly ambiguousFd?: boolean;
 }
 
 interface GitEnvRelocation {
@@ -447,7 +456,10 @@ function tokenizeSegment(
       const tokens = runs.at(-1)!.tokens;
       const previous = tokens.at(-1);
       if (previous && !previous.redirect && /^\d+$/.test(previous.text)) {
-        tokens[tokens.length - 1] = { ...previous, redirect: true };
+        // `2>file` makes it a file descriptor, `git -C 2 > file` makes it a
+        // real argv word, and the token stream cannot tell them apart — so
+        // it is marked ambiguous and the analysis fails closed.
+        tokens[tokens.length - 1] = { ...previous, ambiguousFd: true };
       }
       redirectOperand = true;
       continue;
@@ -483,10 +495,32 @@ function expandShellLocals(
   return { text, dynamic: !resolved };
 }
 
+// Rebuilding a payload from tokens loses the quoting that made a value one
+// argv word, so a path with a space would re-parse as several words and the
+// `-C` value would silently shrink. Re-quote anything that would split.
+function quoteForRejoin(text: string): string {
+  if (text.length === 0) return "''";
+  if (!/[\s"'`$\\|&;<>()*?[\]{}!#~]/.test(text)) return text;
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
+// `eval` concatenates its arguments and re-parses the result as shell text,
+// so its payload must be joined verbatim.
 function joinTokenTexts(tokens: GuardToken[]): string {
   return tokens
     .filter((token) => !token.redirect)
     .map((token) => token.text)
+    .join(' ');
+}
+
+// Rebuilding a command line out of separate argv words is the opposite case:
+// a value that was one word only because it was quoted has to stay one word,
+// or a path with a space re-parses as several and a `-C` value silently
+// shrinks.
+function joinArgvTexts(tokens: GuardToken[]): string {
+  return tokens
+    .filter((token) => !token.redirect)
+    .map((token) => quoteForRejoin(token.text))
     .join(' ');
 }
 
@@ -625,7 +659,7 @@ function consumeEnvWrapper(
       // Mirrors the `-c` payload rule: a payload the daemon cannot read is
       // undecidable, not absent.
       if (payloadToken.dynamic) return { next: run.length, undecidable: true };
-      const rest = joinTokenTexts(run.slice(index + 2));
+      const rest = joinArgvTexts(run.slice(index + 2));
       return {
         next: run.length,
         payload: rest ? `${payloadToken.text} ${rest}` : payloadToken.text,
@@ -636,7 +670,7 @@ function consumeEnvWrapper(
     if (/^-[A-Za-z]*S/.test(token.text) && !token.text.startsWith('--')) {
       const fused = token.text.slice(token.text.indexOf('S') + 1);
       if (fused.length > 0) {
-        const rest = joinTokenTexts(run.slice(index + 1));
+        const rest = joinArgvTexts(run.slice(index + 1));
         return {
           next: run.length,
           payload: rest ? `${fused} ${rest}` : fused,
@@ -647,7 +681,7 @@ function consumeEnvWrapper(
       const payloadToken = run[index + 1];
       if (payloadToken === undefined) return { next: run.length };
       if (payloadToken.dynamic) return { next: run.length, undecidable: true };
-      const rest = joinTokenTexts(run.slice(index + 2));
+      const rest = joinArgvTexts(run.slice(index + 2));
       return {
         next: run.length,
         payload: rest ? `${payloadToken.text} ${rest}` : payloadToken.text,
@@ -799,7 +833,12 @@ function consumeShellWrapper(
         return { kind: 'static', payload: remainder };
       }
       let payloadIndex = nextArgvIndex(run, index + 1);
-      if (/[oO]/.test(remainder)) {
+      // `-o`/`-O` on either side of the `c` each consume one argv entry
+      // before the command string.
+      let toSkip =
+        shellBundleValueFlagsBeforeCommand(token.text) +
+        (/[oO]/.test(remainder) ? 1 : 0);
+      while (toSkip-- > 0) {
         payloadIndex = nextArgvIndex(run, payloadIndex + 1);
       }
       const payloadToken = run[payloadIndex];
@@ -976,7 +1015,7 @@ function readDefinition(
     .slice(first.endsWith('()') ? 1 : 2)
     .filter((token) => token.text !== '{' && token.text !== '}');
   if (bodyTokens.length === 0) return undefined;
-  return { name, body: joinTokenTexts(bodyTokens) };
+  return { name, body: joinArgvTexts(bodyTokens) };
 }
 
 function analyzeRun(run: GuardToken[]): RunAnalysis {
@@ -1038,7 +1077,11 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     }
     if (program === 'eval') {
       const payloadTokens = run.slice(index + 1);
-      if (payloadTokens.some((payloadToken) => payloadToken.dynamic)) {
+      if (
+        payloadTokens.some(
+          (payloadToken) => payloadToken.dynamic || payloadToken.ambiguousFd,
+        )
+      ) {
         return { kind: 'undecidable' };
       }
       return {
@@ -1530,7 +1573,7 @@ function extractCommandSubstitutions(segment: string): string[] | null {
       index += 2;
       continue;
     }
-    if (!single && character === '$' && segment[index + 1] === "'") {
+    if (!single && !double && character === '$' && segment[index + 1] === "'") {
       index = skipAnsiCQuote(segment, index);
       continue;
     }
@@ -1576,7 +1619,7 @@ function findSubstitutionEnd(segment: string, start: number): number {
       index++;
       continue;
     }
-    if (!single && character === '$' && segment[index + 1] === "'") {
+    if (!single && !double && character === '$' && segment[index + 1] === "'") {
       index = skipAnsiCQuote(segment, index) - 1;
       continue;
     }
@@ -1676,6 +1719,76 @@ interface EvaluationScope {
   readonly locals?: Map<string, GuardToken>;
 }
 
+/**
+ * The top-level separators `splitCommands` cut on, in order — mirroring its
+ * quote and substitution rules. `separators[i]` follows segment `i`. Both
+ * sides of a `|` run in subshells, so a `cd` there must not move the shell.
+ */
+function readTopLevelSeparators(command: string): string[] {
+  const separators: string[] = [];
+  let single = false;
+  let double = false;
+  let backtick = false;
+  let substitution = 0;
+  const quoteStack: Array<[boolean, boolean]> = [];
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    const next = command[index + 1];
+    if (!single && character === '\\' && index + 1 < command.length) {
+      index++;
+      continue;
+    }
+    if (!single && character === '`') {
+      backtick = !backtick;
+      continue;
+    }
+    if (!single && !backtick && character === '$' && next === '(') {
+      quoteStack.push([single, double]);
+      single = false;
+      double = false;
+      substitution++;
+      index++;
+      continue;
+    }
+    if (
+      !backtick &&
+      substitution > 0 &&
+      character === ')' &&
+      !single &&
+      !double
+    ) {
+      const enclosing = quoteStack.pop();
+      single = enclosing?.[0] ?? false;
+      double = enclosing?.[1] ?? false;
+      substitution--;
+      continue;
+    }
+    if (!backtick && character === "'" && !double) {
+      single = !single;
+      continue;
+    }
+    if (!backtick && character === '"' && !single) {
+      double = !double;
+      continue;
+    }
+    if (single || double || backtick || substitution > 0) continue;
+    if (character === '&' && next === '&') {
+      separators.push('&&');
+      index++;
+    } else if (character === '|' && next === '|') {
+      separators.push('||');
+      index++;
+    } else if (character === '|') {
+      separators.push('|');
+    } else if (character === ';') {
+      separators.push(';');
+    } else if (character === '\n') {
+      separators.push('\n');
+    }
+  }
+  return separators;
+}
+
 interface CommandEvaluation {
   readonly denial?: GuardDenial;
   readonly cwdAfter: string | undefined;
@@ -1705,6 +1818,9 @@ async function evaluateCommandWithCwd(
   // `alias g='git …'` and `f() { git …; }` both make a later bare word run a
   // body defined earlier; without them that word is an opaque `other` run.
   const definedBodies = new Map<string, string>();
+  // Names carrying the export attribute from a name-only `export KEY`; a
+  // later assignment to one of them reaches the git subprocess.
+  const exportedNames = new Set<string>();
   // Function bodies that `splitCommands` cut across segments cannot be
   // replayed verbatim, so the name is recorded as Git-shaped instead and the
   // later bare word answers to the unrecognized-program containment rule.
@@ -1755,7 +1871,18 @@ async function evaluateCommandWithCwd(
     for (const [key, token] of snapshot.locals) shellLocals.set(key, token);
   };
   const subshellCwds: ShellStateSnapshot[] = [];
-  for (const segment of splitCommands(command)) {
+  const segments = splitCommands(command);
+  const separators = readTopLevelSeparators(command);
+  // On any disagreement with `splitCommands`, treat every segment of a piped
+  // command as a pipeline component rather than guessing.
+  const separatorsMatch = separators.length === segments.length - 1;
+  const isPipeComponent = (index: number): boolean =>
+    separatorsMatch
+      ? separators[index - 1] === '|' || separators[index] === '|'
+      : separators.includes('|');
+  for (const [segmentIndex, segment] of segments.entries()) {
+    const pipeComponent = isPipeComponent(segmentIndex);
+    const cwdBeforeSegment = trackedCwd;
     const substitutions = extractCommandSubstitutions(segment);
     const tokenized =
       substitutions === null ? null : tokenizeSegment(segment, subshellDepth);
@@ -2008,7 +2135,9 @@ async function evaluateCommandWithCwd(
           exported.relocations.push(...analysis.state.relocations);
           if (analysis.state.unresolved) exported.unresolved = true;
           // `export GIT_DIR` with no `=` exports whatever an earlier
-          // shell-local assignment left in that name.
+          // shell-local assignment left in that name — and, because the
+          // export *attribute* sticks to the name, whatever a later one puts
+          // there as well.
           for (const operand of analysis.operands) {
             if (leadingEnvAssignmentKey(operand.text) !== null) continue;
             if (operand.dynamic) {
@@ -2018,6 +2147,14 @@ async function evaluateCommandWithCwd(
             }
             const pending = shellLocals.get(operand.text);
             if (pending) recordEnvAssignment(pending, exported);
+            if (
+              GIT_DIR_ENV_KEYS.has(operand.text) ||
+              GIT_WORK_TREE_ENV_KEYS.has(operand.text) ||
+              GIT_UNRESOLVABLE_ENV_KEYS.has(operand.text) ||
+              GIT_PROGRAM_ENV_KEYS.has(operand.text)
+            ) {
+              exportedNames.add(operand.text);
+            }
           }
           const denial = await evaluateUnrecognizedRun(
             run,
@@ -2118,6 +2255,10 @@ async function evaluateCommandWithCwd(
               for (const token of run) {
                 const key = leadingEnvAssignmentKey(token.text);
                 if (key === null) continue;
+                if (exportedNames.has(key)) {
+                  recordEnvAssignment(token, exported);
+                  continue;
+                }
                 const previous = shellLocals.get(key);
                 if (!isAppendAssignment(token.text) || previous === undefined) {
                   shellLocals.set(key, token);
@@ -2162,6 +2303,9 @@ async function evaluateCommandWithCwd(
       subshellCwds.push(snapshotShellState());
       subshellDepth++;
     }
+    // Both sides of a pipe run in their own subshell, so whatever this
+    // segment did to the shell's directory dies with it.
+    if (pipeComponent) trackedCwd = cwdBeforeSegment;
   }
   return {
     cwdAfter: trackedCwd,

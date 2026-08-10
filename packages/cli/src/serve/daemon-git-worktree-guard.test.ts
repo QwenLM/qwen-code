@@ -1584,6 +1584,61 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // Round-7. These are the reviewers' exact payloads: the earlier "denies as
+  // written" replies were checked with counter-probes that tripped a
+  // different rule (a `.git` in the path matching the Git-word marker, or a
+  // literal `-C`), leaving the reported mechanism untouched. `outsideRepo`
+  // would do that again, so these use a path with no Git word in it.
+  describe('round-7 exact payloads', () => {
+    const plainOutside = path.join(temporaryRoot, 'elsewhere', 'checkout');
+    const spacedOutside = path.join(temporaryRoot, 'boundary with space');
+
+    it.each([
+      // `$'…'` is not ANSI-C quoting inside double quotes, so the
+      // substitution in it is live.
+      () => `echo "$'$(GIT_DIR=${plainOutside}/.git git reset --hard HEAD~1)'"`,
+      // The export attribute sticks to the name, so a LATER assignment to it
+      // reaches the git subprocess.
+      () => `export GIT_DIR; GIT_DIR=${plainOutside}; git reset --hard`,
+      () =>
+        `export GIT_WORK_TREE; GIT_WORK_TREE=${plainOutside}; git reset --hard`,
+      // Both sides of a pipe run in subshells: the parent stays outside.
+      () => `cd ${plainOutside}; echo x | cd ${effectiveCwd}; git commit -m x`,
+      // A bare digit before a spaced redirect is a real argv word.
+      () => `eval git -C 2 > x reset --hard`,
+      // `-o` before `c` in a bundle does not cancel the `c`.
+      () => `bash -oc errexit "$P"`,
+      () => `bash -Oc extglob "$P"`,
+      () => `bash -oc errexit 'git -C ${plainOutside} reset --hard'`,
+      // Re-joining argv must not lose the quoting that made a path one word.
+      () => `env -S 'git -C' '${spacedOutside}' reset --hard`,
+    ])('denies the reported payload verbatim %#', async (build) => {
+      await mkdir(path.join(plainOutside, '.git'), { recursive: true });
+      await mkdir(path.join(spacedOutside, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    });
+
+    it('leaves the equivalent in-boundary shapes alone', async () => {
+      const guard = createDaemonToolGuard();
+
+      for (const command of [
+        'echo x | cat; git commit -m x',
+        `cd nested; echo x | cd ${effectiveCwd}; git commit -m x`,
+        "env -S 'git status'",
+        "bash -oc errexit 'git status'",
+        'export GIT_DIR; echo done',
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
