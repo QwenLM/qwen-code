@@ -72,6 +72,13 @@ returns the requested replay semantics.
   or rescan. Extract and share the existing artifact adjacency/blocker selector
   and stateful reducer rather than approximating artifact activity from UUID
   membership.
+- Add cooperative scheduling to the shared full-scan primitive and to selected
+  dispatch when cumulative selected work can be transcript-proportional. Track
+  fixed internal source-byte and monotonic elapsed-processing budgets; after a
+  complete physical line or aggregate exhausts either budget, await
+  `setImmediate` and reset both. Do not add a setting or protocol field. Preserve
+  one-scan semantics and document that one large synchronous JSON parse remains
+  indivisible.
 - Add parity tests against the current full loader and reducers before changing
   ACP lifecycle code, including the existing malformed-compression selection and
   failure behavior.
@@ -128,14 +135,20 @@ returns the requested replay semantics.
   path returning a restore failure does not apply attribution;
   explicitly do not promise rollback after a #8691 public timeout whose
   underlying child restore later succeeds and is closed.
-- Build and validate the response-mode replay envelope, then prebuild modes,
-  models, config options, artifact/replay metadata, and the complete ACP success
-  value before hydrating the runtime FileHistoryService or calling
-  `createAndStoreSession()`. Only then synchronously restore file history exactly
-  once in the existing creation sequence; do not defer it until `/rewind` or the
-  first file operation. Start its best-effort missing-backup validation once only
-  from successful restore finalization, because that validation may append a
-  transcript record.
+- Build and validate the response-mode replay envelope before runtime
+  FileHistoryService hydration or Session construction. Keep
+  `GeminiClient.initialize()` in `createAndStoreSession()`, then add one narrow
+  synchronous preparation slot after Gemini initialization, the second managed
+  admission check, and the active-id conflict check but before `new Session(...)`
+  and `sessions.set()`. Build modes, models, config options, artifact/replay
+  metadata, and the complete ACP success value in that slot so active-runtime
+  model selection matches current behavior and a builder failure leaves no
+  Session. Only then synchronously restore file history exactly once in the
+  existing creation sequence; do not defer it until `/rewind` or the first file
+  operation. Start its best-effort missing-backup validation once only from
+  successful restore finalization, because that validation may append a
+  transcript record. When file checkpointing is disabled, neither hydrate nor
+  validate the reduced snapshots and release the unused projection field.
   Restore turn parents, initial turn, background notification ids, goal
   runtime/hooks, and artifact state from their explicit projection fields; feed
   the normalized minimal Goal records through the existing recovery and
@@ -156,6 +169,21 @@ returns the requested replay semantics.
   `none` replay plus action, response/stream mode, and inherited-history policy.
   Coalesce only identical shapes; omitted versus explicit page size and unequal
   recent limits return `restore_in_progress`.
+- Normalize the restore shape at bridge ingress before live lookup, admission,
+  or coalescing. Validate a meaningful response-load `historyPageSize` with the
+  same integer range as REST and ACP; streamed load and resume normalize to their
+  existing all/none shape even if a direct programmatic caller supplies the
+  otherwise unused field. The REST route retains its existing
+  `400 invalid_transcript_limit` mapping, while a meaningful invalid direct value
+  receives local bridge input validation. Apply the normalized shape before
+  both warm and cold lookup so the ignored field cannot change meaning with
+  residency.
+- Audit every production restore caller. Change scheduled-task startup
+  rehydration/keepalive and both direct and daemon-backed channel restoration to
+  ACP/SDK resume because they ignore replay. Preserve all replay for generic
+  REST/ACP load compatibility and branch/side-task callers that actually return
+  prior history. Keep parent notification, live task/coordinator, and
+  sub-session parent recovery on their existing resume path.
 - For cold loads, enforce the shared serialized byte cap and existing
   10,000-update cap on explicitly recent bulk replay before transport and before
   session registration. Any individual or collective overflow returns ACP
@@ -189,11 +217,11 @@ returns the requested replay semantics.
 - Preserve `createAndStoreSession()`'s current early map insertion, reporter
   notification, fallible replay/worktree/Goal/rewriter setup, and
   `discardStoredSessionIfCurrent()`/`removeStoredSessionEntry()` rollback. New
-  projection, envelope, and response-builder failures happen before the call and
-  leave no map entry; failures at the existing guarded setup points use their
-  current stored-session cleanup. Do not add map-independent teardown, gate every
-  Session constructor callback, or claim to repair unrelated pre-existing
-  cleanup edges.
+  projection and envelope failures happen before the call; response-builder
+  failures happen in its post-Gemini/pre-construction slot. Both leave no map
+  entry. Failures at the existing guarded setup points use their current
+  stored-session cleanup. Do not add map-independent teardown, gate every Session
+  constructor callback, or claim to repair unrelated pre-existing cleanup edges.
 - Add one narrow ACP-only selective-restore finalizer after
   `session.installRewriter()` and before `session.startCronScheduler()` and the
   available-command timer. It is called exactly once, is synchronous, and does
@@ -201,7 +229,9 @@ returns the requested replay semantics.
   `GoalRuntime.activateRestoredWork()`, and starting idempotent FileHistory
   missing-backup validation. Do not await async completion or change
   existing background/worktree, callback, reporter, cron, command, publication,
-  or rollback timing.
+  or rollback timing. Keep every fallible/awaited setup step before this
+  finalizer; the existing cron start and command timer remain internally
+  best-effort after it.
 
 ## Phase 4: Errors and observability
 
@@ -248,8 +278,9 @@ returns the requested replay semantics.
   suppressed by Goal disposal; FileHistory validation retains its existing
   service/callback lifecycle and gains no detached owner or new cancellation
   protocol.
-- Verify a response-builder failure occurs before FileHistory hydration,
-  `createAndStoreSession()`, or any Session map entry.
+- Verify a response-builder failure occurs after Gemini initialization but
+  before FileHistory hydration, Session construction, or any Session map entry;
+  model/mode/config fields match the existing post-initialization response.
 - Verify live projection and envelope-limit failures release the close gate and
   preserve the registered Session, client accounting, and runtime services.
 - Add #8691 child restore phases for index, state selection, selected reads,
@@ -270,6 +301,12 @@ returns the requested replay semantics.
   no second scan for recent replay, Goal bootstrap, or pending-checkpoint
   evidence. Cover a dead-branch side-task source, glued fragments, concurrent
   fresh/cached builds, stale pending completion, and failed-read cache admission.
+- Add deterministic cooperative-scheduling coverage: force the byte budget with
+  a multi-record fixture, prove a queued timer/sibling callback runs before the
+  scan settles, and verify yields occur only after complete physical lines or
+  selected aggregates without changing order or projection parity. Keep the
+  approximately 2 MiB single-record parse as an explicit residual rather than a
+  timing assertion.
 - Exercise both lease modes, recorder-disabled mode, same-id reservation races,
   every new pre-creation failure and existing stored-session rollback point, and
   Goal migration complete or pending when a later step fails. A same-id retry
@@ -285,7 +322,14 @@ returns the requested replay semantics.
   once after rewriter installation and before cron/commands. Inject independent
   attribution, Goal activation, and FileHistory validation failures and prove
   the other two actions still run, the prebuilt response is unchanged, and
-  existing Session constructor callback timing is unchanged.
+  existing Session constructor callback timing is unchanged. With file
+  checkpointing disabled, prove snapshots are neither hydrated nor validated
+  and the one-shot projection releases them.
+- Exercise scheduled-task rehydration/keepalive and direct/daemon channel
+  restoration through resume/none. Scheduled-task rehydration must restore cron
+  and Goal runtime state; both channel adapters must remain promptable and
+  receive post-resume updates. None may collect historical replay frames.
+  Generic load and branch clients retain their explicit replay behavior.
 - Rebase onto #8824 and run its transactional integration coverage with
   selective-restore 409, 413, timeout/504, cancellation, and staging failures.
   Assert the committed session-id and workspace-cwd source tuple remains attached
@@ -301,6 +345,9 @@ returns the requested replay semantics.
 - Run the opt-in approximately 80 MiB/30,000-record benchmark with a live
   sibling and report wall time, peak and settled memory, event-loop lag,
   selected bytes, replay bytes, compression fallback, and sibling continuity.
+  Use the results to tune the fixed cooperative byte/time budgets and report the
+  largest indivisible-record interval, but do not convert either measurement
+  into a machine-independent CI threshold.
   Report #8824's overlapping source-plus-staged-target WebUI peak separately from
   ACP child index/projection memory; do not add cross-process samples into one
   peak.
@@ -324,6 +371,11 @@ returns the requested replay semantics.
       seeks occurs after lease acquisition when the recorder will acquire it, or
       before `Config` construction otherwise; no projection path performs a
       second scan through paging/cache helpers.
+- [ ] Full scanning and transcript-proportional selected dispatch cooperatively
+      yield after a fixed internal source-byte or elapsed-processing budget at
+      complete physical-line/aggregate boundaries. Functional tests prove
+      scheduler and sibling progress without changing scan count, order, or
+      parity; a single large synchronous parse remains a documented residual.
 - [ ] No production selective cold or live `session/load`/`session/resume` path
       calls the old full loader, including under a small-transcript threshold;
       benchmark-only comparisons are the only exception.
@@ -370,7 +422,8 @@ returns the requested replay semantics.
       after envelope validation the runtime service restores exactly once during
       existing Session setup, and missing-backup validation starts once from the
       successful finalizer. Envelope/prepare failure performs no file-history
-      append.
+      append. With file checkpointing disabled, snapshots are neither hydrated
+      nor validated and their projection payload is released.
 - [ ] Selected-read tests prove file-history and artifact inputs are reduced
       incrementally and are not retained in a transcript-sized intermediate
       array.
@@ -398,10 +451,10 @@ returns the requested replay semantics.
       covers settings/existence I/O through the existing Session creation
       attempt; concurrent direct-ACP restores of one id cannot both prepare, and
       every failure frees the reservation for a clean retry.
-- [ ] New failures before `createAndStoreSession()` leave no map entry; failures
-      at its currently guarded setup points use the existing stored-session
-      rollback and leave no stale Session/Goal hook, observer, Config, or map
-      entry.
+- [ ] New failures before `createAndStoreSession()` or in its
+      post-Gemini/pre-construction response slot leave no map entry; failures at
+      its currently guarded setup points use the existing stored-session rollback
+      and leave no stale Session/Goal hook, observer, Config, or map entry.
 - [ ] Goal preparation and activation are separately memoized; activation waits
       for preparation, readiness waits for both, disposal suppresses unfinished
       work, and non-daemon `restore()` preserves existing awaited behavior.
@@ -413,13 +466,15 @@ returns the requested replay semantics.
       shows this slice expands it. Goal activation remains disposal-owned, while
       FileHistory validation retains existing service/callback lifetime without
       a new detached owner or cancellation protocol.
-- [ ] The complete ACP success value is built before FileHistory hydration and
-      `createAndStoreSession()`; a response-builder failure performs
-      neither and leaves no Session.
+- [ ] The complete ACP success value is built after Gemini initialization and
+      before FileHistory hydration, Session construction, or map insertion; a
+      response-builder failure performs none of the latter three and preserves
+      the existing post-initialization model/mode/config response semantics.
 - [ ] The selective finalizer runs once after rewriter installation and before
       cron/command startup. Attribution, Goal activation, and FileHistory
       validation failures are independently contained and do not replace the
-      prebuilt response; existing Session callback timing is unchanged.
+      prebuilt response; no fallible/awaited setup follows the finalizer, and
+      existing Session callback timing is unchanged.
 - [ ] #8824 integration proves selective-restore 409, 413, timeout/504,
       cancellation, and staging failures preserve the committed session-id and
       workspace-cwd source tuple, while a successful switch commits transcript,
@@ -427,6 +482,13 @@ returns the requested replay semantics.
 - [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
       limits, none, action, stream/response mode, and inherited-history policy;
       only identical shapes share a restore and its typed result.
+- [ ] Bridge ingress rejects invalid/non-finite/out-of-range page sizes before
+      live lookup or coalescing when the field is meaningful. Streamed load and
+      resume ignore the field consistently for warm and cold Sessions.
+- [ ] Scheduled-task rehydration/keepalive and direct/daemon channel restoration
+      use resume/none and collect no historical replay. Scheduled tasks retain
+      cron/Goal recovery; channels retain prompt/live-update behavior; generic
+      and branch loads keep their required replay.
 - [ ] Both intentional caps (256 MiB transcript index and 32 MiB transformed
       explicit-page replay) have maintainer sign-off.
 - [ ] The fixed 32 MiB explicit-replay policy has no configuration, transformed

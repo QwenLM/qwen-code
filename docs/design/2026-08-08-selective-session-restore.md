@@ -339,6 +339,25 @@ workspace and that selected records belong to the requested session. Mixed
 session ids, changed segments, or an unavailable frozen snapshot fail the
 request rather than returning a plausible but incorrect projection.
 
+Keep transcript-proportional work cooperative on the shared ACP child. The
+shared full-scan primitive tracks both source bytes processed and elapsed
+monotonic processing time. After it finishes the current physical JSONL line,
+it awaits `setImmediate` when either fixed internal budget is exhausted, then
+resets both budgets. The selected-record dispatcher uses the same policy after
+dispatching a complete aggregate because no-compression model history can also
+make selected work transcript-proportional. These are internal scheduling
+constants, not settings or protocol fields; use the large-session benchmark to
+tune them without adding a machine-specific latency gate. This preserves one
+scan and every reducer boundary while allowing timers, sibling prompts, and I/O
+callbacks to run between records.
+
+Cooperative scheduling cannot preempt the synchronous parse and validation of
+the current physical line. An approximately 2 MiB JSON record therefore remains
+one indivisible `JSON.parse` interval. Moving parsing to a worker or introducing
+a streaming JSON parser is a separate complexity tradeoff and is not part of
+this slice; report this residual explicitly rather than claiming a hard
+event-loop-lag bound.
+
 A writer-leased cold restore must not reuse an index whose build began before
 lease acquisition. It builds a fresh index inside the lease transaction, uses
 that same object for runtime and replay selection, and may offer the completed
@@ -431,7 +450,10 @@ segments once:
    The reader cannot safely choose only the final 100 records in advance because
    prompt ids and batch validity live inside JSON payloads. Under the current
    synchronous file-history initialization contract, active file-history
-   payloads are a required selected-read cost for this slice.
+   payloads are a required selected-read cost for this slice. Preserve the
+   current service gate: when file checkpointing is disabled, do not hydrate or
+   validate the reduced snapshots, and release that projection field with the
+   other one-shot payloads.
 6. **Artifacts.** Run the current active-side-artifact selection semantics over
    lightweight physical metadata, including the existing adjacency and blocker
    rules, then read every artifact snapshot/event record selected by that rule
@@ -506,6 +528,39 @@ also includes action, response/stream replay mode, and `hideInheritedHistory`.
 Only identical discriminated shapes coalesce. Omitted versus explicit page size,
 or two different explicit limits, returns the existing `restore_in_progress`
 conflict instead of receiving the first request's replay page.
+
+Normalize the restore shape at bridge ingress before live-entry lookup, capacity
+admission, or in-flight coalescing. When `historyPageSize` is meaningful, validate
+it with the same integer range as the REST route and ACP child. This keeps direct
+bridge callers from creating a `recent(NaN)`/out-of-range key or reaching a
+different live-session path than a cold request. `historyPageSize` has meaning
+only for response-mode `load`; streamed load and resume normalize to their
+existing `all`/`none` shape even if a direct programmatic caller supplies the
+otherwise unused field. The REST route already returns
+`400 invalid_transcript_limit` before entering the bridge;
+meaningful invalid values from a direct bridge caller receive the bridge's local
+input-validation error. Use the normalized shape for live lookup too, so a field
+that is ignored for a cold request cannot become recent merely because the
+Session is resident.
+
+Classify every production restore caller by whether it consumes replay. Do not
+use compatibility-mode `all` merely to make a runtime resident:
+
+| Caller                                                                                        | Required restore shape                                                                                                                                   |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WebUI REST load after #8824                                                                   | `recent(100)` or the explicit requested limit                                                                                                            |
+| Generic REST/ACP HTTP/WS `session/load` with no page size                                     | `all`, preserving public compatibility                                                                                                                   |
+| Branch/side-task load that returns inherited/branched history                                 | `all` or its explicit recent request                                                                                                                     |
+| Scheduled-task startup rehydration and keepalive revival                                      | `none`; use bridge `resumeSession()` because the result ignores replay                                                                                   |
+| Direct and daemon-backed channel `SessionRouter` restoration                                  | `none`; keep the router's `loadSession` abstraction if useful, but implement it with ACP/SDK resume because neither adapter consumes the replay snapshot |
+| Parent notification recovery, live task/coordinator recovery, and sub-session parent recovery | Existing `resumeSession()`/`none` behavior                                                                                                               |
+
+Tests must prove scheduled-task rehydration still restores cron/Goal runtime
+state, while both channel adapters remain promptable and receive post-resume
+live updates. None may collect historical replay frames. Standalone
+`qwen/session/loadUpdates`, session export, and callers explicitly asking for
+prior UI history retain their documented full-read behavior outside this
+migration.
 
 Keep `qwen.session.loadReplay` at internal envelope version 1 and add optional
 `anchorRecordId?: string`. The agent sets it to the oldest selected active
@@ -627,6 +682,7 @@ sequenceDiagram
   end
   C->>S: "complete recorder and goal initialization"
   A->>A: "build and validate bounded replay envelope"
+  A->>S: "initialize Gemini; prebuild response before Session construction"
   A->>S: "run existing Session creation and rollback sequence"
   A->>S: "finalize selective restore before cron/commands"
   A-->>B: "published state + bounded replay envelope"
@@ -771,17 +827,26 @@ replay page. The session replays only `SessionRestoreReplayPage.records` plus
 the goal bootstrap described above.
 
 For response-mode load, transform the selected records and enforce the
-serialized byte/update bounds after Config authentication, tool setup, and model
-initialization but before runtime FileHistoryService hydration or `Session`
-construction. Once the envelope fits, immediately build the complete ACP success
-value from the initialized Config and projection, including modes, models,
-config options, artifact state, and replay metadata. Only after that succeeds may
-the runtime call `createAndStoreSession()`, hydrate file history, and copy
-the precomputed replay usage/turn state into it. A size/count or response-build
-failure therefore cleans up only an unregistered Config and reservation, without
-hydrating file history or constructing a Session. No fallible response builder
-may run after that point. The existing replay-conversion partial result may still
-register a fully initialized runtime and report bounded
+serialized byte/update bounds after Config authentication and tool setup but
+before runtime FileHistoryService hydration or `Session` construction. The
+current `createAndStoreSession()` performs `GeminiClient.initialize()` before it
+constructs or inserts a `Session`, and modes/models/config options must be built
+after that initialization to preserve the active-runtime model snapshot. Add one
+narrow pre-construction preparation callback (or an equivalently small split in
+the helper) after Gemini initialization, the second managed-admission check, and
+the active-id conflict check, but before `new Session(...)` and `sessions.set()`.
+It synchronously builds the complete ACP success value from the initialized
+Config and already-bounded projection/envelope, including modes, models, config
+options, artifact state, and replay metadata. It is not a second lifecycle gate
+and is unused by `newSession`.
+
+A size/count failure before the helper or a response-build failure in that
+pre-construction slot therefore cleans up only an unregistered Config and
+reservation, without hydrating file history or constructing a Session. Only
+after the slot succeeds may the existing helper construct/store the Session,
+hydrate file history, and copy the precomputed replay usage/turn state into it.
+No fallible response builder may run after map insertion. The existing
+replay-conversion partial result may still register a fully initialized runtime and report bounded
 `partial`/`replayError`; it must not be confused with an envelope-limit failure.
 
 ### Existing Session creation and targeted restore finalization
@@ -789,8 +854,8 @@ register a fully initialized runtime and report bounded
 Reuse #8691's existing `startingSessionIds` reservation and
 `reserveStartingSessionId()` lifecycle; do not add a second `preparingSessions`
 set. The reservation is acquired before cold settings/existence I/O and remains
-owned through projection, complete response construction, existing Session
-creation, or failure. Active and reserved ids both reject a second direct-ACP
+owned through projection, pre-construction response preparation, existing
+Session creation, or failure. Active and reserved ids both reject a second direct-ACP
 prepare, and the current handler-level `finally` releases the reservation exactly
 once. Do not add reservation-to-map conversion, a provisional unregistered
 Session, or another publication protocol.
@@ -800,13 +865,14 @@ continues to create and insert the Session before its existing replay,
 screen/worktree, Goal-hook, and rewriter setup. Failures already guarded by its
 current `try` continue through
 `discardStoredSessionIfCurrent()`/`removeStoredSessionEntry()`. Selective restore
-must finish its fresh projection, replay transformation and envelope limits,
-Goal bootstrap, and complete ACP response construction before calling it. A
-failure in those new steps therefore has no Session entry; guarded failures in
-the existing creation sequence keep their current stored-session rollback. Do
-not replace either path with a map-independent teardown, move every Session
-constructor callback behind a new lifecycle gate, or claim to repair unrelated
-pre-existing cleanup edges.
+must finish its fresh projection, replay transformation and envelope limits, and
+Goal bootstrap before calling it. The helper's narrow pre-construction slot then
+builds the response after Gemini initialization and before Session construction.
+A failure in any of those new steps therefore has no Session entry; guarded
+failures in the existing creation sequence keep their current stored-session
+rollback. Do not replace either path with a map-independent teardown, move every
+Session constructor callback behind a new lifecycle gate, or claim to repair
+unrelated pre-existing cleanup edges.
 
 Add one narrow ACP-only selective-restore finalizer at the end of the successful
 setup sequence: invoke it after `session.installRewriter()` and before the
@@ -819,6 +885,13 @@ missing-backup validation. Async completion is not awaited and cannot replace
 the already-built success response. Existing Session constructor callbacks,
 background/worktree restore, reporter notification, cron, commands, publication
 timing, and rollback ownership otherwise remain unchanged.
+
+This placement relies on the current post-rewriter tail being non-throwing:
+`startCronScheduler()` contains its own asynchronous error boundary and the
+available-command update is timer-scheduled/fire-and-forget. A future fallible or
+awaited setup step must stay before the selective finalizer (or move the
+finalizer after it); otherwise a later restore failure could occur after
+process-global attribution or autonomous work had been activated.
 
 Here child publication still means addressability in the ACP child, not
 acknowledgement of #8824's WebUI commit. #8691 owns late-result fencing and
@@ -904,25 +977,26 @@ selective path rejects the largest input.
 Every current consumer of full `ResumedSessionData` on the daemon path must have
 an explicit replacement:
 
-| Consumer                          | Current dependency                                                       | Replacement                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| `loadCliConfig()`                 | First full load                                                          | Preload one projection only when the writer protocol is disabled                       |
-| `Config.activateChatRecording()`  | Optional second full authoritative load                                  | Resolve the deferred projection under the acquired lease                               |
-| `ChatRecordingService.activate()` | Last UUID, turn parents, title and lineage from all messages             | `runtime.recording`                                                                    |
-| `Config.initializeGoalRuntime()`  | Full message list                                                        | normalized `runtime.goalRecords`                                                       |
-| Goal pending-checkpoint recovery  | `readActiveTranscriptChain()` full reload                                | projected bounded Goal checkpoint window                                               |
-| `GeminiClient.initialize()`       | API history, telemetry, token counts, attribution from full conversation | Pre-reduced runtime fields; attribution applied by the finalizer                       |
-| `Config.getFileHistoryService()`  | Lazy restore from `sessionData.fileHistorySnapshots`                     | Synchronous restore once after envelope validation                                     |
-| `createAndStoreSession()`         | File snapshots, turn boundaries, replay records                          | Reuse existing creation/rollback; run narrow restore finalization before cron/commands |
-| `Session.primeTurnFromHistory()`  | Initial turn and background notification ids                             | Precomputed ACP state                                                                  |
-| daemon goal hook restore          | Slash-command cards from all messages                                    | normalized `runtime.goalRecords` through the existing helpers                          |
-| load response artifact state      | Rebuilt from all physical records                                        | `runtime.artifactSnapshot`                                                             |
-| live load/resume                  | Full reload under write barrier                                          | Consumer-limited live projection under the same barrier                                |
+| Consumer                          | Current dependency                                                       | Replacement                                                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `loadCliConfig()`                 | First full load                                                          | Preload one projection only when the writer protocol is disabled                                                              |
+| `Config.activateChatRecording()`  | Optional second full authoritative load                                  | Resolve the deferred projection under the acquired lease                                                                      |
+| `ChatRecordingService.activate()` | Last UUID, turn parents, title and lineage from all messages             | `runtime.recording`                                                                                                           |
+| `Config.initializeGoalRuntime()`  | Full message list                                                        | normalized `runtime.goalRecords`                                                                                              |
+| Goal pending-checkpoint recovery  | `readActiveTranscriptChain()` full reload                                | projected bounded Goal checkpoint window                                                                                      |
+| `GeminiClient.initialize()`       | API history, telemetry, token counts, attribution from full conversation | Pre-reduced runtime fields; attribution applied by the finalizer                                                              |
+| `Config.getFileHistoryService()`  | Lazy restore from `sessionData.fileHistorySnapshots`                     | Synchronous restore once after envelope validation                                                                            |
+| `createAndStoreSession()`         | Gemini initialization, file snapshots, turn boundaries, replay records   | Prebuild the response in a narrow post-Gemini/pre-construction slot; reuse existing creation/rollback and finalization timing |
+| `Session.primeTurnFromHistory()`  | Initial turn and background notification ids                             | Precomputed ACP state                                                                                                         |
+| daemon goal hook restore          | Slash-command cards from all messages                                    | normalized `runtime.goalRecords` through the existing helpers                                                                 |
+| load response artifact state      | Rebuilt from all physical records                                        | `runtime.artifactSnapshot`                                                                                                    |
+| live load/resume                  | Full reload under write barrier                                          | Consumer-limited live projection under the same barrier                                                                       |
 
 The implementation is incomplete if any `session/load` or `session/resume`
 consumer named above still calls the old loader or silently treats a recent
-replay page as a complete conversation. The explicitly unchanged legacy paths
-remain outside that assertion.
+replay page as a complete conversation. It is also incomplete if a daemon-owned
+caller that ignores replay still requests compatibility-mode `all`. The
+explicitly unchanged public and legacy paths remain outside that assertion.
 
 ## Observability
 
@@ -1022,6 +1096,12 @@ behavior rather than inventing a new fallback.
   at most one in-progress aggregate record plus the fixed glued-line cache and
   declared final outputs, and validates selected I/O counts against the
   deduplicated UUID/segment plan.
+- The full scanner and transcript-proportional selected dispatcher yield to the
+  event loop after a fixed source-byte or elapsed-processing budget, only at
+  complete physical-line or aggregate boundaries. Deterministic scheduling tests
+  prove a queued timer/sibling callback runs before a large scan completes,
+  without changing record order, scan count, or reducer output. A single large
+  JSON record remains the documented indivisible scheduling unit.
 - A sparse transcript over 256 MiB fails before parsing and never invokes the
   old loader.
 - Concurrent append/growth, snapshot replacement, truncation, same-size rewrites
@@ -1048,12 +1128,16 @@ behavior rather than inventing a new fallback.
 - Same-shape bridge requests coalesce, while omitted/full versus explicit recent
   replay and unequal explicit page sizes return `restore_in_progress`; a waiter
   never receives another request's replay shape or loses typed error data.
+- Bridge ingress rejects an invalid meaningful page size before warm/cold
+  lookup, capacity admission, or coalescing. Streamed load and resume ignore the
+  otherwise unused field consistently in both residency states.
 - Session-id reservation covers scan through the existing creation attempt.
   Concurrent direct-ACP restores of one id cannot both prepare, and every
   failure releases the reservation for a clean retry.
-- New failures before `createAndStoreSession()` leave no map entry. Failures in
-  its currently guarded setup sequence use the stored-session rollback and leave
-  no stale Goal hook/observer, MCP ownership, Config, or map entry.
+- New failures before `createAndStoreSession()` and in its post-Gemini,
+  pre-construction response slot leave no map entry. Failures in its currently
+  guarded setup sequence use the stored-session rollback and leave no stale Goal
+  hook/observer, MCP ownership, Config, or map entry.
 - Envelope overflow and later prepare failure do not hydrate or validate the
   runtime FileHistoryService and cannot append a missing-backup snapshot.
   Successful creation restores state once and starts validation once from the
@@ -1073,9 +1157,14 @@ behavior rather than inventing a new fallback.
   singleton or autonomous work activated between child publication and parent
   adoption; this existing residual is documented without adding a new protocol
   prerequisite unless implementation evidence shows the slice expands it.
-- The complete ACP success response is built before runtime FileHistoryService
-  hydration or `createAndStoreSession()`. A response-builder failure
-  performs neither and leaves no map entry.
+- The complete ACP success response is built after Gemini initialization but
+  before runtime FileHistoryService hydration, Session construction, or map
+  insertion. A response-builder failure performs none of the latter three and
+  leaves no map entry.
+- Scheduled-task rehydration/keepalive and channel restoration use resume/none
+  rather than compatibility-mode all replay. They restore runtime services and
+  receive their required later live updates without collecting historical
+  replay frames.
 - The selective finalizer runs once after rewriter installation and before cron
   and command startup. Attribution, Goal activation, and FileHistory validation
   failures are independently contained and cannot convert the prebuilt success
@@ -1118,13 +1207,14 @@ approximately 2 MiB record and at least one live sibling session. Report:
 - cold restore wall time;
 - peak and post-registration settled heap/RSS or cgroup memory when available;
 - event-loop lag during the scan;
+- the largest observed physical-record parse/validation interval;
 - index bytes, selected record bytes, and replay bytes;
 - whether compression or the legacy full-model-history fallback was used;
 - sibling prompt continuity during and after restore.
 
 The benchmark is evidence, not a CI latency assertion. Functional CI asserts
-the number of scans, selected bytes, bounded replay, failure shape, and sibling
-survival.
+the number of scans, selected bytes, bounded replay, failure shape, cooperative
+scheduler progress, and sibling survival.
 
 ## Alternatives considered
 
@@ -1193,6 +1283,15 @@ replacement, rewind invalidation, and legacy bootstrap are a separate failure
 domain. Combining them would make the first performance PR harder to review and
 roll back. The streaming selective scan is also the required fallback for a
 missing or invalid future checkpoint.
+
+The checkpoint design must independently define a versioned discard-and-rebuild
+schema, atomic publication bound to a validated transcript prefix, an index
+coverage/active-leaf/tail-parent invariant, and bounded write amplification.
+Whether and how it persists the UUID-to-offset index and encodes incremental
+updates remains a decision for that phase. Existing file identity and snapshot
+size are a useful minimum but do not close same-inode in-place rewrite races
+without the cooperative writer protocol. Its legacy, corrupt, and missing
+checkpoint fallback reuses the cooperative full-scan policy above.
 
 ### Fall back to full materialization when indexing rejects a large file
 
@@ -1269,6 +1368,11 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 - **Selected reads are accumulated before reduction.** Use a consumer dispatcher
   with per-record fragment assembly; stream file-history and artifact inputs into
   their existing semantics and retain only unavoidable projection outputs.
+- **A full scan starves live siblings on the shared child.** Yield after a fixed
+  source-byte or elapsed-processing budget at complete physical-line boundaries,
+  and use the same policy for transcript-proportional selected dispatch. Keep a
+  single large record as an explicit residual instead of adding worker-thread or
+  streaming-parser scope.
 - **No-compression sessions still materialize substantial model history.** Emit
   a diagnostic attribute and state the limitation; the checkpoint follow-up is
   the only safe way to make these restores tail-proportional.
@@ -1304,7 +1408,9 @@ After selective restore:
 
 1. Add the durable checkpoint sidecar so valid restores read the checkpoint and
    only the JSONL tail, using this selective scanner as the legacy/corrupt
-   fallback.
+   fallback with the same cooperative-yield policy. Its design owns the exact
+   versioned schema, transcript-prefix validation, persisted-index format,
+   active-leaf/tail-parent invariant, and bounded incremental publication.
 2. Migrate standalone `qwen/session/loadUpdates` and post-rewind artifact refresh
    only if their independent compatibility and failure semantics justify it.
 3. Consider extending selective loading to TUI resume only after the daemon path
