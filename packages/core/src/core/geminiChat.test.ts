@@ -7696,11 +7696,10 @@ describe('GeminiChat', async () => {
     it('retries a transport stream error after yielding only thinking chunks', async () => {
       // Thinking models stream thought parts within seconds, then can
       // spend minutes reasoning — exactly when gateways close long-lived
-      // SSE connections (#7832). The replay is safe because the failed
-      // attempt's partial turn is discarded wholesale before the retry
-      // and thought parts are never user-visible content — the successful
-      // attempt's thoughts DO land in history — so the replay cannot
-      // duplicate anything the caller saw and must be allowed.
+      // SSE connections (#7832). The replay must be allowed even though
+      // thought chunks already reached the caller: the failed attempt's
+      // partial turn is discarded wholesale before the retry, so nothing
+      // the caller saw from that attempt can appear twice.
       vi.useFakeTimers();
       try {
         const transportError = socketCut();

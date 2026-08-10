@@ -151,10 +151,9 @@ function hasCandidateOutput(response: GenerateContentResponse): boolean {
  * is NOT that thought parts stay out of history — the successful
  * attempt's thoughts are recorded there. It is that the failed
  * attempt's accumulated partial turn is discarded wholesale before the
- * retry (`popPendingPartialAssistantTurn`), and thought parts are never
- * user-visible content — so nothing the caller saw from the failed
- * attempt can appear twice. The transport stream retry gate relies on
- * this distinction (#7832).
+ * retry (`popPendingPartialAssistantTurn`), so nothing the caller saw
+ * from the failed attempt can appear twice. The transport stream retry
+ * gate relies on this distinction (#7832).
  */
 function hasNonThoughtCandidateParts(
   response: GenerateContentResponse,
@@ -2929,13 +2928,13 @@ export class GeminiChat {
             }
 
             // Replay only curated socket-level failures before any
-            // user-visible content has reached callers. Thinking-only
-            // output does not block the replay: the failed attempt's
-            // partial turn is popped wholesale below, and thought parts
-            // are never user-visible content, so the replay cannot
-            // duplicate anything the caller saw — and thinking models
-            // can spend minutes in that phase, exactly when gateways
-            // close long-lived SSE connections (#7832).
+            // content (non-thought output) has reached callers.
+            // Thinking-only output does not block the replay: the
+            // failed attempt's partial turn is popped wholesale below,
+            // so nothing the caller saw from that attempt can appear
+            // twice — and thinking models can spend minutes in that
+            // phase, exactly when gateways close long-lived SSE
+            // connections (#7832).
             const isRetryableStreamTransportError =
               classification.kind === 'transport' &&
               classification.transportCode !== undefined &&
