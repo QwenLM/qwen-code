@@ -125,14 +125,19 @@ function withoutNullishThinkingKnobs(
   if (!layer) {
     return undefined;
   }
+  const hasNullishEnableThinking =
+    'enable_thinking' in layer && layer['enable_thinking'] == null;
   const hasNullishEffort =
     'reasoning_effort' in layer && layer['reasoning_effort'] == null;
   const hasNullishBudget =
     'thinking_budget' in layer && layer['thinking_budget'] == null;
-  if (!hasNullishEffort && !hasNullishBudget) {
+  if (!hasNullishEnableThinking && !hasNullishEffort && !hasNullishBudget) {
     return layer;
   }
   const sanitized = { ...layer };
+  if (hasNullishEnableThinking) {
+    delete sanitized['enable_thinking'];
+  }
   if (hasNullishEffort) {
     delete sanitized['reasoning_effort'];
   }
@@ -526,7 +531,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * in buildRequest exists to prevent), and DashScope rejects
    * `reasoning_effort` combined with `thinking_budget`. The `'none'`
    * disable and a winning `thinking_budget` intentionally keep a co-present
-   * `enable_thinking`. Explicit same-layer effort/budget pairs retain
+   * `enable_thinking: true`. Explicit same-layer effort/budget pairs retain
    * reasoning_effort, matching the provider's behavior before cross-layer
    * resolution. An explicit `enable_thinking: false` is the documented
    * extra_body escape hatch winning over the config tier, so it is honoured
@@ -545,70 +550,58 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     merged: Record<string, unknown>,
     selectedThinkingKnob?: DashScopeThinkingKnobSelection,
   ): string[] {
-    const effort = merged['reasoning_effort'];
-    if (typeof effort !== 'string') {
-      return [];
-    }
     const wireModel = this.resolveWireModel(model);
     if (!isQwenFamilyWireModel(wireModel)) {
+      return [];
+    }
+    const isTieredEffortModel = isTieredEffortWireModel(wireModel);
+    if (
+      isTieredEffortModel &&
+      selectedThinkingKnob?.field === 'enable_thinking' &&
+      selectedThinkingKnob.value === false
+    ) {
+      merged['reasoning_effort'] = 'none';
+      const dropped = ['enable_thinking'];
+      if (merged['thinking_budget'] !== undefined) {
+        dropped.push('thinking_budget');
+      }
+      for (const key of dropped) {
+        delete merged[key];
+      }
+      return dropped;
+    }
+
+    const effort = merged['reasoning_effort'];
+    if (typeof effort !== 'string') {
       return [];
     }
     // `none` is a real disable only for the tiered family. On legacy Qwen
     // models reasoning_effort is opaque, so preserve the meaningful budget
     // and drop the inert field just like any other effort value.
-    if (isTieredEffortWireModel(wireModel) && effort === 'none') {
+    if (isTieredEffortModel && effort === 'none') {
       if (merged['thinking_budget'] === undefined) {
         return [];
       }
       delete merged['thinking_budget'];
       return ['thinking_budget'];
     }
-    const dropped: string[] = [];
-    if (isTieredEffortWireModel(wireModel)) {
-      if (selectedThinkingKnob?.field === 'enable_thinking') {
-        // Only the off-switch rewrites the tier; a higher-priority
-        // `enable_thinking: true` keeps thinking on, so the shipping tier
-        // survives and only the redundant knobs go.
-        if (selectedThinkingKnob.value !== true) {
-          merged['reasoning_effort'] = 'none';
-        }
-        dropped.push('enable_thinking');
-        if (merged['thinking_budget'] !== undefined) {
-          dropped.push('thinking_budget');
-        }
-      } else if (selectedThinkingKnob?.field === 'reasoning_effort') {
-        if ('enable_thinking' in merged) {
-          dropped.push('enable_thinking');
-        }
-        if (merged['thinking_budget'] !== undefined) {
-          dropped.push('thinking_budget');
-        }
+
+    if (isTieredEffortModel) {
+      if (
+        selectedThinkingKnob?.field === 'reasoning_effort' &&
+        'enable_thinking' in merged
+      ) {
+        delete merged['enable_thinking'];
+        return ['enable_thinking'];
       }
-      if (dropped.length > 0) {
-        for (const key of dropped) {
-          delete merged[key];
-        }
-        return dropped;
-      }
-      if ('enable_thinking' in merged) {
-        if (merged['enable_thinking'] === false) {
-          merged['reasoning_effort'] = 'none';
-        }
-        dropped.push('enable_thinking');
-      }
-      if (merged['thinking_budget'] !== undefined) {
-        dropped.push('thinking_budget');
-      }
-    } else if (merged['thinking_budget'] !== undefined) {
-      dropped.push('reasoning_effort');
-    }
-    if (dropped.length === 0) {
       return [];
     }
-    for (const key of dropped) {
-      delete merged[key];
+
+    if (merged['thinking_budget'] === undefined) {
+      return [];
     }
-    return dropped;
+    delete merged['reasoning_effort'];
+    return ['reasoning_effort'];
   }
 
   private warnConflictingKnobDrop(
