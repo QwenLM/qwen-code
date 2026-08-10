@@ -2166,13 +2166,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
       debugLogger.warn('Failed to extract command rules:', e);
     }
 
-    // Flag command substitution ($(), backticks, <(), >(), ${parameter@P})
-    // so the user sees a visible warning in the confirmation dialog. We
-    // surface this as an informational warning rather than denying
-    // outright; the deny path was inconsistent and could not be overridden
-    // by YOLO mode (see issue #4093). Substitution is detected on both the
-    // stripped and original command so wrappers like `bash -c "..."` are
-    // checked along with their inner contents.
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. We surface this
+    // as an informational warning rather than denying outright; the deny
+    // path was inconsistent and could not be overridden by YOLO mode
+    // (see issue #4093). Substitution is detected on both the stripped
+    // and original command so wrappers like `bash -c "..."` are checked
+    // along with their inner contents.
     const warnings = [
       ...(buildShellExecWarnings(command, this.params.command) ?? []),
       ...(sedEditPreviewWarning ? [sedEditPreviewWarning] : []),

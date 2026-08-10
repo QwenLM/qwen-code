@@ -264,11 +264,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
       permissionRules = [`Monitor(${normalized.safetyCommand})`];
     }
 
-    // Flag command substitution ($(), backticks, <(), >(), ${parameter@P})
-    // so the user sees a visible warning in the confirmation dialog.
-    // Mirrors the pattern in ShellToolInvocation.getConfirmationDetails —
-    // see #4093 for why we surface this as a warning rather than denying
-    // outright. Checked against both the normalized safety command and the
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. Mirrors the
+    // pattern in ShellToolInvocation.getConfirmationDetails — see #4093
+    // for why we surface this as a warning rather than denying outright.
+    // Checked against both the normalized safety command and the
     // original params.command so wrappers like `bash -c "..."` still
     // trigger the warning.
     const warnings = buildShellExecWarnings(

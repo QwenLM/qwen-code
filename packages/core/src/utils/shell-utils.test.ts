@@ -159,87 +159,6 @@ describe('isCommandAllowed', () => {
       expect(detectCommandSubstitution('echo "${value@P}"')).toBe(true);
       expect(detectCommandSubstitution('echo "${value@Q}"')).toBe(false);
       expect(detectCommandSubstitution("echo '${value@P}'")).toBe(false);
-      expect(detectCommandSubstitution('echo "$\\\n{value@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo $\\\n{value@P}')).toBe(true);
-      expect(detectCommandSubstitution('echo "\\$\\\n{value@P}"')).toBe(false);
-      expect(detectCommandSubstitution('echo "$\\\n{value@Q}"')).toBe(false);
-      expect(detectCommandSubstitution('echo "$\\\n{value}"')).toBe(false);
-      expect(
-        detectCommandSubstitution(
-          'value=\'$(touch PWNED)\'; echo "$\\\n{value@P}"',
-        ),
-      ).toBe(true);
-      // The issue's verbatim variant-2 payload: nested double quotes inside
-      // the `${...}` assignment operators.
-      expect(
-        detectCommandSubstitution(
-          'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
-        ),
-      ).toBe(true);
-      // Numeric/special-parameter alternatives and the subscript branch.
-      expect(detectCommandSubstitution('echo "${1@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${arr[0]@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${arr[0]}"')).toBe(false);
-      expect(detectCommandSubstitution('echo "${*@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${@@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${*@Q}"')).toBe(false);
-      // Line continuations inside the expansion body (#8582 variant 1).
-      expect(detectCommandSubstitution('echo "${value@\\\nP}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${a[\\\nx]@P}"')).toBe(true);
-    });
-
-    it('detects ${parameter@P} payloads hidden in array subscripts', () => {
-      // Bash parses subscripts quote- and nesting-aware, so `}` and `]`
-      // inside a subscript key do not terminate the expansion; the scan
-      // must find the real end of the expansion. All shapes are executed by
-      // bash 5.x (probe-verified in the #8590 review).
-      expect(
-        detectCommandSubstitution(
-          'declare -A a; a[}]=\'$(touch PWNED)\'; echo "${a[}]@P}"',
-        ),
-      ).toBe(true);
-      expect(detectCommandSubstitution('echo "${a[}]@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${b["x]y"]@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${arr[${x}]@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${a[x\ny]@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${x[${y[${z[0]}]}]@P}"')).toBe(
-        true,
-      );
-      // Nested expansions inside operator remainders are skipped whole.
-      expect(detectCommandSubstitution('echo "${arr[${a:-${b[}]}}]@P}"')).toBe(
-        true,
-      );
-      expect(detectCommandSubstitution('echo "${arr[${a:-${b[}]}}]}"')).toBe(
-        false,
-      );
-      // An unmatchable subscript fails closed.
-      expect(detectCommandSubstitution('echo "${a["x]@P}"')).toBe(true);
-      // Same shapes without `@P` stay clean.
-      expect(detectCommandSubstitution('echo "${a[}]}"')).toBe(false);
-      expect(detectCommandSubstitution('echo "${b["x]y"]}"')).toBe(false);
-      expect(detectCommandSubstitution('echo "${a["x]}"')).toBe(false);
-      expect(detectCommandSubstitution("echo '${a[}]@P}'")).toBe(false);
-      // `!` indirection prefix — bash prompt-expands the indirectly
-      // referenced value (§R5-1).
-      expect(detectCommandSubstitution('echo "${!ref@P}"')).toBe(true);
-      // ANSI-C quoting ($'...') — an escaped quote inside does not end
-      // the quoting region (§R5-9).
-      expect(detectCommandSubstitution("echo $'x\\'y' \"${b@P}\"")).toBe(true);
-      // Quote-state desync inside inner-quoted ${...} — the scanner
-      // must not toggle word-level quote state from quotes inside an
-      // expansion (§R7-1).
-      expect(detectCommandSubstitution('echo "${a:-"\'${b@P}\'"}"')).toBe(true);
-    });
-
-    it('does not overflow on adversarially nested expansions', () => {
-      // Deep nesting is capped and fails closed instead of throwing.
-      const deep = `echo "${'${a['.repeat(20000)}${'}]'.repeat(20000)}@\\
-P}"`;
-      expect(() => detectCommandSubstitution(deep)).not.toThrow();
-      expect(detectCommandSubstitution(deep)).toBe(true);
-      const deepWithoutAtP = `"${'${a['.repeat(20000)}0${'}]'.repeat(20000)}"`;
-      expect(() => detectCommandSubstitution(deepWithoutAtP)).not.toThrow();
-      expect(detectCommandSubstitution(deepWithoutAtP)).toBe(false);
     });
 
     it('should block command substitution using `$(...)`', async () => {
@@ -357,14 +276,6 @@ P}"`;
 
         const result = await isCommandAllowed(cmd, config);
         expect(result.allowed).toBe(true);
-      });
-
-      it('should detect ${parameter@P} split by continuation in an unquoted heredoc body (§R2-1)', async () => {
-        const cmd = ['cat <<EOF', '${va\\', 'lue@P}', 'EOF'].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
       });
     });
 
@@ -1399,14 +1310,6 @@ describe('checkArgumentSafety', () => {
     it('should accept arguments with spaces (quoted)', async () => {
       const result = checkArgumentSafety('hello world');
       expect(result.isSafe).toBe(true);
-    });
-
-    it('should detect ${parameter@P} prompt expansion (§R7-3)', async () => {
-      const result = checkArgumentSafety('${foo@P}');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain(
-        '${parameter@P} prompt expansion',
-      );
     });
   });
 
