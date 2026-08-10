@@ -59,7 +59,14 @@ interface ProviderMetadata {
   version?: string;
   baseUrl?: string;
   ignoredVersion?: string;
+  postponedVersion?: string;
+  postponedAt?: number;
 }
+
+// "Later" suppresses re-prompting for the same version for this long, so a
+// user who defers is not nagged on every launch. A new model-list version
+// still re-prompts immediately (postponedVersion no longer matches).
+const LATER_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h
 
 function getProviderMetadata(
   settings: LoadedSettings,
@@ -202,6 +209,16 @@ function findAllPendingUpdates(
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
+
+    // A "later" choice suppresses re-prompting for the same version while the
+    // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
+    if (
+      metadata.postponedVersion === currentVersion &&
+      typeof metadata.postponedAt === 'number' &&
+      Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
+    ) {
+      continue;
+    }
 
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
     const newModelIds = provider.models!.map((s) => s.id);
@@ -366,6 +383,21 @@ export function useProviderUpdates(
               persistScope,
               `${PROVIDER_METADATA_NS}.${p.metadataKey}.ignoredVersion`,
               p.currentVersion,
+            );
+          }
+        } else if (choice === 'later') {
+          // Persist a cooldown so "later" does not re-prompt on every launch.
+          const persistScope = getPersistScopeForModelSelection(settings);
+          for (const p of pendingList) {
+            settings.setValue(
+              persistScope,
+              `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
+              p.currentVersion,
+            );
+            settings.setValue(
+              persistScope,
+              `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+              Date.now(),
             );
           }
         }

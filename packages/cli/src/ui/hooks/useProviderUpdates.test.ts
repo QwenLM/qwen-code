@@ -455,7 +455,7 @@ describe('useProviderUpdates', () => {
     );
   });
 
-  it('dismisses without persisting when user chooses "later"', async () => {
+  it('persists a cooldown (not a full update) when user chooses "later"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -483,7 +483,18 @@ describe('useProviderUpdates', () => {
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
-    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    // "later" persists a postponement cooldown so the prompt does not reappear
+    // on every launch, but it must not apply the update.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      'User',
+      `providerMetadata.${METADATA_KEY}.postponedVersion`,
+      expect.any(String),
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      'User',
+      `providerMetadata.${METADATA_KEY}.postponedAt`,
+      expect.any(Number),
+    );
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
