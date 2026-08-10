@@ -174,6 +174,9 @@ export function AddWorkspaceDialog({
       setError(t('sidebar.addWorkspaceBrowseError'));
     } finally {
       setBrowsing(false);
+      // The blur before the picker set suppressNextFetchOpenRef; clear it so
+      // the first edit after a cancelled or no-op pick still opens the list.
+      suppressNextFetchOpenRef.current = false;
     }
   }, [onPick, closeList, t]);
 

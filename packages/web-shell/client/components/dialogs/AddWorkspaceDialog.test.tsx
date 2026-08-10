@@ -413,6 +413,87 @@ describe('AddWorkspaceDialog', () => {
       expect(input().value).toBe('');
     });
 
+    it('opens suggestions on the first edit after a cancelled picker', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => {
+        browseButton().click();
+      });
+      // While the picker is open, the blur timer sets the suppress flag.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      await act(async () => {
+        resolvePick(undefined);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => input().focus());
+      type('/home/me/co');
+      await settle();
+
+      expect(onSuggest).toHaveBeenCalledWith('/home/me/co');
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('opens suggestions on the first edit after picking the typed path', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      act(() => {
+        browseButton().click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      await act(async () => {
+        // Same value as typed: setPath bails out, so no path-change effect.
+        resolvePick('/home/me/co');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => input().focus());
+      type('/home/me/cod');
+      await settle();
+
+      expect(listbox()).not.toBeNull();
+    });
+
     it('shows an error when the system picker fails', async () => {
       const onPick = vi.fn().mockRejectedValue(new Error('boom'));
       mount(
