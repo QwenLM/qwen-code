@@ -354,10 +354,38 @@ function assertSameEntry(
     stat.dev !== expected.dev ||
     stat.ino !== expected.ino
   ) {
-    throw new Error(
+    throw new EntryChangedError(
       `session registry entry ${filePath} changed between validation and write`,
     );
   }
+}
+
+/**
+ * The pinned entry is not the one that was validated: it was swapped for
+ * another inode, or replaced by a directory or a link.
+ *
+ * A named type rather than a bare `Error` so a caller can tell this apart
+ * from the I/O errors a write raises for its own reasons — the two want
+ * opposite responses, retry the decision versus give up on it.
+ */
+class EntryChangedError extends Error {}
+
+/**
+ * Whether a failed commit assertion means the name is simply no longer
+ * what it was — swapped ({@link EntryChangedError}) or gone (`ENOENT`,
+ * thrown by `assertSameEntry`'s own `lstatSync`).
+ *
+ * Both say the same thing to a writer that pinned an entry: the decision
+ * that chose a replacing write was made about a directory entry that no
+ * longer exists, so it has to be made again rather than reported as a
+ * failure. Only ever consulted for errors raised *inside* the assertion,
+ * so an `ENOENT` from elsewhere in the write is not mistaken for this.
+ */
+function isEntryRace(error: unknown): boolean {
+  return (
+    error instanceof EntryChangedError ||
+    (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+  );
 }
 
 /**
@@ -507,14 +535,47 @@ export async function registerSession(
         // the registry: the sandbox shares this directory across a trust
         // boundary, so the planting side is not hypothetical.
         const pinned = replacing;
-        await atomicWriteJSON(filePath, record, {
-          mode: REGISTRY_FILE_MODE,
-          forceMode: true,
-          noFollow: true,
-          assertCanCommit: pinned
-            ? () => assertSameEntry(filePath, pinned.entry, pinned.requireFile)
-            : undefined,
-        });
+        // Set by the assertion below, and only by it: a commit that failed
+        // because the pinned entry moved is a lost race, not a failed
+        // write, and the two leave through the same `catch`.
+        let raced = false;
+        try {
+          await atomicWriteJSON(filePath, record, {
+            mode: REGISTRY_FILE_MODE,
+            forceMode: true,
+            noFollow: true,
+            // `<pid>.json` is a name for a slot, not a document with an
+            // author: whoever holds that PID now owns the entry, and the
+            // replacement is the whole point of this branch. Preserving
+            // the predecessor's uid instead would write in place, which
+            // is EACCES on the 0600 record a root-run session leaves
+            // behind — registration would fail for a name this process
+            // is entitled to, silently and for its whole lifetime.
+            preserveOwner: false,
+            assertCanCommit: pinned
+              ? () => {
+                  try {
+                    assertSameEntry(filePath, pinned.entry, pinned.requireFile);
+                  } catch (error) {
+                    raced = isEntryRace(error);
+                    throw error;
+                  }
+                }
+              : undefined,
+          });
+        } catch (error) {
+          if (!raced) throw error;
+          // The replace path's counterpart to the create path's 'taken'
+          // above: a concurrent sweep legitimately unlinked the stale
+          // predecessor, so the name this write was going to replace is
+          // free (or holds a record that arrived since). Go round again
+          // and decide about what is there now — the exclusive create
+          // will claim it. Without this the ENOENT reached the outer
+          // catch and registration, which only ever runs at startup,
+          // returned false: a session absent from `qwen sessions ps` for
+          // its entire life, with no `onOriginConflict` to explain it.
+          continue;
+        }
         retiredPids.delete(pid);
         return true;
       }

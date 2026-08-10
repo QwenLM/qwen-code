@@ -48,6 +48,24 @@ export interface AtomicWriteFileOptions extends AtomicWriteOptions {
    * semantics. Default: false (follow symlinks). See PR #4333 review.
    */
   noFollow?: boolean;
+  /**
+   * Keep the existing target's inode — and therefore its uid — when it is
+   * owned by another user, by writing in place instead of renaming over
+   * it. Default: true.
+   *
+   * Pass `false` where the file *is* the thing being replaced rather than
+   * a document being edited: a registry or lock entry named after a
+   * resource, whose contents belong to whoever holds the resource now.
+   * Preserving a stranger's inode there is not a courtesy, it is a write
+   * that cannot succeed — an in-place open of a 0600 file owned by
+   * another uid is EACCES, and the caller ends up unable to claim a name
+   * it is entitled to. Replacement needs write permission on the
+   * *directory*, which such callers own.
+   *
+   * No effect on {@link atomicWriteFileSync}, which has no ownership
+   * fallback: it always replaces.
+   */
+  preserveOwner?: boolean;
   /** Reject the write immediately before its irreversible commit step. */
   assertCanCommit?: () => void;
 }
@@ -130,7 +148,9 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * Atomically write content to a file (write-to-temp + rename).
  *
  * Falls back to in-place write when the existing file's uid differs
- * from the process's euid — POSIX rename would reset ownership.
+ * from the process's euid — POSIX rename would reset ownership — unless
+ * the caller passes `preserveOwner: false`, which keeps the replacing
+ * rename for entries whose owner is not part of what is being written.
  * Also falls back on EXDEV (cross-device). Both fallbacks lose crash
  * atomicity but preserve the existing inode's uid.
  *
@@ -254,6 +274,11 @@ export async function atomicWriteFile(
   // directory's GID for new files, making egid !== file.gid a
   // false positive on the most common dev platform.
   const ownershipWouldChange = (): boolean => {
+    // `preserveOwner: false` is a caller saying the entry's owner is not
+    // part of what it is writing (see the option's doc). Deciding it here
+    // keeps the fallback's own invariants — validated inode, no re-resolved
+    // path — intact for everyone who does preserve ownership.
+    if (options?.preserveOwner === false) return false;
     if (existingStat === undefined) return false;
     if (process.platform === 'win32') return false;
     const euid = process.geteuid?.();

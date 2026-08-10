@@ -53,8 +53,31 @@ vi.mock('../utils/process-liveness.js', async (importOriginal) => {
  */
 const statSizeLie = vi.hoisted(() => ({ value: null as number | null }));
 
+/**
+ * Lets a test land another session's sweep in the one window a fixture
+ * cannot reach: after a replacing write has staged its temp file and
+ * before it commits, which is where the entry it pinned can still be
+ * unlinked out from under it. Armed with the path to remove; fires once.
+ */
+const sweepBeforeCommit = vi.hoisted(() => ({ value: null as string | null }));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const writeFile: typeof actual.writeFile = async (...args) => {
+    const result = await actual.writeFile(...args);
+    const victim = sweepBeforeCommit.value;
+    // Only the staged temp file: the arming test's own fixture write goes
+    // through here too, and disarming on it would fire in the wrong place.
+    if (
+      victim !== null &&
+      typeof args[0] === 'string' &&
+      args[0].endsWith('.tmp')
+    ) {
+      sweepBeforeCommit.value = null;
+      await actual.rm(victim, { force: true });
+    }
+    return result;
+  };
   const open: typeof actual.open = async (...args) => {
     const handle = await actual.open(...args);
     const realStat = handle.stat.bind(handle);
@@ -69,7 +92,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     };
     return handle;
   };
-  return { ...actual, default: { ...actual, open }, open };
+  return {
+    ...actual,
+    default: { ...actual, open, writeFile },
+    open,
+    writeFile,
+  };
 });
 
 vi.mock('../config/storage.js', () => {
@@ -99,6 +127,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   statSizeLie.value = null;
+  sweepBeforeCommit.value = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -333,6 +362,94 @@ describe('registerSession', () => {
       }),
     ).toBe(true);
 
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+      sessionId: 's-ours',
+      cwd: '/w/ours',
+    });
+  });
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'takes over a same-origin record another user owns, rather than writing into it',
+    async () => {
+      // `sudo qwen` against the same HOME — a deployment this module's
+      // threat model already names — leaves a 0600 record owned by root
+      // at that PID. It is same-origin, so the recovery path above
+      // applies, but a write that preserved the predecessor's inode
+      // could not open it: registration would fail silently, and
+      // nothing re-runs it. Replacement is what the entry is for.
+      const filePath = await writeRaw(`${process.pid}.json`, {
+        schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+        pid: process.pid,
+        procStart: '1',
+        pidNamespace: readPidNamespaceId(),
+        machineId: readMachineId(),
+        sessionId: 's-predecessor',
+        cwd: '/w/before',
+        name: 'before-aa',
+        kind: 'interactive',
+        startedAt: 1000,
+      });
+      await fs.chmod(filePath, 0o600);
+      const before = await fs.stat(filePath);
+
+      // The fixture cannot be given a foreign uid without root, so the
+      // comparison the decision actually reads is moved instead.
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => before.uid + 1;
+      try {
+        expect(
+          await registerSession({
+            sessionId: 's-ours',
+            cwd: '/w/ours',
+            kind: 'interactive',
+          }),
+        ).toBe(true);
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      // A new inode is the proof: the in-place path preserves it, and is
+      // the one that cannot work on a file this process does not own.
+      expect((await fs.stat(filePath)).ino).not.toBe(before.ino);
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+      });
+    },
+  );
+
+  it('re-decides when a sweep unlinks the record it was replacing', async () => {
+    // The replace path's version of the create path's lost race. Another
+    // session's `qwen sessions ps` legitimately sweeps the stale
+    // predecessor while this write sits between validation and commit;
+    // the commit assertion then finds nothing. Giving up there costs the
+    // session its entire lifetime on the register, because registration
+    // is startup-only and nothing else writes the record.
+    const filePath = await writeRaw(`${process.pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid: process.pid,
+      procStart: '1',
+      pidNamespace: readPidNamespaceId(),
+      machineId: readMachineId(),
+      sessionId: 's-predecessor',
+      cwd: '/w/before',
+      name: 'before-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+    sweepBeforeCommit.value = filePath;
+
+    expect(
+      await registerSession({
+        sessionId: 's-ours',
+        cwd: '/w/ours',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    // Second pass sees a free name and claims it exclusively.
     expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
       sessionId: 's-ours',
       cwd: '/w/ours',

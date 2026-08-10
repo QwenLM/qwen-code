@@ -332,6 +332,43 @@ describe('atomicWriteFile', () => {
   it.skipIf(
     process.platform === 'win32' || typeof process.geteuid !== 'function',
   )(
+    'replaces a foreign-uid target rather than writing in place under preserveOwner: false',
+    async () => {
+      // The fallback the sibling above pins is a dead end for callers
+      // whose file is a *slot* named after a resource: the in-place open
+      // is O_WRONLY on another uid's 0600 file, which is EACCES, and the
+      // write fails for a name the caller is entitled to claim. A new
+      // inode is the signal that the replacing rename ran instead.
+      const filePath = path.join(tmpDir, 'slot.json');
+      await fs.writeFile(filePath, 'predecessor');
+      await fs.chmod(filePath, 0o600);
+
+      const realStat = await fs.stat(filePath);
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        await atomicWriteFile(filePath, 'mine', {
+          mode: 0o600,
+          forceMode: true,
+          noFollow: true,
+          preserveOwner: false,
+        });
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('mine');
+      const statAfter = await fs.stat(filePath);
+      expect(statAfter.ino).not.toBe(realStat.ino);
+      expect(statAfter.mode & 0o777).toBe(0o600);
+      expect(await fs.readdir(tmpDir)).toEqual(['slot.json']);
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
     'should skip in-place fallback for non-regular files and use atomic replace',
     async () => {
       // FIFO + ownership mismatch must NOT take the in-place fallback —

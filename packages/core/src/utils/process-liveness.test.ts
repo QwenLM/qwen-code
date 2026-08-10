@@ -235,6 +235,12 @@ describe('readPidNamespaceId', () => {
   });
 
   it('reports an unreadable link as unprovable, not as "no namespaces"', () => {
+    // Same guard as the sibling above, and for a stronger reason than
+    // "the fixture is Linux-shaped": `readPidNamespaceId` returns null
+    // before it reads anything at all off Linux, so the mock below is
+    // never reached and the assertion is against the wrong platform's
+    // answer. Without this, the macOS and Windows CI jobs go red.
+    if (process.platform !== 'linux') return;
     nsReadFails.value = true;
     try {
       // Specifically NOT null. null is the claim "this platform has no PID
@@ -251,6 +257,7 @@ describe('readPidNamespaceId', () => {
   });
 
   it('reports a link whose target does not parse as unprovable too', () => {
+    if (process.platform !== 'linux') return;
     nsLinkTarget.value = 'pid:[not-an-inode]';
     try {
       expect(readPidNamespaceId()).toBe(PID_NAMESPACE_UNREADABLE);
