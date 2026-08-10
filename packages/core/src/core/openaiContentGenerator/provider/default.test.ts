@@ -94,9 +94,8 @@ describe('DefaultOpenAICompatibleProvider', () => {
   });
 
   describe('getResponseParsingOptions', () => {
-    it('enables thinking-tag leak handling', () => {
+    it('enables leak handling without treating balanced tags as protocol', () => {
       expect(provider.getResponseParsingOptions()).toEqual({
-        taggedThinkingTags: true,
         contentOnlyThinkingTagLeaks: true,
       });
     });

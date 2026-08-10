@@ -1582,8 +1582,8 @@ export function convertOpenAIChunkToGemini(
         !/\S/.test(combinedCandidateText);
       // The length cap releases undecided prefixes (e.g. a literal "<t" that
       // never resolves) so ordinary content is not buffered forever. Once the
-      // candidate has committed to a complete opening tag with real content,
-      // though, releasing it leaks the whole block — production thinking-tag
+      // candidate has committed to a complete opening tag, though, releasing
+      // it can leak the whole block — production thinking-tag
       // leaks are longer than the cap (issue #6666). Keep those held; the
       // fail-closed throw below rejects them once they exceed the cap.
       // Accepted trade-off: a legitimate balanced literal longer than the cap
@@ -1591,10 +1591,7 @@ export function convertOpenAIChunkToGemini(
       // it is indistinguishable from an unclosed leak.
       const confirmedOpeningTagCandidate =
         LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
-        !combinedCandidateText.trimStart().startsWith('</') &&
-        /\S/.test(
-          combinedCandidateText.replace(LEADING_THINKING_TAG_PATTERN, ''),
-        );
+        !combinedCandidateText.trimStart().startsWith('</');
       const releaseContentOnlyCandidate =
         contentOnlyThinkingState === 'pending' &&
         (Boolean(choice.finish_reason) ||

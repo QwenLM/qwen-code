@@ -127,10 +127,8 @@ export class DefaultOpenAICompatibleProvider
   getResponseParsingOptions(): OpenAIResponseParsingOptions {
     // Hybrid-thinking models occasionally bypass the reasoning channel and
     // emit their thinking as literal <think>/<thinking> tags inside content
-    // (observed in production on qwen3-class models, issue #6666). Enable
-    // both tagged parsing and the conservative malformed-stream fallback for
-    // every OpenAI-compatible endpoint.
-    return { taggedThinkingTags: true, contentOnlyThinkingTagLeaks: true };
+    // (observed in production on qwen3-class models, issue #6666).
+    return { contentOnlyThinkingTagLeaks: true };
   }
 
   /**

@@ -638,24 +638,17 @@ describe('OpenAIContentConverter', () => {
       expect(parts.every((part) => part.thought !== true)).toBe(true);
     });
 
-    it('releases a long undecided prefix before the stream finishes', () => {
+    it('rejects a confirmed opening tag that exceeds the buffer limit', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const text = `<think>${' '.repeat(257)}`;
 
-      const response = converter.convertOpenAIChunkToGemini(
-        streamChunk('literal', { content: text }),
-        stream,
-      );
-      const continuation = converter.convertOpenAIChunkToGemini(
-        streamChunk('continuation', { content: 'literal' }, 'stop'),
-        stream,
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
-      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'literal' },
-      ]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('literal', { content: text }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
     it('preserves a leak-shaped literal without provider provenance', () => {
@@ -5165,6 +5158,7 @@ describe('OpenAIContentConverter', () => {
 
     it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
       const ctx = withStreamParser();
+      ctx.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const part =
         converter.convertOpenAIChunkToGemini(
           {
@@ -5301,7 +5295,10 @@ describe('OpenAIContentConverter', () => {
             },
           ],
         } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
+        {
+          ...requestContext,
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+        },
       );
 
       expect(response.candidates?.[0]?.content?.parts).toEqual([
@@ -5404,10 +5401,6 @@ describe('OpenAIContentConverter', () => {
 
     it('should keep nested balanced thinking blocks out of visible content', () => {
       const context = withTaggedThinkingStreamParser();
-      context.responseParsingOptions = {
-        taggedThinkingTags: true,
-        contentOnlyThinkingTagLeaks: true,
-      };
 
       const chunks = [
         {
