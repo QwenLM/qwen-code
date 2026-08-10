@@ -14284,6 +14284,171 @@ describe('Session', () => {
         ).not.toHaveBeenCalled();
       });
 
+      it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
+        // `prompt()` rejects ahead of the try whose finally settles the turn
+        // when `assertCanStartTurn` throws — a session that began closing
+        // mid-await, or a writer lease that went away. The turn is already
+        // shifted off `goalQueue` by then, so unless the drain's own catch
+        // settles it the runtime keeps `currentPermit` and stays 'running'
+        // forever: no continuation is ever scheduled again, and every later
+        // prompt hangs in `claimGoalTurn` behind the leaked permit.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-admission-rejects',
+        };
+        const turnKey = 'goal-runtime:turn-admission-rejects';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(
+          new Error('Session write ownership could not be verified.'),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        // `releaseTurn`, not `finishTurn`: the turn never reached the model,
+        // so it is not an iteration the Goal made progress on.
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+      });
+
+      it('does not count a Goal turn cancelled before the model request', async () => {
+        // `modelStarted` decides whether settlement hands the permit back
+        // (`releaseTurn`) or records an iteration (`finishTurn` / pause).
+        // Flagging it at the top of the turn made everything between there
+        // and the send — prompt assembly, transcript writes, the abort check
+        // itself — count as model work, so a cancel landing in that window
+        // paused the Goal and charged it a turn it never took.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-cancelled-early',
+        };
+        const turnKey = 'goal-runtime:turn-cancelled-early';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        // The runtime transcript write is the last awaited step before the
+        // turn reaches the model, which makes it the exact window this
+        // finding is about.
+        mockChatRecordingService.recordGoalRuntimeMessage.mockImplementation(
+          () => {
+            void session.cancelPendingPrompt();
+          },
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        // Nothing ran, so there is nothing to pause the Goal over either.
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'pause' }),
+        );
+      });
+
+      it('releases a claimed Goal permit when the prompt is cancelled in the claim window', async () => {
+        // `claimGoalTurn` refuses an already-aborted signal, but the abort
+        // can land in the microtask gap between it resolving with a permit
+        // and the aborted check below it. The release there used to be
+        // gated on `!goalTurn`, so on exactly that path the permit stayed
+        // with a turn that returns `cancelled` without running — the runtime
+        // never leaves `running` and every later Goal turn blocks on it.
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn-claimed',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key.startsWith('goal-user:') ? userPermit : undefined,
+        );
+        // Called synchronously with the freshly claimed permit — the one
+        // seam that lands inside the window rather than around it.
+        mockGoalRuntime.getVerifierFeedback.mockImplementation(() => {
+          void session.cancelPendingPrompt();
+          return undefined;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+
+        expect(result.stopReason).toBe('cancelled');
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
       it('settles a completed Goal turn even when the transcript flush fails', async () => {
         // `ChatRecordingService` latches a write failure permanently — a
         // taken-over transcript lease, for one — so every later `flush()`

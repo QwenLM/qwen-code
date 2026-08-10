@@ -3534,7 +3534,15 @@ export class Session implements SessionContext {
 
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
-      if (reservedGoalRuntime && reservedGoalTurnKey && !goalTurn) {
+      // Release whether or not the claim got as far as building `goalTurn`.
+      // `claimGoalTurn` refuses an already-aborted signal, but the abort can
+      // land in the microtask gap between it resolving with a permit and the
+      // check here — and on that path the old `!goalTurn` guard skipped the
+      // release, so the permit was held by a turn that returns `cancelled`
+      // without ever running. The runtime then stays `running` forever and
+      // every later goal turn blocks behind it. Releasing an unclaimed
+      // reservation is a no-op, so the wider guard costs nothing.
+      if (reservedGoalRuntime && reservedGoalTurnKey) {
         await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
       }
       releasePendingSend();
@@ -4217,7 +4225,6 @@ export class Session implements SessionContext {
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
-            if (goalTurn) goalTurn.modelStarted = true;
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
               promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
@@ -4255,6 +4262,18 @@ export class Session implements SessionContext {
                 let channelDeliveryResponseBlock: string[] | undefined;
 
                 try {
+                  // Set where the model request is actually issued, not at
+                  // the top of the turn. `modelStarted` is what
+                  // `#settleGoalTurn` reads to decide between `releaseTurn`
+                  // (nothing happened, hand the permit back) and `finishTurn`
+                  // (an iteration completed, count it). Between the top of
+                  // the turn and here sit the abort check and the whole
+                  // prompt-assembly path, so flagging early let a turn that
+                  // was preempted before it ever reached the model settle as
+                  // a completed iteration — a phantom turn on the goal's
+                  // count and a checkpoint recording work that never ran.
+                  // Re-assigning on later loop laps is harmless.
+                  if (goalTurn) goalTurn.modelStarted = true;
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
