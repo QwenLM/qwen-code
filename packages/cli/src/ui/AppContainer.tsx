@@ -1306,6 +1306,15 @@ export const AppContainer = (props: AppContainerProps) => {
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
+    } else {
+      // VP never renders <Static>, so the remount alone repaints nothing;
+      // after wake/SIGCONT the terminal buffer may be stale or rearranged and
+      // Ink's relative erase (internal previous-frame height) lands wrong,
+      // stranding frame-top residue and jumping the frame height (flicker).
+      // Blank the alternate-screen viewport so the remount-driven repaint
+      // starts clean. Viewport-only: clearTerminal's 3J would destroy
+      // scrollback / Warp block history.
+      stdout.write(ansiEscapes.clearViewport);
     }
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);

@@ -937,7 +937,7 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('refreshStatic skips the physical clear in VP mode (#4891)', () => {
+    it('refreshStatic uses a viewport-only clear in VP mode (#4891, #8557)', () => {
       const vpSettings = {
         merged: {
           hideTips: false,
@@ -963,8 +963,11 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.refreshStatic();
 
-      // VP mode owns the viewport via the React tree, so refreshStatic must not
-      // emit a physical clear — the resize-settle path (#4891) strands nothing.
+      // After wake/SIGCONT the terminal buffer may be rearranged; without a
+      // clear, Ink's relative erase strands frame-top residue and flickers.
+      // The clear must be viewport-only: clearTerminal's 3J would destroy
+      // scrollback history.
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearViewport);
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
