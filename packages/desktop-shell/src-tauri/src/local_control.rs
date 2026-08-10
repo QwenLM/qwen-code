@@ -488,10 +488,13 @@ fn select_lan_ipv4(
             Addr::V4(address)
                 if address.broadcast.is_some()
                     && !address.ip.is_loopback()
-                    && !address.ip.is_unspecified() => address.netmask.map(|netmask| LocalNetwork {
-                address: address.ip,
-                netmask,
-            }),
+                    && !address.ip.is_unspecified() => address
+                .netmask
+                .filter(|netmask| !netmask.is_unspecified())
+                .map(|netmask| LocalNetwork {
+                    address: address.ip,
+                    netmask,
+                }),
             _ => None,
         })
         .collect();
