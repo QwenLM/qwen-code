@@ -20542,6 +20542,12 @@ describe('Session', () => {
           _meta: meta,
         } as Parameters<typeof session.prompt>[0]);
 
+        // Pin that the continuation turn reached the model: one send from the
+        // marking turn and one from the continuation. Without this, a future
+        // recovery-plan classifier change could make the turn return before
+        // the intent-clearing gate while this test stays green.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+
         allowAcpWriteFile();
         await runAcpWriteFile(
           '/repo/QWEN.md',

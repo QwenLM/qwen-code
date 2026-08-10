@@ -9449,29 +9449,72 @@ describe('useGeminiStream', () => {
       };
     }
 
-    async function submitSlashCommandAndCompleteTool(
-      completedToolCall: TrackedCompletedToolCall,
-      refreshContextFilesOnWrite?: boolean,
-    ) {
-      mockHandleSlashCommand.mockResolvedValue({
+    async function markContextRefreshIntent() {
+      mockHandleSlashCommand.mockResolvedValueOnce({
         type: 'submit_prompt',
-        content: refreshContextFilesOnWrite ? 'remember this' : 'write docs',
-        ...(refreshContextFilesOnWrite
-          ? { refreshContextFilesOnWrite: true }
-          : {}),
+        content: 'remember this',
+        refreshContextFilesOnWrite: true,
       });
 
       const { result } = renderTestHook();
       await act(async () => {
-        await result.current.submitQuery(
-          refreshContextFilesOnWrite ? '/remember fact' : '/write-docs',
-        );
+        await result.current.submitQuery('/remember fact');
       });
+      mockRefreshMemoryInstruction.mockClear();
+      return result;
+    }
+
+    async function completeToolWrite(
+      completedToolCall: TrackedCompletedToolCall,
+    ) {
       const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
         | ((completedTools: TrackedToolCall[]) => Promise<void>)
         | undefined;
       await act(async () => {
         await onComplete?.([completedToolCall]);
+      });
+    }
+
+    async function submitSlashCommandAndCompleteTool(
+      completedToolCall: TrackedCompletedToolCall,
+      refreshContextFilesOnWrite?: boolean,
+    ) {
+      if (refreshContextFilesOnWrite) {
+        await markContextRefreshIntent();
+      } else {
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'write docs',
+        });
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('/write-docs');
+        });
+      }
+      await completeToolWrite(completedToolCall);
+    }
+
+    async function submitContinuationAndCompleteTool(
+      result: ReturnType<typeof renderTestHook>['result'],
+      text: string,
+      submitType: SendMessageType,
+      promptId?: string,
+      extra?: { goal?: QueuedGoalTurn },
+    ) {
+      await act(async () => {
+        await result.current.submitQuery(text, submitType, promptId, extra);
+      });
+      // Pin that the continuation turn was admitted and reached the model;
+      // submitQuery can silently reject via its lease/streaming-state guards.
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await completeToolWrite(
+        createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+      );
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
       });
     }
 
@@ -9487,39 +9530,23 @@ describe('useGeminiStream', () => {
     });
 
     it('keeps refreshing context-file instructions for later writes in a marked turn', async () => {
-      mockHandleSlashCommand.mockResolvedValue({
-        type: 'submit_prompt',
-        content: 'remember this',
-        refreshContextFilesOnWrite: true,
-      });
+      await markContextRefreshIntent();
 
-      const { result } = renderTestHook();
-      await act(async () => {
-        await result.current.submitQuery('/remember fact');
-      });
-      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | undefined;
-
-      await act(async () => {
-        await onComplete?.([
-          createCompletedFileWrite({
-            callId: 'write-context-call-1',
-            filePath: '/test/dir/QWEN.md',
-          }),
-        ]);
-      });
+      await completeToolWrite(
+        createCompletedFileWrite({
+          callId: 'write-context-call-1',
+          filePath: '/test/dir/QWEN.md',
+        }),
+      );
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
-      await act(async () => {
-        await onComplete?.([
-          createCompletedFileWrite({
-            callId: 'write-context-call-2',
-            filePath: '/test/dir/QWEN.md',
-          }),
-        ]);
-      });
+      await completeToolWrite(
+        createCompletedFileWrite({
+          callId: 'write-context-call-2',
+          filePath: '/test/dir/QWEN.md',
+        }),
+      );
 
       expect(mockRefreshMemoryInstruction).toHaveBeenCalledTimes(2);
     });
@@ -9569,86 +9596,24 @@ describe('useGeminiStream', () => {
     });
 
     it('clears unmatched context-file refresh intent on the next ordinary turn', async () => {
-      mockHandleSlashCommand.mockResolvedValue({
-        type: 'submit_prompt',
-        content: 'remember this',
-        refreshContextFilesOnWrite: true,
-      });
-
-      const { result } = renderTestHook();
-      await act(async () => {
-        await result.current.submitQuery('/remember fact');
-      });
-      const markedOnComplete = mockUseReactToolScheduler.mock.calls.at(
-        -1,
-      )?.[0] as
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | undefined;
-      await act(async () => {
-        await markedOnComplete?.([
-          createCompletedFileWrite({ filePath: '/test/dir/notes.md' }),
-        ]);
-      });
+      const result = await markContextRefreshIntent();
+      await completeToolWrite(
+        createCompletedFileWrite({ filePath: '/test/dir/notes.md' }),
+      );
 
       mockHandleSlashCommand.mockResolvedValue(false);
       await act(async () => {
         await result.current.submitQuery('ordinary turn');
       });
-      const ordinaryOnComplete = mockUseReactToolScheduler.mock.calls.at(
-        -1,
-      )?.[0] as
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | undefined;
-      await act(async () => {
-        await ordinaryOnComplete?.([
-          createCompletedFileWrite({
-            callId: 'ordinary-write-context-call',
-            filePath: '/test/dir/QWEN.md',
-          }),
-        ]);
-      });
+      await completeToolWrite(
+        createCompletedFileWrite({
+          callId: 'ordinary-write-context-call',
+          filePath: '/test/dir/QWEN.md',
+        }),
+      );
 
       expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
     });
-
-    async function markContextRefreshIntent() {
-      mockHandleSlashCommand.mockResolvedValueOnce({
-        type: 'submit_prompt',
-        content: 'remember this',
-        refreshContextFilesOnWrite: true,
-      });
-
-      const { result } = renderTestHook();
-      await act(async () => {
-        await result.current.submitQuery('/remember fact');
-      });
-      mockRefreshMemoryInstruction.mockClear();
-      return result;
-    }
-
-    async function submitContinuationAndCompleteTool(
-      result: ReturnType<typeof renderTestHook>['result'],
-      text: string,
-      submitType: SendMessageType,
-      promptId?: string,
-      extra?: { goal?: QueuedGoalTurn },
-    ) {
-      await act(async () => {
-        await result.current.submitQuery(text, submitType, promptId, extra);
-      });
-      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | undefined;
-      await act(async () => {
-        await onComplete?.([
-          createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
-        ]);
-      });
-
-      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
-        logContext: 'interactive context-file memory tool batch',
-      });
-    }
 
     it.each([
       ['Retry', SendMessageType.Retry],
