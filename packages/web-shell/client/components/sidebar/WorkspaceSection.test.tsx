@@ -313,6 +313,29 @@ describe('WorkspaceSection label', () => {
     expect(container.textContent).not.toContain('Stale task session');
   });
 
+  it('does not carry a load error across a source switch', async () => {
+    const listWorkspaceSessions = vi.fn((options?: { sourceType?: string }) =>
+      options?.sourceType === 'channel'
+        ? new Promise<DaemonSessionSummary[]>(() => {})
+        : Promise.reject(new Error('tasks unavailable')),
+    );
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true, sourceType: 'default' });
+    await flush();
+    expect(container.textContent).toContain('Load failed');
+
+    renderSection({ client, expanded: true, sourceType: 'channel' });
+    await flush();
+    expect(container.textContent).not.toContain('Load failed');
+  });
+
   it('groups a secondary workspace with its own channel catalog', async () => {
     const client = {
       workspaceByCwd: vi.fn(() => ({

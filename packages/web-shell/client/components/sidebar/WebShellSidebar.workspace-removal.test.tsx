@@ -87,6 +87,7 @@ const {
       fields: [];
     }>,
     channels: {} as Record<string, unknown>,
+    reload: vi.fn().mockResolvedValue(undefined),
   };
   const useChannels = vi.fn(() => channelState);
   return {
@@ -540,6 +541,7 @@ beforeEach(() => {
   channelState.data = undefined;
   channelState.catalog = [];
   channelState.channels = {};
+  channelState.reload.mockClear();
 });
 
 afterEach(() => {
@@ -3134,6 +3136,12 @@ describe('WebShellSidebar session source switch', () => {
   });
 
   it('polls channel sessions on the active-session interval', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
     const setIntervalSpy = vi.spyOn(window, 'setInterval');
     renderSidebar();
     await ensureWorkspaceExpanded('project');
@@ -3147,6 +3155,7 @@ describe('WebShellSidebar session source switch', () => {
     );
     expect(activePoll).toBeDefined();
     active.reload.mockClear();
+    channelState.reload.mockClear();
 
     await act(async () => {
       const callback = activePoll![0];
@@ -3156,6 +3165,7 @@ describe('WebShellSidebar session source switch', () => {
     });
 
     expect(active.reload).toHaveBeenCalledOnce();
+    expect(channelState.reload).toHaveBeenCalledOnce();
   });
 
   it('keeps a flat channel list when channel metadata is unavailable', async () => {

@@ -203,6 +203,29 @@ describe('tryGenerateSessionTitle', () => {
     expect(prompt).not.toContain('hidden second instructions');
   });
 
+  it('does not align a display projection onto an intervening system turn', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'First reply' }] },
+        { role: 'user', parts: [{ text: 'internal cron prompt' }] },
+        { role: 'model', parts: [{ text: 'Cron reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      'visible channel message',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('visible channel message');
+    expect(prompt).not.toContain('hidden channel instructions');
+    expect(prompt).not.toContain('internal cron prompt');
+  });
+
   it('omits unprojected older user turns from resumed channel history', async () => {
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',

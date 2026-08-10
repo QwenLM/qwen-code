@@ -185,7 +185,7 @@ export const renameCommand: SlashCommand = {
           [];
         const lastDisplayText = userDisplayTexts.at(-1)?.trim();
         const titleDisplayTexts = lastDisplayText?.match(
-          /^\/rename(?:\s+--auto)?$/,
+          /^\/(?:rename|tag)(?:\s+--auto)?$/i,
         )
           ? userDisplayTexts.slice(0, -1)
           : userDisplayTexts;

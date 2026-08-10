@@ -1770,6 +1770,13 @@ export class ChatRecordingService {
     try {
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      const projectionStart = Math.max(
+        0,
+        this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
+      );
+      this.userDisplayTextsForTitle.splice(
+        Math.max(0, targetTurnIndex - projectionStart),
+      );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned

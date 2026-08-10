@@ -6,6 +6,7 @@ import {
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
 } from './channel-worker-supervisor.js';
+import { isChannelWorkerPromptAuthorized } from './channel-worker-prompt-authorization.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
 import { MAX_CHANNEL_STARTUP_FAILURES } from './channel-worker-startup-ipc.js';
 import {
@@ -254,6 +255,13 @@ describe('createChannelWorkerSupervisor', () => {
     expect(env).toHaveProperty('TELEGRAM_BOT_TOKEN', 'telegram-secret');
     expect(env).toHaveProperty('HTTPS_PROXY', 'http://proxy.example.com:8080');
     expect(env['QWEN_CHANNEL_DAEMON_WORKER']).not.toBe('1');
+    const promptAuthorization = env['QWEN_CHANNEL_DAEMON_WORKER']!;
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(true);
+    expect(isChannelWorkerPromptAuthorized(promptAuthorization, '/other')).toBe(
+      false,
+    );
     const argv = spawnWorker.mock.calls[0]![1];
     expect(argv).not.toContain('secret-token');
     expect(supervisor.snapshot()).toMatchObject({
@@ -263,6 +271,10 @@ describe('createChannelWorkerSupervisor', () => {
       channels: ['telegram', 'feishu'],
       requestedChannels: ['telegram', 'feishu'],
     });
+    supervisor.killAllSync();
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(false);
   });
 
   it('ignores non-ready IPC messages before the ready message', async () => {

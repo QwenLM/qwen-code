@@ -263,17 +263,15 @@ function sessionSourceRequestMeta(
 }
 
 /**
- * The daemon's channel adapter carries the user-facing display projection in
- * prompt meta; only channel sessions may use it — every other source echoes
- * its prompt content verbatim. Single source of truth for the echo, the
- * pending-entry text, and the re-arm strip so their `''`/missing-meta
- * semantics cannot drift apart.
+ * Only the daemon's authenticated channel-worker path can populate the
+ * user-facing display projection. Every other source echoes its prompt content
+ * verbatim. Single source of truth for the echo, pending-entry text, and child
+ * metadata so their `''`/undefined semantics cannot drift apart.
  */
 function getChannelPromptDisplayText(
   entry: Pick<SessionEntry, 'sourceType'>,
-  meta: Record<string, unknown> | null | undefined,
+  displayText: string | undefined,
 ): string | undefined {
-  const displayText = meta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
   return entry.sourceType === 'channel' && typeof displayText === 'string'
     ? displayText
     : undefined;
@@ -1019,6 +1017,7 @@ function echoPromptToSessionBus(
   req: PromptRequest,
   promptId: string,
   originatorClientId: string | undefined,
+  displayText: string | undefined,
 ): void {
   // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
   // ACP type contract — read it directly so a future SDK bump that
@@ -1030,12 +1029,21 @@ function echoPromptToSessionBus(
   // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
   if (!Array.isArray(prompt) || prompt.length === 0) return;
-  const displayText = getChannelPromptDisplayText(entry, req._meta);
   let displayTextPublished = false;
   const serverTimestamp = Date.now();
-  const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
+  const echoPrompt = prompt.slice(0, MAX_ECHO_CONTENT_BLOCKS);
+  if (
+    displayText !== undefined &&
+    !echoPrompt.some((part) => isRecord(part) && part['type'] === 'text')
+  ) {
+    const textPart = prompt
+      .slice(MAX_ECHO_CONTENT_BLOCKS)
+      .find((part) => isRecord(part) && part['type'] === 'text');
+    if (textPart) echoPrompt[echoPrompt.length - 1] = textPart;
+  }
+  const blockCount = echoPrompt.length;
   for (let i = 0; i < blockCount; i += 1) {
-    const part = prompt[i];
+    const part = echoPrompt[i];
     if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
     let displayPart = part;
     if (displayText !== undefined && part.type === 'text') {
@@ -6543,12 +6551,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
-      const channelDisplayText = getChannelPromptDisplayText(entry, req._meta);
+      const channelDisplayText = getChannelPromptDisplayText(
+        entry,
+        context?.promptDisplayText,
+      );
       const pendingText =
         channelDisplayText === undefined
           ? extractPromptText(req.prompt)
           : channelDisplayText ||
-            (req.prompt.some((block) => block.type === 'image')
+            (req.prompt.some(
+              (block) => isRecord(block) && block['type'] === 'image',
+            )
               ? '[image]'
               : '');
       const pendingEntry: PendingPromptEntry = {
@@ -6747,10 +6760,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
-                  const promptDisplayText = getChannelPromptDisplayText(
-                    entry,
-                    meta,
-                  );
+                  const promptDisplayText = channelDisplayText;
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -6828,6 +6838,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       promptRequest,
                       pendingEntry.promptId,
                       originatorClientId,
+                      channelDisplayText,
                     );
                   }
                 } catch (echoErr) {

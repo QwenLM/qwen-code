@@ -595,6 +595,7 @@ export function WebShellSidebar({
     data: channelCatalogData,
     catalog: channelTypeCatalog,
     channels: channelInstances,
+    reload: reloadChannelCatalog,
   } = useChannels({
     autoLoad: channelGroupingEnabled,
     enabled: channelGroupingEnabled,
@@ -1452,7 +1453,13 @@ export function WebShellSidebar({
   );
 
   useEffect(() => {
-    if (!projectExpanded && !hasRunningSession) return;
+    if (
+      !projectExpanded &&
+      !hasRunningSession &&
+      selectedSessionSource !== 'channel'
+    ) {
+      return;
+    }
     const pollInterval =
       (hasRunningSession || selectedSessionSource === 'channel') && !error
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
@@ -1460,16 +1467,22 @@ export function WebShellSidebar({
     const intervalId = window.setInterval(() => {
       if (document.hidden || pollInFlightRef.current) return;
       pollInFlightRef.current = true;
-      void reload().finally(() => {
+      const reloadSessions = reload();
+      const reloadCatalog = channelGroupingEnabled
+        ? reloadChannelCatalog()
+        : Promise.resolve(undefined);
+      void Promise.allSettled([reloadSessions, reloadCatalog]).finally(() => {
         pollInFlightRef.current = false;
       });
     }, pollInterval);
     return () => window.clearInterval(intervalId);
   }, [
     error,
+    channelGroupingEnabled,
     hasRunningSession,
     projectExpanded,
     reload,
+    reloadChannelCatalog,
     selectedSessionSource,
   ]);
 
@@ -1531,7 +1544,9 @@ export function WebShellSidebar({
       for (const sessionIdentity of next) {
         if (
           sessionIdentity === currentSessionIdentity ||
-          runningBySessionId.get(sessionIdentity)
+          (previousRunningBySessionId.has(sessionIdentity) &&
+            (!runningBySessionId.has(sessionIdentity) ||
+              runningBySessionId.get(sessionIdentity)))
         ) {
           next.delete(sessionIdentity);
           changed = true;
@@ -2734,14 +2749,18 @@ export function WebShellSidebar({
   }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
 
   useEffect(() => {
-    if (!organizationEnabled) return;
+    const activeSections = channelSessionSections ?? sessionSections;
+    if (selectedSessionSource === 'channel') {
+      if (!channelCatalogLoaded || sessionsPage === undefined) return;
+    } else {
+      if (!organizationEnabled) return;
+      if (!groupsCatalogReady || !sessionsCatalogReady) return;
+    }
     // Wait for both independent catalog sources. Flipping the latch on the
     // first non-empty derived sections would treat later initial recent/color
     // ids as brand-new and auto-collapse them; leaving the latch set when the
     // first ready catalog is empty would leave the first real section expanded.
-    if (!groupsCatalogReady || !sessionsCatalogReady) return;
-
-    const unseenIds = sessionSections
+    const unseenIds = activeSections
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
     const isInitialCatalog = awaitingInitialSessionCatalogRef.current;
@@ -2760,9 +2779,13 @@ export function WebShellSidebar({
     });
   }, [
     groupsCatalogReady,
+    channelCatalogLoaded,
+    channelSessionSections,
     organizationEnabled,
+    selectedSessionSource,
     sessionSections,
     sessionsCatalogReady,
+    sessionsPage,
   ]);
 
   useEffect(() => {
@@ -3503,12 +3526,12 @@ export function WebShellSidebar({
   );
 
   const body = useMemo(() => {
-    if (loading && sessions.length === 0) {
+    if (loading && filteredSessions.length === 0) {
       return (
         <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
       );
     }
-    if (error && sessions.length === 0) {
+    if (error && filteredSessions.length === 0) {
       return (
         <button className={styles.retry} type="button" onClick={reload}>
           {t('sidebar.loadFailed')}
@@ -3517,7 +3540,8 @@ export function WebShellSidebar({
     }
     if (
       filteredSessions.length === 0 &&
-      (channelSessionSections !== null ||
+      (selectedSessionSource === 'channel' ||
+        channelSessionSections !== null ||
         searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
@@ -3537,6 +3561,9 @@ export function WebShellSidebar({
           {section.sessions.map((session) => renderSessionRow(session))}
         </SessionGroupSection>
       ));
+    }
+    if (selectedSessionSource === 'channel') {
+      return filteredSessions.map((session) => renderSessionRow(session));
     }
     if (!organizationEnabled) {
       return filteredSessions.map((session) => renderSessionRow(session));
@@ -3589,8 +3616,8 @@ export function WebShellSidebar({
     reload,
     renderSessionRow,
     searchQuery,
+    selectedSessionSource,
     sessionSections,
-    sessions.length,
     t,
     toggleSessionSection,
   ]);
@@ -4272,6 +4299,8 @@ export function WebShellSidebar({
                   noSessionsLabel={t('sidebar.noSessions')}
                   loadErrorLabel={t('sidebar.loadFailed')}
                   organizationEnabled={false}
+                  sourceType={selectedSessionSource}
+                  channelGroupingEnabled={channelGroupingEnabled}
                   ungroupedLabel={t('sidebar.groupUngrouped')}
                   formatTime={(iso) => formatRelativeTime(iso, t)}
                   autoExpandKey={

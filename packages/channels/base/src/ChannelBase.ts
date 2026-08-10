@@ -5307,6 +5307,7 @@ export abstract class ChannelBase {
           }
           const bufferedDisplayText =
             (envelope.isGroup || this.config.sessionScope === 'single') &&
+            !envelope.alreadyPrefixed &&
             !recognizedSlashCommand
               ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
               : displayText;

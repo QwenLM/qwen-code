@@ -870,6 +870,7 @@ describe('runChannelDaemonWorker', () => {
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
       daemonToken: 'secret-token',
+      promptAuthorization: 'worker-prompt-token',
       workspace: '/workspace',
       selection: { mode: 'names', names: ['telegram'] },
       loadDaemonSdk: async () => sdk,
@@ -890,6 +891,7 @@ describe('runChannelDaemonWorker', () => {
       expect.objectContaining({
         cwd: '/workspace',
         modelServiceId: 'qwen-plus',
+        promptAuthorization: 'worker-prompt-token',
       }),
     );
     const bridgeFacade = mockSessionRouter.mock.calls[0]![0] as {

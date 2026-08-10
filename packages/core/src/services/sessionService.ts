@@ -869,7 +869,7 @@ export class SessionService {
    */
   private extractFirstPromptFromRecords(records: ChatRecord[]): string {
     for (const record of records) {
-      if (record.type !== 'user') continue;
+      if (record.type !== 'user' || record.subtype !== undefined) continue;
       const payload = record.systemPayload as
         | UserPromptRecordPayload
         | undefined;
@@ -889,10 +889,14 @@ export class SessionService {
   }
 
   private truncatePromptForDisplay(text: string): string {
-    const codePoints = Array.from(text);
-    return codePoints.length > 200
-      ? `${codePoints.slice(0, 200).join('')}...`
-      : text;
+    const codePoints: string[] = [];
+    for (const codePoint of text) {
+      if (codePoints.length === 200) {
+        return `${codePoints.join('')}...`;
+      }
+      codePoints.push(codePoint);
+    }
+    return text;
   }
 
   /**

@@ -4,6 +4,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   type AvailableCommand,
@@ -89,6 +90,7 @@ export interface DaemonChannelBridgeOptions {
   sessionScope?: SessionScope;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
   deleteSessionData?: (sessionId: string) => Promise<void>;
+  promptAuthorization?: string;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -244,11 +246,8 @@ export class DaemonChannelBridge
     const deleteSessionData = options.deleteSessionData;
     if (deleteSessionData) {
       this.deleteSessionData = async (sessionId) => {
-        try {
-          await deleteSessionData(sessionId);
-        } finally {
-          this.removeSessionBinding(sessionId);
-        }
+        await deleteSessionData(sessionId);
+        this.removeSessionBinding(sessionId);
       };
     }
     this.on('error', (error) => {
@@ -418,6 +417,10 @@ export class DaemonChannelBridge
       });
     }
     prompt.push({ type: 'text', text });
+    const promptAuthorization =
+      options?.displayText !== undefined
+        ? this.options.promptAuthorization
+        : undefined;
 
     try {
       const result = await session.prompt(
@@ -425,6 +428,11 @@ export class DaemonChannelBridge
           prompt,
           _meta: {
             [CHANNEL_PROMPT_META_KEY]: true,
+            ...(promptAuthorization
+              ? {
+                  [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization,
+                }
+              : {}),
             ...(options?.displayText !== undefined
               ? {
                   [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,

@@ -555,7 +555,7 @@ export function ChannelEditorDialog({
     (field) => field.key === 'sessionScope',
   );
   const platformFields = descriptor.fields.filter(
-    (field) => field.key !== 'sessionScope',
+    (field) => field.key !== 'sessionScope' && field.kind !== 'object',
   );
 
   return (

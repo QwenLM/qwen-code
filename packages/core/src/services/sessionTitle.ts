@@ -120,22 +120,14 @@ export async function tryGenerateSessionTitle(
     const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
-    const dialog = filterToDialog(fullHistory);
-    if (userDisplayTexts.some((displayText) => displayText !== undefined)) {
-      let displayTextIndex = userDisplayTexts.length - 1;
-      for (let index = dialog.length - 1; index >= 0; index--) {
-        if (dialog[index].role !== 'user') continue;
-        const hasRecordedDisplayText = displayTextIndex >= 0;
-        const displayText = hasRecordedDisplayText
-          ? userDisplayTexts[displayTextIndex--]
-          : '';
-        if (displayText === undefined) continue;
-        dialog[index] = {
-          ...dialog[index],
-          parts: displayText ? [{ text: displayText }] : [],
-        };
-      }
-    }
+    const hasDisplayProjection = userDisplayTexts.some(
+      (displayText) => displayText !== undefined,
+    );
+    const dialog = hasDisplayProjection
+      ? userDisplayTexts.flatMap((displayText): Content[] =>
+          displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
+        )
+      : filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };

@@ -185,6 +185,7 @@ export interface RunChannelDaemonWorkerOptions {
   reportStartup?: (message: ChannelStartupReportMessage) => Promise<void>;
   startupSignal?: AbortSignal;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
+  promptAuthorization?: string;
 }
 
 export function createDaemonSessionFactory({
@@ -488,6 +489,9 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    ...(opts.promptAuthorization
+      ? { promptAuthorization: opts.promptAuthorization }
+      : {}),
     deleteSessionData: async (sessionId) => {
       const workspaceClient = client.workspaceByCwd?.(daemonWorkspace);
       if (!workspaceClient) {
@@ -794,6 +798,7 @@ function scrubDaemonWorkerEnv(): void {
 function readDaemonWorkerEnv(): {
   daemonToken: string | undefined;
   daemonUrl: string;
+  promptAuthorization: string;
   workspace: string;
 } {
   const daemonToken = process.env[QWEN_DAEMON_TOKEN_ENV];
@@ -801,6 +806,7 @@ function readDaemonWorkerEnv(): {
     return {
       daemonToken,
       daemonUrl: readRequiredEnv(QWEN_DAEMON_URL_ENV),
+      promptAuthorization: readRequiredEnv(CHANNEL_DAEMON_WORKER_SENTINEL),
       workspace: readRequiredEnv(QWEN_DAEMON_WORKSPACE_ENV),
     };
   } finally {
@@ -929,7 +935,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
 
     try {
       assertInternalDaemonWorkerInvocation();
-      const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
+      const { daemonToken, daemonUrl, promptAuthorization, workspace } =
+        readDaemonWorkerEnv();
       // Mirror the ACP-child self-scrub: in dev mode the supervisor spawns
       // this worker with the daemon's loader-carrying base env (the harness
       // tsx loader must reach this .ts entry), but nothing the worker spawns
@@ -958,6 +965,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
       const handle = await runChannelDaemonWorker({
         daemonUrl,
         daemonToken,
+        promptAuthorization,
         workspace,
         selection,
         startupSignal: startupAbortController.signal,

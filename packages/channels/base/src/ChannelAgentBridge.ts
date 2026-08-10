@@ -5,6 +5,8 @@ import type {
 
 export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
+export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
+  'qwen.daemon.channelPromptAuthorization';
 // Client-supplied routing hint only; never use it as an authorization boundary.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 
@@ -98,7 +100,8 @@ export interface ChannelAgentBridgeSessionOptions {
 export interface ChannelAgentBridgePromptOptions {
   imageBase64?: string;
   imageMimeType?: string;
-  /** User-authored text shown in transcripts when `text` includes hidden context. */
+  /** User-authored text shown in transcripts when `text` includes hidden context.
+   * `''` means no user-visible text and must not be treated as unset. */
   displayText?: string;
 }
 

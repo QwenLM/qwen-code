@@ -143,7 +143,7 @@ export function WorkspaceSection({
     catalog: DaemonChannelTypeCatalog;
     snapshot: DaemonChannelsSnapshot;
   }>();
-  const [loadError, setLoadError] = useState(false);
+  const [loadErrorSourceType, setLoadErrorSourceType] = useState<string>();
   const [internalExpanded, setInternalExpanded] = useState(false);
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
     readWorkspaceCollapsedGroupIds(workspace.id),
@@ -193,14 +193,14 @@ export function WorkspaceSection({
       if (requestId === sessionLoadRequestId.current) {
         setSessions(result);
         setSessionsSourceType(sourceType ?? '');
-        setLoadError(false);
+        setLoadErrorSourceType(undefined);
       }
     } catch (err) {
       // Surface connectivity failures so users can distinguish a broken
       // daemon from genuinely zero sessions.
       console.warn('[WorkspaceSection] session poll failed:', err);
       if (requestId === sessionLoadRequestId.current) {
-        setLoadError(true);
+        setLoadErrorSourceType(sourceType ?? '');
       }
     }
   }, [client, disabled, organizationEnabled, sourceType, workspace.cwd]);
@@ -362,6 +362,7 @@ export function WorkspaceSection({
       );
     });
   }, [excludePinned, searchQuery, sessions, sessionsSourceType, sourceType]);
+  const loadError = loadErrorSourceType === (sourceType ?? '');
 
   const groupedSessions = useMemo(() => {
     if (!organizationEnabled || groups.length === 0) return null;

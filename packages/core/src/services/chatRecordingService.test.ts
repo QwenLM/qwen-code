@@ -647,6 +647,42 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it('drops display projections from rewound user turns', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'hidden A' }],
+        undefined,
+        {
+          displayText: 'A',
+          hookContext: '',
+        },
+      );
+      chatRecordingService.recordUserMessage(
+        [{ text: 'hidden B' }],
+        undefined,
+        {
+          displayText: 'B',
+          hookContext: '',
+        },
+      );
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      chatRecordingService.recordUserMessage(
+        [{ text: 'hidden C' }],
+        undefined,
+        {
+          displayText: 'C',
+          hookContext: '',
+        },
+      );
+
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+        'A',
+        'C',
+      ]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
+
     it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         lastCompletedUuid: 'assistant-1',

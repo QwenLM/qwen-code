@@ -418,6 +418,24 @@ describe('handleGroup', () => {
     expect(env['displayText']).toBe('你好');
   });
 
+  it('可见文本只移除机器人 mention', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> ask <@OPENID_ALICE> now',
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true },
+          { member_openid: 'alice-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['displayText']).toBe('ask <@OPENID_ALICE> now');
+  });
+
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
     const ch = makeChannel({ allowMention: false });
     const pvt = ch as unknown as QQChannelRaw;

@@ -9,7 +9,10 @@ import {
   type DaemonChannelLoopMcpHost,
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
-import { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 
 class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   private events: DaemonChannelEvent[] = [];
@@ -174,6 +177,27 @@ describe('DaemonChannelBridge', () => {
     await bridge.deleteSessionData?.('session-1');
 
     expect(deleteSessionData).toHaveBeenCalledWith('session-1');
+    events.close();
+    bridge.stop();
+  });
+
+  it('keeps the live binding when permanent deletion fails', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockRejectedValue(new Error('locked'));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.deleteSessionData?.('session-1')).rejects.toThrow(
+      'locked',
+    );
+
+    expect(bridge.listSessions()).toHaveLength(1);
     events.close();
     bridge.stop();
   });
@@ -1920,6 +1944,7 @@ describe('DaemonChannelBridge', () => {
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
+      promptAuthorization: 'worker-token',
     });
 
     await bridge.start();
@@ -1938,6 +1963,7 @@ describe('DaemonChannelBridge', () => {
         prompt: [{ type: 'text', text: 'internal context\n\nhello' }],
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
           'qwen.daemon.promptDisplayText': 'hello',
         },
       },
