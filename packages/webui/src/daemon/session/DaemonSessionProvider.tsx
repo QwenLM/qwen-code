@@ -2360,6 +2360,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);
+          const pendingLoad = pendingSessionLoadRef.current;
+          const errorBody =
+            error instanceof DaemonHttpError && isRecord(error.body)
+              ? error.body
+              : undefined;
+          if (
+            loadingRequestedSession &&
+            pendingLoad?.sessionId === restoreSessionId &&
+            error instanceof DaemonHttpError &&
+            error.status === 404 &&
+            typeof errorBody?.['error'] === 'string' &&
+            errorBody['error'].endsWith(
+              'The session is closing; retry after close completes',
+            )
+          ) {
+            reconnectAttempt += 1;
+            const reconnectConfig = reconnectConfigRef.current;
+            await delay(
+              getReconnectDelayMs(
+                reconnectAttempt,
+                reconnectConfig.reconnectDelayMs,
+                reconnectConfig.maxReconnectDelayMs,
+              ),
+              abort.signal,
+            );
+            if (pendingSessionLoadRef.current !== pendingLoad) return;
+            continue;
+          }
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -2375,7 +2403,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
-          const pendingLoad = pendingSessionLoadRef.current;
           if (
             pendingLoad &&
             (pendingLoad.sessionId === restoreSessionId ||
