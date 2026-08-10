@@ -3484,6 +3484,11 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(msg).toContain('never a hand-rolled agent');
     expect(msg).toContain('compose floor');
     expect(msg).toContain('Do NOT re-verify findings already');
+    // The wait-bound and no-fresh-pass clauses too — the budget message's
+    // test pins the same two for the sibling refusal; one bounded-tail
+    // protocol, both pin both.
+    expect(msg).toContain('stop waiting on any verifier batch still out');
+    expect(msg).toContain('invent a fresh re-verification pass');
     // The marker is on disk so compose-review caps without the relay.
     expect(readBudgetStop(plan)?.cause).toBe('round-cap');
     expect(readBudgetStop(plan)?.cap).toBe(3);

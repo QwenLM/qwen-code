@@ -25,6 +25,7 @@ import {
   DEFAULT_COMPOSE_FLOOR_SECONDS,
   budgetStopEntry,
   budgetStopEntryZh,
+  clearBudgetStop,
   expectedRoundSeconds,
   readBudgetStop,
   readRoundStamps,
@@ -40,6 +41,7 @@ import {
   verifyBudgetMessage,
   writeBudgetStop,
 } from './deadline.js';
+import { promptRecordDir } from './prompt-record.js';
 
 const NOW_MS = 1_754_000_000_000;
 const NOW_S = NOW_MS / 1000;
@@ -389,6 +391,28 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     const stop = readBudgetStop(p);
     expect(stop?.cause).toBe('round-cap');
     expect(stop?.cap).toBe(3);
+  });
+
+  it('clearBudgetStop removes a same-run marker — and never throws', () => {
+    // The CONVERGED-exit tests in agent-prompt.test.ts pin the call SITE;
+    // this pins the function itself, so a refactor that moves the clear out
+    // of refuseConverged (or unlinks a different file) fails here directly,
+    // not only through the loop-level tests.
+    const p = stopPlan();
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    expect(readBudgetStop(p)?.cause).toBe('round-cap');
+    clearBudgetStop(p);
+    expect(readBudgetStop(p)).toBeNull();
+    // A repeat clear (file already gone), a run with no record dir at all,
+    // and an unlink that fails (record dir blocked by a regular file) are
+    // all no-ops, not throws: the file is the thing to be rid of, and a
+    // clear that cannot run still only leaves a cap on, never corrupts a
+    // verdict.
+    expect(() => clearBudgetStop(p)).not.toThrow();
+    const fresh = stopPlan();
+    expect(() => clearBudgetStop(fresh)).not.toThrow();
+    writeFileSync(promptRecordDir(fresh), 'a file where the record dir goes');
+    expect(() => clearBudgetStop(fresh)).not.toThrow();
   });
 
   it('the dedup phrase travels with the entry it identifies', () => {
