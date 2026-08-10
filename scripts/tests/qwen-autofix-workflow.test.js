@@ -283,6 +283,16 @@ function writeWorkdirStub(dir, lines) {
   ]);
 }
 
+function qwenResultLine({ result, errorMessage, isError = false }) {
+  return `${JSON.stringify({
+    type: 'result',
+    subtype: isError ? 'error_during_execution' : 'success',
+    is_error: isError,
+    ...(result === undefined ? {} : { result }),
+    ...(errorMessage === undefined ? {} : { error: { message: errorMessage } }),
+  })}\n`;
+}
+
 function runAutofixRunner(args) {
   return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
     encoding: 'utf8',
@@ -10712,7 +10722,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'turn_tool_call_cap: too many tool calls',
+            isError: true,
+          }),
+        )});`,
         'process.exit(1);',
       ]);
 
@@ -10744,7 +10759,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
         "process.stdout.write('x'.repeat(21_000));",
         'process.exit(1);',
       ]);
@@ -10832,7 +10852,9 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stdout.write('[API Error: 429 quota exceeded]\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
         'process.exit(0);',
       ]);
 
@@ -10842,12 +10864,98 @@ exit 1
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         '[API Error: 429 quota exceeded]',
       );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'recoverable API error without an agent verdict',
+      );
       expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
         '429 quota exceeded',
       );
       expect(
         readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
       ).toBe('transient');
+    });
+  });
+
+  it('ignores API-error markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: '[API Error: 429 quota exceeded]',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'finished without required output file(s)',
+      );
+    });
+  });
+
+  it('ignores loop-guard markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: 'turn_tool_call_cap Loop detection halted the run',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: '[API Error: 429 quota exceeded]',
+            isError: true,
+          }),
+        )});`,
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+    });
+  });
+
+  it('keeps a recovered exit-zero run with a verdict out of the API-error retry path', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
   });
 
@@ -10886,7 +10994,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
         "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
         'process.exit(1);',
       ]);

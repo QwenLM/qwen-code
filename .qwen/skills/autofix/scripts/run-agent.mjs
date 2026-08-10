@@ -177,6 +177,19 @@ function isLoopGuardOutput(output) {
   );
 }
 
+function streamResultOutput(event) {
+  if (!event || event.type !== 'result') return '';
+  return [event.error?.message, event.result]
+    .filter((value) => typeof value === 'string')
+    .join('\n');
+}
+
+function isLoopGuardResult(event) {
+  return (
+    event?.is_error === true && isLoopGuardOutput(streamResultOutput(event))
+  );
+}
+
 function killQwen(child, signal) {
   try {
     process.kill(-child.pid, signal);
@@ -191,8 +204,9 @@ function runQwen(options, prompt) {
     flags: 'w',
   });
   log.on('error', () => {});
-  let outputTail = '';
-  let loopDetected = false;
+  let diagnosticTail = '';
+  let stdoutCarry = '';
+  let terminalResult;
   let settled = false;
   let timedOut = false;
   let idleTimedOut = false;
@@ -224,18 +238,44 @@ function runQwen(options, prompt) {
       },
     );
 
+    const appendDiagnostic = (text) => {
+      diagnosticTail = (diagnosticTail + text).slice(-20_000);
+    };
+
+    const consumeStreamJson = (text, final = false) => {
+      stdoutCarry += text;
+      const lines = stdoutCarry.split('\n');
+      stdoutCarry = final ? '' : (lines.pop() ?? '');
+      if (final && lines.at(-1) === '') lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event?.type === 'result') terminalResult = event;
+        } catch {
+          appendDiagnostic(`${line}\n`);
+        }
+      }
+    };
+
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
       clearInterval(idleTimer);
-      const apiErrorInfo = recoverableApiError(outputTail);
+      consumeStreamJson('', true);
+      const terminalOutput = streamResultOutput(terminalResult);
+      const apiErrorInfo = recoverableApiError(
+        result.status === 0
+          ? terminalOutput
+          : `${diagnosticTail}\n${terminalOutput}`,
+      );
       const payload = {
         ...result,
         timedOut,
         idleTimedOut,
-        loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+        loopDetected: isLoopGuardResult(terminalResult),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
@@ -249,7 +289,7 @@ function runQwen(options, prompt) {
       }
     };
 
-    const record = (chunk, stream) => {
+    const record = (chunk, stream, source) => {
       lastOutputAt = Date.now();
       const text = chunk.toString('utf8');
       if (!sandboxName) {
@@ -268,14 +308,17 @@ function runQwen(options, prompt) {
           }
         }
       }
-      outputTail = (outputTail + text).slice(-20_000);
-      if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
+      if (source === 'stdout') {
+        consumeStreamJson(text);
+      } else {
+        appendDiagnostic(text);
+      }
       log.write(chunk);
       stream.write(chunk);
     };
 
-    child.stdout.on('data', (chunk) => record(chunk, process.stdout));
-    child.stderr.on('data', (chunk) => record(chunk, process.stderr));
+    child.stdout.on('data', (chunk) => record(chunk, process.stdout, 'stdout'));
+    child.stderr.on('data', (chunk) => record(chunk, process.stderr, 'stderr'));
     child.on('error', (error) => finish({ error, status: null, signal: null }));
     child.on('close', (status, signal) =>
       finish({ error: null, status, signal }),
@@ -511,9 +554,7 @@ if (spec.exclusiveOutput && presentOutputs.length > 1) {
   writeFailure(options.workdir, message);
   fail(message);
 }
-const ok = spec.anyOutput
-  ? missingOutputs.length < spec.outputs.length
-  : missingOutputs.length === 0;
+const ok = hasOutputVerdict;
 if (!ok) {
   const message = `Autofix agent finished without required output file(s): ${missingOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
