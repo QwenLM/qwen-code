@@ -7,19 +7,22 @@ interface MessageTimestampProps {
   children: ReactNode;
   /** When true, show the timestamp permanently at bottom-right instead of hover tooltip. */
   chatMode?: boolean;
+  /** Use the larger vertical rhythm for tool summaries in thinking-hidden mode. */
+  toolGroupSpacing?: boolean;
   copyText?: string;
   copyTitle?: string;
 }
 
 /**
  * Wraps a rendered history message and reveals its wall-clock time as a
- * CSS-only tooltip on hover. When the message carries no timestamp the
- * children render unchanged, so no empty wrapper is introduced.
+ * CSS-only tooltip on hover. The row wrapper is always rendered so message
+ * spacing does not depend on timestamp availability.
  */
 export function MessageTimestamp({
   timestamp,
   children,
   chatMode = false,
+  toolGroupSpacing = false,
   copyText,
   copyTitle = 'Copy',
 }: MessageTimestampProps) {
@@ -34,9 +37,6 @@ export function MessageTimestamp({
       })
       .catch(() => {});
   }, [copyText]);
-  if (timestamp === undefined && !copyText) {
-    return <>{children}</>;
-  }
   const copyButton = copyText ? (
     <button
       type="button"
@@ -48,16 +48,21 @@ export function MessageTimestamp({
       {copied ? <CheckIcon /> : <CopyIcon />}
     </button>
   ) : null;
+  const rowClassName = chatMode
+    ? styles.chatRow
+    : toolGroupSpacing
+      ? `${styles.row} ${styles.toolGroupSpacing}`
+      : styles.row;
   if (timestamp === undefined) {
     return (
-      <div className={chatMode ? styles.chatRow : styles.row}>
+      <div className={rowClassName}>
         {children}
         {copyButton}
       </div>
     );
   }
   return (
-    <div className={chatMode ? styles.chatRow : styles.row}>
+    <div className={rowClassName}>
       {children}
       {chatMode ? (
         <span className={styles.chatActions}>

@@ -18,8 +18,18 @@ import type { Message } from '../adapters/types';
 vi.mock('./MessageTimestamp', async () => {
   const React = await import('react');
   return {
-    MessageTimestamp: ({ children }: { children: React.ReactNode }) =>
-      React.createElement('div', null, children),
+    MessageTimestamp: ({
+      children,
+      toolGroupSpacing,
+    }: {
+      children: React.ReactNode;
+      toolGroupSpacing?: boolean;
+    }) =>
+      React.createElement(
+        'div',
+        { 'data-tool-group-spacing': String(toolGroupSpacing === true) },
+        children,
+      ),
     formatTimestamp: () => '',
   };
 });
@@ -55,10 +65,20 @@ vi.mock('./messages/AssistantMessage', async () => {
         customFooter,
       );
     },
-    ThinkingMessage: ({ generateContent }: { generateContent?: unknown }) =>
+    ThinkingMessage: ({
+      generateContent,
+      startTime,
+      endTime,
+    }: {
+      generateContent?: unknown;
+      startTime?: number;
+      endTime?: number;
+    }) =>
       React.createElement('div', {
         'data-testid': 'thinking',
         'data-has-generator': generateContent !== undefined ? 'true' : 'false',
+        'data-start-time': startTime,
+        'data-end-time': endTime,
       }),
   };
 });
@@ -112,6 +132,12 @@ const assistantMsg = (id: string, content: string): Message =>
   ({ id, role: 'assistant', content, timestamp: 0 }) as Message;
 const thinkingMsg = (id: string, content: string): Message =>
   ({ id, role: 'thinking', content, timestamp: 0 }) as Message;
+const toolMsg = (id: string): Message => ({
+  id,
+  role: 'tool_group',
+  tools: [],
+  timestamp: 0,
+});
 
 function item(message: Message) {
   return <MessageItem message={message} />;
@@ -195,7 +221,74 @@ describe('MessageItem selectable wrapper', () => {
   });
 });
 
+describe('MessageItem tool group spacing', () => {
+  it('uses larger row spacing only while thinking is hidden', () => {
+    const hidden = render(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider value={{ showThinking: false }}>
+          {item(toolMsg('hidden'))}
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    const visible = render(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider value={{ showThinking: true }}>
+          {item(toolMsg('visible'))}
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    const hiddenAssistant = render(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider value={{ showThinking: false }}>
+          {item(assistantMsg('assistant', 'answer'))}
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    const defaultTool = render(
+      <I18nProvider language="en">{item(toolMsg('default'))}</I18nProvider>,
+    );
+
+    expect(
+      hidden.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('true');
+    expect(
+      visible.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('false');
+    expect(
+      hiddenAssistant.firstElementChild?.getAttribute(
+        'data-tool-group-spacing',
+      ),
+    ).toBe('false');
+    expect(
+      defaultTool.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('false');
+  });
+});
+
 describe('MessageItem generation updates', () => {
+  it('rerenders a thinking message when its timing changes', () => {
+    const message = thinkingMsg('1', 'reasoning');
+    const { root, container } = renderWithRoot(
+      <I18nProvider language="en">
+        <MessageItem message={message} />
+      </I18nProvider>,
+    );
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageItem
+            message={{ ...message, startTime: 1_000, endTime: 6_000 }}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    const thinking = container.querySelector('[data-testid="thinking"]');
+    expect(thinking?.getAttribute('data-start-time')).toBe('1000');
+    expect(thinking?.getAttribute('data-end-time')).toBe('6000');
+  });
+
   it('rerenders a thinking message when generation becomes available', () => {
     const message = thinkingMsg('1', 'reasoning');
     const { root, container } = renderWithRoot(

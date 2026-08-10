@@ -5,7 +5,10 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
-import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
+import {
+  useWebShellCustomization,
+  type WebShellAssistantTurnFooterRenderInfo,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -60,6 +63,7 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  const { showThinking } = useWebShellCustomization();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -93,6 +97,8 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
+            startTime={message.startTime}
+            endTime={message.endTime}
             isLocateFlashing={isLocateFlashing}
             generateContent={generateContent}
           />
@@ -223,6 +229,7 @@ export const MessageItem = memo(function MessageItem({
     <MessageTimestamp
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
+      toolGroupSpacing={message.role === 'tool_group' && showThinking === false}
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle={t('common.copy')}
     >
@@ -322,7 +329,9 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'thinking' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        prev.startTime === next.startTime &&
+        prev.endTime === next.endTime
       );
     case 'system':
       return (

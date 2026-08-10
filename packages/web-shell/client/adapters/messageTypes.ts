@@ -105,6 +105,8 @@ export interface DaemonThinkingMessage extends DaemonMessageMeta {
   role: 'thinking';
   content: string;
   isStreaming?: boolean;
+  startTime?: number;
+  endTime?: number;
 }
 
 export interface DaemonToolGroupMessage extends DaemonMessageMeta {

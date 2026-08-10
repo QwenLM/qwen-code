@@ -11,7 +11,6 @@ interface Observation {
   theme: string;
   language: string;
   renderMode: string;
-  compactMode: boolean;
   customization: Record<string, unknown>;
 }
 
@@ -21,14 +20,12 @@ const observed = vi.hoisted(() => ({
 }));
 
 vi.mock('../App', () => ({
-  CompactModeContext: createContext(false),
   TodoDetailContext: createContext(new Map()),
   TodoTimelineContext: createContext(new Map()),
 }));
 
 vi.mock('./MessageList', async () => {
   const React = await import('react');
-  const { CompactModeContext } = await import('../App');
   const { useWebShellCustomization } = await import('../customization');
   const { useI18n } = await import('../i18n');
   const { useTheme } = await import('../themeContext');
@@ -42,7 +39,6 @@ vi.mock('./MessageList', async () => {
         theme: useTheme(),
         language: useI18n().language,
         renderMode: useTranscriptRenderMode(),
-        compactMode: React.useContext(CompactModeContext),
         customization: customization as Record<string, unknown>,
       });
       return React.createElement('div', { 'data-testid': 'message-list' });
@@ -169,7 +165,6 @@ describe('WebShellTranscript contract', () => {
       theme: 'light',
       language: 'zh-CN',
       renderMode: 'readonly',
-      compactMode: false,
     });
     expect(observation.customization).toMatchObject({
       compactThinking: true,

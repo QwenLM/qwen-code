@@ -8,11 +8,7 @@ import {
   type ReactElement,
 } from 'react';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import {
-  CompactModeContext,
-  TodoDetailContext,
-  TodoTimelineContext,
-} from '../App';
+import { TodoDetailContext, TodoTimelineContext } from '../App';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
@@ -238,28 +234,26 @@ function WebShellTranscriptContent({
             <WebShellCustomizationProvider value={customization}>
               <TodoTimelineContext.Provider value={todoTimeline}>
                 <TodoDetailContext.Provider value={todoDetails}>
-                  <CompactModeContext.Provider value={false}>
+                  <div
+                    ref={rootRef}
+                    className={rootClassName}
+                    style={rootStyle}
+                    data-web-shell-root
+                    data-web-shell-shadcn
+                    lang={resolvedLanguage}
+                  >
                     <div
-                      ref={rootRef}
-                      className={rootClassName}
-                      style={rootStyle}
-                      data-web-shell-root
-                      data-web-shell-shadcn
-                      lang={resolvedLanguage}
+                      className={`${styles.content} ${styles.contentHasMessages}`}
                     >
-                      <div
-                        className={`${styles.content} ${styles.contentHasMessages}`}
-                      >
-                        <MessageList
-                          messages={messages}
-                          pendingApproval={null}
-                          isResponding={false}
-                          workspaceCwd={workspaceCwd}
-                          virtualScrollThreshold={virtualScrollThreshold}
-                        />
-                      </div>
+                      <MessageList
+                        messages={messages}
+                        pendingApproval={null}
+                        isResponding={false}
+                        workspaceCwd={workspaceCwd}
+                        virtualScrollThreshold={virtualScrollThreshold}
+                      />
                     </div>
-                  </CompactModeContext.Provider>
+                  </div>
                 </TodoDetailContext.Provider>
               </TodoTimelineContext.Provider>
             </WebShellCustomizationProvider>

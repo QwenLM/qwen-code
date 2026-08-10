@@ -54,7 +54,36 @@ interface TranscriptMessageOptions {
 
 interface BackgroundAgentTaskUpdate {
   status: string;
-  endTime: number;
+  serverEndTime?: number;
+  clientEndTime: number;
+}
+
+function hasServerTimingPair(
+  block: DaemonTextTranscriptBlock | DaemonToolTranscriptBlock,
+): boolean {
+  return (
+    block.serverTimestamp !== undefined &&
+    block.serverUpdatedAt !== undefined &&
+    block.serverUpdatedAt > block.serverTimestamp
+  );
+}
+
+function getTranscriptTiming(
+  block: DaemonTextTranscriptBlock | DaemonToolTranscriptBlock,
+  complete: boolean,
+): { startTime: number; endTime?: number } {
+  const serverStart = block.serverTimestamp;
+  const serverEnd = block.serverUpdatedAt;
+  const hasServerPair = hasServerTimingPair(block);
+  if (complete) {
+    return hasServerPair
+      ? { startTime: serverStart!, endTime: serverEnd! }
+      : { startTime: block.createdAt, endTime: block.updatedAt };
+  }
+  const elapsed = hasServerPair
+    ? Math.max(0, serverEnd! - serverStart!)
+    : Math.max(0, block.updatedAt - block.createdAt);
+  return { startTime: block.updatedAt - elapsed };
 }
 
 function collectBackgroundAgentTaskUpdates(
@@ -76,7 +105,8 @@ function collectBackgroundAgentTaskUpdates(
     if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
     updates.set(toolUseId, {
       status,
-      endTime: block.serverTimestamp ?? block.clientReceivedAt,
+      serverEndTime: block.serverTimestamp,
+      clientEndTime: block.clientReceivedAt,
     });
   }
   return updates;
@@ -85,21 +115,23 @@ function collectBackgroundAgentTaskUpdates(
 function applyBackgroundAgentTaskUpdate(
   tool: DaemonMessageToolCall,
   update: BackgroundAgentTaskUpdate | undefined,
+  block: DaemonToolTranscriptBlock,
 ): void {
   if (!update) return;
+  const hasServerPair =
+    block.serverTimestamp !== undefined && update.serverEndTime !== undefined;
+  tool.startTime = hasServerPair ? block.serverTimestamp : block.createdAt;
+  tool.endTime = hasServerPair ? update.serverEndTime : update.clientEndTime;
   switch (update.status) {
     case 'completed':
       tool.status = 'completed';
-      tool.endTime = update.endTime;
       break;
     case 'failed':
       tool.status = 'failed';
-      tool.endTime = update.endTime;
       break;
     case 'cancelled':
     case 'canceled':
       tool.status = 'completed';
-      tool.endTime = update.endTime;
       tool.rawOutput = {
         ...(getRecord(tool.rawOutput) ?? {}),
         status: 'cancelled',
@@ -329,6 +361,7 @@ export function transcriptBlocksToDaemonMessages(
   const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
+  let currentThinkingUsesServerPair = false;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
   // the next top-level assistant/thought block must start a fresh assistant
   // message instead of being appended to text that appeared before the tool.
@@ -510,6 +543,8 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
+        const usesServerPair =
+          !textBlock.streaming && hasServerTimingPair(textBlock);
         const parentSubAgent = textBlock.parentToolCallId
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
@@ -521,22 +556,32 @@ export function transcriptBlocksToDaemonMessages(
           currentThinkingIdx !== null
             ? messages[currentThinkingIdx]
             : undefined;
-        if (target && target.role === 'thinking' && !needsNewContentMessage) {
+        if (
+          target &&
+          target.role === 'thinking' &&
+          !needsNewContentMessage &&
+          currentThinkingUsesServerPair === usesServerPair
+        ) {
+          const timing = getTranscriptTiming(textBlock, !textBlock.streaming);
           messages[currentThinkingIdx!] = {
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
+            endTime: timing.endTime,
           };
           needsNewContentMessage = false;
         } else {
+          const timing = getTranscriptTiming(textBlock, !textBlock.streaming);
           messages.push({
             id: block.id,
             role: 'thinking',
             content: textBlock.text,
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
+            ...timing,
           });
           currentThinkingIdx = messages.length - 1;
+          currentThinkingUsesServerPair = usesServerPair;
           needsNewContentMessage = false;
         }
         currentAssistantIdx = null;
@@ -549,6 +594,7 @@ export function transcriptBlocksToDaemonMessages(
         applyBackgroundAgentTaskUpdate(
           toolCall,
           backgroundAgentTaskUpdates.get(toolCall.callId),
+          toolBlock,
         );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
@@ -997,6 +1043,7 @@ function daemonToolBlockToToolCall(
     block.status === 'failed' ||
     block.status === 'cancelled' ||
     block.status === 'canceled';
+  const timing = getTranscriptTiming(block, isComplete && !isBackgroundAgent);
 
   return {
     callId: block.toolCallId,
@@ -1010,8 +1057,7 @@ function daemonToolBlockToToolCall(
     rawOutput,
     args: block.rawInput as Record<string, unknown> | undefined,
     parentToolCallId: block.parentToolCallId,
-    startTime: block.createdAt,
-    endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    ...timing,
     ...(content ? { content } : {}),
   };
 }

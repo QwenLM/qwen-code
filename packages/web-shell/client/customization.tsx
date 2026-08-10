@@ -486,6 +486,7 @@ export interface WebShellCustomization {
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
+  showThinking?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving

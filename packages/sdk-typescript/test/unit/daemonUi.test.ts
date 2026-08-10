@@ -3270,6 +3270,61 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
+  it('preserves authoritative tool start and end times during replay', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100_000 }),
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'call-1',
+          status: 'in_progress',
+          serverTimestamp: 1_000,
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'call-1',
+          status: 'completed',
+          serverTimestamp: 6_000,
+        },
+      ],
+      { now: 100_000 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      serverTimestamp: 1_000,
+      serverUpdatedAt: 6_000,
+      createdAt: 100_000,
+      updatedAt: 100_000,
+    });
+  });
+
+  it('preserves authoritative thought start and end times during replay', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100_000 }),
+      [
+        {
+          type: 'thought.text.delta',
+          text: 'thinking',
+          serverTimestamp: 1_000,
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'answer',
+          serverTimestamp: 6_000,
+        },
+      ],
+      { now: 100_000 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'thought',
+      streaming: false,
+      serverTimestamp: 1_000,
+      serverUpdatedAt: 6_000,
+    });
+  });
+
   it('uses assistant.done timestamp when the active assistant block has none', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = reduceDaemonTranscriptEvents(
@@ -3303,6 +3358,35 @@ describe('daemon UI time schema (PR-B)', () => {
       eventId: 2,
       serverTimestamp: 5_000,
     });
+    expect(state.blocks[0]).not.toHaveProperty('serverUpdatedAt');
+  });
+
+  it('does not create a server timing pair from a stamped thought end only', () => {
+    let state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100_000 }),
+      [{ type: 'thought.text.delta', text: 'thinking' }],
+      { now: 100_000 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'answer',
+          serverTimestamp: 6_000,
+        },
+      ],
+      { now: 106_000 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'thought',
+      createdAt: 100_000,
+      updatedAt: 106_000,
+      serverTimestamp: 6_000,
+    });
+    expect(state.blocks[0]).not.toHaveProperty('serverUpdatedAt');
   });
 
   it('extracts serverTimestamp from top-level envelope field when present', () => {

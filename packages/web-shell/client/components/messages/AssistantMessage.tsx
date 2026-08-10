@@ -1,14 +1,5 @@
-import {
-  memo,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Markdown } from './Markdown';
-import { CompactModeContext } from '../../App';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -189,6 +180,8 @@ interface ThinkingMessageProps {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+  startTime?: number;
+  endTime?: number;
   isLocateFlashing?: boolean;
   generateContent?: SessionContentGenerator;
 }
@@ -225,23 +218,28 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   isStreaming,
   timestamp,
+  startTime,
+  endTime,
   isLocateFlashing = false,
   generateContent,
 }: ThinkingMessageProps) {
   const { language, t } = useI18n();
-  const compactMode = useContext(CompactModeContext);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const thinkingActive = isStreaming === true;
-  const startTimeRef = useRef(timestamp ?? Date.now());
+  const startTimeRef = useRef(startTime ?? timestamp ?? Date.now());
   const sawActiveRef = useRef(thinkingActive);
   const [now, setNow] = useState(() => Date.now());
-  const [finishedAt, setFinishedAt] = useState<number | null>(null);
+  const [finishedAt, setFinishedAt] = useState<number | null>(endTime ?? null);
   const [translationOpen, setTranslationOpen] = useState(false);
   const [translation, setTranslation] = useState<ThinkingTranslation>();
   const [translationLoading, setTranslationLoading] = useState(false);
   const [translationThinking, setTranslationThinking] = useState(false);
   const [translationError, setTranslationError] = useState(false);
   const translationAbortRef = useRef<AbortController | undefined>(undefined);
+
+  useEffect(() => {
+    if (startTime !== undefined) startTimeRef.current = startTime;
+  }, [startTime]);
 
   useEffect(() => {
     if (!content || !thinkingActive) return;
@@ -252,6 +250,10 @@ export const ThinkingMessage = memo(function ThinkingMessage({
 
   useEffect(() => {
     if (!content) return;
+    if (endTime !== undefined) {
+      setFinishedAt(endTime);
+      return;
+    }
     if (thinkingActive) {
       sawActiveRef.current = true;
       setFinishedAt(null);
@@ -260,11 +262,13 @@ export const ThinkingMessage = memo(function ThinkingMessage({
     if (sawActiveRef.current && finishedAt === null) {
       setFinishedAt(Date.now());
     }
-  }, [content, finishedAt, thinkingActive]);
+  }, [content, endTime, finishedAt, thinkingActive]);
 
+  const effectiveFinishedAt = endTime ?? finishedAt;
   const thinkingDurationMs =
-    thinkingActive || finishedAt !== null
-      ? (thinkingActive ? now : finishedAt!) - startTimeRef.current
+    thinkingActive || effectiveFinishedAt !== null
+      ? (thinkingActive ? now : effectiveFinishedAt!) -
+        (startTime ?? startTimeRef.current)
       : undefined;
   const thinkingSummaryKey = getThinkingSummaryKey({
     isStreaming,
@@ -381,7 +385,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
         isLocateFlashing ? ` ${flashStyles.flash}` : ''
       }`}
     >
-      {content && !compactMode && (
+      {content && (
         <div className={styles.thinking}>
           <div className={styles.thinkingBody}>
             <div

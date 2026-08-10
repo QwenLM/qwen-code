@@ -118,6 +118,8 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    serverTimestamp: overrides.serverTimestamp,
+    serverUpdatedAt: overrides.serverUpdatedAt,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -2893,7 +2895,113 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: 'let me think about this',
         isStreaming: false,
         timestamp: 1,
+        startTime: 1,
+        endTime: 1,
       },
+    ]);
+  });
+
+  it('preserves authoritative thinking duration across replay', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'thinking', 100_000, false, {
+        serverTimestamp: 1_000,
+        serverUpdatedAt: 6_000,
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'thinking',
+      startTime: 1_000,
+      endTime: 6_000,
+    });
+  });
+
+  it('projects live daemon timing onto the client clock', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'thinking', 100_000, true, {
+        updatedAt: 101_000,
+        serverTimestamp: 1_000,
+        serverUpdatedAt: 3_000,
+      }),
+      toolBlock('tool-1', 'call-1', 'in_progress', 200_000, {
+        updatedAt: 201_000,
+        serverTimestamp: 4_000,
+        serverUpdatedAt: 7_000,
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'thinking',
+      startTime: 99_000,
+    });
+    expect(messages[0]).not.toHaveProperty('endTime');
+    expect(messages[1]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ startTime: 198_000 }],
+    });
+    if (messages[1]?.role === 'tool_group') {
+      expect(messages[1].tools[0]).not.toHaveProperty('endTime');
+    }
+  });
+
+  it('preserves authoritative tool duration across replay', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'call-1', 'completed', 100_000, {
+        serverTimestamp: 1_000,
+        serverUpdatedAt: 6_000,
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ startTime: 1_000, endTime: 6_000 }],
+    });
+  });
+
+  it('does not mix server and client clocks for partial tool timestamps', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'call-1', 'completed', 100_000, {
+        serverTimestamp: 1_000,
+        updatedAt: 106_000,
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ startTime: 100_000, endTime: 106_000 }],
+    });
+  });
+
+  it('falls back to client timing for an identical thought server pair', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'thinking', 100_000, false, {
+        updatedAt: 106_000,
+        serverTimestamp: 6_000,
+        serverUpdatedAt: 6_000,
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'thinking',
+      startTime: 100_000,
+      endTime: 106_000,
+    });
+  });
+
+  it('does not merge adjacent thinking blocks from different clocks', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('client', 'thought', 'first', 100_000, false, {
+        updatedAt: 101_000,
+      }),
+      textBlock('server', 'thought', 'second', 102_000, false, {
+        serverTimestamp: 1_000,
+        serverUpdatedAt: 6_000,
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'thinking', startTime: 100_000, endTime: 101_000 },
+      { role: 'thinking', startTime: 1_000, endTime: 6_000 },
     ]);
   });
 
@@ -2994,6 +3102,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
         content: 'analyzing...',
         isStreaming: false,
         timestamp: 1,
+        startTime: 1,
+        endTime: 1,
       },
       {
         id: 'a1',

@@ -292,7 +292,7 @@ function applyDaemonTranscriptEvent(
       // those reasons; the post-reconnect `tool_call_update` stream
       // will deliver the real terminal status.
       if (event.reason === 'cancelled' || event.reason === 'error') {
-        propagateCancellationToInFlightTools(next);
+        propagateCancellationToInFlightTools(next, event);
       }
       break;
     case 'assistant.usage':
@@ -376,7 +376,7 @@ function applyDaemonTranscriptEvent(
       // UIs don't show a tool spinning forever after a peer cancel.
       // Idempotent — safe if the daemon also later emits terminal
       // tool_call_update frames.
-      propagateCancellationToInFlightTools(next);
+      propagateCancellationToInFlightTools(next, event);
       if (event.reason !== 'forward_failed') {
         appendPromptCancelledBlock(next, event);
       }
@@ -444,7 +444,7 @@ function handleStateResyncRequired(
     lastDeliveredId: event.lastDeliveredId,
     earliestAvailableId: event.earliestAvailableId,
   };
-  propagateCancellationToInFlightTools(state);
+  propagateCancellationToInFlightTools(state, event);
   appendStatusBlock(
     state,
     'error',
@@ -498,11 +498,12 @@ function finalizeStreamingTextBlock(
     if (event?.eventId !== undefined) block.eventId = event.eventId;
     // Preserve the text event's own timestamp during history replay; later
     // finalize/status events can be much newer and would skew message times.
-    if (
-      block.serverTimestamp === undefined &&
-      event?.serverTimestamp !== undefined
-    ) {
-      block.serverTimestamp = event.serverTimestamp;
+    if (event?.serverTimestamp !== undefined) {
+      if (block.serverTimestamp === undefined) {
+        block.serverTimestamp = event.serverTimestamp;
+      } else {
+        block.serverUpdatedAt = event.serverTimestamp;
+      }
     }
   }
 }
@@ -650,7 +651,8 @@ function appendTextDelta(
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.serverTimestamp !== undefined) {
-      existing.serverTimestamp = event.serverTimestamp;
+      existing.serverTimestamp ??= event.serverTimestamp;
+      existing.serverUpdatedAt = event.serverTimestamp;
     }
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
@@ -687,15 +689,15 @@ function appendTextDelta(
 
   if (parentId != null) {
     if (kind === 'assistant') {
-      clearActiveThoughtForParent(state, parentId);
+      clearActiveThoughtForParent(state, parentId, event);
     }
     if (kind === 'thought') {
-      clearActiveAssistantForParent(state, parentId);
+      clearActiveAssistantForParent(state, parentId, event);
     }
   } else {
     if (kind !== 'user') state.activeUserBlockId = undefined;
-    if (kind !== 'assistant') clearActiveAssistant(state);
-    if (kind !== 'thought') clearActiveThought(state);
+    if (kind !== 'assistant') clearActiveAssistant(state, event);
+    if (kind !== 'thought') clearActiveThought(state, event);
   }
 }
 
@@ -776,6 +778,9 @@ function upsertToolBlock(
     }
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
+    if (event.serverTimestamp !== undefined) {
+      existing.serverUpdatedAt = event.serverTimestamp;
+    }
     if (event.details) existing.details = event.details;
     if (compactTaskOutput) delete existing.content;
     else if (event.content !== undefined) existing.content = event.content;
@@ -884,7 +889,10 @@ function upsertToolBlock(
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
     ...(event.serverTimestamp !== undefined
-      ? { serverTimestamp: event.serverTimestamp }
+      ? {
+          serverTimestamp: event.serverTimestamp,
+          serverUpdatedAt: event.serverTimestamp,
+        }
       : {}),
     ...(event.sourceRecordIds
       ? { sourceRecordIds: [...event.sourceRecordIds] }
@@ -1019,6 +1027,7 @@ function findLatestInFlightToolCallId(
  */
 function propagateCancellationToInFlightTools(
   state: DaemonTranscriptState,
+  event?: DaemonUiEvent,
 ): void {
   // Skip trimmed sentinels up front. Without this filter
   // each cancellation walked the entire historical tool-call index (which
@@ -1033,6 +1042,9 @@ function propagateCancellationToInFlightTools(
     if (!IN_FLIGHT_TOOL_STATUSES.has(block.status)) continue;
     block.status = 'cancelled';
     block.updatedAt = state.now;
+    if (event?.serverTimestamp !== undefined) {
+      block.serverUpdatedAt = event.serverTimestamp;
+    }
   }
   state.currentToolCallId = undefined;
 }
@@ -1308,7 +1320,9 @@ function createTextBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
-    ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(serverTimestamp !== undefined
+      ? { serverTimestamp, serverUpdatedAt: serverTimestamp }
+      : {}),
     ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };

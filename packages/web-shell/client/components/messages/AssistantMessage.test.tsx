@@ -7,13 +7,6 @@ import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-vi.mock('../../App', async () => {
-  const { createContext } = await import('react');
-  return {
-    CompactModeContext: createContext(false),
-  };
-});
-
 const {
   AssistantMessage,
   ThinkingMessage,
@@ -93,17 +86,49 @@ describe('AssistantMessage thinking logic', () => {
     expect(formatThinkingDuration(120_000)).toBe('2m');
   });
 
-  it('keeps replayed completed thinking durationless', () => {
+  it('keeps replayed completed thinking duration stable', () => {
+    vi.setSystemTime(100_000);
     const container = render(
       <ThinkingMessage
         messageId="replayed"
         content="private chain of thought"
-        timestamp={0}
+        startTime={1_000}
+        endTime={6_000}
       />,
     );
 
-    expect(container.textContent).toContain('Done thinking');
-    expect(container.textContent).not.toContain('Thought for');
+    expect(container.textContent).toContain('Thought for 5s');
+  });
+
+  it('uses authoritative timing when a live thought completes', () => {
+    vi.setSystemTime(100_000);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const tree = (props: {
+      isStreaming: boolean;
+      startTime: number;
+      endTime?: number;
+    }) => (
+      <I18nProvider language="en">
+        <ThinkingMessage
+          messageId="live-to-complete"
+          content="private chain of thought"
+          {...props}
+        />
+      </I18nProvider>
+    );
+
+    act(() => root.render(tree({ isStreaming: true, startTime: 99_000 })));
+    expect(container.textContent).toContain('Thinking 1s');
+
+    act(() =>
+      root.render(
+        tree({ isStreaming: false, startTime: 1_000, endTime: 6_000 }),
+      ),
+    );
+    expect(container.textContent).toContain('Thought for 5s');
   });
 
   it.each([

@@ -826,6 +826,8 @@ export interface DaemonTranscriptBlockBase {
    * display: clients viewing the same session see the same value.
    */
   serverTimestamp?: number;
+  /** Daemon-authoritative wall clock for the latest event merged into this block. */
+  serverUpdatedAt?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
   /**

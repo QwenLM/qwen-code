@@ -17,12 +17,8 @@ import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
-// Mock the App context and the heavy row children so this test exercises only
-// MessageList's own collapse + deferred-scroll logic, not the whole render tree.
-vi.mock('../App', async () => {
-  const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
-});
+// Mock the heavy row children so this test exercises only MessageList's own
+// collapse + deferred-scroll logic, not the whole render tree.
 vi.mock('./MessageItem', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('../customization');
@@ -53,6 +49,7 @@ vi.mock('./MessageItem', async () => {
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
+          'data-timestamp': message.timestamp,
         },
         sendFailed
           ? React.createElement(
@@ -467,6 +464,95 @@ describe('MessageList — failed prompt retry', () => {
         ?.click(),
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MessageList — thinking visibility', () => {
+  it('hides thinking rows without removing surrounding transcript content', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
+      undefined,
+      { customization: { showThinking: false } },
+    );
+
+    expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('merges tool groups separated only by hidden thinking', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        { ...toolMsg('g1'), timestamp: 1_000 },
+        thinkingMsg('t1'),
+        { ...toolMsg('g2'), timestamp: 2_000 },
+        asstMsg('a1'),
+        userMsg('u2'),
+        toolMsg('g3'),
+      ],
+      undefined,
+      {
+        customization: {
+          showThinking: false,
+          collapseCompletedTurns: false,
+        },
+      },
+    );
+
+    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-g1"]')
+        ?.getAttribute('data-timestamp'),
+    ).toBe('1000');
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
+  });
+
+  it('keeps visible thinking and tool groups in transcript order', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        toolMsg('g1'),
+        thinkingMsg('t1'),
+        toolMsg('g2'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      { customization: { collapseCompletedTurns: false } },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g2"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('[data-testid^="msg-"]')).map(
+        (element) => element.getAttribute('data-testid'),
+      ),
+    ).toEqual(['msg-u1', 'msg-g1', 'msg-t1', 'msg-g2', 'msg-a1']);
+  });
+
+  it('keeps agent groups on their parallel-agent path', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        thinkingMsg('t1'),
+        agentMsg('agent-2'),
+      ],
+      undefined,
+      {
+        customization: {
+          showThinking: false,
+          collapseCompletedTurns: false,
+        },
+      },
+    );
+
+    expect(parallelAgentsSummary(container)).not.toBeNull();
   });
 });
 

@@ -1,7 +1,6 @@
 import {
   forwardRef,
   memo,
-  useContext,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -25,7 +24,6 @@ import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
-import { CompactModeContext } from '../App';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -46,9 +44,11 @@ import {
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
+  isAskUserQuestionToolName,
   isActiveToolStatus,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { isTodoWriteToolName } from '../utils/todos';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -259,12 +259,23 @@ function isForceExpandGroup(
   return false;
 }
 
-function isHiddenInCompactMode(msg: Message): boolean {
-  if (msg.role === 'thinking') return true;
-  return false;
+function isThinkingMessage(msg: Message): boolean {
+  return msg.role === 'thinking';
 }
 
-function mergeCompactToolGroups(
+function isStandaloneToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    msg.tools.some(
+      (tool) =>
+        isSubAgentToolCall(tool) ||
+        isTodoWriteToolName(tool.toolName) ||
+        isAskUserQuestionToolName(tool.toolName),
+    )
+  );
+}
+
+function mergeToolGroupsAcrossThinking(
   messages: Message[],
   pendingApproval: PermissionRequest | null,
 ): Message[] {
@@ -274,8 +285,12 @@ function mergeCompactToolGroups(
   while (i < messages.length) {
     const msg = messages[i];
 
-    if (msg.role !== 'tool_group' || isForceExpandGroup(msg, pendingApproval)) {
-      if (!isHiddenInCompactMode(msg)) {
+    if (
+      msg.role !== 'tool_group' ||
+      isForceExpandGroup(msg, pendingApproval) ||
+      isStandaloneToolGroup(msg)
+    ) {
+      if (!isThinkingMessage(msg)) {
         result.push(msg);
       }
       i++;
@@ -289,14 +304,15 @@ function mergeCompactToolGroups(
     while (j < messages.length) {
       const next = messages[j];
 
-      if (isHiddenInCompactMode(next)) {
+      if (isThinkingMessage(next)) {
         j++;
         continue;
       }
 
       if (
         next.role === 'tool_group' &&
-        !isForceExpandGroup(next, pendingApproval)
+        !isForceExpandGroup(next, pendingApproval) &&
+        !isStandaloneToolGroup(next)
       ) {
         mergeableGroups.push(next);
         lastMergedIdx = j;
@@ -320,6 +336,7 @@ function mergeCompactToolGroups(
       id: mergeableGroups[0].id,
       role: 'tool_group',
       tools: mergedTools,
+      timestamp: mergeableGroups[0].timestamp,
     });
     i = lastMergedIdx + 1;
   }
@@ -2475,13 +2492,14 @@ export const MessageList = memo(
   ) {
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
-    const compactMode = useContext(CompactModeContext);
+    const { collapseCompletedTurns, showThinking } = useWebShellCustomization();
+    const hideThinking = showThinking === false;
     const mergedMessages = useMemo(
       () =>
-        compactMode
-          ? mergeCompactToolGroups(messages, pendingApproval)
+        hideThinking
+          ? mergeToolGroupsAcrossThinking(messages, pendingApproval)
           : messages,
-      [compactMode, messages, pendingApproval],
+      [hideThinking, messages, pendingApproval],
     );
     const displayItems = useMemo(
       () =>
@@ -2716,7 +2734,6 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>

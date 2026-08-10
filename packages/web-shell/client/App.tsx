@@ -317,8 +317,6 @@ import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import styles from './App.module.css';
 
-export const CompactModeContext = createContext(false);
-
 /**
  * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
  * history row can render what changed in that snapshot without re-deriving it
@@ -457,7 +455,6 @@ function availableSkillInfos(status: {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
-const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
 /** Maps each ModelDialogMode to its i18n title key — single source of truth. */
@@ -863,6 +860,7 @@ type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+const SHOW_THINKING_STORAGE_KEY = 'qwen-code-web-shell-show-thinking';
 
 function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
@@ -912,6 +910,27 @@ function writeSidebarCollapsed(collapsed: boolean): void {
       SIDEBAR_COLLAPSED_STORAGE_KEY,
       String(collapsed),
     );
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
+function readShowThinking(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const stored = window.localStorage.getItem(SHOW_THINKING_STORAGE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return true;
+}
+
+function writeShowThinking(value: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SHOW_THINKING_STORAGE_KEY, String(value));
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
   }
@@ -1631,6 +1650,7 @@ export function App({
 }: AppProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
+  const [showThinking, setShowThinking] = useState(readShowThinking);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
       providedLanguage === undefined
@@ -1829,6 +1849,7 @@ export function App({
       renderComposerFooter,
       renderFooter,
       compactThinking,
+      showThinking,
       collapseCompletedTurns,
       markdownTableMode,
       markdown,
@@ -1852,6 +1873,7 @@ export function App({
       renderComposerFooter,
       renderFooter,
       compactThinking,
+      showThinking,
       collapseCompletedTurns,
       markdownTableMode,
       markdown,
@@ -5810,10 +5832,6 @@ export function App({
     }
     return options;
   }, [connection.models]);
-  const [compactMode, setCompactMode] = useState(false);
-  const compactModeRef = useRef(compactMode);
-  compactModeRef.current = compactMode;
-
   useEffect(() => {
     if (providedTheme) {
       setSelectedTheme(providedTheme);
@@ -5890,17 +5908,11 @@ export function App({
     store.reset();
   }, [store, t]);
 
-  const handleToggleCompact = useCallback(() => {
-    const previous = compactModeRef.current;
-    const next = !compactModeRef.current;
-    setCompactMode(next);
-    setWorkspaceSetting('workspace', COMPACT_MODE_SETTING_KEY, next).catch(
-      (error: unknown) => {
-        setCompactMode(previous);
-        reportError(error, t('compact.saveFailed'));
-      },
-    );
-  }, [reportError, setWorkspaceSetting, t]);
+  const handleToggleThinking = useCallback(() => {
+    const next = !showThinking;
+    setShowThinking(next);
+    writeShowThinking(next);
+  }, [showThinking]);
 
   const handleSetMode = useCallback(
     (modeId: string) => {
@@ -8574,7 +8586,7 @@ export function App({
         }
         if (e.key === 'o') {
           e.preventDefault();
-          handleToggleCompact();
+          handleToggleThinking();
           return;
         }
         if (e.key === 'y') {
@@ -8589,7 +8601,7 @@ export function App({
   }, [
     interactionBlocked,
     handleClearScreen,
-    handleToggleCompact,
+    handleToggleThinking,
     handleRetry,
     store,
     t,
@@ -10373,48 +10385,46 @@ export function App({
                       </button>
                     </div>
                   )}
-                  {/* Share the app-level customization + compact-mode contexts so
-                      split panes render markdown/tool-headers/thinking the same
+                  {/* Share the app-level customization so split panes render
+                      markdown/tool-headers/thinking the same
                       way the single-session chat does (todo contexts stay chat-
                       only — they belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
-                      <SplitView
-                        sessionIds={splitSessionIds}
-                        // Mirror live pane add/remove back up so switching away
-                        // and re-entering restores the same panes. Keep this
-                        // callback stable to avoid looping SplitView's reporting
-                        // effect.
-                        onPanesChange={handleSplitPanesChange}
-                        // Refresh the "add pane" picker when the session list
-                        // changes elsewhere, matching the sidebar.
-                        sessionListReloadToken={sessionListReloadToken}
-                        includeOtherWorkspaces={!lockedWorkspaceCwd}
-                        workspaceCwd={lockedWorkspaceCwd}
-                        // Back returns to the Session Overview (the hub the split
-                        // is launched from), not the single-session chat.
-                        onExit={handleSplitExit}
-                        onError={reportError}
-                        onImageIngestionNotice={pushToast}
-                        onSlashCommand={onSlashCommand}
-                        onRightPanelOpen={handleTurnOutputOpen}
-                        onOpenMonitor={openMonitorPanel}
-                        onPaneArtifactsChange={handlePaneArtifactsChange}
-                        messageTurnOutputs={messageTurnOutputs}
-                        restartSseOnPrompt={restartSseOnPrompt}
-                        historyPageSize={historyPageSize}
-                        renderPaneHeaderActions={renderPaneHeaderActions}
-                        voiceUserRevision={voiceUserRevision}
-                        voiceWorkspaceRevisions={voiceWorkspaceRevisions}
-                        voiceWorkspaces={
-                          workspace.capabilities?.workspaces ||
-                          lockedWorkspaceCapability
-                            ? workspaces
-                            : undefined
-                        }
-                        sessionWorkflowEnabled={sessionWorkflowEnabled}
-                      />
-                    </CompactModeContext.Provider>
+                    <SplitView
+                      sessionIds={splitSessionIds}
+                      // Mirror live pane add/remove back up so switching away
+                      // and re-entering restores the same panes. Keep this
+                      // callback stable to avoid looping SplitView's reporting
+                      // effect.
+                      onPanesChange={handleSplitPanesChange}
+                      // Refresh the "add pane" picker when the session list
+                      // changes elsewhere, matching the sidebar.
+                      sessionListReloadToken={sessionListReloadToken}
+                      includeOtherWorkspaces={!lockedWorkspaceCwd}
+                      workspaceCwd={lockedWorkspaceCwd}
+                      // Back returns to the Session Overview (the hub the split
+                      // is launched from), not the single-session chat.
+                      onExit={handleSplitExit}
+                      onError={reportError}
+                      onImageIngestionNotice={pushToast}
+                      onSlashCommand={onSlashCommand}
+                      onRightPanelOpen={handleTurnOutputOpen}
+                      onOpenMonitor={openMonitorPanel}
+                      onPaneArtifactsChange={handlePaneArtifactsChange}
+                      messageTurnOutputs={messageTurnOutputs}
+                      restartSseOnPrompt={restartSseOnPrompt}
+                      historyPageSize={historyPageSize}
+                      renderPaneHeaderActions={renderPaneHeaderActions}
+                      voiceUserRevision={voiceUserRevision}
+                      voiceWorkspaceRevisions={voiceWorkspaceRevisions}
+                      voiceWorkspaces={
+                        workspace.capabilities?.workspaces ||
+                        lockedWorkspaceCapability
+                          ? workspaces
+                          : undefined
+                      }
+                      sessionWorkflowEnabled={sessionWorkflowEnabled}
+                    />
                   </WebShellCustomizationProvider>
                 </div>
               )}
@@ -10475,14 +10485,13 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
-                      <TodoContextsProvider
-                        timeline={todoTimeline}
-                        details={todoDetails}
+                    <TodoContextsProvider
+                      timeline={todoTimeline}
+                      details={todoDetails}
+                    >
+                      <InteractionBlockContext.Provider
+                        value={registerInteractionBlocker}
                       >
-                        <InteractionBlockContext.Provider
-                          value={registerInteractionBlocker}
-                        >
                           {(() => {
                             const contentClassName = [
                               styles.content,
@@ -10638,9 +10647,8 @@ export function App({
                               </div>
                             );
                           })()}
-                        </InteractionBlockContext.Provider>
-                      </TodoContextsProvider>
-                    </CompactModeContext.Provider>
+                      </InteractionBlockContext.Provider>
+                    </TodoContextsProvider>
 
                     <div
                       ref={footerRef}

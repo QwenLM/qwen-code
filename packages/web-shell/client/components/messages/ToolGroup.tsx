@@ -61,7 +61,7 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
-import { CompactModeContext, TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
@@ -593,20 +593,27 @@ export function formatToolGroupSummary(
   duration?: string,
 ): string {
   if (hasActiveAgents(tools)) {
-    const foregroundActiveTool = tools.find(
+    const foregroundActiveTools = tools.filter(
       (tool) =>
         isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
     );
-    const activeTool = foregroundActiveTool ?? getActiveTool(tools);
-    if (isAskUserQuestionToolName(activeTool.toolName)) {
-      return t('toolGroup.summary.provideInformation');
-    }
-    if (!foregroundActiveTool && isBackgroundSubAgentToolCall(activeTool)) {
+    if (foregroundActiveTools.length === 0) {
       return t('subagent.background');
     }
+    if (
+      foregroundActiveTools.length === 1 &&
+      isAskUserQuestionToolName(foregroundActiveTools[0].toolName)
+    ) {
+      return t('toolGroup.summary.provideInformation');
+    }
+    const activeSummaries = foregroundActiveTools.map((tool) =>
+      isAskUserQuestionToolName(tool.toolName)
+        ? t('toolGroup.summary.provideInformation')
+        : formatSingleToolSummary(tool, t),
+    );
     return t('toolGroup.running', {
-      name: localizeToolDisplayName(activeTool.toolName, t),
-      count: tools.length,
+      name: activeSummaries.join(' · '),
+      count: foregroundActiveTools.length,
       duration: duration ?? '',
     });
   }
@@ -959,61 +966,6 @@ export function isWebFetchToolName(toolName: string): boolean {
   return name === 'web_fetch' || name === 'webfetch' || name === 'fetch';
 }
 
-const getCompactDisplayStatus = getAgentDisplayStatus;
-
-function CompactToolGroup({
-  tools,
-  workspaceCwd,
-  isLocateFlashing = false,
-}: {
-  tools: ACPToolCall[];
-  workspaceCwd?: string;
-  isLocateFlashing?: boolean;
-}) {
-  const { t } = useI18n();
-  const activeTool = getActiveTool(tools);
-  const displayName = localizeToolDisplayName(activeTool.toolName, t);
-  const overallStatus = getCompactDisplayStatus(activeTool);
-  const description = getToolDescription(activeTool, workspaceCwd);
-  const elapsed =
-    (isActiveToolStatus(activeTool.status) &&
-      isBackgroundSubAgentToolCall(activeTool)) ||
-    isShellToolName(activeTool.toolName) ||
-    isWebFetchToolName(activeTool.toolName)
-      ? ''
-      : formatElapsed(activeTool.startTime, activeTool.endTime);
-
-  return (
-    <div
-      className={`${styles.compactGroup}${
-        isLocateFlashing ? ` ${flashStyles.flash}` : ''
-      }`}
-    >
-      <div className={styles.compactHeader}>
-        <StatusIcon status={overallStatus} />
-        <span className={styles.lineName}>{displayName}</span>
-        {tools.length > 1 && (
-          <span className={styles.compactCount}>
-            {'× '}
-            {tools.length}
-          </span>
-        )}
-        <ToolHeaderExtra
-          info={{
-            kind: getToolHeaderKind(activeTool),
-            tool: activeTool,
-            displayName,
-            description,
-            elapsed,
-            workspaceCwd,
-          }}
-        />
-      </div>
-      <div className={styles.compactHint}>{t('compact.hint')}</div>
-    </div>
-  );
-}
-
 function areToolLinePropsEqual(
   prev: ToolLineProps,
   next: ToolLineProps,
@@ -1128,14 +1080,13 @@ export const ToolLine = memo(function ToolLine({
 }: ToolLineProps) {
   const { t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
-  const compactMode = useContext(CompactModeContext);
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
+    () => forceExpanded || shouldAutoExpand(tool),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1144,22 +1095,14 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(
-        forceExpanded || (compactMode ? false : shouldAutoExpand(tool)),
-      );
+      setExpanded(forceExpanded || shouldAutoExpand(tool));
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
-      // A new tool identity (or compact-mode toggle) resets the manual latch.
+      // A new tool identity resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [
-      compactMode,
-      forceExpanded,
-      monitorDetailsAvailable,
-      tool.callId,
-      tool.toolName,
-    ],
+    [forceExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -1405,6 +1348,7 @@ export const ToolLine = memo(function ToolLine({
               : undefined
           }
         >
+          <ToolSummaryIcon tool={tool} />
           <StatusIcon status={tool.status} />
           <span className={styles.lineName}>{displayName}</span>
           {isTodo && hasTodoList && (
@@ -1517,7 +1461,6 @@ export const ToolGroup = memo(function ToolGroup({
   isLocateFlashing = false,
 }: ToolGroupProps) {
   const { t } = useI18n();
-  const compactMode = useContext(CompactModeContext);
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
@@ -1527,7 +1470,11 @@ export const ToolGroup = memo(function ToolGroup({
   const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveAgents(tools);
   const hasFailedTool = tools.some((tool) => tool.status === 'failed');
-  const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
+  const activeTool =
+    tools.find(
+      (tool) =>
+        isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
+    ) ?? (tools.length > 0 ? getActiveTool(tools) : undefined);
   const singleTool = tools.length === 1 ? tools[0] : undefined;
   const singleSubagent =
     singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
@@ -1545,21 +1492,15 @@ export const ToolGroup = memo(function ToolGroup({
     singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
-  const summaryIconTool = tools[0] ?? activeTool;
-  const liveStartedAtRef = useRef(Date.now());
+  const summaryIconTool = activeTool ?? tools[0];
   const summaryNow = useSharedNow(animateSummary);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
-  const showCompact = compactMode && !hasApprovalTool;
-  const runningDuration = animateSummary
-    ? formatLiveElapsed(summaryNow - liveStartedAtRef.current)
-    : undefined;
-
-  useEffect(() => {
-    if (!animateSummary) return;
-    liveStartedAtRef.current = Date.now();
-  }, [animateSummary, activeTool?.callId]);
+  const runningDuration =
+    animateSummary && activeTool?.startTime !== undefined
+      ? formatLiveElapsed(summaryNow - activeTool.startTime)
+      : undefined;
 
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
@@ -1578,16 +1519,6 @@ export const ToolGroup = memo(function ToolGroup({
       },
     );
   };
-
-  if (showCompact) {
-    return (
-      <CompactToolGroup
-        tools={tools}
-        workspaceCwd={workspaceCwd}
-        isLocateFlashing={isLocateFlashing}
-      />
-    );
-  }
 
   if (!hasApprovalTool) {
     return (
