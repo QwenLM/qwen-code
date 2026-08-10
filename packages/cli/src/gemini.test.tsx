@@ -2789,6 +2789,15 @@ describe('startInteractiveUI', () => {
   it('should perform all startup tasks in correct order', async () => {
     const { getCliVersion } = await import('./utils/version.js');
     const { registerCleanup } = await import('./utils/cleanup.js');
+    const { registerSession, unregisterSession } = await import(
+      '@qwen-code/qwen-code-core'
+    );
+
+    // Re-arm the registry stub. An earlier describe's `vi.restoreAllMocks()`
+    // strips the module mock's implementation, so `registerSession` resolves
+    // undefined and the registry cleanup is never registered — which made the
+    // registered-cleanup count depend on which other files ran first.
+    vi.mocked(registerSession).mockResolvedValue(true);
 
     const mockInitializationResult = {
       authError: null,
@@ -2805,12 +2814,22 @@ describe('startInteractiveUI', () => {
       mockInitializationResult,
     );
 
-    // Verify all startup tasks were called
+    // Verify all startup tasks were called. Two cleanups are registered, in
+    // this order: the registry withdrawal for the session this startup just
+    // announced, then the unmount handler.
     expect(getCliVersion).toHaveBeenCalledTimes(1);
-    expect(registerCleanup).toHaveBeenCalledTimes(1);
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
+
+    // Pin what the registry cleanup does, so a cleanup that no longer
+    // withdraws the record fails here rather than leaking a dead record on
+    // every exit.
+    const unregisterCleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
+    expect(unregisterSession).not.toHaveBeenCalled();
+    await unregisterCleanupFn();
+    expect(unregisterSession).toHaveBeenCalledTimes(1);
 
     // Verify cleanup handler is registered with unmount function
-    const cleanupFn = vi.mocked(registerCleanup).mock.calls[0][0];
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls[1][0];
     expect(typeof cleanupFn).toBe('function');
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(

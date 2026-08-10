@@ -4563,6 +4563,7 @@ describe('Gemini Client (client.ts)', () => {
       SendMessageType.Cron,
       SendMessageType.Notification,
       SendMessageType.Teammate,
+      SendMessageType.Peer,
     ])('checks session writer admission before a %s turn', async (type) => {
       const failure = new Error('writer admission failed');
       vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(failure);
@@ -4576,6 +4577,95 @@ describe('Gemini Client (client.ts)', () => {
 
       await expect(stream.next()).rejects.toBe(failure);
       expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    describe('SendMessageType.Peer is a top-level interaction', () => {
+      // The enum's own doc promises Peer behaves "like Teammate", but this
+      // branch declares the type without wiring it into any of
+      // `sendMessageStream`'s per-type branches. Each branch fails
+      // differently, so each gets its own assertion.
+      beforeEach(() => {
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+      });
+
+      it('does not fire UserPromptSubmit hooks on peer content', async () => {
+        // A blocking hook would swallow a turn the inbound gate has
+        // already receipted `delivered`, and a side-effecting one would
+        // run on another session's attacker-influenced envelope.
+        const mockMessageBus = { request: vi.fn(), response: vi.fn() };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: '<cross_session_message>hi</cross_session_message>' }],
+            new AbortController().signal,
+            'prompt-peer-hook',
+            { type: SendMessageType.Peer },
+          ),
+        );
+
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('records the peer turn with the display text the drain passes', async () => {
+        // Without this the user side of a peer turn is never persisted, so
+        // a resumed session replies to a turn that is not in its history —
+        // and the `notificationDisplayText` this PR plumbs through
+        // AppContainer for peer submissions has no reader at all.
+        const recordNotification = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordNotification,
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: '<cross_session_message>hi</cross_session_message>' }],
+            new AbortController().signal,
+            'prompt-peer-record',
+            {
+              type: SendMessageType.Peer,
+              notificationDisplayText: 'peer alice: hi',
+            },
+          ),
+        );
+
+        expect(recordNotification).toHaveBeenCalledWith(
+          [{ text: '<cross_session_message>hi</cross_session_message>' }],
+          'peer alice: hi',
+          undefined,
+          undefined,
+        );
+      });
+
+      it('resets the loop detector so a prior streak cannot abort it', async () => {
+        // A latched `loopDetected` leaks across the boundary otherwise, and
+        // then EVERY later peer turn aborts before doing any work while its
+        // sender was already told `delivered`.
+        const reset = vi.spyOn(client['loopDetector'], 'reset');
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: '<cross_session_message>hi</cross_session_message>' }],
+            new AbortController().signal,
+            'prompt-peer-loop',
+            { type: SendMessageType.Peer },
+          ),
+        );
+
+        expect(reset).toHaveBeenCalledWith('prompt-peer-loop');
+      });
     });
 
     it('does not re-run session writer admission for a mid-turn hook continuation', async () => {

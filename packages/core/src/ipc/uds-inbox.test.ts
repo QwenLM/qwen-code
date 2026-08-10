@@ -103,6 +103,28 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     expect(dirStat.mode & 0o777).toBe(0o700);
   });
 
+  // The socket directory sits at a predictable path under a world-writable
+  // `/tmp` whenever `XDG_RUNTIME_DIR` is unset, so a different-uid neighbour
+  // can get there first. `mkdir(recursive)` is happy with a pre-existing
+  // symlink-to-directory and `chmod` follows it, which would hand our 0700
+  // to a directory of their choosing.
+  it('refuses a socket directory that is a symlink', async () => {
+    const target = path.join(tmpDir, 'victim');
+    await fs.mkdir(target, { mode: 0o755 });
+    await fs.chmod(target, 0o755);
+    await fs.symlink(target, path.join(tmpDir, 'socks'));
+
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+      onFrame: () => {},
+    });
+
+    expect(started).toBeNull();
+    // The decisive assertion: the planted target keeps its own mode.
+    const targetStat = await fs.stat(target);
+    expect(targetStat.mode & 0o777).toBe(0o755);
+  });
+
   it('reclaims a socket file left behind by a crashed session', async () => {
     const dir = path.join(tmpDir, 'socks');
     await fs.mkdir(dir, { recursive: true });

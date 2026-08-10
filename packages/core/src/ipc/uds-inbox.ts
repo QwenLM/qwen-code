@@ -150,6 +150,23 @@ async function sweepOrphanSockets(
 export const _sweepOrphanSocketsForTesting = sweepOrphanSockets;
 
 /**
+ * True when `dir` is a real directory belonging to this uid.
+ *
+ * `lstat`, not `stat`: the question is what the path itself is, and a
+ * symlink that happens to point at one of our own directories is still an
+ * attacker-controlled indirection, not a directory we created.
+ *
+ * The uid comparison is skipped where the platform has no uids (Windows),
+ * where the directory check is the whole of what can be asserted.
+ */
+async function isOwnDirectory(dir: string): Promise<boolean> {
+  const stat = await fs.lstat(dir);
+  if (!stat.isDirectory()) return false;
+  const euid = process.geteuid?.();
+  return euid === undefined || stat.uid === euid;
+}
+
+/**
  * Bind this session's inbox.
  *
  * Returns null instead of throwing when the socket cannot be bound: a
@@ -170,6 +187,18 @@ export async function startPeerInbox(
   try {
     const dir = path.dirname(socketPath);
     await fs.mkdir(dir, { recursive: true, mode: SOCKET_DIR_MODE });
+    // `mkdir` accepts a pre-existing symlink-to-directory and `chmod`
+    // follows it, so without this check a different-uid neighbour who
+    // pre-plants the (predictable, `/tmp`-rooted when `XDG_RUNTIME_DIR` is
+    // unset) directory path as a symlink gets our chmod applied to a
+    // directory of their choosing. lstat first, and refuse anything that is
+    // not a real directory this uid owns.
+    if (!(await isOwnDirectory(dir))) {
+      debugLogger.error(
+        `peer inbox directory is not a directory owned by this user, refusing to listen: ${dir}`,
+      );
+      return null;
+    }
     // mkdir's mode is masked by the umask and ignored outright when the
     // directory already exists, so chmod is what actually enforces 0700.
     await fs.chmod(dir, SOCKET_DIR_MODE);

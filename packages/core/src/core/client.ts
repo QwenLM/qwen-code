@@ -2077,7 +2077,8 @@ export class GeminiClient {
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer
     ) {
       await this.config.assertCanStartTurn();
     }
@@ -2308,6 +2309,10 @@ export class GeminiClient {
         // hooks must not fire on (or be able to block) internal team
         // coordination traffic.
         messageType !== SendMessageType.Teammate &&
+        // A peer envelope is not a user prompt either: its content came
+        // from another session, so user-authored UserPromptSubmit hooks
+        // must not fire on it.
+        messageType !== SendMessageType.Peer &&
         messageType !== SendMessageType.Goal &&
         hooksEnabled &&
         messageBus &&
@@ -2468,9 +2473,10 @@ export class GeminiClient {
 
     if (
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer
     ) {
-      // Teammate envelopes record like notifications: the UI rendered
+      // Teammate and peer envelopes record like notifications: the UI rendered
       // them as a compact `●` line (the displayText) and the envelope
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
@@ -2501,7 +2507,8 @@ export class GeminiClient {
     } else if (
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer
     ) {
       this.config.startAutomaticActiveTodoWorkChain(
         prompt_id,
@@ -2516,7 +2523,8 @@ export class GeminiClient {
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate;
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Peer;
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
@@ -2982,7 +2990,8 @@ export class GeminiClient {
         messageType === SendMessageType.Retry ||
         messageType === SendMessageType.Cron ||
         messageType === SendMessageType.Notification ||
-        messageType === SendMessageType.Teammate
+        messageType === SendMessageType.Teammate ||
+        messageType === SendMessageType.Peer
       ) {
         const activeTodoReminder = this.config.takeActiveTodoReminder(
           prompt_id,

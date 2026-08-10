@@ -96,6 +96,29 @@ const RECORD_FILENAME = /^\d+\.json$/;
  */
 const RECORD_NAME = /^[\w.-]+$/;
 
+/**
+ * Longest `cwd` a record may carry.
+ *
+ * `PATH_MAX` is 4096 bytes on Linux and 1024 on macOS, so no real working
+ * directory comes close. The bound is here because `cwd` is not only
+ * rendered — it reaches the model verbatim through `list_agents`'
+ * `llmContent`, `send_message`'s ambiguous-match text and its `sent`
+ * confirmation. Those sinks have no length budget of their own, so a
+ * record is the one place to put one.
+ */
+const MAX_RECORD_CWD_LENGTH = 4096;
+
+/**
+ * Control characters a `cwd` may not contain.
+ *
+ * `sessions ps` already strips this class before painting the table; the
+ * model-context sinks do not, and cannot be fixed one at a time without
+ * the next sink reintroducing the hole. C0 (minus nothing — a path needs
+ * none of it), DEL, and C1, which is where the 8-bit CSI introducer lives.
+ */
+// eslint-disable-next-line no-control-regex
+const RECORD_CWD_CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/;
+
 export type SessionKind = 'interactive' | 'headless';
 
 /** One live session, as recorded on disk. */
@@ -421,6 +444,11 @@ async function readRecord(
     pid <= 0 ||
     typeof sessionId !== 'string' ||
     typeof cwd !== 'string' ||
+    // `cwd` is as attacker-influenced as `name` and reaches further — into
+    // model context, not just the terminal — so it is bounded at the same
+    // parse boundary rather than at each of its three sinks.
+    cwd.length > MAX_RECORD_CWD_LENGTH ||
+    RECORD_CWD_CONTROL_CHARS.test(cwd) ||
     typeof name !== 'string' ||
     !RECORD_NAME.test(name) ||
     (kind !== 'interactive' && kind !== 'headless') ||

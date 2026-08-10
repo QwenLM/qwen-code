@@ -69,29 +69,51 @@ export function sendPeerFrame(
     const socket = net.connect({ path: socketPath });
     let settled = false;
 
-    const fail = (error: NodeJS.ErrnoException) => {
+    // An absolute deadline, not `socket.setTimeout`. The socket's own timer
+    // is an *idle* timer that every byte the peer sends resets, so a peer
+    // that accepts the connection and trickles data keeps it alive forever —
+    // and the send is awaited from inside a tool call, so a never-settling
+    // promise hangs the whole turn. The address comes from a file another
+    // same-uid process wrote, so "the peer cooperates" is not an assumption
+    // this side gets to make.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+
+    const settle = (run: () => void) => {
       if (settled) return;
       settled = true;
-      socket.destroy();
-      reject(new PeerSendError(error.message, error.code));
+      if (deadline !== undefined) {
+        clearTimeout(deadline);
+        deadline = undefined;
+      }
+      run();
     };
 
-    socket.setTimeout(SEND_TIMEOUT_MS, () => {
+    const fail = (error: NodeJS.ErrnoException) => {
+      settle(() => {
+        socket.destroy();
+        reject(new PeerSendError(error.message, error.code));
+      });
+    };
+
+    deadline = setTimeout(() => {
       fail(
         Object.assign(new Error(`Timed out sending to ${socketPath}`), {
           code: 'ETIMEDOUT',
         }),
       );
-    });
+    }, SEND_TIMEOUT_MS);
+    // Never hold the event loop open on the deadline alone.
+    deadline.unref?.();
+
     socket.on('error', fail);
     socket.on('connect', () => {
       socket.end(encodePeerFrame(frame));
     });
     socket.on('close', () => {
-      if (settled) return;
-      settled = true;
-      debugLogger.debug(`sent ${frame.type} frame to ${socketPath}`);
-      resolve();
+      settle(() => {
+        debugLogger.debug(`sent ${frame.type} frame to ${socketPath}`);
+        resolve();
+      });
     });
   });
 }
