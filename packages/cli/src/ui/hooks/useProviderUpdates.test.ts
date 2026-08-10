@@ -81,6 +81,7 @@ describe('useProviderUpdates', () => {
     vi.clearAllMocks();
     mockSettings.merged['modelProviders'] = {};
     mockSettings.merged[PROVIDER_METADATA_NS] = {};
+    delete mockSettings.merged['model'];
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       authType: AuthType.USE_OPENAI,
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
@@ -266,6 +267,11 @@ describe('useProviderUpdates', () => {
   });
 
   it('executes update when user confirms with "update"', async () => {
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: `${CODING_PLAN_CHINA_BASE_URL.replace('coding.', 'CODING.')}/`,
+      apiKeyEnvKey: CODING_PLAN_ENV_KEY,
+    });
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -315,11 +321,53 @@ describe('useProviderUpdates', () => {
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
     expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
-    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
       'security.auth.selectedType',
-      expect.anything(),
+      AuthType.USE_OPENAI,
     );
+  });
+
+  it('keeps an inactive provider behind the selected provider with shared model ids', async () => {
+    const selectedModel = tokenTemplate.find(
+      (model) => model.id === 'qwen3.7-plus',
+    )!;
+    mockConfig.getModel.mockReturnValue(selectedModel.id);
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...tokenTemplate, ...chinaTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    expect(
+      reloaded[AuthType.USE_OPENAI].find(
+        (model: { id: string }) => model.id === selectedModel.id,
+      ),
+    ).toEqual(selectedModel);
+    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -376,7 +424,18 @@ describe('useProviderUpdates', () => {
   );
 
   it('does not refresh auth before auth initialization completes', async () => {
+    let activeModel = 'removed-model';
+    mockConfig.getModel.mockImplementation(() => activeModel);
+    mockModelsConfig.syncAfterAuthRefresh.mockImplementation(
+      (_authType, modelId) => {
+        activeModel = modelId;
+      },
+    );
     mockConfig.getContentGeneratorConfig.mockReturnValue(undefined as never);
+    mockSettings.merged['model'] = {
+      name: activeModel,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+    };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -401,6 +460,16 @@ describe('useProviderUpdates', () => {
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3.5-plus',
+      undefined,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI,
+    );
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 

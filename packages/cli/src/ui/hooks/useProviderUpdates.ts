@@ -61,6 +61,14 @@ interface ProviderMetadata {
   ignoredVersion?: string;
 }
 
+function normalizeProviderBaseUrl(baseUrl: string): string {
+  try {
+    return new URL(baseUrl.replace(/\/+$/, '')).href;
+  } catch {
+    return baseUrl.replace(/\/+$/, '');
+  }
+}
+
 function getProviderMetadata(
   settings: LoadedSettings,
   metadataKey: string,
@@ -252,19 +260,60 @@ export function useProviderUpdates(
         delete installPlan.env;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
-        const updatesActiveProvider =
-          activeConfig?.authType === providerCfg.protocol &&
-          providerMatchesCredentials(
+        const mergedSettings = settings.merged as Record<string, unknown>;
+        const selectedBaseUrl =
+          activeConfig?.baseUrl ??
+          (mergedSettings['model'] as { baseUrl?: string } | undefined)
+            ?.baseUrl;
+        const normalizedSelectedBaseUrl = selectedBaseUrl
+          ? normalizeProviderBaseUrl(selectedBaseUrl)
+          : undefined;
+        const registeredModels = (
+          mergedSettings['modelProviders'] as
+            | Record<string, ProviderModelConfig[]>
+            | undefined
+        )?.[installPlan.authType];
+        const selectedModel = normalizedSelectedBaseUrl
+          ? registeredModels?.find(
+              (model) =>
+                model.id === previousModel &&
+                typeof model.baseUrl === 'string' &&
+                normalizeProviderBaseUrl(model.baseUrl) ===
+                  normalizedSelectedBaseUrl,
+            )
+          : registeredModels?.find((model) => model.id === previousModel);
+        const ownsSelectedModel = selectedModel
+          ? (resolveOwnsModel(providerCfg)?.(selectedModel) ?? false)
+          : false;
+        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
+        const selectedBaseUrlBelongsToProvider =
+          normalizedSelectedBaseUrl !== undefined &&
+          newConfigs.some(
+            (model) =>
+              typeof model.baseUrl === 'string' &&
+              normalizeProviderBaseUrl(model.baseUrl) ===
+                normalizedSelectedBaseUrl,
+          );
+        const runtimeMatchesProvider =
+          activeConfig?.authType === installPlan.authType &&
+          (providerMatchesCredentials(
             providerCfg,
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
-          );
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
+          ) ||
+            ownsSelectedModel);
+        const updatesSelectedProvider =
+          runtimeMatchesProvider ||
+          (activeConfig === undefined &&
+            (ownsSelectedModel || selectedBaseUrlBelongsToProvider));
+        if (!updatesSelectedProvider && installPlan.modelProviders?.[0]) {
+          installPlan.modelProviders[0].mergeStrategy = 'replace-owned';
+        }
         const previousModelStillAvailable = newConfigs.some(
           (cfg) => cfg.id === previousModel,
         );
         // Only the active provider may migrate model selection.
-        if (!updatesActiveProvider || previousModelStillAvailable) {
+        if (!updatesSelectedProvider || previousModelStillAvailable) {
           delete installPlan.modelSelection;
         }
         const settingsAdapter = createLoadedSettingsAdapter(settings);
@@ -273,8 +322,10 @@ export function useProviderUpdates(
           settings: {
             ...settingsAdapter,
             setValue: (key, value) => {
-              // Template updates never change the selected auth method.
-              if (key !== 'security.auth.selectedType') {
+              if (
+                updatesSelectedProvider ||
+                key !== 'security.auth.selectedType'
+              ) {
                 settingsAdapter.setValue(key, value);
               }
             },
@@ -284,7 +335,7 @@ export function useProviderUpdates(
             config
               .getModelsConfig()
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
-          ...(updatesActiveProvider && {
+          ...(runtimeMatchesProvider && {
             refreshAuth: (authType) => config.refreshAuth(authType),
           }),
         });
