@@ -609,7 +609,10 @@ describe('CDP bridge', () => {
   });
 
   it('releasing a landed link while another attach is in flight leaves no phantom ref', async () => {
-    const chromeHarness = installChromeHarness({ deferTabQuery: true });
+    const chromeHarness = installChromeHarness({
+      deferTabGet: true,
+      deferTabQuery: true,
+    });
     const bridge = await loadBridge();
     const send = vi.fn();
 
@@ -619,6 +622,10 @@ describe('CDP bridge', () => {
       send,
     );
     chromeHarness.finishTabQuery();
+    await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalled(),
+    );
+    chromeHarness.finishTabGet();
     await vi.waitFor(() =>
       expect(send).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'cdp_attached', id: 1 }),
@@ -642,6 +649,12 @@ describe('CDP bridge', () => {
     // Link 2's attach lands on the same tab.
     chromeHarness.finishTabQuery();
     await vi.waitFor(() =>
+      expect(chrome.tabs.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(
+        2,
+      ),
+    );
+    chromeHarness.finishTabGet();
+    await vi.waitFor(() =>
       expect(send).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'cdp_attached', id: 2 }),
       ),
@@ -655,6 +668,41 @@ describe('CDP bridge', () => {
     await vi.waitFor(() =>
       expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 }),
     );
+  });
+
+  it('detaches when a failed attach outlives the final landed link', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+    (chrome.tabs.query as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('tab query failed'),
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_release', linkId: 'cdp-link-1' }),
+      send,
+    );
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cdp_attached',
+          id: 2,
+          error: { message: 'tab query failed' },
+        }),
+      ),
+    );
+    expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 });
   });
 
   it('an untagged release (legacy daemon) detaches immediately', async () => {

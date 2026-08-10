@@ -201,6 +201,7 @@ function configStub(servers: Record<string, MCPServerConfig>): {
     getMcpServers: () => servers,
     getSettingsMcpServers: () => servers,
     isSafeMode: () => false,
+    getBareMode: () => false,
     setMcpServers,
   } as unknown as Config;
   return { config, setMcpServers };
@@ -261,6 +262,7 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
       }),
       getSettingsMcpServers: () => settingsServers,
       isSafeMode: () => false,
+      getBareMode: () => false,
       setMcpServers,
     } as unknown as Config;
 
@@ -294,6 +296,24 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
       'chrome-devtools': AUTO_CONNECT_SERVER,
     });
     vi.spyOn(config, 'isSafeMode').mockReturnValue(true);
+    const fetchImpl = vi.fn();
+
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      {},
+      () => {},
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(setMcpServers).not.toHaveBeenCalled();
+  });
+
+  it('does not reroute MCP servers in bare mode', async () => {
+    const { config, setMcpServers } = configStub({
+      'chrome-devtools': AUTO_CONNECT_SERVER,
+    });
+    vi.spyOn(config, 'getBareMode').mockReturnValue(true);
     const fetchImpl = vi.fn();
 
     await maybeRouteChromeDevToolsViaDaemonBridge(

@@ -297,7 +297,7 @@ async function runAttachFlow(
     // Already attached to exactly this tab: just refcount, no debugger churn.
     if (attachedTabId === tabId) {
       attachedLinks.add(linkId);
-      return tabInfoOf(tabId);
+      return await tabInfoOf(tabId);
     }
 
     // Switching to a different tab (or first attach): the previous tab's
@@ -407,6 +407,9 @@ async function handleAttach(
     });
   } catch (e) {
     releasedDuringAttach.delete(linkId);
+    if (attachedLinks.size === 0 && attachedTabId !== null) {
+      shutdownCdpBridge();
+    }
     const message = e instanceof Error ? e.message : String(e);
     console.warn(LOG_PREFIX, 'attach failed:', message);
     send({

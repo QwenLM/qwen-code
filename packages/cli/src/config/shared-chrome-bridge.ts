@@ -166,7 +166,7 @@ export async function maybeRouteChromeDevToolsViaDaemonBridge(
 ): Promise<void> {
   try {
     if (env[SHARED_CHROME_BRIDGE_OPT_OUT_ENV]) return;
-    if (config.isSafeMode()) return;
+    if (config.isSafeMode() || config.getBareMode()) return;
 
     const servers = config.getSettingsMcpServers();
     if (!servers) return;
