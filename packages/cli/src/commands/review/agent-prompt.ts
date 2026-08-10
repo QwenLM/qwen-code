@@ -1623,6 +1623,44 @@ export function buildLaunch(
 }
 
 /**
+ * Every launch the plan's roster requires, built through `buildLaunch` and
+ * matched to the roster's keys under one guard.
+ *
+ * The roster is what coverage holds the run to, and the key is what the
+ * records and briefs are written under. They are derived in two files, and if
+ * they ever disagree, every delivery check downstream reads "brief never
+ * reached an agent" on a run that did everything right. Both dispatchers —
+ * `--roster` and `emit-workflow` — consume this one mapping so the guard
+ * exists once; a caller that rebuilt the loop would be a second implementation
+ * of the invariant.
+ */
+export function buildRosterLaunches(
+  report: PlanReport,
+  planPath: string,
+  rules?: string,
+): Array<{ req: RequiredAgent; key: string; prompt: string }> {
+  const roster = requiredAgents(report as RosterPlan);
+  return roster.map((req) => {
+    const { key, prompt } = buildLaunch(
+      report,
+      planPath,
+      req.role === 'chunk'
+        ? { chunk: req.chunk }
+        : { role: req.role, file: req.file },
+      rules,
+    );
+    if (key !== req.key) {
+      throw new Error(
+        `built "${key}" where the roster requires "${req.key}" — the ` +
+          'record could never be matched to the requirement. This is a bug ' +
+          'in the CLI, not in the call.',
+      );
+    }
+    return { req, key, prompt };
+  });
+}
+
+/**
  * The digest that keys a findings role's record and brief: the identity of the
  * launch material the key must tell apart — the findings list AND the effective
  * project rules. Findings alone left the rules out of that identity: a round
@@ -1740,29 +1778,10 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
   // `check-coverage` holds the run to that same set from the same field.
-  const roster = requiredAgents(report as RosterPlan);
-  const blocks = roster.map((req, i) => {
-    const { key, prompt } = buildLaunch(
-      report,
-      planPath,
-      req.role === 'chunk'
-        ? { chunk: req.chunk }
-        : { role: req.role, file: req.file },
-      rules,
-    );
-    // The roster is what coverage checks; the key is what this command records
-    // under. They are derived in two files, and if they ever disagree, every
-    // delivery check downstream reads "brief never reached an agent" on a run
-    // that did everything right. Refuse to hand out prompts that cannot match.
-    if (key !== req.key) {
-      throw new Error(
-        `agent-prompt: --roster built "${key}" where the roster requires ` +
-          `"${req.key}" — the record could never be matched to the requirement. ` +
-          'This is a bug in the CLI, not in the call.',
-      );
-    }
+  const launches = buildRosterLaunches(report, planPath, rules);
+  const blocks = launches.map(({ req, key, prompt }, i) => {
     recordPrompt(planPath, key, prompt);
-    return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
+    return `───── agent ${i + 1} of ${launches.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
   });
   // Worktree-mode reviews: remind the orchestrator of the exact Agent tool
   // parameters at the point of action. A run that passed both `working_dir`
@@ -1795,12 +1814,12 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
     `block VERBATIM.`;
   writeStdoutLine(
     [
-      `${roster.length} agents required. Launch one agent per block below, ` +
+      `${launches.length} agents required. Launch one agent per block below, ` +
         `passing its block VERBATIM — copy, do not retype. The ───── lines are ` +
         `separators, not part of any prompt. This is the same roster ` +
         `\`check-coverage\` reads out of the plan: a block you skip or reword is ` +
         `a dimension nobody reviewed. Blocks are numbered \`agent k of ` +
-        `${roster.length}\` and the output ends with an end-of-roster line — if ` +
+        `${launches.length}\` and the output ends with an end-of-roster line — if ` +
         `either is missing, this output was truncated in transit: every prompt ` +
         `is also recorded on disk, so rebuild just the missing blocks with ` +
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
@@ -1808,7 +1827,7 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         descNote +
         paramNote,
       ...blocks,
-      `───── end of roster — ${roster.length} agents ─────`,
+      `───── end of roster — ${launches.length} agents ─────`,
     ].join('\n\n'),
   );
 }

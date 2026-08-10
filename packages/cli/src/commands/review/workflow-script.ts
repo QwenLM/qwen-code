@@ -38,14 +38,24 @@ export const REVIEW_STEP_3A_WORKFLOW_SCRIPT = `export const meta = {
 
 phase('Review');
 
+// Fail closed on a payload this script cannot dispatch: a missing, stale or
+// mis-bound args file would otherwise die inside the vm as a bare TypeError
+// that names nothing about emit-workflow or the args file.
+if (!args || !Array.isArray(args.agents)) {
+  throw new Error('review-step-3a: args.agents is missing or not an array - pass the args.json that qwen review emit-workflow wrote');
+}
+if (args.version !== 1) {
+  throw new Error('review-step-3a: args version ' + args.version + ' does not match this script - re-run qwen review emit-workflow to regenerate both files together');
+}
 const agents = args.agents;
 log(agents.length + ' agents required by the plan');
 
 // One thunk per required agent, dispatched together. The roster is data the
 // CLI computed; this loop cannot shorten it, and there is no branch in which
-// an agent is skipped.
+// an agent is skipped. The label is the human-readable roster identity the
+// args carry — the runtime's progress display consumes it.
 const returns = await parallel(
-  agents.map((a) => () => agent(a.prompt, { label: a.key, phase: 'Review' })),
+  agents.map((a) => () => agent(a.prompt, { label: a.label, phase: 'Review' })),
 );
 
 // parallel() reports a failed dispatch as a null element rather than throwing,

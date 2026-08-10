@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { createContext, Script } from 'node:vm';
 import { REVIEW_STEP_3A_WORKFLOW_SCRIPT } from './workflow-script.js';
 
 // The script is a fixed constant, so it can be RUN rather than merely parsed —
@@ -72,10 +73,17 @@ const AGENTS = [
   { key: '7', label: 'Build & Test', prompt: 'PROMPT-7' },
 ];
 
+// The payload shape `emit-workflow` writes: version pinned to what this
+// script reads, agents under their roster keys.
+const ARGS = { version: 1, agents: AGENTS };
+
 describe('the Step 3A workflow script', () => {
-  it('declares a meta block the sandbox will accept as a pure literal', () => {
-    // `meta` must be the first statement and must contain no variables, calls
-    // or interpolation — the runtime reads it before executing anything.
+  it('declares a meta block the sandbox can evaluate in a bare context', () => {
+    // `meta` must be the first statement, and the runtime evaluates it in a
+    // bare vm context — a null-prototyped globalThis with no bridge globals —
+    // before executing anything. A variable reference or call inside the
+    // literal therefore dies before any agent launches. Do exactly that
+    // evaluation instead of pattern-matching the shapes a regex can see.
     expect(
       REVIEW_STEP_3A_WORKFLOW_SCRIPT.startsWith('export const meta = {'),
     ).toBe(true);
@@ -86,7 +94,22 @@ describe('the Step 3A workflow script', () => {
       0,
       REVIEW_STEP_3A_WORKFLOW_SCRIPT.indexOf('\n};') + 3,
     );
-    expect(metaBlock).not.toMatch(/\$\{|\bfunction\b|\(\s*\)|\.\.\./);
+    const metaSource = metaBlock.slice(
+      metaBlock.indexOf('{'),
+      metaBlock.lastIndexOf('}') + 1,
+    );
+    const meta = new Script('(' + metaSource + ')').runInContext(
+      createContext(Object.create(null)),
+    ) as {
+      name: string;
+      description: string;
+      phases: Array<{ title: string; detail: string }>;
+    };
+    expect(meta.name).toBe('review-step-3a');
+    expect(meta.description).toBe(
+      'Review Step 3A: launch every agent the plan requires, in one fan-out',
+    );
+    expect(meta.phases.map((p) => p.title)).toEqual(['Review']);
   });
 
   it('uses no non-deterministic builtin — the sandbox throws on them', () => {
@@ -96,9 +119,26 @@ describe('the Step 3A workflow script', () => {
     expect(REVIEW_STEP_3A_WORKFLOW_SCRIPT).not.toContain('new Date');
   });
 
+  it('refuses a payload without an agents array, naming the args file', async () => {
+    // A missing args, a path string passed where the object belongs, and an
+    // object without agents must all fail with the emit-workflow hint — not
+    // as a bare vm TypeError naming nothing about where args come from.
+    for (const bad of [undefined, '/tmp/out/args.json', { version: 1 }]) {
+      await expect(runScript(bad, async () => 'x')).rejects.toThrow(
+        'args.agents is missing or not an array',
+      );
+    }
+  });
+
+  it('refuses an args version this script does not read', async () => {
+    await expect(
+      runScript({ version: 2, agents: AGENTS }, async () => 'x'),
+    ).rejects.toThrow('args version 2 does not match this script');
+  });
+
   it('dispatches every agent in the roster, once each', async () => {
     const { result, dispatched, phases } = await runScript(
-      { agents: AGENTS },
+      ARGS,
       async (prompt) => `said:${prompt}`,
     );
     expect(dispatched).toHaveLength(3);
@@ -109,12 +149,13 @@ describe('the Step 3A workflow script', () => {
     expect((result as { missingRoles: string[] }).missingRoles).toEqual([]);
   });
 
-  it('passes each prompt through untouched and labels the agent by roster key', async () => {
+  it('passes each prompt through untouched and labels the agent with its roster label', async () => {
     // The prompts are values the CLI computed. The script's contract is that
     // it does not read, trim, wrap or annotate them — which is the property
-    // the whole migration exists to make structural.
+    // the whole migration exists to make structural. The label is the
+    // human-readable identity the args carry, for the run's progress display.
     const { dispatched } = await runScript(
-      { agents: AGENTS },
+      ARGS,
       async (prompt) => `said:${prompt}`,
     );
     expect(dispatched.map((d) => d.prompt)).toEqual([
@@ -123,9 +164,9 @@ describe('the Step 3A workflow script', () => {
       'PROMPT-7',
     ]);
     expect(dispatched.map((d) => (d.opts as { label: string }).label)).toEqual([
-      '1a',
-      '2',
-      '7',
+      'Line-by-line correctness',
+      'Security',
+      'Build & Test',
     ]);
   });
 
@@ -134,7 +175,7 @@ describe('the Step 3A workflow script', () => {
     // throwing. A script that ignored that would return a short findings list
     // and no indication a dimension went unreviewed — the one regression this
     // path must not introduce.
-    const { result } = await runScript({ agents: AGENTS }, async (prompt) => {
+    const { result } = await runScript(ARGS, async (prompt) => {
       if (prompt === 'PROMPT-2') throw new Error('agent died');
       return `said:${prompt}`;
     });
@@ -149,7 +190,7 @@ describe('the Step 3A workflow script', () => {
   });
 
   it('treats an undefined return as missing, not as an empty finding set', async () => {
-    const { result } = await runScript({ agents: AGENTS }, async (prompt) =>
+    const { result } = await runScript(ARGS, async (prompt) =>
       prompt === 'PROMPT-7' ? undefined : `said:${prompt}`,
     );
     expect((result as { missingRoles: string[] }).missingRoles).toEqual(['7']);
@@ -157,7 +198,7 @@ describe('the Step 3A workflow script', () => {
 
   it('carries each agent return back under its roster key', async () => {
     const { result } = await runScript(
-      { agents: AGENTS },
+      ARGS,
       async (prompt) => `said:${prompt}`,
     );
     expect(

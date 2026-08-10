@@ -4,17 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
+}));
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   buildWorkflowArgs,
   emitWorkflowCommand,
   type WorkflowArgsFile,
 } from './emit-workflow.js';
-import { buildLaunch } from './agent-prompt.js';
+import { buildLaunch, rosterLabel } from './agent-prompt.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
+import { briefPath, readRecordedPrompts } from './lib/prompt-record.js';
+import { REVIEW_STEP_3A_WORKFLOW_SCRIPT } from './workflow-script.js';
 import type { PlanReport } from './lib/report.js';
 
 /**
@@ -105,6 +122,18 @@ describe('emit-workflow — the roster it hands the script', () => {
     }
   });
 
+  // The script's progress display consumes the label the args carry, and
+  // nothing downstream re-derives it — pin the wiring at the source, so a
+  // substitution of a different label source fails here, not in a run.
+  it('labels every agent with the roster label the reader sees', () => {
+    const plan = localPlan();
+    const payload = buildWorkflowArgs(plan, planPath);
+    for (const req of requiredAgents(plan as unknown as RosterPlan)) {
+      const emitted = payload.agents.find((a) => a.key === req.key);
+      expect(emitted?.label).toBe(rosterLabel(req));
+    }
+  });
+
   // The launch prompt points at a brief on disk rather than carrying it. An
   // agent whose prompt named no brief would review with no dimension, no
   // severity definitions and no project rules.
@@ -127,6 +156,18 @@ describe('emit-workflow — the roster it hands the script', () => {
 
   it('reports the review mode it built for', () => {
     expect(buildWorkflowArgs(localPlan(), planPath).mode).toBe('local');
+    // A plan without an untracked-file list is a diff-only review — no tree
+    // to grep or build in. The args file is the record of what the run could
+    // do, so the mode it declares must follow the plan, and the reduced
+    // roster of a diff-only review must follow with it.
+    const diffOnly = buildWorkflowArgs(
+      localPlan({ untrackedFiles: undefined }),
+      planPath,
+    );
+    expect(diffOnly.mode).toBe('diff-only');
+    const keys = diffOnly.agents.map((a) => a.key);
+    expect(keys).not.toContain('1c');
+    expect(keys).not.toContain('7');
   });
 });
 
@@ -188,6 +229,7 @@ describe('emit-workflow — what it writes', () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    (writeStdoutLine as unknown as Mock).mockClear();
   });
 
   afterEach(() => {
@@ -200,9 +242,10 @@ describe('emit-workflow — what it writes', () => {
     const out = join(dir, 'out');
     (emitWorkflowCommand.handler as (a: unknown) => void)({ plan, out });
 
+    // The script is the exhaustively-tested constant, byte for byte — a
+    // transformed or stale script must fail here, not at workflow runtime.
     const script = readFileSync(join(out, 'script.js'), 'utf8');
-    expect(script).toContain('export const meta');
-    expect(script).toContain('parallel(');
+    expect(script).toBe(REVIEW_STEP_3A_WORKFLOW_SCRIPT);
 
     const args = JSON.parse(
       readFileSync(join(out, 'args.json'), 'utf8'),
@@ -215,6 +258,56 @@ describe('emit-workflow — what it writes', () => {
     for (const a of args.agents) {
       expect(typeof a.prompt).toBe('string');
       expect(a.prompt.length).toBeGreaterThan(80);
+    }
+
+    // The delivery gate reads recorded prompts, not briefs: every emitted
+    // agent must be recorded exactly as dispatched, or check-coverage fails a
+    // correct workflow run as "briefless".
+    const recorded = readRecordedPrompts(plan);
+    for (const a of args.agents) {
+      expect(recorded.get(a.key)).toBe(a.prompt);
+    }
+
+    // The stdout lines are the orchestrator's contract — one count, and each
+    // path labelled with its own file. A swap or mislabel sends the single
+    // Workflow call at the wrong file.
+    const lines = (writeStdoutLine as unknown as Mock).mock.calls.map(
+      (c) => c[0] as string,
+    );
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain(`${args.agents.length} agents required`);
+    expect(lines[1]).toBe(`scriptPath: ${join(out, 'script.js')}`);
+    expect(lines[2]).toBe(`args: ${join(out, 'args.json')}`);
+  });
+
+  it('injects the project rules into every brief it emits', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const rules = join(dir, 'rules.md');
+    writeFileSync(rules, 'No `any` in new code.\n');
+    const out = join(dir, 'out');
+    (emitWorkflowCommand.handler as (a: unknown) => void)({
+      plan,
+      rules,
+      out,
+    });
+
+    // The rules are in the BRIEFS, which the launch prompts point at — a
+    // rules file that never reached a brief is a review that silently
+    // enforced no project rules. Agent 7 is the declared exception: it runs
+    // deterministic commands, not code review, so it must NOT get them.
+    const args = JSON.parse(
+      readFileSync(join(out, 'args.json'), 'utf8'),
+    ) as WorkflowArgsFile;
+    expect(args.agents.length).toBeGreaterThan(1);
+    for (const a of args.agents) {
+      const briefText = readFileSync(briefPath(plan, a.key), 'utf8');
+      if (a.key === '7') {
+        expect(briefText).not.toContain('## Project rules');
+      } else {
+        expect(briefText).toContain('## Project rules');
+        expect(briefText).toContain('No `any` in new code.');
+      }
     }
   });
 });

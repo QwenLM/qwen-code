@@ -33,7 +33,7 @@ import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { buildLaunch, rosterLabel } from './agent-prompt.js';
+import { buildRosterLaunches, rosterLabel } from './agent-prompt.js';
 import type { PlanReport } from './lib/report.js';
 import {
   isTerritoryFanOut,
@@ -41,6 +41,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
+import { recordPrompt } from './lib/prompt-record.js';
 import { REVIEW_STEP_3A_WORKFLOW_SCRIPT } from './workflow-script.js';
 
 interface EmitWorkflowArgs {
@@ -109,36 +110,27 @@ export function buildWorkflowArgs(
     );
   }
 
-  const roster = requiredAgents(plan);
-  const agents = roster.map((req): WorkflowAgentSpec => {
-    // `role: 'chunk'` only appears in a territory fan-out, which is refused
-    // above. Assert rather than assume: a future roster change that emitted
-    // one here would otherwise reach `buildLaunch` as `{ role: undefined }`.
-    if (req.role === 'chunk') {
-      throw new Error(
-        `emit-workflow: the roster produced a chunk agent (${req.key}) for a ` +
-          'plan that is not a territory fan-out. This is a bug in the CLI.',
-      );
-    }
-    const { key, prompt } = buildLaunch(
-      report,
-      planPath,
-      { role: req.role, file: req.file },
-      rules,
+  // `role: 'chunk'` only appears in a territory fan-out, which is refused
+  // above. Assert rather than assume, and before anything is built: a future
+  // roster change that emitted one here would otherwise ride the shared
+  // mapper into a 3B-shaped agent inside the 3A fan-out.
+  const chunk = requiredAgents(plan).find((r) => r.role === 'chunk');
+  if (chunk) {
+    throw new Error(
+      `emit-workflow: the roster produced a chunk agent (${chunk.key}) for a ` +
+        'plan that is not a territory fan-out. This is a bug in the CLI.',
     );
-    // The same guard `--roster` makes, for the same reason: the roster is what
-    // coverage holds the run to, and the key is what the brief was written
-    // under. If they ever disagree, every delivery check downstream reads
-    // "brief never reached an agent" on a run that did everything right.
-    if (key !== req.key) {
-      throw new Error(
-        `emit-workflow: built "${key}" where the roster requires "${req.key}" ` +
-          '— the agent could never be matched to the requirement. This is a ' +
-          'bug in the CLI, not in the call.',
-      );
-    }
-    return { key, label: rosterLabel(req), prompt };
-  });
+  }
+
+  const agents = buildRosterLaunches(report, planPath, rules).map(
+    ({ req, key, prompt }): WorkflowAgentSpec => {
+      // The delivery gate reads recorded prompts, not briefs: without this
+      // record, a run dispatched from these args would fail check-coverage as
+      // "briefless" despite reviewing with exactly the built prompts.
+      recordPrompt(planPath, key, prompt);
+      return { key, label: rosterLabel(req), prompt };
+    },
+  );
 
   return { version: 1, plan: planPath, mode, agents };
 }
