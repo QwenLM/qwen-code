@@ -471,6 +471,26 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
     expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
   });
 
+  it('a blank or whitespace floor override falls back — only explicit 0 disables', () => {
+    // If the missing/blank guard weakens, Number('') === 0 silently trips the
+    // documented disable hatch instead of using the fallback. Pin that a
+    // blank/whitespace value falls back to the default (gate active), while
+    // an explicit '0' still disables.
+    const under = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS - 60),
+    };
+    for (const blank of ['', '   ']) {
+      const spent = verifyBudgetExhausted(
+        { ...under, [COMPOSE_FLOOR_ENV]: blank },
+        NOW_MS,
+      );
+      expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+    }
+    expect(
+      verifyBudgetExhausted({ ...under, [COMPOSE_FLOOR_ENV]: '0' }, NOW_MS),
+    ).toBeNull();
+  });
+
   it('admits a verify build while the compose floor still fits', () => {
     const env = {
       [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS + 60),
@@ -559,8 +579,20 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
     // composeFloorSeconds→remainingSeconds would misstate the protected
     // floor to the orchestrator that decides whether to stop.
     expect(msg).toContain('20-minute floor');
-    // The publication contract: tagged findings stay terminal-only, never
-    // posted as an accusation.
-    expect(msg).toContain('terminal-only');
+    // The publication contract, stated as the invariant both readings agree
+    // on (not the pre-existing posted-vs-terminal question this PR does not
+    // relitigate): an unverified finding is never a confirmed blocker.
+    expect(msg).toContain('never treats an unverified finding as a confirmed');
+  });
+
+  it('clamps a negative remaining to zero — a post-deadline verify call', () => {
+    // Reachable: verifyBudgetExhausted returns non-null with negative
+    // remaining past the deadline. Without the Math.max(0, …) clamp the line
+    // would read "-2 minute(s) remain"; the sibling RA message pins the same.
+    const msg = verifyBudgetMessage({
+      remainingSeconds: -120,
+      composeFloorSeconds: DEFAULT_COMPOSE_FLOOR_SECONDS,
+    });
+    expect(msg).toContain('0 minute(s) remain');
   });
 });

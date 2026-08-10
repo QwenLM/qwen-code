@@ -264,12 +264,6 @@ export interface BudgetExhausted {
 }
 
 /**
- * Decide whether another reverse-audit round still fits the review's time
- * budget: the remaining time must cover the round being admitted AND the
- * tail after it. Returns `null` when it does — or when no (well-formed)
- * deadline is present, which is every local run.
- */
-/**
  * The deadline epoch both gates read, or null when unset/malformed — the
  * fail-open contract in one place so the two gates cannot drift on it. A
  * missing, empty, non-finite or non-positive `QWEN_REVIEW_DEADLINE_EPOCH`
@@ -301,6 +295,12 @@ function readNonNegativeSeconds(
   return fallback;
 }
 
+/**
+ * Decide whether another reverse-audit round still fits the review's time
+ * budget: the remaining time must cover the round being admitted AND the
+ * tail after it. Returns `null` when it does — or when no (well-formed)
+ * deadline is present, which is every local run.
+ */
 export function reverseAuditBudgetExhausted(
   env: NodeJS.ProcessEnv,
   roundCostSeconds: number,
@@ -384,17 +384,15 @@ export function verifyBudgetMessage(spent: ComposeFloorExhausted): string {
   const floorMinutes = Math.round(spent.composeFloorSeconds / 60);
   return (
     `VERIFY BUDGET: ${minutesLeft} minute(s) remain before this review's ` +
-    `deadline — below the ${floorMinutes}-minute floor compose-review and ` +
+    `deadline — at or below the ${floorMinutes}-minute floor compose-review and ` +
     `submission need, so no verification shard will be built. This is a ` +
     `termination rule, not an error: do not rebuild the verifier. Proceed ` +
     `to Step 6 NOW and compose. Findings still carrying \`— [unverified]\` ` +
-    `keep that tag: compose-review caps the verdict and discloses the ` +
-    `verification gap, and their details stay terminal-only (the ` +
-    `confirmed-only rule — an unverified finding is never posted as an ` +
-    `accusation). What DOES post is everything earlier rounds already ` +
-    `confirmed, plus that gap — because a review that stops verifying here ` +
-    `still reports what it proved, while one that keeps verifying past this ` +
-    `floor is killed before it posts anything.`
+    `keep that tag: compose-review caps the verdict on it and never treats ` +
+    `an unverified finding as a confirmed blocker — everything earlier ` +
+    `rounds confirmed still posts. A review that stops verifying here ` +
+    `reports what it proved; one that keeps verifying past this floor is ` +
+    `killed before it posts anything.`
   );
 }
 
