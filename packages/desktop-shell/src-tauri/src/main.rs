@@ -30,6 +30,8 @@ const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 const BOOTSTRAP_URL: &str = "tauri://localhost";
 #[cfg(target_os = "macos")]
 static FULLSCREEN_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // Keep the default first-launch workspace aligned with the Electron shell's
 // getDefaultConversationWorkspacePath() in
 // packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
@@ -132,7 +134,7 @@ fn main() {
             }
             #[cfg(target_os = "macos")]
             WindowEvent::Focused(true) => {
-                FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+                cancel_pending_fullscreen_hide();
             }
             #[cfg(target_os = "macos")]
             WindowEvent::CloseRequested { api, .. } => {
@@ -147,6 +149,8 @@ fn main() {
                             FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
                             return;
                         }
+                        let hide_generation =
+                            FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
                         FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
                         let app = app_handle.clone();
                         let win = window.clone();
@@ -154,7 +158,7 @@ fn main() {
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(2));
                             let _ = app.run_on_main_thread(move || {
-                                if FULLSCREEN_HIDE_PENDING.swap(false, Ordering::AcqRel) {
+                                if take_pending_fullscreen_hide(hide_generation) {
                                     let _ = win.hide();
                                 }
                             });
@@ -716,12 +720,24 @@ fn spawn_window_state_flusher(app: AppHandle) {
 
 fn focus_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
-    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+    cancel_pending_fullscreen_hide();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+#[cfg(target_os = "macos")]
+fn cancel_pending_fullscreen_hide() {
+    FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+}
+
+#[cfg(target_os = "macos")]
+fn take_pending_fullscreen_hide(generation: u64) -> bool {
+    FULLSCREEN_HIDE_GENERATION.load(Ordering::Acquire) == generation
+        && FULLSCREEN_HIDE_PENDING.swap(false, Ordering::AcqRel)
 }
 
 #[cfg(target_os = "macos")]
@@ -871,34 +887,37 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::{
+        cancel_pending_fullscreen_hide, should_restore_main_window, take_pending_fullscreen_hide,
+        FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
+    };
     use super::{
         default_workspace_override_dir, default_workspace_path, ensure_workspace_dir,
         is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
         BOOTSTRAP_URL,
     };
-    #[cfg(target_os = "macos")]
-    use super::{should_restore_main_window, FULLSCREEN_HIDE_PENDING};
-    #[cfg(target_os = "macos")]
-    use std::sync::atomic::Ordering;
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(target_os = "macos")]
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use url::Url;
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn should_restore_main_window_truth_table() {
+    fn fullscreen_hide_lifecycle_state() {
         // has_visible, main_needs_restore, FULLSCREEN_PENDING → expected
         let cases: &[(bool, bool, bool, bool)] = &[
-            (true,  false, false, false),
-            (true,  false, true,  true),
-            (true,  true,  false, true),
-            (true,  true,  true,  true),
+            (true, false, false, false),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
             (false, false, false, true),
-            (false, false, true,  true),
-            (false, true,  false, true),
-            (false, true,  true,  true),
+            (false, false, true, true),
+            (false, true, false, true),
+            (false, true, true, true),
         ];
         for (has_visible, needs_restore, pending, expected) in cases {
             FULLSCREEN_HIDE_PENDING.store(*pending, Ordering::Relaxed);
@@ -906,10 +925,22 @@ mod tests {
                 should_restore_main_window(*has_visible, *needs_restore),
                 *expected,
                 "has_visible={}, needs_restore={}, pending={}",
-                has_visible, needs_restore, pending,
+                has_visible,
+                needs_restore,
+                pending,
             );
         }
         FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+
+        FULLSCREEN_HIDE_GENERATION.store(0, Ordering::Relaxed);
+        let first_hide = FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+        cancel_pending_fullscreen_hide();
+        let second_hide = FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+        assert!(!take_pending_fullscreen_hide(first_hide));
+        assert!(FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed));
+        assert!(take_pending_fullscreen_hide(second_hide));
     }
 
     #[test]
