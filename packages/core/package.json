@@ -25,6 +25,10 @@
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
     },
+    "./toolWriteOrigin": {
+      "types": "./dist/src/services/tool-write-origin.d.ts",
+      "import": "./dist/src/services/tool-write-origin.js"
+    },
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
