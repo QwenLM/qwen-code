@@ -501,6 +501,17 @@ describe('AskUserQuestion accessibility', () => {
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'cancel', undefined);
   });
 
+  it('submits a single question directly with Enter', () => {
+    render();
+    act(() => optionButtons()[1]!.click());
+
+    pressKey(optionButtons()[1]!, 'Enter');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', {
+      '0': 'Blue',
+    });
+  });
+
   it('keeps an accepted submission locked while awaiting resolution', async () => {
     const pending = deferred<boolean>();
     onConfirm.mockReturnValue(pending.promise);
@@ -644,13 +655,15 @@ describe('AskUserQuestion multiple questions', () => {
     expect(document.activeElement).toBe(restoredOptions[1]);
   });
 
-  it('focuses Submit instead of submitting when Enter is pressed on the last question', () => {
+  it('submits directly when Enter is pressed on the last question', () => {
     render(undefined, multipleQuestionsRequest);
     pressKey(optionButtons()[0]!, 'Enter');
     pressKey(optionButtons()[0]!, 'Enter');
 
-    expect(onConfirm).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(submitButton());
+    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
+      '0': 'Red',
+      '1': 'Small',
+    });
   });
 
   it('submits all answers with Command/Ctrl+Enter when complete', () => {
@@ -678,10 +691,22 @@ describe('AskUserQuestion multiple questions', () => {
   });
 
   it('shows contextual keyboard hints', () => {
+    render();
+    expect(container!.textContent).toContain(
+      '↑↓ select · Enter submit · Esc ignore',
+    );
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+
+    act(() => root?.unmount());
+    container?.remove();
+    root = null;
+    container = null;
+
     render(undefined, multipleQuestionsRequest);
     expect(container!.textContent).toContain(
       '↑↓ select · Enter next · Esc ignore',
     );
+    expect(container!.textContent).toContain('⌘/Ctrl+Enter submit');
 
     act(() => optionButtons()[2]!.click());
     expect(container!.textContent).toContain(
