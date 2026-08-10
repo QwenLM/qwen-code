@@ -229,13 +229,20 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
-  models: ProviderModelConfig[],
+  _models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
+    // The stored version must be computed from the same input the launch-time
+    // check uses — the built-in template (default models only) — so that
+    // user-added custom models (editable providers) don't make the stored
+    // version permanently diverge from the recomputed currentVersion.
+    // Otherwise "update all" would never clear the prompt for users with
+    // custom models (see #8829 follow-up).
+    const template = buildProviderTemplate(config, baseUrl);
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(models),
+        version: computeModelListVersion(template),
         baseUrl,
       },
     };
