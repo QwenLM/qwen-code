@@ -1165,6 +1165,7 @@ function classifyContentOnlyThinkingTagPrefix(
       break;
     }
     rest = rest.slice(tagLength).trimStart();
+    if (closing && !rest) return 'clean';
     // An opening tag followed by ordinary text is only a legitimate literal
     // if a closing tag still balances it later. Without one, the turn is an
     // unclosed thinking block — the exact shape of the recorded production
@@ -1583,21 +1584,18 @@ export function convertOpenAIChunkToGemini(
       // The length cap releases undecided prefixes (e.g. a literal "<t" that
       // never resolves) so ordinary content is not buffered forever. Once the
       // candidate has committed to a complete opening tag, though, releasing
-      // it can leak the whole block — production thinking-tag
-      // leaks are longer than the cap (issue #6666). Keep those held; the
-      // fail-closed throw below rejects them once they exceed the cap.
-      // Accepted trade-off: a legitimate balanced literal longer than the cap
-      // whose closing tag has not arrived yet is rejected too — at that point
-      // it is indistinguishable from an unclosed leak.
+      // it can leak the whole block — production thinking-tag leaks are longer
+      // than the cap (issue #6666). Keep those held until a closing tag arrives
+      // or the finished-stream check rejects an unclosed block.
       const confirmedOpeningTagCandidate =
         LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
         !combinedCandidateText.trimStart().startsWith('</');
       const releaseContentOnlyCandidate =
         contentOnlyThinkingState === 'pending' &&
+        !confirmedOpeningTagCandidate &&
         (Boolean(choice.finish_reason) ||
-          (!confirmedOpeningTagCandidate &&
-            combinedCandidateText.trimStart().length >
-              MAX_THINKING_TAG_CANDIDATE_LENGTH));
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH);
 
       if (contentOnlyThinkingState === 'leaked') {
         throwProtocolTagLeak(requestContext);
@@ -1620,6 +1618,7 @@ export function convertOpenAIChunkToGemini(
         requestContext.pendingThinkingTagCandidate = undefined;
       } else if (isPossibleTag) {
         if (
+          !confirmedOpeningTagCandidate &&
           !closingTagName &&
           combinedCandidateText.trimStart().length >
             MAX_THINKING_TAG_CANDIDATE_LENGTH

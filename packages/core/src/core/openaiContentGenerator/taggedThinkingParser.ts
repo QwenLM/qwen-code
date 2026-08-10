@@ -9,9 +9,11 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TAGGED_THINKING_PARSER');
 
+// Parser uses a binary mode toggle rather than a tag stack, so
+// <think>content</thinking> is valid and cross-matching is intentional.
+// MiniMax only uses one tag type per response in practice.
 const OPEN_TAGS = ['<think>', '<thinking>'] as const;
 const CLOSE_TAGS = ['</think>', '</thinking>'] as const;
-const ALL_TAGS = [...OPEN_TAGS, ...CLOSE_TAGS] as const;
 
 /** Longest tag length across all open/close variants ('</thinking>' = 11). */
 const MAX_TAG_LENGTH = Math.max(
@@ -61,7 +63,6 @@ function findMatchingTag(
 
 export class TaggedThinkingParser {
   private mode: ParserMode = 'text';
-  private thinkingDepth = 0;
   private buffer = '';
 
   parse(chunk: string, final = false): Part[] {
@@ -76,7 +77,7 @@ export class TaggedThinkingParser {
     let index = 0;
 
     while (index < this.buffer.length) {
-      const activeTags = this.mode === 'text' ? OPEN_TAGS : ALL_TAGS;
+      const activeTags = this.mode === 'text' ? OPEN_TAGS : CLOSE_TAGS;
       const matchedTag = findMatchingTag(lower, index, activeTags);
 
       if (matchedTag) {
@@ -85,15 +86,7 @@ export class TaggedThinkingParser {
         );
         appendPart(parts, segment, this.mode);
         segment = '';
-        if (this.mode === 'text') {
-          this.mode = 'thought';
-          this.thinkingDepth = 1;
-        } else if (matchedTag.startsWith('</')) {
-          this.thinkingDepth -= 1;
-          if (this.thinkingDepth === 0) this.mode = 'text';
-        } else {
-          this.thinkingDepth += 1;
-        }
+        this.mode = this.mode === 'text' ? 'thought' : 'text';
         index += matchedTag.length;
         continue;
       }

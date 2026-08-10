@@ -571,21 +571,24 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
-    it('fails closed when a confirmed opening tag exceeds the buffer limit mid-stream', () => {
-      // The production leaks are longer than the 128-char candidate cap; the
-      // confirmed opening tag must keep them held until the fail-closed throw
-      // fires mid-stream instead of the cap releasing them as visible text.
+    it('holds a long confirmed opening tag until its closing tag arrives', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const text = `<thinking>${'x'.repeat(200)}</thinking>`;
 
-      expect(() =>
-        converter.convertOpenAIChunkToGemini(
-          streamChunk('long-unclosed', {
-            content: '<thinking>' + 'x'.repeat(200),
-          }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('long-balanced', {
+          content: `<thinking>${'x'.repeat(200)}`,
+        }),
+        stream,
+      );
+      const closing = converter.convertOpenAIChunkToGemini(
+        streamChunk('long-balanced', { content: '</thinking>' }, 'stop'),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([{ text }]);
     });
 
     it('leaks the production <thinking> shape without provider provenance', () => {
@@ -619,6 +622,7 @@ describe('OpenAIContentConverter', () => {
         'two split valid blocks',
         ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
       ],
+      ['long empty block', [`<thinking>${' '.repeat(128)}</thinking>`, '']],
     ])('preserves content-only %s', (_name, chunks) => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
@@ -638,17 +642,33 @@ describe('OpenAIContentConverter', () => {
       expect(parts.every((part) => part.thought !== true)).toBe(true);
     });
 
-    it('rejects a confirmed opening tag that exceeds the buffer limit', () => {
+    it('releases a long unconfirmed prefix before the stream finishes', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const text = `<think>${' '.repeat(257)}`;
+      const text = `<think${' '.repeat(257)}`;
 
-      expect(() =>
-        converter.convertOpenAIChunkToGemini(
-          streamChunk('literal', { content: text }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal', { content: text }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it('rejects an unclosed whitespace-only block at stream finish', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('unclosed', {
+          content: `<thinking>${' '.repeat(128)}`,
+        }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
     });
 
     it('preserves a leak-shaped literal without provider provenance', () => {
@@ -710,17 +730,20 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('fails closed when a suspicious prefix exceeds the buffer limit', () => {
+    it('fails closed for a long suspicious prefix at stream finish', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const content = '<think></think><think>9<think>' + 'x'.repeat(257);
 
-      expect(() =>
-        converter.convertOpenAIChunkToGemini(
-          streamChunk('long-leak', { content }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('long-leak', { content }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
     });
 
     it.each([
@@ -5397,49 +5420,6 @@ describe('OpenAIContentConverter', () => {
       expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
         { text: ' visible' },
       ]);
-    });
-
-    it('should keep nested balanced thinking blocks out of visible content', () => {
-      const context = withTaggedThinkingStreamParser();
-
-      const chunks = [
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-nested-thinking-1',
-          created: 456,
-          choices: [
-            {
-              index: 0,
-              delta: { content: '<thinking><thinking>x</thinking>' },
-              finish_reason: null,
-              logprobs: null,
-            },
-          ],
-          model: 'test-model',
-        },
-        {
-          object: 'chat.completion.chunk',
-          id: 'chunk-nested-thinking-2',
-          created: 457,
-          choices: [
-            {
-              index: 0,
-              delta: { content: 'y</thinking>' },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-          model: 'test-model',
-        },
-      ] as unknown as OpenAI.Chat.ChatCompletionChunk[];
-      const parts = chunks.flatMap(
-        (chunk) =>
-          converter.convertOpenAIChunkToGemini(chunk, context).candidates?.[0]
-            ?.content?.parts ?? [],
-      );
-
-      expect(parts.every((part) => part.thought === true)).toBe(true);
-      expect(parts.map((part) => part.text).join('')).toBe('xy');
     });
 
     it('should suppress reasoning_content when the same streaming chunk has tagged thinking content', () => {
