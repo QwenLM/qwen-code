@@ -1007,9 +1007,12 @@ export function createServeApp(
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
       delegateReadTextFileToClient: false,
-      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Final ACP text writes remain delegated. Workspace writes use WFS;
+      // marked same-host tool writes may use the factory's host writer.
       // Unexpected delegated reads still fail closed at the WFS boundary.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+        allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+      }),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
