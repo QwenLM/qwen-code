@@ -447,7 +447,11 @@ export interface DaemonSessionActions {
   branchSession(
     name?: string,
     atRecordId?: string,
-  ): Promise<{ sessionId: string; displayName: string }>;
+  ): Promise<{
+    sessionId: string;
+    displayName: string;
+    switchStarted: boolean;
+  }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 

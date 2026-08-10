@@ -4199,7 +4199,7 @@ describe('SessionService', () => {
       expect(fs.readdirSync(targetBackupDir)).toEqual(['backup-a']);
     });
 
-    it('does not leak post-checkpoint artifact records into a historical fork', async () => {
+    it('retains pre-checkpoint artifacts without leaking later ones', async () => {
       const oldId = '31313131-3131-3131-3131-313131313138';
       const newId = '41414141-4141-4141-4141-414141414148';
       const { file, lines } = seedSession(oldId);
@@ -4222,6 +4222,46 @@ describe('SessionService', () => {
         oldId,
         'url:https://example.com/after-checkpoint',
       );
+      const earlyArtifactId = stableSessionArtifactId(
+        oldId,
+        'url:https://example.com/before-checkpoint',
+      );
+      const earlyArtifact = {
+        uuid: 'artifact-early',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:02.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:02.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: earlyArtifactId,
+              artifact: {
+                id: earlyArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Early artifact',
+                url: 'https://example.com/before-checkpoint',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:02.500Z',
+                updatedAt: '2026-04-22T00:00:02.500Z',
+                persistedAt: '2026-04-22T00:00:02.500Z',
+              },
+            },
+          ],
+        },
+      };
       const lateArtifact = {
         uuid: 'artifact-late',
         parentUuid: 'checkpoint-artifact',
@@ -4260,7 +4300,7 @@ describe('SessionService', () => {
       };
       fs.writeFileSync(
         file,
-        [...lines, checkpoint, lateArtifact]
+        [...lines, earlyArtifact, checkpoint, lateArtifact]
           .map((record) => JSON.stringify(record))
           .join('\n') + '\n',
       );
@@ -4270,8 +4310,18 @@ describe('SessionService', () => {
       });
 
       const loaded = await service.loadSession(newId);
-      expect(loaded?.artifactSnapshot?.artifacts ?? []).toEqual([]);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([
+        expect.objectContaining({
+          id: stableSessionArtifactId(
+            newId,
+            'url:https://example.com/before-checkpoint',
+          ),
+          title: 'Early artifact',
+        }),
+      ]);
       const forkedRaw = fs.readFileSync(result.filePath, 'utf8');
+      expect(forkedRaw).toContain('artifact-early');
+      expect(forkedRaw).toContain('Early artifact');
       expect(forkedRaw).not.toContain('artifact-late');
       expect(forkedRaw).not.toContain('Late artifact');
     });
@@ -4488,7 +4538,18 @@ describe('SessionService', () => {
         ),
       ).toBe('foreign content');
       expect(
-        fs.existsSync(realPath.join(targetBackupDir, '.branch-owner')),
+        fs
+          .readdirSync(chatsDir)
+          .some(
+            (name) => name.startsWith(`.${newId}.`) && name.endsWith('.tmp'),
+          ),
+      ).toBe(false);
+      expect(
+        fs
+          .readdirSync(realPath.join(realTmpDir, 'file-history'))
+          .some(
+            (name) => name.startsWith(`.${newId}.`) && name.endsWith('.tmp'),
+          ),
       ).toBe(false);
     });
 
@@ -4735,6 +4796,53 @@ describe('SessionService', () => {
       },
     );
 
+    it('removes published backups when transcript publication fails', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555563';
+      const newId = '66666666-6666-6666-6666-666666666681';
+      const { file, lines } = seedSession(oldId);
+      appendFileHistorySnapshot(oldId, file, lines, ['backup-orphan']);
+      const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
+      const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
+      fs.mkdirSync(sourceBackupDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(sourceBackupDir, 'backup-orphan'),
+        'backup content',
+      );
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      const targetTranscript = realPath.join(chatsDir, `${newId}.jsonl`);
+      const realRename = fs.promises.rename;
+      const linkError = Object.assign(new Error('link failed'), {
+        code: 'EIO',
+      });
+      const renameError = Object.assign(new Error('rename failed'), {
+        code: 'EIO',
+      });
+      const linkSpy = vi
+        .spyOn(fs.promises, 'link')
+        .mockRejectedValue(linkError);
+      const renameSpy = vi
+        .spyOn(fs.promises, 'rename')
+        .mockImplementation(async (source, target) => {
+          if (String(target) === targetTranscript) throw renameError;
+          return realRename(source, target);
+        });
+
+      try {
+        await expect(service.forkSession(oldId, newId)).rejects.toBe(
+          renameError,
+        );
+      } finally {
+        linkSpy.mockRestore();
+        renameSpy.mockRestore();
+      }
+
+      expect(fs.existsSync(targetTranscript)).toBe(false);
+      expect(fs.existsSync(targetBackupDir)).toBe(false);
+    });
+
     it('uses asynchronous filesystem APIs for fork publication and backup staging', async () => {
       const oldId = '55555555-5555-5555-5555-555555555560';
       const newId = '66666666-6666-6666-6666-666666666674';
@@ -4749,6 +4857,8 @@ describe('SessionService', () => {
       const syncSpies = [
         vi.spyOn(fs, 'mkdirSync'),
         vi.spyOn(fs, 'openSync'),
+        vi.spyOn(fs, 'readSync'),
+        vi.spyOn(fs, 'writeSync'),
         vi.spyOn(fs, 'writeFileSync'),
         vi.spyOn(fs, 'fsyncSync'),
         vi.spyOn(fs, 'closeSync'),

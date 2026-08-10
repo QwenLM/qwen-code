@@ -121,7 +121,11 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .click();
 
   await expect.poll(() => daemon.branchRequests().length).toBe(1);
-  expect(requestBodyRecord(firstRequest(daemon.branchRequests()))).toEqual({
+  const branchRequest = firstRequest(daemon.branchRequests());
+  expect(branchRequest.path).toBe(
+    `/session/${encodeURIComponent(scenario.sessionId)}/branch`,
+  );
+  expect(requestBodyRecord(branchRequest)).toEqual({
     atRecordId: branchRecordId,
   });
   await expect(page).toHaveURL(

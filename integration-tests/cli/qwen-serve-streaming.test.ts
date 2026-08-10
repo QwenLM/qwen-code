@@ -811,13 +811,14 @@ describePOSIX('qwen serve — historical Assistant response branch', () => {
     expect(sourceText).toContain('historical branch turn two');
     expect(sourceText).toContain('historical branch turn three');
 
+    const loadedBranch = await client.loadSession(branched.sessionId);
     await client.prompt(
       branched.sessionId,
       {
         prompt: [{ type: 'text', text: 'continue the historical branch' }],
       },
       undefined,
-      branched.clientId,
+      loadedBranch.clientId,
     );
     const branchAfterContinue = await client.getSessionTranscriptPage(
       branched.sessionId,

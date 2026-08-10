@@ -283,24 +283,14 @@ function applyDaemonTranscriptEvent(
         event.promptId &&
         event.reason === 'end_turn'
       ) {
-        const activeAssistant = getWritableBlockById(
+        const assistant = getWritableBlockById(
           next,
-          next.activeAssistantBlockId,
+          findFinalVisibleAssistantForPrompt(next, event.promptId),
         );
-        if (
-          activeAssistant?.kind === 'assistant' &&
-          activeAssistant.parentToolCallId === undefined &&
-          activeAssistant.promptId === event.promptId &&
-          activeAssistant.text.trim().length > 0 &&
-          isFinalVisibleAssistantForPrompt(
-            next,
-            activeAssistant.id,
-            event.promptId,
-          )
-        ) {
-          activeAssistant.branchRecordId = event.branchRecordId;
-          activeAssistant.sourceRecordIds = unionStrings(
-            activeAssistant.sourceRecordIds,
+        if (assistant?.kind === 'assistant') {
+          assistant.branchRecordId = event.branchRecordId;
+          assistant.sourceRecordIds = unionStrings(
+            assistant.sourceRecordIds,
             event.sourceRecordIds,
           );
         }
@@ -764,11 +754,10 @@ function canMergeTextDelta(
   return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
 }
 
-function isFinalVisibleAssistantForPrompt(
+function findFinalVisibleAssistantForPrompt(
   state: DaemonTranscriptState,
-  blockId: string,
   promptId: string,
-): boolean {
+): string | undefined {
   for (let index = state.blocks.length - 1; index >= 0; index--) {
     const block = state.blocks[index];
     if (
@@ -777,10 +766,10 @@ function isFinalVisibleAssistantForPrompt(
       block.promptId === promptId &&
       block.text.trim().length > 0
     ) {
-      return block.id === blockId;
+      return block.id;
     }
   }
-  return false;
+  return undefined;
 }
 
 function finishAssistant(

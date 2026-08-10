@@ -227,6 +227,7 @@ const {
       branchSession: vi.fn().mockResolvedValue({
         sessionId: 'branch-1',
         displayName: 'Historical branch',
+        switchStarted: true,
       }),
       submitPermission: vi.fn().mockResolvedValue(true),
       clearGoal: vi.fn().mockResolvedValue(undefined),
@@ -4398,6 +4399,7 @@ beforeEach(() => {
   mockSessionActions.branchSession.mockResolvedValue({
     sessionId: 'branch-1',
     displayName: 'Historical branch',
+    switchStarted: true,
   });
   mockSessionActions.submitPermission.mockResolvedValue(undefined);
   mockSessionActions.clearGoal.mockResolvedValue(undefined);
@@ -6301,6 +6303,7 @@ describe('App session callbacks', () => {
     const branch = deferred<{
       sessionId: string;
       displayName: string;
+      switchStarted: boolean;
     }>();
     mockSessionActions.branchSession.mockReturnValue(branch.promise);
     renderApp();
@@ -6321,6 +6324,7 @@ describe('App session callbacks', () => {
     branch.resolve({
       sessionId: 'branch-1',
       displayName: 'Historical branch',
+      switchStarted: true,
     });
     await act(async () => {
       await request;
@@ -6330,6 +6334,24 @@ describe('App session callbacks', () => {
         type: 'status',
         text: expect.stringContaining('Historical branch') as string,
       }),
+    ]);
+  });
+
+  it('does not claim a late branch result switched sessions', async () => {
+    mockSessionActions.branchSession.mockResolvedValue({
+      sessionId: 'branch-1',
+      displayName: 'Historical branch',
+      switchStarted: false,
+    });
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status' }),
     ]);
   });
 
@@ -6518,6 +6540,35 @@ describe('App session callbacks', () => {
       'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
     );
     expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      'This response is no longer on the active history path. The transcript has been refreshed.',
+    );
+  });
+
+  it('treats a superseded same-session stale reload as refreshed', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockConnection.capabilities.features = ['session_transcript_pagination'];
+    mockSessionActions.branchSession.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { code: 'branch_point_invalid' },
+        'Invalid branch point',
+      ),
+    );
+    mockSessionActions.reloadSession.mockRejectedValue(
+      new DOMException('Session load superseded', 'AbortError'),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.(
+        'stale-checkpoint',
+      );
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
       'error',
       'This response is no longer on the active history path. The transcript has been refreshed.',
     );

@@ -938,6 +938,7 @@ describe('createDaemonSessionActions', () => {
       await expect(branch).resolves.toEqual({
         sessionId: 'session-b',
         displayName: 'Historical branch',
+        switchStarted: true,
       });
       if (pendingSessionLoadRef.current) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
@@ -972,6 +973,7 @@ describe('createDaemonSessionActions', () => {
     await expect(branch).resolves.toEqual({
       sessionId: 'session-c',
       displayName: 'Historical branch',
+      switchStarted: false,
     });
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
 

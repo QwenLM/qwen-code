@@ -839,5 +839,51 @@ describe('sessionStorageUtils', () => {
         ),
       ).resolves.toEqual({ customTitle: 'Head', titleSource: 'manual' });
     });
+
+    it('re-reads the latest tail when the file grows after the first read', async () => {
+      const initial = Buffer.from(
+        '{"subtype":"custom_title","customTitle":"old","titleSource":"manual"}\n' +
+          'x'.repeat(LITE_READ_BUF_SIZE + 16 * 1024) +
+          '\n',
+      );
+      const latest = Buffer.from(
+        '{"subtype":"custom_title","customTitle":"new","titleSource":"auto"}\n',
+      );
+      const grown = Buffer.concat([initial, latest]);
+      let readCount = 0;
+      const handle = {
+        stat: vi
+          .fn()
+          .mockResolvedValueOnce({ size: initial.length })
+          .mockResolvedValueOnce({ size: grown.length }),
+        read: vi.fn(
+          async (
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number,
+          ) => {
+            const source = readCount++ === 0 ? initial : grown;
+            const bytes = source.subarray(position, position + length);
+            bytes.copy(buffer, offset);
+            return { bytesRead: bytes.length, buffer };
+          },
+        ),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.spyOn(fs.promises, 'open').mockResolvedValue(
+        handle as unknown as Awaited<ReturnType<typeof fs.promises.open>>,
+      );
+
+      await expect(
+        readLastJsonStringFieldsAsync(
+          '/virtual/growing.jsonl',
+          'customTitle',
+          ['titleSource'],
+          'custom_title',
+        ),
+      ).resolves.toEqual({ customTitle: 'new', titleSource: 'auto' });
+      expect(handle.read).toHaveBeenCalledTimes(2);
+    });
   });
 });

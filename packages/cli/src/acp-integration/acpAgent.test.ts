@@ -3951,7 +3951,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('aborts a tracked prompt waiting at writer admission on cancel', async () => {
-    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const callerSessionId = sessionId.toUpperCase();
     await setupSessionMocks(sessionId);
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -3974,13 +3975,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     );
 
-    const prompt = agent.prompt({ sessionId, prompt: [] });
+    const prompt = agent.prompt({ sessionId: callerSessionId, prompt: [] });
     await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
     const admissionSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
       | AbortSignal
       | undefined;
 
-    await agent.cancel({ sessionId });
+    await agent.cancel({ sessionId: callerSessionId });
     expect(admissionSignal?.aborted).toBe(true);
 
     releaseAdmission();
@@ -13908,6 +13909,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
     ).rejects.toThrow('write barrier failed');
     expect(sessionService.forkSession).not.toHaveBeenCalled();
     expect(SessionService).not.toHaveBeenCalled();
+    expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
+    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14214,6 +14217,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
       expect.any(String),
       { title: 'Source session (Branch)', atRecordId: checkpoint },
     );
+    expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
+    expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14266,6 +14271,57 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await branch;
     await close;
     expect(recording.finalize).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('times out close while a branch holds the history mutation gate', async () => {
+    let releaseBranchAdmission!: () => void;
+    const branchAdmission = new Promise<void>((resolve) => {
+      releaseBranchAdmission = resolve;
+    });
+    liveAssertCanStartTurn.mockReturnValueOnce(branchAdmission);
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const branch = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+      cwd: '/tmp',
+      sessionId: liveSessionId,
+    });
+    await vi.waitFor(() =>
+      expect(liveAssertCanStartTurn).toHaveBeenCalledOnce(),
+    );
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+        drainTimeoutMs: 5,
+      }),
+    ).rejects.toThrow('Session close timed out');
+    expect(liveReleaseCloseGate).toHaveBeenCalledOnce();
+    expect(recording.finalize).not.toHaveBeenCalled();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).toContain(liveSessionId);
+
+    releaseBranchAdmission();
+    await branch;
 
     mockConnectionState.resolve();
     await agentPromise;

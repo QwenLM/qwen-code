@@ -3721,6 +3721,7 @@ class QwenAgent implements Agent {
   private async runExclusiveHistoryMutation<T>(
     sessionId: string,
     operation: () => Promise<T>,
+    waitTimeoutMs?: number,
   ): Promise<T> {
     const previous =
       this.historyMutationTails.get(sessionId) ?? Promise.resolve();
@@ -3730,7 +3731,21 @@ class QwenAgent implements Agent {
     });
     const current = previous.then(() => gate);
     this.historyMutationTails.set(sessionId, current);
-    await previous;
+    try {
+      if (waitTimeoutMs === undefined) {
+        await previous;
+      } else {
+        await waitForSessionDrain(previous, waitTimeoutMs, 'close');
+      }
+    } catch (error) {
+      release();
+      void current.then(() => {
+        if (this.historyMutationTails.get(sessionId) === current) {
+          this.historyMutationTails.delete(sessionId);
+        }
+      });
+      throw error;
+    }
     try {
       return await operation();
     } finally {
@@ -4415,40 +4430,49 @@ class QwenAgent implements Agent {
         'close',
       );
 
-      await this.runExclusiveHistoryMutation(sessionId, async () => {
-        if (this.sessions.get(sessionId) !== session) {
+      await this.runExclusiveHistoryMutation(
+        sessionId,
+        async () => {
+          if (this.sessions.get(sessionId) !== session) {
+            removedFromStore = true;
+            return;
+          }
+          recorder?.finalize();
+          let flushError: unknown;
+          try {
+            await recorder?.flush();
+          } catch (error) {
+            flushError = error;
+          }
+          if (flushError !== undefined && requireFlush) {
+            throw flushError;
+          }
+
+          let closeError: unknown;
+          try {
+            await recorder?.close();
+          } catch (error) {
+            closeError = error;
+          }
+          if (recorder?.hasWriteOwnership()) {
+            throw closeError ?? new SessionWriterUnavailableError();
+          }
+
+          const cleanupErrors: unknown[] = [];
+          if (flushError !== undefined) cleanupErrors.push(flushError);
+          if (closeError !== undefined) cleanupErrors.push(closeError);
+          await this.removeStoredSessionEntry(
+            sessionId,
+            session,
+            cleanupErrors,
+            {
+              shutdownConfig: opts?.shutdownConfig,
+            },
+          );
           removedFromStore = true;
-          return;
-        }
-        recorder?.finalize();
-        let flushError: unknown;
-        try {
-          await recorder?.flush();
-        } catch (error) {
-          flushError = error;
-        }
-        if (flushError !== undefined && requireFlush) {
-          throw flushError;
-        }
-
-        let closeError: unknown;
-        try {
-          await recorder?.close();
-        } catch (error) {
-          closeError = error;
-        }
-        if (recorder?.hasWriteOwnership()) {
-          throw closeError ?? new SessionWriterUnavailableError();
-        }
-
-        const cleanupErrors: unknown[] = [];
-        if (flushError !== undefined) cleanupErrors.push(flushError);
-        if (closeError !== undefined) cleanupErrors.push(closeError);
-        await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
-          shutdownConfig: opts?.shutdownConfig,
-        });
-        removedFromStore = true;
-      });
+        },
+        drainTimeoutMs,
+      );
     } finally {
       if (!removedFromStore) cancelClose();
     }
@@ -5584,7 +5608,7 @@ class QwenAgent implements Agent {
     // activePromptCalls but have no session pendingPrompt yet, so
     // cancelPendingPrompt cannot see them. Abort their controllers too, or a
     // cancelled prompt would run in full once the gate frees.
-    for (const call of this.activePromptCalls.get(params.sessionId) ?? []) {
+    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
       call.controller.abort();
     }
   }

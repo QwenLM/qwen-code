@@ -6380,6 +6380,7 @@ export function App({
       return sessionActions
         .branchSession(name || undefined, atRecordId)
         .then((result) => {
+          if (!result.switchStarted) return;
           store.dispatch([
             {
               type: 'status',
@@ -6406,8 +6407,8 @@ export function App({
             try {
               await sessionActions.reloadSession(new AbortController().signal);
               refreshed = true;
-            } catch {
-              refreshed = false;
+            } catch (reloadError) {
+              refreshed = isAbortError(reloadError);
             }
             // A switch landing while the recovery reload is in flight
             // supersedes it; the outcome toast belongs to the source session.

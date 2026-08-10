@@ -9300,7 +9300,7 @@ describe('createAcpSessionBridge', () => {
       const factory: ChannelFactory = async () =>
         makeChannel({
           extMethodImpl: async (method) => {
-            if (method !== 'qwen/control/session/branch') return {};
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
             await new Promise<void>((resolve) => {
               releaseBranch = resolve;
             });
@@ -9650,6 +9650,78 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it.each([
+      {
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+      },
+      {
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+      },
+    ])(
+      'rejects a dispatched $method when its transport closes',
+      async ({ method, invoke }) => {
+        const started = deferred<void>();
+        const handle = makeChannel({
+          extMethodImpl: (candidate) => {
+            if (candidate !== method) return {};
+            started.resolve();
+            return new Promise(() => {});
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        const mutation = invoke(bridge, session.sessionId);
+        await started.promise;
+        handle.crash({ exitCode: 1, signalCode: null });
+
+        await expect(mutation).rejects.toBeInstanceOf(BridgeChannelClosedError);
+        await bridge.shutdown();
+      },
+    );
+
+    it.each([
+      {
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+      },
+      {
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+      },
+    ])(
+      'does not poison the prompt queue after a failed $method',
+      async ({ method, invoke }) => {
+        const handle = makeChannel({
+          extMethodImpl: (candidate) => {
+            if (candidate === method) throw new Error('mutation failed');
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(invoke(bridge, session.sessionId)).rejects.toThrow();
+        await expect(
+          bridge.sendPrompt(session.sessionId, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'after failed mutation' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      },
+    );
+
     it('rejects rewind at admission while a prompt is active', async () => {
       const promptStarted = deferred<void>();
       const promptGate = deferred<void>();
@@ -9765,7 +9837,7 @@ describe('createAcpSessionBridge', () => {
     it('creates a persisted branch even when live session capacity is full', async () => {
       const handle = makeChannel({
         extMethodImpl: async (method) => {
-          if (method !== 'qwen/control/session/branch') return {};
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
           return { newSessionId: 'branch-1', title: 'Branch 1' };
         },
         resumeSessionImpl: () => new Promise(() => {}),
@@ -13889,6 +13961,89 @@ describe('createAcpSessionBridge', () => {
         [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true,
       });
 
+      await bridge.shutdown();
+    });
+
+    it.each([false, true])(
+      'releases side-task admission when restore failure is %s',
+      async (restoreFails) => {
+        const contexts: BridgeFreshSessionAdmissionContext[] = [];
+        const releases: BridgeFreshSessionAdmissionContext[] = [];
+        const handle = makeChannel({
+          extMethodImpl: async (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+              return { newSessionId: 'side-admission', title: 'Side task' };
+            }
+            return {};
+          },
+          loadSessionImpl: () => {
+            if (restoreFails) throw new Error('restore failed');
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          freshSessionAdmission: (context) => {
+            contexts.push(context);
+            return { release: () => releases.push(context) };
+          },
+        });
+        const parent = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        contexts.length = 0;
+        releases.length = 0;
+
+        const sideTask = bridge.createSideTaskSession(parent.sessionId, {
+          name: 'Side task',
+        });
+        if (restoreFails) {
+          await expect(sideTask).rejects.toThrow();
+        } else {
+          await expect(sideTask).resolves.toMatchObject({
+            sessionId: 'side-admission',
+          });
+        }
+
+        expect(contexts).toEqual([
+          {
+            operation: 'branch',
+            workspaceCwd: WS_A,
+            sourceSessionId: parent.sessionId,
+          },
+        ]);
+        expect(releases).toEqual(contexts);
+        await bridge.shutdown();
+      },
+    );
+
+    it('rejects a side task when live session capacity is full', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSideTask) {
+            throw new Error('side task must not reach the agent');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxSessions: 1,
+      });
+      const parent = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.createSideTaskSession(parent.sessionId, { name: 'Side task' }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+        limit: 1,
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionSideTask,
+        }),
+      );
       await bridge.shutdown();
     });
 
@@ -18289,7 +18444,7 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () =>
           makeChannel({
             extMethodImpl: (method) => {
-              if (method !== 'qwen/control/session/branch') return {};
+              if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
               return { newSessionId: 'branch-1', title: 'Branch 1' };
             },
             loadSessionImpl: () => ({}),
@@ -18322,7 +18477,7 @@ describe('createAcpSessionBridge', () => {
         channelFactory: async () =>
           makeChannel({
             extMethodImpl: (method) => {
-              if (method === 'qwen/control/session/branch') {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
                 throw new Error('branch failed');
               }
               return {};

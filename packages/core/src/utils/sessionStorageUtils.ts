@@ -491,7 +491,8 @@ export function readLastJsonStringFieldsSync(
  * Promise-based counterpart to {@link readLastJsonStringFieldsSync} for
  * latency-sensitive daemon paths. It preserves the same bounded tail-first,
  * latest-tail retry, and head fallback semantics without blocking the event
- * loop on filesystem calls.
+ * loop on filesystem calls. A caller-provided scratch buffer must not be
+ * shared by overlapping calls because each awaited read writes into it.
  */
 export async function readLastJsonStringFieldsAsync(
   filePath: string,

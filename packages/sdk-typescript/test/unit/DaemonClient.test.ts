@@ -3147,14 +3147,16 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({
         baseUrl: 'http://daemon',
         fetch,
-        fetchTimeoutMs: 1,
+        fetchTimeoutMs: 600_000,
       });
 
       try {
         const branch = client.branchSession('source-1');
+        await vi.advanceTimersByTimeAsync(119_999);
+        expect(requestSignal?.aborted ?? false).toBe(false);
         await Promise.all([
           expect(branch).rejects.toBeDefined(),
-          vi.advanceTimersByTimeAsync(120_000),
+          vi.advanceTimersByTimeAsync(1),
         ]);
         expect(requestSignal?.aborted ?? false).toBe(true);
       } finally {

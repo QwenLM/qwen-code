@@ -498,7 +498,8 @@ An invalid, inactive, malformed, or stale checkpoint returns:
 ```json
 {
   "code": "branch_point_invalid",
-  "error": "The selected response is no longer in the active session history"
+  "error": "Invalid or inactive branch point: <recordId>",
+  "errorKind": "branch_point_invalid"
 }
 ```
 

@@ -67,6 +67,38 @@ describe('daemon transcript rewind', () => {
     });
   });
 
+  it('attaches a branch anchor after a passive observer completion', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'answer',
+          promptId: 'prompt-1',
+        },
+        {
+          type: 'assistant.done',
+          reason: 'passive_observer',
+          promptId: 'prompt-1',
+        },
+        {
+          type: 'assistant.done',
+          reason: 'end_turn',
+          promptId: 'prompt-1',
+          sourceRecordIds: ['assistant-record'],
+          branchRecordId: 'checkpoint-record',
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      promptId: 'prompt-1',
+      branchRecordId: 'checkpoint-record',
+    });
+  });
+
   it('does not attach a branch anchor when the completed prompt differs', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

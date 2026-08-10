@@ -7350,6 +7350,7 @@ describe('DaemonSessionProvider', () => {
     await expect(branch).resolves.toEqual({
       sessionId: 'session-b',
       displayName: 'Branch 1',
+      switchStarted: true,
     });
 
     expect(sdkMocks.branchSession).toHaveBeenCalledWith(

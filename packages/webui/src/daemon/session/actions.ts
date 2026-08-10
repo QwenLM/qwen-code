@@ -1383,10 +1383,10 @@ export function createDaemonSessionActions({
           { name, atRecordId },
           session.clientId,
         );
-        if (
+        const switchStarted =
           sessionRef.current?.sessionId === sourceSessionId &&
-          pendingSessionLoadIdRef.current === loadGeneration
-        ) {
+          pendingSessionLoadIdRef.current === loadGeneration;
+        if (switchStarted) {
           void startSessionSwitch(result.sessionId, 'load').catch(
             (switchError: unknown) => {
               if (isAbortError(switchError)) return;
@@ -1402,6 +1402,7 @@ export function createDaemonSessionActions({
         return {
           sessionId: result.sessionId,
           displayName: result.displayName,
+          switchStarted,
         };
       } catch (error) {
         if (isStaleBranchPointError(error)) {
