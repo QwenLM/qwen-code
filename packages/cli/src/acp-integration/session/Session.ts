@@ -6199,10 +6199,17 @@ export class Session implements SessionContext {
                   );
                 if (!sendResult.responseStream) {
                   this.todoStopGuard.suspend();
+                  const preserveFullMessage =
+                    sendResult.stopReason === 'cancelled';
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
-                    sendResult.stopReason === 'cancelled',
+                    preserveFullMessage,
                   );
+                  if (preserveFullMessage && turnCount === 1) {
+                    this.config
+                      .getChatRecordingService()
+                      ?.recordCronPrompt([{ text: modelText }], echoText);
+                  }
                   if (sendResult.stopReason === 'max_tokens') {
                     this.#stopCronAfterTokenLimit();
                   }

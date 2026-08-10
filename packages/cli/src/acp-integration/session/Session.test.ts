@@ -13740,6 +13740,77 @@ describe('Session', () => {
         expect(tokenLimitDiagnosticCount()).toBe(diagnosticCountBefore);
       });
 
+      it('persists a cron prompt preserved after send preparation is cancelled', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: 'scheduled prompt',
+                cronExpr: '0 * * * *',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        let cronCompressionStarted!: () => void;
+        const cronCompressionStartedPromise = new Promise<void>((resolve) => {
+          cronCompressionStarted = resolve;
+        });
+        mockGeminiClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockImplementationOnce(
+            async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+              new Promise((_, reject) => {
+                cronCompressionStarted();
+                signal.addEventListener('abort', () => {
+                  const abortError = new Error('aborted');
+                  abortError.name = 'AbortError';
+                  reject(abortError);
+                });
+              }),
+          );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await cronCompressionStartedPromise;
+        vi.mocked(mockChat.addHistory).mockClear();
+
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() =>
+          expect(
+            mockChatRecordingService.recordCronPrompt,
+          ).toHaveBeenCalledTimes(1),
+        );
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([{ text: 'scheduled prompt' }]),
+        });
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'scheduled prompt' }],
+          'scheduled prompt',
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
       it('does not auto-compress slash commands handled without a model send', async () => {
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
