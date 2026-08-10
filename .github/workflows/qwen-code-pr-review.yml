@@ -78,6 +78,15 @@ jobs:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     # Authorization is delegated to the `authorize` job (write+ permission);
     # this `if` only matches the /review command shape.
+    #
+    # The command may be followed by a newline and a body, so the shape match
+    # accepts that — via fromJSON, because expression string literals are NOT
+    # escape-processed: '\n' there is a literal backslash + n, and the branch
+    # written that way never matched anything. fromJSON('"\n"') is JSON, which
+    # IS escape-processed, so it yields a real newline. Both line endings are
+    # listed: the API sends LF, the web UI sends CRLF, and startsWith with an
+    # LF pattern does not match a CRLF body. Measured on a live runner, not
+    # assumed — see the PR that introduced this.
     needs: ['authorize']
     if: |-
       !cancelled() &&
@@ -87,17 +96,20 @@ jobs:
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))) ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))) ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n')))))
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))))
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
@@ -119,7 +131,12 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          # Blank line after the marker, or none of the prose below renders. A
+          # line opening with `<!--` starts an HTML block that runs to the line
+          # containing the closing delimiter, and the REST of that line stays
+          # inside it — so gluing the text on shipped it as raw source with a
+          # dead link. Verified against GitHub's own renderer.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
           EXISTING_ACK_ID="$(
             # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
@@ -315,7 +332,8 @@ jobs:
     # review_requested events check the requester and skip delay):
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately
-    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches) —
+    # including the fromJSON newline/CR pair, explained there.
     if: |-
       !cancelled() &&
       ((github.event_name == 'workflow_dispatch' &&
@@ -335,19 +353,22 @@ jobs:
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true'))
     # The per-review budget auto-scales to QWEN_REVIEW_MAX_TIMEOUT_MINUTES
     # for any non-small PR (see "Run review"), and the shared retry budget
@@ -443,7 +464,20 @@ jobs:
           # input or a /review --timeout=N comment). When false, "Run review"
           # replaces this default with a PR-size-aware tier instead.
           TIMEOUT_EXPLICIT=false
+          # True only for the automatic pull_request_target review — every
+          # other path is a human asking for a review explicitly, and an
+          # explicit ask always gets the full high-effort run. That includes
+          # the review_requested action: a maintainer clicking "Request
+          # review" is an explicit ask (authorize write-permission-checks the
+          # requester for exactly that action), so it is excluded below.
+          AUTO_REVIEW=false
+          # First line only, then drop a trailing CR: comments written in the
+          # GitHub web UI arrive CRLF-terminated, so without this the command
+          # line keeps a `\r`. That rides through word splitting (IFS has no
+          # CR) into tokens like `--timeout=300<CR>`, which then fails the
+          # numeric check for no visible reason.
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
+          TRIGGER_COMMAND="${TRIGGER_COMMAND%$'\r'}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
@@ -467,6 +501,10 @@ jobs:
             fi
             PR_NUMBER="${{ github.event.pull_request.number }}"
             REVIEW_MODE="comment"
+            if [ "${{ github.event_name }}" = "pull_request_target" ] &&
+               [ "${{ github.event.action }}" != "review_requested" ]; then
+              AUTO_REVIEW=true
+            fi
           else
             echo "Unsupported event: ${{ github.event_name }}" >&2
             exit 1
@@ -495,6 +533,7 @@ jobs:
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
             echo "timeout_explicit=$TIMEOUT_EXPLICIT"
+            echo "auto_review=$AUTO_REVIEW"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Setup Node.js for hosted review'
@@ -684,8 +723,43 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
+          AUTO_REVIEW: '${{ steps.context.outputs.auto_review }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
           TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'
+          # Timeout headroom for CI reviews, measured against the PR 8507
+          # double-abort (2026-08-07):
+          # - Request timeout (connect + TTFB), 120s default -> 10 minutes:
+          #   a large-PR review turn carries a million-token (mostly cached)
+          #   context plus a long thinking phase, and under upstream load the
+          #   first byte alone can exceed 120s; the SDK's internal retries
+          #   turned three ~120s TTFB timeouts into a 483s visible abort on
+          #   an early, small turn. QWEN_CODE_API_TIMEOUT_MS is the env knob
+          #   for ContentGeneratorConfig.timeout and outranks settings, so no
+          #   settings.json write is needed.
+          # - Stream idle window, 240s default -> 10 minutes: tolerates a
+          #   long thinking phase between chunks; the PR 8507 fan-out
+          #   generation on a ~1.27M-token context stalled past the default
+          #   while the upstream was degraded, and the pipeline-level retry
+          #   doubled the loss (~16 minutes) before aborting the run.
+          # - Lifetime cap at 30 minutes: the hard bound for drip-fed
+          #   streams; MUST exceed the idle window (a single legitimate gap
+          #   is charged against both).
+          # Accepted trade-offs: a dead-but-accepting upstream now costs up
+          # to ~4 x 30 minutes per LLM turn for a drip-fed generation (the
+          # lifetime cap bounds one attempt; the guard's ETIMEDOUT rides the
+          # transport replay/continuation budget) or ~4 x 10 minutes per
+          # TTFB-hung SDK call (DEFAULT_MAX_RETRIES = 3), with the pipeline
+          # retry on top, before a visible abort —
+          # hang-detection latency degrades for that rare case; and
+          # LoggingContentGenerator's hardcoded 5-minute stream-span idle
+          # timer fires before these guards, closing the LLM request span as
+          # an idle-timeout failure and skipping its api_response log even
+          # when the generation succeeds. The outer GNU timeout and the
+          # review deadline still bound the job — these knobs trade
+          # hang-detection latency for survival on slow-but-alive upstreams.
+          QWEN_CODE_API_TIMEOUT_MS: '600000'
+          QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
+          QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
           # Evidence-image destination for `qwen review publish-assets` —
           # OPT-IN by design: the command refuses to push images anywhere the
           # user did not designate, so with the repository variable unset the
@@ -701,6 +775,16 @@ jobs:
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
           QWEN_HOME: '${{ runner.temp }}/qwen-home'
+          # KEEP THE `run` BODY BELOW FREE OF `${{ }}`. A run block containing
+          # one is evaluated as a single expression template, capped at 21000
+          # characters — and this script is far past that. Every value it needs
+          # from the workflow context is passed as an environment variable, so
+          # the body is plain bash the runner never templates. See the
+          # workflow-expression-length test in
+          # scripts/tests/qwen-pr-review-workflow.test.js.
+          EVENT_NAME: '${{ github.event_name }}'
+          EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -913,7 +997,7 @@ jobs:
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+          MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
           if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then
             fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"
           fi
@@ -942,13 +1026,97 @@ jobs:
               if [ "$PR_SIZE_LINES" -le 300 ]; then
                 EFFECTIVE_TIMEOUT_MINUTES=180
               else
-                EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
+                EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"
               fi
               echo "PR #${PR_NUMBER} changed ${PR_SIZE_LINES} lines; auto timeout ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
             else
               echo "Could not determine PR #${PR_NUMBER} size; using default ${EFFECTIVE_TIMEOUT_MINUTES} minutes."
             fi
           fi
+
+          # Docs-only automatic reviews run at medium effort. The classifier is
+          # the same one the Test workflow's CI-profile gate already trusts
+          # (.github/scripts/ci/classify-profile.mjs) and it is conservative by
+          # construction: only docs/**.md and root-level prose files classify
+          # docs_only — MDX is executable (imported components, expressions)
+          # and stays `full`, as does markdown under any src/ tree, matching
+          # the review skill's own "markdown inside a source tree counts as
+          # source" rule — and any fetch or classifier failure falls back to
+          # the full review. On a diff with zero source lines, the passes
+          # medium drops (adversarial personas, reverse audit) have no
+          # failure mode to hunt;
+          # medium keeps the verified finder fan-out. `--comment` is dropped
+          # with the downgrade — an effective --comment forces high
+          # (parse-args), and medium never posts — so the "Report docs-only
+          # medium outcome" step relays the review's completion line instead.
+          # Explicit requests (dispatch, @qwen-code /review) never downgrade.
+          # Three-valued on purpose: 'true' (classified docs-only), 'false'
+          # (POSITIVELY classified not-docs-only by a successful automatic
+          # classification), '' (never determined — explicit run, or the
+          # classification failed). The supersede step keys on 'false', so
+          # conflating "never determined" with "determined not docs-only"
+          # would retire a still-accurate badge on a transient classifier
+          # failure or a dry run.
+          DOCS_ONLY_MEDIUM=""
+          # One implementation for both downgrades' arithmetic: the docs-only
+          # branch and the micro tightening below both halve with the same
+          # 90-minute floor, and two verbatim copies once let a one-sided
+          # divisor edit diverge them silently while the comments still
+          # claimed they matched.
+          halve_budget_floor() {
+            EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
+            if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
+              EFFECTIVE_TIMEOUT_MINUTES=90
+            fi
+          }
+          if [ "${AUTO_REVIEW:-false}" = "true" ]; then
+            # Fetch + classify through the shared wrapper so this gate and
+            # ci.yml's profile gate cannot drift on the classifier's input
+            # contract. Exit 2 = listing failed, 3 = classifier failed —
+            # either way the fallback is the full review.
+            set +e
+            profile="$(.github/scripts/ci/classify-pr-profile.sh "${REPO}" "${PR_NUMBER}")"
+            classify_rc=$?
+            set -e
+            if [ "$classify_rc" -ne 0 ]; then
+              echo "::warning::Docs-only gate could not classify PR files (exit ${classify_rc}); running the full review."
+            elif [ "$profile" = "docs_only" ]; then
+              DOCS_ONLY_MEDIUM=true
+              # Medium measures at one-third to one-half of high, so halve
+              # the size-aware budget with a 90-minute floor.
+              halve_budget_floor
+              echo "PR #${PR_NUMBER} is docs-only; automatic review runs at --effort medium (${EFFECTIVE_TIMEOUT_MINUTES}-minute budget)."
+            else
+              DOCS_ONLY_MEDIUM=false
+            fi
+          fi
+          # A micro automatic review — total churn (additions + deletions)
+          # strictly below 25 — keeps its full high-effort posting run: a
+          # medium downgrade would drop the inline comments a source fix
+          # deserves. The threshold is an INDEPENDENT "this is a small PR"
+          # bound, deliberately NOT the skill's SWEEP_FLOOR: the two count
+          # different things (this gate counts churn; the skill weighs raw
+          # unified-diff lines — file/hunk headers and context included), so
+          # a scattered micro diff can still run the sweep and the full
+          # reverse-audit loop. That is fine — the justification is not "the
+          # pipeline shrank" but "churn < 25 bounds the reviewed territory,
+          # and 90 minutes is ample for that territory even on the full
+          # pipeline" (measured: a 23-line PR runs high end to end in ~30
+          # min). What a micro run must not keep is the full 180-minute
+          # small-PR budget when its measured worst case is ~30 minutes:
+          # the same halve-with-floor the docs downgrade uses, so a hung
+          # run dies at the scale of its work.
+          # Skipped when the size lookup failed (an unknown size must not
+          # tighten anything), on explicit runs (their timeout is the
+          # caller's), and for docs-only runs, which are already halved.
+          if [ "${AUTO_REVIEW:-false}" = "true" ] \
+            && [ "$DOCS_ONLY_MEDIUM" != "true" ] \
+            && [ -n "${PR_SIZE_LINES:-}" ] \
+            && [ "$PR_SIZE_LINES" -lt 25 ]; then
+            halve_budget_floor
+            echo "PR #${PR_NUMBER} is a micro diff (${PR_SIZE_LINES} changed lines); the automatic review keeps --effort high and inline posting, with a tightened ${EFFECTIVE_TIMEOUT_MINUTES}-minute budget."
+          fi
+          echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
 
           if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
             fail "Failed to determine state for PR #${PR_NUMBER}."
@@ -959,8 +1127,7 @@ jobs:
             exit 0
           fi
           EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
             if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
               echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
@@ -976,7 +1143,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           PROMPT="/review ${REVIEW_URL}"
-          if [ "$REVIEW_MODE" = "comment" ]; then
+          if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
+            PROMPT="${PROMPT} --effort medium"
+          elif [ "$REVIEW_MODE" = "comment" ]; then
             PROMPT="${PROMPT} --comment"
           fi
 
@@ -1034,6 +1203,23 @@ jobs:
             fi
             export QWEN_REVIEW_DEADLINE_RESERVE_SECONDS
             set +e
+            # The agent streams its ENTIRE transcript to stdout, and the runner
+            # scans every line for workflow commands. A tool result that quotes
+            # a file containing one is executed as a command: reviewing a PR
+            # that touches `actions/setup-node`, the agent read that action's
+            # own main.ts, which legitimately contains
+            # `core.info(\`##[add-matcher]${...}\`)`. The runner took the rest
+            # of the JSON line as a matcher path and errored. Observed on run
+            # 31167034020 (PR #8681): three `Unable to process command`, and
+            # 1h37m of review work discarded. Any PR whose review quotes a file
+            # containing `##[...]` or `::...::` breaks the same way — this
+            # repository's own workflows included.
+            # Turn command parsing off around the agent and nothing else. The
+            # token is random per attempt, so no output the agent produces can
+            # guess it and re-enable parsing early.
+            local stop_token
+            stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
+            echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
@@ -1043,6 +1229,18 @@ jobs:
               --output-format stream-json \
               | tee "$LOG_PATH"
             local ps=("${PIPESTATUS[@]}")
+            # Resume BEFORE anything else can exit: errexit is still off here,
+            # so this line is reached on every agent outcome — timeout, crash
+            # or success. Leaving it off would silently swallow this job's own
+            # ::error:: and the fallback comment's diagnostics for the rest of
+            # the run, turning one broken review into a silent one.
+            # Lead with a newline: the runner only recognises `::cmd::` at the
+            # start of a line, and `--kill-after` SIGKILLs the agent, which can
+            # leave a partial stream-json line with no trailing newline. An
+            # `echo` would append the resume to that fragment, where it is just
+            # text — parsing would stay off for the rest of the job, on exactly
+            # the path this guard exists to survive.
+            printf '\n::%s::\n' "$stop_token"
             set -e
             local qwen_status="${ps[0]}"
             local tee_status="${ps[1]}"
@@ -1158,6 +1356,215 @@ jobs:
             fail "$REASON" 1 "$KIND"
           done
 
+          if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
+            # The review CLI's machine-readable completion contract — batch
+            # drivers detect completion by this exact line, and it is the one
+            # verdict statement the relay step may quote (asserting a verdict
+            # the run did not print is the failure the review skill measures).
+            # The line is model-authored, so relaying it under the bot's name
+            # gets a strict allowlist, not a prefix check: this path never
+            # posts (no --comment), so any `posted`-form disposition is false
+            # by definition — the skill's DESIGN.md records a measured phantom
+            # `APPROVE posted` — and anything outside the not-posted shape
+            # (including injection-steered text) falls back to the neutral
+            # form, which deliberately does NOT start with the reserved
+            # `Review complete: ` prefix so log scrapers never parse it.
+            COMPLETION_LINE="$(printf '%s\n' "$RESULT_TEXT" | grep -E '^Review complete: ' | tail -n1 || true)"
+            # Bound to THIS PR's target and to the verdicts a medium run can
+            # produce: Comment, or Request changes when it verified a Critical
+            # (compose-review caps only Approve at medium — a docs-only run
+            # that found a blocker is exactly the outcome the relay must not
+            # swallow). A stale line for another PR, or an Approve-shaped
+            # injection, must not be republished under the bot's name.
+            if ! printf '%s' "$COMPLETION_LINE" \
+              | grep -qE "^Review complete: pr-${PR_NUMBER} — (Comment|Request changes), not posted \([0-9]+ Critical, [0-9]+ Suggestion\)$"; then
+              COMPLETION_LINE=""
+            fi
+            echo "completion_line=${COMPLETION_LINE:-(no relayable \"Review complete:\" line in the run output — see the run log)}" >> "$GITHUB_OUTPUT"
+          fi
+          # Distinct from the step's exit code: the state/head guards above
+          # exit 0 without running Qwen (closed PR, stale head), and the
+          # relay must not announce a review that never ran.
+          echo "review_completed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 'Report docs-only medium outcome'
+        if: |-
+          steps.context.outputs.should_run == 'true' &&
+          steps.review.outcome == 'success' &&
+          steps.review.outputs.review_completed == 'true' &&
+          steps.review.outputs.docs_only_medium == 'true' &&
+          steps.context.outputs.pr_number != ''
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: '${{ steps.review.outputs.expected_head_sha }}'
+          COMPLETION_LINE: '${{ steps.review.outputs.completion_line || ''(no relayable "Review complete:" line in the run output — see the run log)'' }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          # The write is bound to the reviewed head: re-read the live PR
+          # state immediately before the mutation. The stale-head guard in
+          # "Run review" checked at step start; a push that landed since
+          # must not receive this head's outcome (the fallback-comment step
+          # uses the same guard shape).
+          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+            echo "::warning::Could not verify PR #${PR_NUMBER} before relaying the docs-only outcome; skipping the relay."
+            exit 0
+          fi
+          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "Skipping docs-only relay: PR #${PR_NUMBER} is ${PR_STATE}."
+            exit 0
+          fi
+          if [ "$CURRENT_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping docs-only relay: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${CURRENT_HEAD_SHA}."
+            exit 0
+          fi
+          # Medium never posts inline comments and --comment would force high
+          # effort back on (parse-args), so a docs-only automatic review
+          # reports through this single relay instead. The quoted line arrives
+          # allowlisted by "Run review" (not-posted disposition shape only) —
+          # this step asserts nothing the run did not print. The marker is
+          # defined ONCE and used for both the body and the upsert lookup —
+          # the two must be byte-identical or the upsert posts duplicates.
+          MARKER='<!-- qwen-review docs-only-medium -->'
+          BODY="$(printf '%s\n' \
+            "$MARKER" \
+            '' \
+            "📄 **Docs-only change** — the automatic review ran at \`--effort medium\` (verified findings, no reverse audit; medium posts no inline comments). Outcome:" \
+            '' \
+            "> ${COMPLETION_LINE}" \
+            '' \
+            "Reviewed head: \`${EXPECTED_HEAD_SHA}\`. Full report in the [workflow run](${RUN_URL}). For a full high-effort review with inline comments, comment \`@qwen-code /review\`." \
+            '' \
+            '<details><summary>中文说明</summary>' \
+            '' \
+            "📄 **纯文档变更** —— 自动评审以 \`--effort medium\` 运行（发现已验证、无反向审计；medium 不发布行内评论），结果见上方引用行。评审的 head：\`${EXPECTED_HEAD_SHA}\`。完整报告见 [workflow 运行](${RUN_URL})；如需带行内评论的完整高强度（high-effort）评审，请评论 \`@qwen-code /review\`。" \
+            '' \
+            '</details>')"
+          # The shared upsert protocol (.github/scripts/upsert-bot-comment.sh)
+          # carries the load-bearing properties: author-scoped lookup (a PR
+          # participant posting the marker can never capture the upsert),
+          # per-attempt re-resolution, and bounded retry. Never fail the job
+          # over the relay: the review itself succeeded, and a failing step
+          # here would trip the post-failure fallback into announcing a
+          # review failure that never happened — losing the relay costs a
+          # comment, and the outcome line below keeps it recoverable from
+          # the job log.
+          printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-relay-body.md"
+          if .github/scripts/upsert-bot-comment.sh \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
+            "$MARKER" \
+            "${RUNNER_TEMP}/docs-only-relay-body.md"; then
+            echo "docs-only medium outcome relayed to PR #${PR_NUMBER}."
+          else
+            echo "::warning::Docs-only relay comment could not be posted after 3 attempts; the review itself succeeded. Outcome: ${COMPLETION_LINE}"
+          fi
+
+      - name: 'Supersede stale docs-only badge'
+        # Three paths owe the badge correction, and only these three:
+        # (1) an automatic run whose classification POSITIVELY determined the
+        #     PR is not (or no longer) docs-only — docs_only_medium == 'false'
+        #     is three-valued and empty when the classifier failed or never
+        #     ran, so a badge is never retired on ignorance; the review's own
+        #     success is deliberately not required (a failed full review still
+        #     leaves the badge misdescribing the head);
+        # (2) an explicit comment-mode review that actually completed — the
+        #     badge's own CTA path, whose posted full review makes the badge
+        #     redundant; a dispatch dry-run that posts nothing retires
+        #     nothing;
+        # (3) a FAILED automatic docs-only review — the relay only runs on
+        #     success, so without this path the badge would keep quoting the
+        #     previous revision's outcome for a head whose own run died.
+        # The retired body is cause-neutral: it asserts only what is true on
+        # every covered path (an explicit review can complete on the very
+        # same SHA the badge describes).
+        if: |-
+          !cancelled() &&
+          steps.context.outputs.should_run == 'true' &&
+          steps.context.outputs.pr_number != '' &&
+          (
+            steps.review.outputs.docs_only_medium == 'false' ||
+            (
+              steps.context.outputs.auto_review == 'false' &&
+              steps.context.outputs.review_mode == 'comment' &&
+              steps.review.outputs.review_completed == 'true'
+            ) ||
+            (
+              failure() &&
+              steps.review.outputs.docs_only_medium == 'true'
+            )
+          )
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: "${{ steps.review.outputs.expected_head_sha || '' }}"
+          DOCS_ONLY_MEDIUM: '${{ steps.review.outputs.docs_only_medium }}'
+          REVIEW_COMPLETED: '${{ steps.review.outputs.review_completed }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          # The write is bound to the reviewed head: re-read the live PR
+          # state immediately before the mutation (the same guard shape as
+          # the fallback-comment step). A run that failed before "Run
+          # review" emitted the reviewed SHA has nothing to bind to — a
+          # badge is never updated on ignorance.
+          if [ -z "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping badge update: the reviewed head SHA is unknown."
+            exit 0
+          fi
+          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+            echo "::warning::Could not verify PR #${PR_NUMBER} before updating the docs-only badge."
+            exit 0
+          fi
+          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "Skipping badge update: PR #${PR_NUMBER} is ${PR_STATE}."
+            exit 0
+          fi
+          if [ "$CURRENT_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping badge update: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${CURRENT_HEAD_SHA}."
+            exit 0
+          fi
+          # --update-only makes this a strict no-op on PRs that never
+          # carried the badge; a failed lookup exits 1 (never the no-op), so
+          # the warning below fires instead of silently keeping a stale
+          # badge. The marker is defined once and used for both the body and
+          # the lookup — they must be byte-identical.
+          MARKER='<!-- qwen-review docs-only-medium -->'
+          if [ "$DOCS_ONLY_MEDIUM" = "true" ] && [ "$REVIEW_COMPLETED" != "true" ]; then
+            # A failed docs-only run: the singleton badge must not keep
+            # quoting the previous revision's success for this head.
+            BODY="$(printf '%s\n' \
+              "$MARKER" \
+              '' \
+              "📄 **Docs-only change** — the automatic \`--effort medium\` review of head \`${EXPECTED_HEAD_SHA}\` **did not complete**, so no outcome currently applies. See the failure comment on this PR and the [workflow run](${RUN_URL})." \
+              '' \
+              '<details><summary>中文说明</summary>' \
+              '' \
+              "📄 **纯文档变更** —— head \`${EXPECTED_HEAD_SHA}\` 的自动 \`--effort medium\` 评审**未能完成**，当前没有有效的评审结果。详见本 PR 上的失败评论与 [workflow 运行](${RUN_URL})。" \
+              '' \
+              '</details>')"
+          else
+            BODY="$(printf '%s\n' \
+              "$MARKER" \
+              '' \
+              '📄 ~~Docs-only change~~ **(superseded)** — this badge no longer reflects the current review state of this PR. See the latest review activity on this PR.' \
+              '' \
+              '<details><summary>中文说明</summary>' \
+              '' \
+              '📄 ~~纯文档变更~~ **（已失效）** —— 该徽章已不再反映本 PR 当前的评审状态。请以本 PR 上最新的评审动态为准。' \
+              '' \
+              '</details>')"
+          fi
+          printf '%s' "$BODY" > "${RUNNER_TEMP}/docs-only-supersede-body.md"
+          .github/scripts/upsert-bot-comment.sh \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
+            "$MARKER" \
+            "${RUNNER_TEMP}/docs-only-supersede-body.md" \
+            --update-only \
+            || echo "::warning::Could not supersede the stale docs-only badge."
+
       - name: 'Post fallback comment on failure'
         if: |-
           failure() &&
@@ -1258,6 +1665,8 @@ jobs:
 
   resolve-pr:
     needs: ['authorize']
+    # The /resolve shape match uses the same fromJSON newline/CR pair as
+    # ack-review-request.if, and for the same reason — see the note there.
     if: |-
       !cancelled() &&
       github.repository == 'QwenLM/qwen-code' &&
@@ -1270,7 +1679,8 @@ jobs:
          github.event.issue.state == 'open' &&
          (github.event.comment.body == '@qwen-code /resolve' ||
           startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
-          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\n"'))) ||
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\r"')))))
       )
     # Pinned to an ephemeral hosted runner. The conflict-resolution agent step
     # runs with `sandbox: true`, which on Linux needs docker or podman to launch

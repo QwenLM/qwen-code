@@ -2020,3 +2020,93 @@ describe('ArtifactPanel shell tab', () => {
     expect(container.textContent).toContain('Command failed');
   });
 });
+
+describe('ArtifactPanel fullscreen toggle', () => {
+  function renderPanel(props: {
+    fullscreen?: boolean;
+    onToggleFullscreen?: () => void;
+  }) {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'monitor:monitor-1',
+                kind: 'monitor',
+                title: task.description,
+                task,
+              },
+            ]}
+            activeTabId="monitor:monitor-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            fullscreen={props.fullscreen}
+            onToggleFullscreen={props.onToggleFullscreen}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  it('shows a fullscreen toggle and reports clicks', () => {
+    const onToggleFullscreen = vi.fn();
+    const container = renderPanel({ onToggleFullscreen });
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    act(() => {
+      toggle?.click();
+    });
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the panel full-bleed and flips the toggle when fullscreen', () => {
+    const container = renderPanel({
+      fullscreen: true,
+      onToggleFullscreen: () => {},
+    });
+    const aside = container.querySelector('aside');
+    expect(aside?.className).toContain('panelFullscreen');
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('omits the toggle when fullscreen is unsupported', () => {
+    const container = renderPanel({});
+    expect(
+      container.querySelector('button[aria-label="Fullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Exit fullscreen"]'),
+    ).toBeNull();
+  });
+});

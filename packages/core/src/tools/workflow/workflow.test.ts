@@ -13,6 +13,11 @@ import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
 import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import {
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  MAX_WORKFLOW_AGENTS_ENV,
+  MAX_WORKFLOW_CONCURRENCY_ENV,
+} from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
 
 function fakeConfig(): Config {
@@ -44,9 +49,97 @@ describe('WorkflowTool', () => {
     expect(tool.name).toBe(ToolNames.WORKFLOW);
     expect(tool.displayName).toBe(ToolDisplayNames.WORKFLOW);
     const schema = tool.schema.parametersJsonSchema as {
-      properties: { run_in_background: { default?: boolean } };
+      properties: {
+        run_in_background: { default?: boolean; description?: string };
+      };
     };
     expect(schema.properties.run_in_background.default).toBe(false);
+    expect(schema.properties.run_in_background.description).toContain(
+      'cooperatively pause/resume',
+    );
+  });
+
+  // The description is what makes the model pick pipeline() over a barrier
+  // and verify a finding before reporting it. A refactor that drops the
+  // policy prose leaves a runtime nobody drives well, and no other test
+  // would notice — so anchor the load-bearing claims.
+  it('description carries both the runtime facts and the orchestration policy', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+    // Every env knob the description names is anchored. The two that the
+    // orchestrator exports are anchored *through the exported constant*, so
+    // a rename on the runtime side fails here too — a hardcoded literal
+    // would only have caught a description-side typo, and the model would
+    // go on telling users to set a variable nothing reads.
+    // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
+    // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
+    for (const anchor of [
+      'min(16, cpus-2)',
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
+      'QWEN_CODE_MAX_WORKFLOW_SECONDS',
+      'resumeFromRunId',
+      '/workflows',
+      'node:vm sandbox',
+    ]) {
+      expect(description).toContain(anchor);
+    }
+    // One anchor per policy section — dropping any whole section has to
+    // turn this test red, which is the regression it exists to catch.
+    expect(description).toMatch(/Parallelism on its own is not a reason/);
+    expect(description).toMatch(/only before the orchestration step/);
+    expect(description).toMatch(/Common single-phase shapes/);
+    expect(description).toMatch(/Default to `pipeline\(\)`/);
+    expect(description).toMatch(/A barrier is right only when/);
+    expect(description).toMatch(/refute/);
+    expect(description).toMatch(/against everything already seen/);
+    expect(description).toMatch(/log\(\)` what was dropped/);
+    // Limits the model has to plan around rather than discover from a
+    // mid-run failure — the numbers themselves, not just the knob names.
+    // Anchored *through* the exported constant rather than as a literal:
+    // the description interpolates `DEFAULT_MAX_AGENTS_PER_RUN`, so this
+    // tracks a raised cap automatically, and a regression that pastes the
+    // number back in as prose goes red the next time the constant moves.
+    expect(description).toContain(
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
+    // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
+    // this one is still a hand-synced literal on both sides.
+    expect(description).toMatch(/30-minute wall-clock cap/);
+    expect(description).toMatch(/nests one level only/);
+    expect(description).toMatch(/read `budget\.total`/);
+    // The `/workflows` capability list is the one part of the description
+    // that trails the runtime: #8320 added cooperative pause/resume to the
+    // dialog while this branch was moving the description into a constant,
+    // and the base merge conflicted exactly here. Nothing else asserts the
+    // control set, so dropping one on the next merge would be silent.
+    expect(description).toMatch(/cooperative pause\/resume/);
+    // #8690 asked the text to speak this project's own vocabulary. Without
+    // a location, "runs a saved workflow" leaves the model no way to reach
+    // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
+    // absolute path it cannot construct.
+    expect(description).toContain('.qwen/workflows');
+  });
+
+  // The tool description is not the only model-visible copy of the caps —
+  // the `script` parameter description states them a second time, and a
+  // model reading one tool call sees both. Anchoring only the tool
+  // description lets a maintainer raise a cap, watch the test above go
+  // green again, and stop while `script` still advertises the old number.
+  it('script parameter description states the same caps as the tool description', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: { script: { description: string } };
+    };
+    const scriptDescription = schema.properties.script.description;
+    expect(scriptDescription).toContain(
+      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
+    );
+    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
+    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
+    // Both halves must agree on the agent cap, whatever it is.
+    expect(tool.description).toContain(
+      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
   });
 
   it('rejects build() when script is missing', () => {
@@ -226,7 +319,7 @@ describe('WorkflowTool', () => {
       },
     ]);
     expect(result.returnDisplay).toBe(
-      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe or stop it.`,
+      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
     );
     expect(updateOutput).not.toHaveBeenCalled();
 
