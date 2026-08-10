@@ -64,6 +64,8 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `QWEN_SERVE_RATE_LIMIT_WINDOW_MS`   | Env fallback for `--rate-limit-window-ms`.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `QWEN_CODE_MEMORY_PROJECT_SCOPE`    | `workspace` keys project memory by the exact workspace dir; `git-root` selects the legacy shared scope. When unset, the daemon injects `workspace`; unrecognized values warn once and retain the legacy `git-root` behavior. Propagates via the runtime base env, not `childEnvOverrides`; `--memory-project-scope` wins. Each workspace remember/forget/dream lane caps pending tasks at `MAX_PENDING = 16`; N workspaces allow up to 16·N queued tasks with no daemon-wide cap. |
 
+Blank `QWEN_CODE_MEMORY_PROJECT_SCOPE` values are treated as unset and therefore default to `workspace`; unrecognized non-empty values still warn once and retain the legacy `git-root` behavior.
+
 ### Read by the `qwen serve` CLI wrapper
 
 | Env                                   | Effect                                                                                                                                                                                                                                                                                                                      |
@@ -104,12 +106,12 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 ## `ServeOptions` (programmatic embedding)
 
-`packages/cli/src/serve/types.ts` defines the typed options object accepted by both `runQwenServe` and `createServeApp`. It mirrors the CLI flags above and adds:
+`packages/cli/src/serve/types.ts` defines the typed options passed through the public serve APIs. It mirrors the CLI flags above and adds:
 
 | Field                         | Effect                                                                                                                                                                     |
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `eventRingSize`               | Overrides the default per-session ring size.                                                                                                                               |
-| `memoryProjectScope`          | `'git-root' \| 'workspace'` project-memory partitioning; falls back to `QWEN_CODE_MEMORY_PROJECT_SCOPE`, then `workspace`.                                                 |
+| `memoryProjectScope`          | `runQwenServe` only; precedence is option, launch env, then `workspace`. Direct `createServeApp` callers use `deps.daemonEnv`.                                             |
 | `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                                                                                          |
 | `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                                                                                             |
 | `externalToolGuard`           | Optional `{mode:'required', endpoint, token, timeoutMs?}`. Omission is fully off; required mode performs the provider handshake before listening.                          |

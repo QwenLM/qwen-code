@@ -2105,12 +2105,26 @@ async function runQwenServeImpl(
   // Snapshot before any scrub: close() restores the host's launch
   // environment from this copy, not from the (possibly scrubbed) base env.
   const launchEnv = { ...process.env };
+  const launchMemoryProjectScopeValue =
+    launchEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
+    ? launchMemoryProjectScopeValue
+    : undefined;
+  const memoryProjectScopeValue =
+    optsIn.memoryProjectScope ?? launchMemoryProjectScope ?? 'workspace';
+  const memoryProjectScopeSource =
+    optsIn.memoryProjectScope !== undefined
+      ? 'option'
+      : launchMemoryProjectScope !== undefined
+        ? 'environment'
+        : 'default';
+  const resolvedMemoryProjectScope =
+    memoryProjectScopeValue.trim().toLowerCase() === 'workspace'
+      ? 'workspace'
+      : 'git-root';
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    QWEN_CODE_MEMORY_PROJECT_SCOPE:
-      optsIn.memoryProjectScope ??
-      launchEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] ??
-      'workspace',
+    QWEN_CODE_MEMORY_PROJECT_SCOPE: memoryProjectScopeValue,
   };
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
@@ -2661,6 +2675,10 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  daemonLog.info('project memory scope resolved', {
+    projectMemoryScope: resolvedMemoryProjectScope,
+    projectMemoryScopeSource: memoryProjectScopeSource,
+  });
   // Per-workspace .env loads keep running after boot (skill status, voice
   // capability checks, settings reloads); boot stderr is long gone by then,
   // so fresh loader-key rejections must land in the durable daemon log or

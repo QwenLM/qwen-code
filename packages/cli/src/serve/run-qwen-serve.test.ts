@@ -1270,6 +1270,9 @@ describe('runQwenServe daemon logger wiring', () => {
       expect(logContent).toContain(
         `workspace=${fs.realpathSync.native(workspace)}`,
       );
+      expect(logContent).toContain('project memory scope resolved');
+      expect(logContent).toContain('projectMemoryScope=workspace');
+      expect(logContent).toContain('projectMemoryScopeSource=default');
 
       await Promise.all(
         Array.from({ length: 70 }, (_, index) =>
@@ -3750,6 +3753,24 @@ describe('runQwenServe runtime startup failures', () => {
       'git-root',
       undefined,
       'git-root',
+    ],
+    [
+      'treats a blank launch environment scope as unset',
+      '',
+      undefined,
+      'workspace',
+    ],
+    [
+      'treats a whitespace-only launch environment scope as unset',
+      '   ',
+      undefined,
+      'workspace',
+    ],
+    [
+      'passes an unrecognized launch environment scope through unchanged',
+      'workspce',
+      undefined,
+      'workspce',
     ],
   ] as const)('%s', async (_name, launchScope, optionScope, expectedScope) => {
     tmpDir = fs.realpathSync(
