@@ -22,10 +22,11 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 // Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
 // (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
 // container entry and then sat silent for the whole absolute budget,
-// burning 2 hours per round for zero work. Legitimate runs are never that
-// quiet: the longest silence the fleet tolerates elsewhere is the review
-// pipeline's 10-minute stream-idle window for thinking phases on ~1M-token
-// contexts, so twice that is the default. Distinct from QWEN_TIMEOUT_MS so
+// burning 2 hours per round for zero work. Streamed agent events keep active
+// runs observable; the longest silence the fleet tolerates elsewhere is the
+// review pipeline's 10-minute stream-idle window for thinking phases on
+// ~1M-token contexts, so twice that is the default. Distinct from
+// QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
 // shorter than this window (the review workflow's 18-minute repair pass)
 // always reaches the absolute timer first.
@@ -207,10 +208,21 @@ function runQwen(options, prompt) {
   let sandboxRemoval = null;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      options.qwenBin,
+      [
+        '--yolo',
+        '--output-format',
+        'stream-json',
+        '--include-partial-messages',
+        '--prompt',
+        prompt,
+      ],
+      {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        detached: true,
+      },
+    );
 
     const finish = (result) => {
       if (settled) return;

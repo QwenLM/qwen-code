@@ -11824,10 +11824,9 @@ describe('run-agent idle watchdog', () => {
   // last byte at docker container entry and then sat SILENT for the whole
   // 2-hour absolute budget — four different runners, two image versions, so
   // the watchdog lives in the runner script, not the environment. A wedged
-  // sandbox produces nothing; a legitimate run is never silent for 20
-  // minutes (the fleet's longest tolerated quiet is the review pipeline's
-  // 10-minute stream-idle window). These tests execute the REAL script with
-  // a stub agent whose only difference is whether it keeps talking.
+  // sandbox produces nothing; stream-json makes active headless work emit
+  // progress before its final result. These tests execute the REAL script
+  // with a stub agent whose only difference is whether it keeps talking.
   const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
     try {
@@ -11923,6 +11922,24 @@ describe('run-agent idle watchdog', () => {
         'for i in $(seq 1 8); do echo "tick $i" >&2; sleep 0.4; done',
         'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
         'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('requests streamed partial progress so active headless work refreshes the watchdog', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'if [[ " $* " == *" --output-format stream-json "* && " $* " == *" --include-partial-messages "* ]]; then',
+        '    for i in $(seq 1 8); do echo "{\\"type\\":\\"progress\\",\\"step\\":$i}"; sleep 0.4; done',
+        'else',
+        '    sleep 4',
+        'fi',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
         'exit 0',
       ].join('\n'),
       idleMs: 1500,
