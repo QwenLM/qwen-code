@@ -264,6 +264,47 @@ describe('useProviderUpdates', () => {
         expect.objectContaining({ id: 'my-custom-model' }),
       ]),
     );
+    // The persisted version tracks the built-in template, never the
+    // selection — a carried custom model must not poison the hash and
+    // re-trigger the prompt on the next launch.
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
+    );
+  });
+
+  it('does not re-prompt when the stored version matches the template but the selection differs', () => {
+    // Installed with a deselected default and an added custom model: the
+    // selection hash differs from the template hash, yet the stored version
+    // (template-derived at install time) agrees with the current template.
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: chinaVersion,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate.slice(1),
+        {
+          id: 'my-custom-model',
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          envKey: CODING_PLAN_ENV_KEY,
+          name: '[Coding Plan] my-custom-model',
+        },
+      ],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
   });
 
   it('preserves custom models colliding with sibling endpoint defaults', async () => {
@@ -409,6 +450,75 @@ describe('useProviderUpdates', () => {
       ),
     ).toHaveLength(4);
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    // The live session sits on the sibling Coding Plan endpoint; updating the
+    // API endpoint must not re-auth (and rebuild) the untouched session.
+    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('isolates same-envKey API regions during an endpoint update', async () => {
+    // api-china and api-international share MOONSHOT_API_KEY, the name
+    // prefix, and identical model lists; updating one must leave the other
+    // byte-identical.
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const chinaTemplate = buildProviderTemplate(kimiProvider, chinaUrl);
+    const intlTemplate = buildProviderTemplate(kimiProvider, intlUrl);
+    const chinaCustom = {
+      id: 'china-custom',
+      baseUrl: chinaUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      name: '[Kimi API] china-custom',
+    };
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs['kimi--api-china'] = {
+      baseUrl: chinaUrl,
+      version: computeModelListVersion(chinaTemplate),
+    };
+    metadataNs['kimi--api-international'] = {
+      baseUrl: intlUrl,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, chinaCustom, ...intlTemplate],
+    };
+    mockConfig.getModel.mockReturnValue('kimi-k3');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: intlUrl,
+      apiKeyEnvKey: 'MOONSHOT_API_KEY',
+    });
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    // Only the stale endpoint prompts.
+    expect(result.current.providerUpdateRequest?.entries).toHaveLength(1);
+    expect(result.current.providerUpdateRequest?.entries[0]?.metadataKey).toBe(
+      'kimi--api-international',
+    );
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+    const reloaded =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
+        AuthType.USE_OPENAI
+      ];
+    expect(reloaded).toEqual([...intlTemplate, ...chinaTemplate, chinaCustom]);
   });
 
   it('detects updates for every installed Kimi endpoint with legacy metadata', async () => {
@@ -565,6 +675,50 @@ describe('useProviderUpdates', () => {
 
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('never rewrites the live model selection for an inactive provider update', async () => {
+    // Active session on Token Plan with a model the updated Coding Plan
+    // template does not contain: previousModelStillAvailable is false, yet the
+    // update targets an inactive provider and must not switch the session.
+    mockConfig.getModel.mockReturnValue('qwen3.7-max');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    const selectionWrites = mockSettings.setValue.mock.calls.filter(
+      (call: unknown[]) =>
+        call[1] === 'model.name' || call[1] === 'model.baseUrl',
+    );
+    expect(selectionWrites).toHaveLength(0);
   });
 
   it('does not refresh auth before auth initialization completes', async () => {

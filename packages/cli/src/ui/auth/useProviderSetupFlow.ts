@@ -292,7 +292,12 @@ export function useProviderSetupFlow(
         const fieldSet = new Set(currentIds);
         const customIds = [
           ...new Set([
-            ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
+            // Same guard as changeModelIds, against the endpoint we leave:
+            // a custom id colliding with its built-in may be absent from the
+            // field only because it was shown as a (deselected) recommendation.
+            ...customModelIdsRef.current.filter(
+              (id) => fieldSet.has(id) || previousDefaultSet.has(id),
+            ),
             ...currentIds.filter((id) => !previousDefaultSet.has(id)),
           ]),
         ];
@@ -426,7 +431,12 @@ export function useProviderSetupFlow(
       const fieldSet = new Set(normalized);
       customModelIdsRef.current = [
         ...new Set([
-          ...customModelIdsRef.current.filter((id) => fieldSet.has(id)),
+          // An id that is this endpoint's built-in leaves the field when the
+          // user deselects the recommendation; its custom provenance (possibly
+          // a sibling endpoint's saved custom sharing the id) must survive.
+          ...customModelIdsRef.current.filter(
+            (id) => fieldSet.has(id) || defaultSet.has(id),
+          ),
           ...normalized.filter((id) => !defaultSet.has(id)),
         ]),
       ];

@@ -67,6 +67,16 @@ describe('buildAuthProviderCatalog', () => {
     for (const option of options) {
       expect(option.envKey).toBe('MIMO_API_KEY');
     }
+    // The options carry no per-option models; the descriptor's top-level
+    // models fall back to the provider-wide list and seed the Web Shell
+    // models field.
+    for (const option of options) {
+      expect(option.models).toBeUndefined();
+    }
+    expect(xiaomi?.models?.map((model) => model.id)).toEqual([
+      'mimo-v2.5-pro',
+      'mimo-v2.5',
+    ]);
   });
 
   it('does not synthesize an environment key before a custom endpoint is entered', () => {

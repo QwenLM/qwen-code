@@ -941,3 +941,52 @@ describe('resolveMetadataKey dotted-id guard', () => {
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
   });
 });
+
+import {
+  buildInstallPlan as buildInstallPlanSrc,
+  buildProviderTemplate as buildProviderTemplateSrc,
+} from '../provider-config.js';
+
+describe('providerState version semantics', () => {
+  it('persists the template version even when the selection adds custom models', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }, { id: 'model-b' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'model-b', 'my-custom'],
+    });
+
+    expect(plan.providerState).toEqual({
+      'providerMetadata.test': {
+        baseUrl: 'https://api.test.com/v1',
+        version: computeModelListVersion(
+          buildProviderTemplateSrc(config, 'https://api.test.com/v1'),
+        ),
+      },
+    });
+  });
+
+  it('persists the template version even when the selection drops defaults', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }, { id: 'model-b' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    // findAllPendingUpdates compares the stored version against a hash of the
+    // built-ins-only template; a deselected default must not diverge from it
+    // and re-trigger the update prompt on every launch.
+    expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(
+        buildProviderTemplateSrc(config, 'https://api.test.com/v1'),
+      ),
+    );
+  });
+});

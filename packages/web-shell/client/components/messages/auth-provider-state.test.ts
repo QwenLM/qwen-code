@@ -77,15 +77,25 @@ describe('auth provider endpoint state', () => {
   });
 
   it('leaves the env key unknown when the catalog carries none', () => {
+    // Mirrors the shipped custom-openai-compatible descriptor: the catalog
+    // omits `models` entirely, so the ?? fallbacks are the live path.
     const custom: DaemonAuthProviderDescriptor = {
       id: 'custom-openai-compatible',
       label: 'Custom Provider',
       description: 'Manual endpoint',
       protocol: 'openai',
-      models: [{ id: 'custom-model' }],
       steps: ['baseUrl', 'apiKey', 'models'],
     };
 
+    expect(
+      selectedBaseUrlModelIds(custom, 'https://llm.internal.example/v1'),
+    ).toBe('');
+    expect(
+      baseUrlOptionModelIds(
+        { id: 'opt', label: 'Opt', url: 'https://llm.internal.example/v1' },
+        custom,
+      ),
+    ).toBe('');
     expect(
       selectedBaseUrlEnvKey(custom, 'https://llm.internal.example/v1'),
     ).toBeUndefined();
@@ -251,9 +261,14 @@ describe('auth provider endpoint state', () => {
       ),
     ).toBe('typed-code-key');
 
+    expect(drafts.get('MOONSHOT_API_KEY')).toBe('typed-api-key');
+
     expect(apiKeyAfterBaseUrlChange(kimi, codingUrl, apiUrl, '', drafts)).toBe(
       'typed-api-key',
     );
+    // A cleared field overwrites the stored draft instead of reviving the
+    // previous key on the next round trip.
+    expect(drafts.get('KIMI_CODE_API_KEY')).toBe('');
   });
 
   it('keeps draft direction correct across three credential domains', () => {
@@ -285,6 +300,8 @@ describe('auth provider endpoint state', () => {
     expect(
       apiKeyAfterBaseUrlChange(provider, urls[0], urls[1], 'key-a2', drafts),
     ).toBe('key-b');
+    // Re-entering a domain overwrites its stored draft with the new value.
+    expect(drafts.get('DOMAIN_0_API_KEY')).toBe('key-a2');
   });
 
   it('falls back to provider-level models for options without endpoint models', () => {

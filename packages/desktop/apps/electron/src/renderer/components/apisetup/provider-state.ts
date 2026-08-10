@@ -47,7 +47,12 @@ export function customModelIdsAfterEdit(
   const field = new Set(modelIds);
   return [
     ...new Set([
-      ...currentCustomModelIds.filter((id) => field.has(id)),
+      // An id that is this endpoint's built-in leaves the field when the user
+      // deselects the recommendation; its custom provenance (possibly a saved
+      // custom from a sibling endpoint sharing the id) must survive.
+      ...currentCustomModelIds.filter(
+        (id) => field.has(id) || defaults.has(id),
+      ),
       ...modelIds.filter((id) => !defaults.has(id)),
     ]),
   ];
@@ -108,8 +113,13 @@ export function modelIdsAfterBaseUrlChange(
   const fieldSet = new Set(fieldIds);
   const nextCustomModelIds = [
     ...new Set([
-      // Ids the user deleted from the field stay deleted.
-      ...customModelIds.filter((id) => fieldSet.has(id)),
+      // Ids the user deleted from the field stay deleted — except an id that
+      // is the previous endpoint's built-in: it can be absent from the field
+      // only because it was shown as a (deselected) recommendation, and its
+      // provenance may belong to a sibling endpoint.
+      ...customModelIds.filter(
+        (id) => fieldSet.has(id) || previousDefaults.has(id),
+      ),
       ...fieldIds.filter((id) => !previousDefaults.has(id)),
     ]),
   ];

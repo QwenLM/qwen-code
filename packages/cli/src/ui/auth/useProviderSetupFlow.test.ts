@@ -164,6 +164,58 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('first-default, shared-id');
   });
 
+  it('keeps a seeded custom id deselected as a sibling endpoint recommendation', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'sibling-uncheck-provider',
+      label: 'Sibling Uncheck Provider',
+      description:
+        'Provider whose second endpoint has a built-in colliding with a seeded custom id',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-default' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'shared-id' }, { id: 'second-default' }],
+        },
+      ],
+      envKey: () => 'SIBLING_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Sibling',
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(provider, undefined, undefined, ['shared-id']);
+    });
+    expect(result.current.state.modelIds).toBe('first-default, shared-id');
+
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.modelIds).toBe('shared-id, second-default');
+
+    act(() => {
+      // Unchecking the 'shared-id' recommendation means "do not install this
+      // built-in here" — it must not delete the seeded custom provenance.
+      result.current.changeModelIds('second-default');
+    });
+    expect(result.current.state.modelIds).toBe('second-default');
+
+    act(() => {
+      result.current.selectBaseUrl(firstUrl);
+    });
+    expect(result.current.state.modelIds).toBe('first-default, shared-id');
+  });
+
   it('rebuilds endpoint defaults after a net-zero model edit', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';
@@ -831,6 +883,7 @@ describe('useProviderSetupFlow', () => {
   });
 
   it('resets dirty model state when starting another provider flow', () => {
+    const sharedUrl = 'https://shared.example/v1';
     const providerA: ProviderConfig = {
       id: 'provider-a',
       label: 'Provider A',
@@ -838,10 +891,10 @@ describe('useProviderSetupFlow', () => {
       protocol: AuthType.USE_OPENAI,
       baseUrl: [
         {
-          id: 'a-first',
-          label: 'A First',
-          url: 'https://a-first.example/v1',
-          models: [{ id: 'a-first-model' }],
+          id: 'a-shared',
+          label: 'A Shared',
+          url: sharedUrl,
+          models: [{ id: 'shared-model' }, { id: 'a-only' }],
         },
       ],
       envKey: () => 'A_API_KEY',
@@ -849,7 +902,6 @@ describe('useProviderSetupFlow', () => {
       modelNamePrefix: 'A',
     };
     const bFirstUrl = 'https://b-first.example/v1';
-    const bSecondUrl = 'https://b-second.example/v1';
     const providerB: ProviderConfig = {
       id: 'provider-b',
       label: 'Provider B',
@@ -863,10 +915,10 @@ describe('useProviderSetupFlow', () => {
           models: [{ id: 'b-first-model' }],
         },
         {
-          id: 'b-second',
-          label: 'B Second',
-          url: bSecondUrl,
-          models: [{ id: 'b-second-model' }],
+          id: 'b-shared',
+          label: 'B Shared',
+          url: sharedUrl,
+          models: [{ id: 'shared-model' }, { id: 'b-only' }],
         },
       ],
       envKey: () => 'B_API_KEY',
@@ -879,16 +931,23 @@ describe('useProviderSetupFlow', () => {
       result.current.start(providerA);
     });
     act(() => {
-      result.current.changeModelIds('a-custom-model');
+      // Trim a default and type a custom id; both must die with this flow.
+      result.current.changeModelIds('a-only, a-custom-model');
     });
     act(() => {
       result.current.start(providerB);
     });
+
+    expect(result.current.state.modelIds).toBe('b-first-model');
+
     act(() => {
-      result.current.selectBaseUrl(bSecondUrl);
+      // Provider B reuses provider A's endpoint URL and one built-in id: a
+      // stale per-URL trim entry would strip 'shared-model' here, and a
+      // leaked custom id from provider A would ride along in the field.
+      result.current.selectBaseUrl(sharedUrl);
     });
 
-    expect(result.current.state.modelIds).toBe('b-second-model');
+    expect(result.current.state.modelIds).toBe('shared-model, b-only');
   });
 
   it('starts from a previously installed endpoint', () => {

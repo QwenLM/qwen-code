@@ -183,6 +183,11 @@ describe('getMaxItemsToShow', () => {
     expect(getMaxItemsToShow(100, 4, 7)).toBe(4);
     expect(getMaxItemsToShow(24, 0, 7)).toBe(1);
   });
+
+  it('clamps to a single item when the floor computation goes non-positive', () => {
+    expect(getMaxItemsToShow(12, 6, 7)).toBe(1);
+    expect(getMaxItemsToShow(10, 6, 7)).toBe(1);
+  });
 });
 
 const expectSelectedOption = (frame: string | undefined, label: string) => {
@@ -409,6 +414,26 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'kimi-for-coding-highspeed',
       ],
     });
+  });
+
+  it('seeds no trims or customs for a provider without saved models', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    // No saved record at all, and an empty record map: the dialog must not
+    // mark every default as previously trimmed (which would empty the Models
+    // step and install zero models).
+    for (const setup of [
+      getExistingProviderSetup(kimi!, undefined),
+      getExistingProviderSetup(kimi!, {}),
+    ]) {
+      expect(setup).toEqual({
+        initialProtocol: undefined,
+        initialBaseUrl: undefined,
+        customModelIds: [],
+        trimmedDefaultModelIds: [],
+      });
+    }
   });
 
   it('seeds only the restored custom-provider endpoint, ignoring trailing slashes', () => {

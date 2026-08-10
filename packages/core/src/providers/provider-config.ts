@@ -249,13 +249,18 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
-  models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config, baseUrl);
   if (key) {
+    // The version tracks the provider's built-in template, never the user's
+    // selection: findAllPendingUpdates compares against a template hash, so a
+    // deselected default or a carried custom model must not poison the hash
+    // and re-trigger the update prompt on every launch.
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(models),
+        version: computeModelListVersion(
+          buildProviderTemplate(config, baseUrl),
+        ),
         baseUrl,
       },
     };
@@ -319,7 +324,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, baseUrl, models),
+    providerState: resolveProviderState(config, baseUrl),
   };
 }
 

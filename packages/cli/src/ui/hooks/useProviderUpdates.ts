@@ -370,6 +370,20 @@ export function useProviderUpdates(
         delete installPlan.env;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
+        const updatesActiveProvider =
+          activeConfig?.authType === providerCfg.protocol &&
+          // A merge provider owns several endpoints under one authType; only
+          // the endpoint being updated can be the live session's provider, so
+          // a sibling endpoint must not trigger a mid-session re-auth.
+          (!providerCfg.mergeModelsByIdentity ||
+            !activeConfig?.baseUrl ||
+            normalizeBaseUrlForMatching(activeConfig.baseUrl) ===
+              normalizeBaseUrlForMatching(resolved)) &&
+          providerMatchesCredentials(
+            providerCfg,
+            activeConfig.baseUrl,
+            activeConfig.apiKeyEnvKey,
+          );
         const endpointOwnsModel =
           installPlan.modelProviders?.[0]?.ownsModel ?? (() => false);
         const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
@@ -393,16 +407,13 @@ export function useProviderUpdates(
               normalizeBaseUrlForMatching(cfg.baseUrl) ===
                 normalizeBaseUrlForMatching(activeConfig.baseUrl)),
         );
-        if (previousModelStillAvailable) {
+        if (!updatesActiveProvider || previousModelStillAvailable) {
+          // An inactive-provider update must never rewrite the live session's
+          // model selection (and thereby fire syncAuthState); a selection
+          // rewrite is only acceptable when the updated provider is the one
+          // the session is actually using and its model disappeared.
           delete installPlan.modelSelection;
         }
-        const updatesActiveProvider =
-          activeConfig?.authType === providerCfg.protocol &&
-          providerMatchesCredentials(
-            providerCfg,
-            activeConfig.baseUrl,
-            activeConfig.apiKeyEnvKey,
-          );
 
         await applyProviderInstallPlan(installPlan, {
           settings: createLoadedSettingsAdapter(settings),

@@ -331,7 +331,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
             models: [{ id: 'kimi-k3' }],
           },
         ],
-        envKey: 'KIMI_CODE_API_KEY',
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://api.kimi.com/coding/v1'
+            ? 'KIMI_CODE_API_KEY'
+            : 'MOONSHOT_API_KEY',
         models: [{ id: 'k3-256k' }, { id: 'kimi-k3' }],
         modelsEditable: true,
         modelNamePrefix: 'Kimi',
@@ -11223,6 +11226,49 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ id: 'kimi' }),
       expect.objectContaining({
         baseUrl: 'https://api.moonshot.ai/v1',
+        modelIds: ['kimi-k3'],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect reuses the stored apiKey resolved through the endpoint env key', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { MOONSHOT_API_KEY: 'sk-stored-intl' },
+        modelProviders: {},
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // The list response carries only hasApiKey, so the client reconnects
+    // without apiKey; the stored key must be found via the REQUESTED
+    // endpoint's env key, not the preset's first/default endpoint.
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        modelIds: ['kimi-k3'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-stored-intl',
         modelIds: ['kimi-k3'],
       }),
     );

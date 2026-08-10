@@ -3,10 +3,12 @@ import type { QwenProviderSummary } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
   customModelIdsAfterEdit,
+  defaultBaseUrl,
   defaultModelIds,
   initialApiKey,
   initialModelIds,
   modelIdsAfterBaseUrlChange,
+  parseModelIds,
   resetTrimmedDefaultModelIds,
   shouldResetApiKeyAfterBaseUrlChange,
   trimmedDefaultModelIds,
@@ -42,6 +44,54 @@ const kimi: QwenProviderSummary = {
 };
 
 describe('provider endpoint state', () => {
+  it('parses newline- and comma-separated model lists with dedup', () => {
+    expect(parseModelIds('a\nb, c')).toEqual(['a', 'b', 'c']);
+    expect(parseModelIds('kimi-k3\nkimi-k2.6, kimi-k3')).toEqual([
+      'kimi-k3',
+      'kimi-k2.6',
+    ]);
+  });
+
+  it('resolves the default base URL for each provider shape', () => {
+    expect(defaultBaseUrl(kimi)).toBe('https://api.kimi.com/coding/v1');
+    expect(
+      defaultBaseUrl({ ...kimi, baseUrl: 'https://single.example/v1' }),
+    ).toBe('https://single.example/v1');
+    expect(
+      defaultBaseUrl({
+        ...kimi,
+        baseUrl: undefined,
+        baseUrlPlaceholder: 'https://placeholder.example/v1',
+      }),
+    ).toBe('https://placeholder.example/v1');
+  });
+
+  it('seeds the saved model ids of a configured provider', () => {
+    expect(
+      initialModelIds(
+        {
+          ...kimi,
+          existingConfig: { modelIds: ['k3-256k', 'saved-custom'] },
+        },
+        'https://api.kimi.com/coding/v1',
+      ),
+    ).toEqual(['k3-256k', 'saved-custom']);
+  });
+
+  it('falls back to provider-level default model ids', () => {
+    // String baseUrl presets (no option array) and saved baseUrls that match
+    // no current option both take the provider-level fallback.
+    expect(
+      defaultModelIds(
+        { ...kimi, baseUrl: 'https://single.example/v1' },
+        'https://single.example/v1',
+      ),
+    ).toEqual(['k3-256k']);
+    expect(
+      defaultModelIds(kimi, 'https://no-longer-shipped.example/v1'),
+    ).toEqual(['k3-256k']);
+  });
+
   it('uses endpoint-specific defaults for initial state', () => {
     expect(defaultModelIds(kimi, 'https://api.moonshot.ai/v1')).toEqual([
       'kimi-k3',
@@ -148,6 +198,52 @@ describe('provider endpoint state', () => {
     expect(afterRoundTrip.modelIds).toEqual(['k3-256k', 'kimi-k3']);
   });
 
+  it('keeps custom provenance when the id leaves the field as an endpoint built-in', () => {
+    // kimi-k3 is seeded as a Coding Plan custom and collides with the API
+    // endpoint built-in; removing it from the field on the API endpoint means
+    // "do not install this built-in here", not "delete my saved custom".
+    expect(
+      customModelIdsAfterEdit(['kimi-k3', 'api-default'], ['kimi-k3'], [
+        'api-default',
+      ]),
+    ).toEqual(['kimi-k3']);
+  });
+
+  it('keeps a saved custom through deselection at its colliding endpoint', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    // Saved custom [Kimi Code] kimi-k3 on Coding Plan; the form opens there.
+    const seeded = ['k3-256k', 'kimi-k3'];
+    const seededDefaults = new Set(defaultModelIds(kimi, codingUrl));
+    const customModelIds = seeded.filter((id) => !seededDefaults.has(id));
+
+    const afterSwitchToApi = modelIdsAfterBaseUrlChange(
+      kimi,
+      codingUrl,
+      apiUrl,
+      seeded.join(', '),
+      customModelIds,
+    );
+    // The user removes kimi-k3 from the API field (it is this endpoint's
+    // built-in, so the form shows it as a recommendation).
+    const afterDeselect = customModelIdsAfterEdit(
+      defaultModelIds(kimi, apiUrl),
+      afterSwitchToApi.customModelIds,
+      [],
+    );
+    expect(afterDeselect).toEqual(['kimi-k3']);
+
+    const afterSwitchBack = modelIdsAfterBaseUrlChange(
+      kimi,
+      apiUrl,
+      codingUrl,
+      '',
+      afterDeselect,
+    );
+    expect(afterSwitchBack.customModelIds).toEqual(['kimi-k3']);
+    expect(afterSwitchBack.modelIds).toEqual(['k3-256k', 'kimi-k3']);
+  });
+
   it('does not resurrect custom model IDs the user deleted before switching', () => {
     const { modelIds, customModelIds } = modelIdsAfterBaseUrlChange(
       kimi,
@@ -162,11 +258,24 @@ describe('provider endpoint state', () => {
 
   it('resets persisted trims when seeding a different provider', () => {
     const codingUrl = 'https://api.kimi.com/coding/v1';
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: codingUrl,
+          models: [{ id: 'k3-256k' }, { id: 'k3' }],
+        },
+      ],
+    };
     const trims = new Map([['https://stale.example/v1', ['stale-default']]]);
 
-    resetTrimmedDefaultModelIds(trims, kimi, codingUrl, ['k3-256k']);
+    // A saved subset that omits a default must store the non-empty trim —
+    // selectProvider restores exactly this value for a configured provider.
+    resetTrimmedDefaultModelIds(trims, provider, codingUrl, ['k3-256k']);
 
-    expect([...trims.entries()]).toEqual([[codingUrl, []]]);
+    expect([...trims.entries()]).toEqual([[codingUrl, ['k3']]]);
   });
 
   it('resets API keys only when the endpoint key domain changes', () => {
@@ -252,15 +361,7 @@ describe('provider endpoint state', () => {
     expect(drafts.size).toBe(0);
   });
 
-  it('clears endpoint drafts when seeding a new provider form', () => {
-    // The catalog wire carries `hasApiKey`, never the stored key itself, so
-    // the field starts empty even for a configured provider.
-    const configured: QwenProviderSummary = {
-      ...kimi,
-      existingConfig: { hasApiKey: true },
-    };
-    expect(configured.existingConfig?.hasApiKey).toBe(true);
-
+  it('clears endpoint drafts and starts empty when seeding a new provider form', () => {
     const drafts = new Map([['SHARED_API_KEY', 'draft-from-provider-a']]);
     expect(initialApiKey(drafts)).toBe('');
     expect(drafts.size).toBe(0);

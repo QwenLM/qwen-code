@@ -13,6 +13,7 @@ import {
   buildInstallPlan,
   customProvider,
   generateCustomEnvKey,
+  KIMI_API_ENV_KEY,
   KIMI_CODE_BASE_URL,
   KIMI_CODE_ENV_KEY,
   kimiProvider,
@@ -345,6 +346,39 @@ describe('applyProviderInstallPlan', () => {
         baseUrl: KIMI_CODE_BASE_URL,
       }),
       ...apiModels,
+    ]);
+  });
+
+  it('keeps a same-envKey sibling endpoint untouched when resubmitting one region', async () => {
+    // The two API regions share MOONSHOT_API_KEY, the name prefix, and
+    // identical model lists; only the endpoint-scoped ownsModel clause keeps
+    // resubmitting one region from rewriting or deleting the other's models.
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const chinaModels = buildProviderTemplate(kimiProvider, chinaUrl);
+    const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
+    const chinaCustom = {
+      id: 'china-custom',
+      name: '[Kimi API] china-custom',
+      baseUrl: chinaUrl,
+      envKey: KIMI_API_ENV_KEY,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...chinaModels, chinaCustom, ...intlModels],
+    });
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: intlUrl,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: intlModels.map((model) => model.id),
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      ...intlModels,
+      ...chinaModels,
+      chinaCustom,
     ]);
   });
 

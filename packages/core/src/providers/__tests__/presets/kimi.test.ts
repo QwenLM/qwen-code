@@ -322,6 +322,57 @@ describe('kimiProvider', () => {
     });
   });
 
+  it('scopes ownsModel by endpoint across same-envKey API regions', () => {
+    // api-china and api-international share MOONSHOT_API_KEY, the [Kimi API]
+    // name prefix, and identical model lists — an envKey-scoped ownsModel
+    // would classify one region's models as the other's and let a resubmit
+    // delete them.
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const intlPlan = buildInstallPlan(kimiProvider, {
+      baseUrl: intlUrl,
+      apiKey: 'sk-api',
+      modelIds: ['kimi-k3'],
+    });
+    const intlOwnsModel = intlPlan.modelProviders?.[0]?.ownsModel;
+    expect(intlOwnsModel).toBeDefined();
+    expect(
+      intlOwnsModel?.({
+        id: 'kimi-k3',
+        name: '[Kimi API] kimi-k3',
+        baseUrl: chinaUrl,
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(false);
+    expect(
+      intlOwnsModel?.({
+        id: 'kimi-k3',
+        name: '[Kimi API] kimi-k3',
+        baseUrl: intlUrl,
+        envKey: KIMI_API_ENV_KEY,
+      }),
+    ).toBe(true);
+  });
+
+  it('persists the template version even when the selection differs', () => {
+    const baseUrl = 'https://api.moonshot.cn/v1';
+    const template = buildProviderTemplate(kimiProvider, baseUrl);
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl,
+      apiKey: 'sk-kimi',
+      // Deselect one default and add a custom id — the stored version must
+      // still agree with the template hash the update check computes.
+      modelIds: [...template.slice(1).map((model) => model.id), 'my-custom'],
+    });
+
+    expect(plan.providerState).toEqual({
+      'providerMetadata.kimi--api-china': {
+        baseUrl,
+        version: computeModelListVersion(template),
+      },
+    });
+  });
+
   it.each([
     ['https://api.kimi.com/coding/v1', 'kimi--coding-plan'],
     ['https://api.moonshot.cn/v1', 'kimi--api-china'],
