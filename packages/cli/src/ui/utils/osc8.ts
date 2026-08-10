@@ -101,7 +101,10 @@ export function isSafeOscScheme(url: string): boolean {
  * the URL so URLs that legitimately end with `)` (Wikipedia disambiguation,
  * MSDN) aren't truncated.
  */
-export function trimTrailingUrlPunctuation(url: string): string {
+export function trimTrailingUrlPunctuation(
+  url: string,
+  nextCharacter = '',
+): string {
   // Count `( [ {` opens once up-front; we then
   // decrement running `)`/`]`/`}` close counts as we trim, keeping the whole
   // trim O(n) instead of O(n²) for adversarial inputs like `https://x.com))))…`.
@@ -122,6 +125,14 @@ export function trimTrailingUrlPunctuation(url: string): string {
   }
 
   let end = url.length;
+  if (
+    url.charCodeAt(end - 1) === 0x5f &&
+    /[\u3001-\u3004\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\ufe10-\ufe1f\ufe30-\ufe6f]/.test(
+      nextCharacter,
+    )
+  ) {
+    end--;
+  }
   while (end > 0) {
     const c = url.charCodeAt(end - 1);
     // .,;:!?'"`> — `>` covers CommonMark autolinks (`<https://x.com>`)

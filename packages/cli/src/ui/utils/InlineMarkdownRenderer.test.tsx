@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import stripAnsi from 'strip-ansi';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
@@ -262,6 +263,21 @@ math then literal: $x^2\$$`;
       expect(out).not.toContain(`\x1b]8;;${url}（`);
       // The glued-on punctuation renders as plain text after the link.
       expect(out.replace(/\s+/g, ' ')).toContain('（2 commits，等 CI）');
+    });
+
+    it('does not treat underscores around a later URL as emphasis', () => {
+      enableHyperlinks();
+      const firstUrl = 'https://a.com/x';
+      const secondUrl = 'https://b.com/y';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`见 ${firstUrl}（说明_1）和 ${secondUrl}_。`} />,
+      );
+
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${firstUrl}\x07`);
+      expect(out).toContain(`\x1b]8;;${secondUrl}\x07`);
+      expect(out.replace(/\s+/g, ' ')).toContain('（说明_1）和');
+      expect(stripAnsi(out)).toContain(`${secondUrl}_`);
     });
 
     it('leaves bare URLs unwrapped when unsupported', () => {

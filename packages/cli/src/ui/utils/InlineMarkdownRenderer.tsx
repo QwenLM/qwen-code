@@ -38,7 +38,7 @@ const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 const INLINE_MARKDOWN_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_.*?_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
     String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
   'g',
 );
@@ -250,7 +250,10 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         // alternative is anchored on `https?://`, so `isSafeOscScheme` is
         // redundant but kept as a cheap defense-in-depth assertion.
         const trimmedUrl = canHyperlink
-          ? trimTrailingUrlPunctuation(fullMatch)
+          ? trimTrailingUrlPunctuation(
+              fullMatch,
+              text[index + fullMatch.length],
+            )
           : fullMatch;
         const wrapOsc8 = canHyperlink && isSafeOscScheme(trimmedUrl);
         renderedNode = (

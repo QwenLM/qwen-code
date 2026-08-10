@@ -659,6 +659,22 @@ describe('<TableRenderer />', () => {
       expect(stripAnsi(output)).toContain(suffix);
     });
 
+    it('does not treat underscores around a later URL as emphasis', () => {
+      enableHyperlinks();
+      const firstUrl = 'https://a.com/x';
+      const secondUrl = 'https://b.com/y';
+      const output = renderTable(
+        ['PR'],
+        [[`见 ${firstUrl}（说明_1）和 ${secondUrl}_。`]],
+        100,
+      );
+
+      expect(output).toContain(`\x1b]8;;${firstUrl}\x07`);
+      expect(output).toContain(`\x1b]8;;${secondUrl}\x07`);
+      expect(stripAnsi(output)).toContain('（说明_1）和');
+      expect(stripAnsi(output)).toContain(`${secondUrl}_。`);
+    });
+
     it('falls back to legacy `label (url)` in cells on unsupported terminals', () => {
       // isTTY=false from the suite-wide beforeEach disables hyperlinks.
       const url = 'https://example.com/page';
