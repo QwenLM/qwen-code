@@ -32,44 +32,67 @@ describe('isPidAlive', () => {
 });
 
 describe('readProcStartToken', () => {
-  it('returns a numeric token for a live process on Linux', () => {
-    const token = readProcStartToken(process.pid);
-    if (process.platform !== 'linux') {
+  it('identifies the current process with a platform-prefixed token', async () => {
+    const token = await readProcStartToken(process.pid);
+    if (process.platform === 'linux') {
+      // Boot ID plus start ticks: ticks alone reset on reboot, so a
+      // record surviving a reboot could otherwise match a later process
+      // with the same PID and tick count.
+      expect(token).toMatch(/^linux:[0-9a-f-]+:\d+$/);
+    } else if (process.platform === 'darwin') {
+      expect(token).toMatch(/^darwin:/);
+    } else if (process.platform === 'win32') {
+      expect(token).toMatch(/^win32:\d+$/);
+    } else {
       expect(token).toBeNull();
-      return;
     }
-    expect(token).toMatch(/^\d+$/);
   });
 
-  it('is stable across calls', () => {
-    expect(readProcStartToken(process.pid)).toBe(
-      readProcStartToken(process.pid),
+  it('is stable across calls', async () => {
+    expect(await readProcStartToken(process.pid)).toBe(
+      await readProcStartToken(process.pid),
     );
   });
 
-  it('returns null for a dead pid', () => {
-    expect(readProcStartToken(DEAD_PID)).toBeNull();
+  it('returns null for a dead pid', async () => {
+    expect(await readProcStartToken(DEAD_PID)).toBeNull();
+  });
+
+  it('returns null for nonsense pids without throwing', async () => {
+    expect(await readProcStartToken(0)).toBeNull();
+    expect(await readProcStartToken(-1)).toBeNull();
+    expect(await readProcStartToken(1.5)).toBeNull();
   });
 });
 
 describe('isSameProcess', () => {
-  it('is false for a dead pid regardless of token', () => {
-    expect(isSameProcess(DEAD_PID, null)).toBe(false);
-    expect(isSameProcess(DEAD_PID, '123')).toBe(false);
+  it('is false for a dead pid regardless of token', async () => {
+    expect(await isSameProcess(DEAD_PID, null)).toBe(false);
+    expect(await isSameProcess(DEAD_PID, 'linux:boot:123')).toBe(false);
   });
 
-  it('accepts a live pid recorded without a token', () => {
-    expect(isSameProcess(process.pid, null)).toBe(true);
-    expect(isSameProcess(process.pid, undefined)).toBe(true);
+  it('accepts a live pid recorded without a token', async () => {
+    expect(await isSameProcess(process.pid, null)).toBe(true);
+    expect(await isSameProcess(process.pid, undefined)).toBe(true);
   });
 
-  it('accepts a live pid whose token still matches', () => {
-    const token = readProcStartToken(process.pid);
-    expect(isSameProcess(process.pid, token)).toBe(true);
+  it('accepts a live pid whose token still matches', async () => {
+    const token = await readProcStartToken(process.pid);
+    expect(await isSameProcess(process.pid, token)).toBe(true);
   });
 
-  it('rejects a live pid whose token has changed', () => {
-    if (process.platform !== 'linux') return;
-    expect(isSameProcess(process.pid, 'definitely-not-the-token')).toBe(false);
-  });
+  it.skipIf(process.platform !== 'linux')(
+    'rejects a live pid whose token has changed',
+    async () => {
+      // A plausible-looking identity that cannot belong to this boot: the
+      // boot id is all zeros. A recycled PID carrying the old owner's
+      // token must not pass as the same process.
+      expect(
+        await isSameProcess(
+          process.pid,
+          'linux:00000000-0000-0000-0000-000000000000:1',
+        ),
+      ).toBe(false);
+    },
+  );
 });

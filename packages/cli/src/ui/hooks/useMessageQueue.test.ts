@@ -7,7 +7,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
-import { useMessageQueue } from './useMessageQueue.js';
+import {
+  MAX_QUEUED_PEER_SUBMISSIONS,
+  useMessageQueue,
+} from './useMessageQueue.js';
 
 describe('useMessageQueue', () => {
   beforeEach(() => {
@@ -1026,6 +1029,52 @@ describe('useMessageQueue', () => {
         popped = result.current.popNextSubmission();
       });
       expect(popped).toMatchObject({ modelText: 'envelope', origin: 'peer' });
+    });
+
+    it('caps peer submissions and reports the evicted oldest', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const evicted: string[] = [];
+
+      act(() => {
+        for (let i = 0; i < MAX_QUEUED_PEER_SUBMISSIONS + 3; i++) {
+          result.current.addMessage(`peer ${i}`, false, undefined, 'peer', () =>
+            evicted.push(`peer ${i}`),
+          );
+        }
+      });
+
+      // Oldest-first eviction, one per overflow: the three newest pushed
+      // out the three earliest.
+      expect(evicted).toEqual(['peer 0', 'peer 1', 'peer 2']);
+      expect(result.current.messageQueue).toHaveLength(
+        MAX_QUEUED_PEER_SUBMISSIONS,
+      );
+      expect(result.current.messageQueue[0]).toBe('peer 3');
+      expect(
+        result.current.messageQueue[result.current.messageQueue.length - 1],
+      ).toBe(`peer ${MAX_QUEUED_PEER_SUBMISSIONS + 2}`);
+    });
+
+    it('never counts typed input against the peer cap', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      const evicted: string[] = [];
+
+      act(() => {
+        for (let i = 0; i < MAX_QUEUED_PEER_SUBMISSIONS + 3; i++) {
+          result.current.addMessage(
+            `typed ${i}`,
+            false,
+            undefined,
+            'typed',
+            () => evicted.push(`typed ${i}`),
+          );
+        }
+      });
+
+      expect(evicted).toEqual([]);
+      expect(result.current.messageQueue).toHaveLength(
+        MAX_QUEUED_PEER_SUBMISSIONS + 3,
+      );
     });
   });
 });

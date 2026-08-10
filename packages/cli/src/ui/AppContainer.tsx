@@ -2333,12 +2333,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const peerMessaging = usePeerMessaging();
   useEffect(() => {
     if (!peerMessaging) return;
-    peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
-      // Tagged 'peer' so the drain submits it as SendMessageType.Peer.
-      // Without the tag it drains as a plain user query and, with `!`
-      // shell mode active, the envelope is executed as a shell command.
-      addMessage(modelText, false, displayText, 'peer');
-    });
+    peerMessaging.setSubmitFn(
+      (modelText: string, displayText: string, onEvicted?: () => void) => {
+        // Tagged 'peer' so the drain submits it as SendMessageType.Peer.
+        // Without the tag it drains as a plain user query and, with `!`
+        // shell mode active, the envelope is executed as a shell command.
+        // onEvicted lets the queue's peer cap receipt 'expired' back to
+        // the sender instead of dropping the message silently.
+        addMessage(modelText, false, displayText, 'peer', onEvicted);
+      },
+    );
   }, [addMessage, peerMessaging]);
 
   // Surface parked messages. The model never sees a held message, so

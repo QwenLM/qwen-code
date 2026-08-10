@@ -3138,7 +3138,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'What happens to messages other sessions send this one. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means approval-mode parity: a message auto-delivers unless this session bypasses permission prompts (YOLO) while the sender does not, or does not say — those are held for you to review.',
+          'What happens to messages other sessions send this one. "accept" delivers them; "hold" parks them for your review without letting the model act; "refuse" opts this session out. Unset means approval-mode parity: a message auto-delivers unless this session can act without permission prompts (YOLO, AUTO, or AUTO_EDIT) while the sender does not, or does not say — those are held for you to review.',
         showInDialog: false,
         options: [
           { value: 'accept', label: 'Accept' },

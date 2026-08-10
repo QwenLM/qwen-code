@@ -20,6 +20,11 @@ import {
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual };
+});
+
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/session-registry-test';
   return {
@@ -300,25 +305,89 @@ describe('listLiveSessions', () => {
     await expect(fs.stat(filePath)).resolves.toBeDefined();
   });
 
-  it('treats a recycled PID as stale', async () => {
-    // Our own PID is alive, but the recorded start token belongs to a
-    // different process — so the record describes a session that is gone.
-    if (process.platform !== 'linux') return;
-    await writeRaw(`${process.pid}.json`, {
+  it('does not delete a record replaced between the stale check and the sweep', async () => {
+    const filePath = await writeRaw(`${DEAD_PID}.json`, {
       schemaVersion: 1,
-      pid: process.pid,
-      procStart: '1',
+      pid: DEAD_PID,
+      procStart: null,
+      sessionId: 's-dead',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: 1000,
+    });
+
+    // First read classifies the record as stale; the sweep's re-read then
+    // sees a different record — the one a recycled PID's new owner would
+    // atomically write into the same file. Deleting by pathname alone
+    // would destroy the fresh record, so the sweep must leave it alone.
+    const staleBody = await fs.readFile(filePath, 'utf8');
+    const replacementBody = JSON.stringify({
+      schemaVersion: 1,
+      pid: DEAD_PID,
+      procStart: null,
       sessionId: 's-recycled',
       cwd: '/w/app',
       name: 'app-aa',
       kind: 'interactive',
-      startedAt: Date.now(),
+      startedAt: 2000,
     });
+    let reads = 0;
+    const readSpy = vi.spyOn(fs, 'readFile');
+    readSpy.mockImplementation((async () => {
+      reads += 1;
+      return reads === 1 ? staleBody : replacementBody;
+    }) as unknown as typeof fs.readFile);
 
-    // selfPid is set elsewhere so this record goes through the liveness
-    // path rather than the trust-our-own-record shortcut.
-    expect(await listLiveSessions({ selfPid: DEAD_PID })).toEqual([]);
+    try {
+      expect(await listLiveSessions()).toEqual([]);
+      await expect(fs.stat(filePath)).resolves.toBeDefined();
+    } finally {
+      readSpy.mockRestore();
+    }
   });
+
+  // Windows has no POSIX permission bits to make a directory unreadable,
+  // and root ignores them outright.
+  it.skipIf(
+    process.platform === 'win32' ||
+      (typeof process.getuid === 'function' && process.getuid() === 0),
+  )('surfaces an unreadable registry only when asked to', async () => {
+    const dir = getSessionRegistryDir();
+    await fs.mkdir(dir, { recursive: true });
+    await fs.chmod(dir, 0o000);
+    try {
+      await expect(
+        listLiveSessions({ throwOnReadError: true }),
+      ).rejects.toMatchObject({ code: 'EACCES' });
+      // Discovery callers still degrade to "no sessions".
+      expect(await listLiveSessions()).toEqual([]);
+    } finally {
+      await fs.chmod(dir, 0o700);
+    }
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'treats a recycled PID as stale',
+    async () => {
+      // Our own PID is alive, but the recorded start token belongs to a
+      // different process — so the record describes a session that is gone.
+      await writeRaw(`${process.pid}.json`, {
+        schemaVersion: 1,
+        pid: process.pid,
+        procStart: '1',
+        sessionId: 's-recycled',
+        cwd: '/w/app',
+        name: 'app-aa',
+        kind: 'interactive',
+        startedAt: Date.now(),
+      });
+
+      // selfPid is set elsewhere so this record goes through the liveness
+      // path rather than the trust-our-own-record shortcut.
+      expect(await listLiveSessions({ selfPid: DEAD_PID })).toEqual([]);
+    },
+  );
 
   it('ignores files that are not <pid>.json', async () => {
     await writeRaw('2026-planning-notes.json', { hello: 'world' });

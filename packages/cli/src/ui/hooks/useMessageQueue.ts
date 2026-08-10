@@ -28,6 +28,19 @@ export interface QueuedGoalTurn {
  */
 export type SubmissionOrigin = 'typed' | 'peer';
 
+/**
+ * Cap on queued peer-origin submissions.
+ *
+ * The queue drains only at idle boundaries, so everything a peer sends
+ * during a turn accumulates here; left uncapped, a chatty peer grows the
+ * queue without bound and the idle drain joins the whole batch into one
+ * unbounded model submission. Same ceiling and same eviction policy as
+ * the inbound gate's hold buffer: oldest first, with the evicted entry's
+ * callback telling the sender its message expired. Typed input is the
+ * user's own action and stays uncapped.
+ */
+export const MAX_QUEUED_PEER_SUBMISSIONS = 50;
+
 export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
@@ -52,6 +65,7 @@ export interface UseMessageQueueReturn {
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
     origin?: SubmissionOrigin,
+    onEvicted?: () => void,
   ) => void;
   enqueueGoalTurn: (
     input: Parameters<GoalTurnHost['startGoalTurn']>[0],
@@ -84,6 +98,8 @@ interface QueuedMessage {
   submittedPrompt?: string;
   deferUntilIdle: boolean;
   origin: SubmissionOrigin;
+  /** Fired when this entry is evicted by the peer cap, not consumed. */
+  onEvicted?: () => void;
 }
 
 export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
@@ -126,10 +142,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
       deferUntilIdle = false,
       submittedPrompt?: string,
       origin: SubmissionOrigin = 'typed',
+      onEvicted?: () => void,
     ) => {
       const text = message.trim();
       if (!text) return;
-      queueRef.current = [
+      let next: QueuedMessage[] = [
         ...queueRef.current,
         {
           key: nextMessageKey(),
@@ -137,8 +154,18 @@ export function useMessageQueue(): UseMessageQueueReturn {
           deferUntilIdle,
           submittedPrompt,
           origin,
+          ...(onEvicted ? { onEvicted } : {}),
         },
       ];
+      if (origin === 'peer') {
+        const peerEntries = next.filter(({ origin: o }) => o === 'peer');
+        if (peerEntries.length > MAX_QUEUED_PEER_SUBMISSIONS) {
+          const evicted = peerEntries[0];
+          next = next.filter((entry) => entry !== evicted);
+          evicted.onEvicted?.();
+        }
+      }
+      queueRef.current = next;
       setQueuedMessages(queueRef.current);
     },
     [nextMessageKey],

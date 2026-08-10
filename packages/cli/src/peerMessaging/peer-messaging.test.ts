@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import {
   ApprovalMode,
   buildUserFrame,
+  MAX_HELD_MESSAGES,
   sendPeerFrame,
   startPeerInbox,
   type PeerFrame,
@@ -266,6 +267,112 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
   it('reports the mode class it would advertise when sending', async () => {
     const { messaging: m } = await start(ApprovalMode.YOLO);
     expect(m.selfModeClass()).toBe('bypass');
+  });
+
+  it('caps the pre-submit buffer and expires what it cannot keep', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    // No submitFn yet, so accepted frames buffer. Overflow the buffer.
+    const frames = [];
+    for (let i = 0; i < MAX_HELD_MESSAGES + 2; i++) {
+      const frame = buildUserFrame({
+        content: `msg ${i}`,
+        from: sender.socketPath,
+      });
+      frames.push(frame);
+      await sendPeerFrame(started.socketPath!, frame);
+    }
+    await settle();
+
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => submitted.push(modelText));
+    expect(submitted).toHaveLength(MAX_HELD_MESSAGES);
+    expect(submitted[0]).toContain('msg 2');
+    await settle();
+
+    // The two evicted frames were already receipted 'delivered' at admit
+    // time; the eviction owes the sender an 'expired' follow-up.
+    const expiredIds = receipts
+      .filter((r) => r.type === 'control' && r.status === 'expired')
+      .map((r) => (r as { origMsgId: string }).origMsgId)
+      .sort();
+    expect(expiredIds).toEqual([frames[0].msgId, frames[1].msgId].sort());
+  });
+
+  it('expires buffered messages on close instead of dropping them silently', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const frame = buildUserFrame({
+      content: 'early bird',
+      from: sender.socketPath,
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+
+    // Still no submitFn: the message is buffered, and close() means it
+    // will never be submitted.
+    await started.close();
+    messaging = null;
+    await settle();
+
+    expect(
+      receipts.some(
+        (r) =>
+          r.type === 'control' &&
+          r.status === 'expired' &&
+          (r as { origMsgId: string }).origMsgId === frame.msgId,
+      ),
+    ).toBe(true);
+  });
+
+  it('hands the submit function an eviction callback that receipts expired', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    let onEvicted: (() => void) | undefined;
+    started.setSubmitFn((_modelText, _displayText, evict) => {
+      onEvicted = evict;
+    });
+
+    const frame = buildUserFrame({
+      content: 'hi',
+      from: sender.socketPath,
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+    expect(onEvicted).toBeDefined();
+
+    // What the message queue does when its peer cap evicts this entry.
+    onEvicted!();
+    await settle();
+    expect(
+      receipts.some(
+        (r) =>
+          r.type === 'control' &&
+          r.status === 'expired' &&
+          (r as { origMsgId: string }).origMsgId === frame.msgId,
+      ),
+    ).toBe(true);
   });
 
   it('is safe to close twice', async () => {

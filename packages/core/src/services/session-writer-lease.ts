@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
 import * as nodeConstants from 'node:constants';
 import { createHash, randomUUID, type Hash } from 'node:crypto';
 import type { Stats } from 'node:fs';
@@ -13,6 +12,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
+import { readProcessStartIdentity } from '../utils/process-liveness.js';
 
 const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
@@ -238,77 +238,6 @@ function isProcessAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
-}
-
-async function execFileText(
-  file: string,
-  args: readonly string[],
-  env?: NodeJS.ProcessEnv,
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    try {
-      execFile(
-        file,
-        args,
-        {
-          encoding: 'utf8',
-          timeout: 1_000,
-          windowsHide: true,
-          ...(env ? { env } : {}),
-        },
-        (error, stdout) => {
-          const value = stdout.trim();
-          resolve(error || value.length === 0 ? null : value);
-        },
-      );
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
-async function readProcessStartIdentity(pid: number): Promise<string | null> {
-  if (process.platform === 'linux') {
-    try {
-      const [stat, bootId] = await Promise.all([
-        fs.readFile(`/proc/${pid}/stat`, 'utf8'),
-        fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8'),
-      ]);
-      const fields = stat
-        .slice(stat.lastIndexOf(')') + 1)
-        .trim()
-        .split(/\s+/);
-      const startTicks = fields[19];
-      if (
-        !startTicks ||
-        !/^\d+$/.test(startTicks) ||
-        !/^[0-9a-f-]+$/i.test(bootId.trim())
-      ) {
-        return null;
-      }
-      return `linux:${bootId.trim()}:${startTicks}`;
-    } catch {
-      return null;
-    }
-  }
-  if (process.platform === 'darwin') {
-    const startedAt = await execFileText(
-      '/bin/ps',
-      ['-o', 'lstart=', '-p', String(pid)],
-      { ...process.env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC' },
-    );
-    return startedAt ? `darwin:${startedAt}` : null;
-  }
-  if (process.platform === 'win32') {
-    const startedAt = await execFileText('powershell.exe', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `$targetProcess = Get-Process -Id ${pid} -ErrorAction Stop; $targetProcess.StartTime.ToUniversalTime().Ticks`,
-    ]);
-    return startedAt && /^\d+$/.test(startedAt) ? `win32:${startedAt}` : null;
-  }
-  return null;
 }
 
 function hasValidOwnerFields(

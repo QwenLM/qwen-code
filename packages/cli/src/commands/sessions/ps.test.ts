@@ -105,10 +105,16 @@ describe('qwen sessions ps', () => {
     listLiveSessions.mockResolvedValue([]);
 
     await run({ json: true, all: false });
-    expect(listLiveSessions).toHaveBeenLastCalledWith({ includeSelf: false });
+    expect(listLiveSessions).toHaveBeenLastCalledWith({
+      includeSelf: false,
+      throwOnReadError: true,
+    });
 
     await run({ json: true, all: true });
-    expect(listLiveSessions).toHaveBeenLastCalledWith({ includeSelf: true });
+    expect(listLiveSessions).toHaveBeenLastCalledWith({
+      includeSelf: true,
+      throwOnReadError: true,
+    });
   });
 
   it('neutralizes control sequences coming from another process record', async () => {

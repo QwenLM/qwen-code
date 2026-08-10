@@ -16,17 +16,18 @@
  * encodes one idea: a message may auto-deliver only when acting on it
  * cannot do more than the sender could already have done itself.
  *
- *   receiver YOLO      + sender YOLO       → accept
- *   receiver YOLO      + sender prompting  → hold
- *   receiver YOLO      + sender unasserted → hold
+ *   receiver bypassing + sender bypassing  → accept
+ *   receiver bypassing + sender prompting  → hold
+ *   receiver bypassing + sender unasserted → hold
  *   receiver prompting + anything          → accept
  *   receiver mode unknown                  → hold  (fail closed)
  *
  * A prompting receiver can accept freely because every consequential
  * action still faces its own gate; the message is a suggestion, not an
- * execution. A YOLO receiver has no such backstop, so anything it is told
- * to do simply happens — which is why an unverified sender has to be
- * reviewed first.
+ * execution. A bypassing receiver has no such backstop — YOLO approves
+ * everything, AUTO has fast paths that never reach the classifier, and
+ * AUTO_EDIT auto-approves edits — so anything it is told to do can simply
+ * happen, which is why an unverified sender has to be reviewed first.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -64,12 +65,18 @@ export type ModeClass = 'bypass' | 'prompting';
 /**
  * Map an approval mode onto the two classes that matter for parity.
  *
- * Only YOLO is "bypass". AUTO is deliberately "prompting": it does not
- * stop to ask, but every tool call still passes the permission
- * classifier, which sees the full message text.
+ * "Bypass" means acting on a message can do something consequential
+ * WITHOUT a user prompt: YOLO approves everything, AUTO has fast paths
+ * (workspace edits, allowlisted tools) that run before the permission
+ * classifier ever sees the message, and AUTO_EDIT auto-approves edits.
+ * Classifying any of them as prompting would let a sender that prompts
+ * for everything auto-deliver into a receiver with strictly greater
+ * unattended capability, defeating the parity invariant above.
  */
 export function approvalModeClass(mode: ApprovalMode): ModeClass {
-  return mode === ApprovalMode.YOLO ? 'bypass' : 'prompting';
+  return mode === ApprovalMode.DEFAULT || mode === ApprovalMode.PLAN
+    ? 'prompting'
+    : 'bypass';
 }
 
 export interface HeldMessage {
@@ -164,6 +171,16 @@ export class InboundGate {
 
   /** Run a freshly-arrived message through the gate. */
   admit(frame: PeerUserFrame): GateDecision {
+    if (this.shuttingDown) {
+      // Checked before ANY outcome: a session tearing down must neither
+      // deliver (the receipt would claim 'delivered' for model work that
+      // will never run) nor hold (nothing will ever release it). Expire
+      // instead, so a sender blocked on a decision learns none is coming.
+      debugLogger.debug(`expiring peer message ${frame.msgId} during shutdown`);
+      this.options.reportStatus?.(frame, 'expired');
+      return 'refused';
+    }
+
     const { policy, cause } = this.resolvePolicy(frame);
 
     if (policy === 'refuse') {
@@ -176,17 +193,6 @@ export class InboundGate {
       this.options.deliver(frame);
       this.options.reportStatus?.(frame, 'delivered');
       return 'accept';
-    }
-
-    if (this.shuttingDown) {
-      // Parking a message during teardown would strand it: nothing will
-      // ever release it, and the sender would wait on a decision that
-      // cannot come.
-      debugLogger.debug(
-        `not parking peer message ${frame.msgId} during shutdown; expiring it`,
-      );
-      this.options.reportStatus?.(frame, 'expired');
-      return 'refused';
     }
 
     if (this.held.length >= MAX_HELD_MESSAGES) {
@@ -277,7 +283,7 @@ export class InboundGate {
   }
 
   /**
-   * Settle every parked message as expired and refuse new holds.
+   * Settle every parked message as expired and refuse new arrivals.
    *
    * A sender blocked on a decision has to learn that no decision is
    * coming; silence would look identical to "delivered and ignored".

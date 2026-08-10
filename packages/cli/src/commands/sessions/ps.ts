@@ -103,7 +103,12 @@ function outputHuman(records: SessionRegistryRecord[], now: number): void {
 async function handlePs(argv: PsArgs): Promise<void> {
   let records: SessionRegistryRecord[];
   try {
-    records = await listLiveSessions({ includeSelf: argv.all ?? false });
+    // throwOnReadError: a command that REPORTS the registry must not turn
+    // "cannot read the registry" into a false "nothing is running".
+    records = await listLiveSessions({
+      includeSelf: argv.all ?? false,
+      throwOnReadError: true,
+    });
   } catch (err) {
     writeStderrLine(
       `Error: failed to read the session registry: ${

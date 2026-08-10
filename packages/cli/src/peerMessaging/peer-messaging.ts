@@ -26,6 +26,7 @@ import {
   formatPeerEnvelope,
   InboundGate,
   type HeldMessage,
+  MAX_HELD_MESSAGES,
   type InboundPolicy,
   type PeerFrame,
   type PeerInbox,
@@ -38,7 +39,20 @@ import {
 const debugLogger = createDebugLogger('PEER_MESSAGING');
 
 /** Submit an already-formatted message into the session's input queue. */
-export type PeerSubmitFn = (modelText: string, displayText: string) => void;
+export type PeerSubmitFn = (
+  modelText: string,
+  displayText: string,
+  /**
+   * Fired when the queue evicts this submission under its peer cap
+   * instead of ever handing it to the model. The receipt has to say so:
+   * the sender was told 'delivered', and silence about the eviction
+   * would read as "delivered and ignored".
+   */
+  onEvicted?: () => void,
+) => void;
+
+/** How long `close()` waits for outstanding receipts to land. */
+const CLOSE_RECEIPT_WAIT_MS = 1_000;
 
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
@@ -56,6 +70,7 @@ export class PeerMessaging {
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[], added?: HeldMessage) => void
   >();
+  private readonly inflightReceipts = new Set<Promise<void>>();
   private closed = false;
 
   private constructor(private readonly options: PeerMessagingOptions) {}
@@ -77,11 +92,13 @@ export class PeerMessaging {
       deliver: (frame) => messaging.deliver(frame),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
-        void sendDeliveryStatus(frame.from, {
-          status,
-          origMsgId: frame.msgId,
-          from: messaging.inbox?.socketPath,
-        });
+        messaging.trackReceipt(
+          sendDeliveryStatus(frame.from, {
+            status,
+            origMsgId: frame.msgId,
+            from: messaging.inbox?.socketPath,
+          }),
+        );
       },
       onHeldChange: (held, added) => messaging.emitHeldChange(held, added),
     });
@@ -151,7 +168,21 @@ export class PeerMessaging {
     // Settle held messages before the socket goes away: the expiry
     // receipts have to travel over it.
     this.gate?.shutdown();
+    // What was accepted but never submitted will never be now: the session
+    // is going away. Settle it as expired rather than leaving the sender
+    // believing a 'delivered' message was read.
+    const stranded = this.buffered.splice(0, this.buffered.length);
+    for (const frame of stranded) this.expireFrame(frame);
+    // Stop new frames before waiting on receipts, so the set waited on is
+    // the final one.
     await this.inbox?.close();
+    await Promise.race([
+      Promise.allSettled([...this.inflightReceipts]),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, CLOSE_RECEIPT_WAIT_MS);
+        timer.unref();
+      }),
+    ]);
     await patchSessionRecord({ ipcPath: undefined });
   }
 
@@ -170,10 +201,35 @@ export class PeerMessaging {
 
   private deliver(frame: PeerUserFrame): void {
     if (!this.submitFn) {
+      if (this.buffered.length >= MAX_HELD_MESSAGES) {
+        const evicted = this.buffered.shift();
+        if (evicted) this.expireFrame(evicted);
+      }
       this.buffered.push(frame);
       return;
     }
     this.submit(frame);
+  }
+
+  /**
+   * Tell the sender a message that was accepted is not going to be read:
+   * evicted by a cap, or stranded by shutdown. The 'delivered' receipt it
+   * already got makes the follow-up owed.
+   */
+  private expireFrame(frame: PeerUserFrame): void {
+    if (!frame.from) return;
+    this.trackReceipt(
+      sendDeliveryStatus(frame.from, {
+        status: 'expired',
+        origMsgId: frame.msgId,
+        from: this.inbox?.socketPath,
+      }),
+    );
+  }
+
+  private trackReceipt(task: Promise<void>): void {
+    this.inflightReceipts.add(task);
+    void task.finally(() => this.inflightReceipts.delete(task));
   }
 
   private submit(frame: PeerUserFrame): void {
@@ -189,6 +245,7 @@ export class PeerMessaging {
         ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
         content: frame.message.content,
       }),
+      () => this.expireFrame(frame),
     );
   }
 

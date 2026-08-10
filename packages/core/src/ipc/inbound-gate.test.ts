@@ -76,14 +76,18 @@ function frame(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
 }
 
 describe('approvalModeClass', () => {
-  it('treats only YOLO as bypass', () => {
-    expect(approvalModeClass(ApprovalMode.YOLO)).toBe('bypass');
+  it('treats every mode with unattended capability as bypass', () => {
+    // AUTO has fast paths that never reach the classifier and AUTO_EDIT
+    // auto-approves edits: both can act without a prompt, so neither may
+    // be modelled as a prompting receiver.
     for (const mode of [
-      ApprovalMode.PLAN,
-      ApprovalMode.DEFAULT,
-      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.YOLO,
       ApprovalMode.AUTO,
+      ApprovalMode.AUTO_EDIT,
     ]) {
+      expect(approvalModeClass(mode)).toBe('bypass');
+    }
+    for (const mode of [ApprovalMode.PLAN, ApprovalMode.DEFAULT]) {
       expect(approvalModeClass(mode)).toBe('prompting');
     }
   });
@@ -113,6 +117,26 @@ describe('mode parity (no explicit setting)', () => {
     expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-mismatch');
     expect(h.delivered).toHaveLength(0);
+  });
+
+  it.each([ApprovalMode.AUTO, ApprovalMode.AUTO_EDIT])(
+    'holds a prompting sender when the receiver is %s',
+    (mode) => {
+      // The parity invariant: a message may auto-deliver only when acting
+      // on it cannot do more than the sender could already do itself. An
+      // AUTO/AUTO_EDIT receiver can act without prompting, a DEFAULT
+      // sender cannot — so the message needs review.
+      h.setMode(mode);
+      expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+      expect(h.gate.getHeld()[0].cause).toBe('mode-mismatch');
+      expect(h.delivered).toHaveLength(0);
+    },
+  );
+
+  it('accepts a bypassing sender when the receiver is AUTO', () => {
+    h.setMode(ApprovalMode.AUTO);
+    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
+    expect(h.delivered).toHaveLength(1);
   });
 
   it('holds a sender that asserts no mode when the receiver bypasses', () => {
@@ -290,12 +314,16 @@ describe('shutdown', () => {
     expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
   });
 
-  it('still delivers after shutdown when the policy accepts', () => {
-    // Shutdown must not silently start dropping messages that were never
-    // going to be held in the first place.
+  it('expires a late arrival even when the policy would have accepted it', () => {
+    // The session is tearing down: delivering would receipt 'delivered'
+    // for model work that will never run, and holding would strand the
+    // message with nobody left to release it.
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.gate.shutdown();
-    expect(h.gate.admit(frame())).toBe('accept');
+    const late = frame();
+    expect(h.gate.admit(late)).toBe('refused');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
   });
 });
 

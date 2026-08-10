@@ -165,7 +165,7 @@ export async function registerSession(
   const record: SessionRegistryRecord = {
     schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
     pid,
-    procStart: readProcStartToken(pid),
+    procStart: await readProcStartToken(pid),
     sessionId: fields.sessionId,
     cwd: fields.cwd,
     name: fields.name ?? deriveSessionName(fields.cwd, fields.sessionId),
@@ -245,7 +245,7 @@ export async function readOwnSessionRecord(
 ): Promise<SessionRegistryRecord | null> {
   const record = await readRecord(getSessionRecordPath(pid));
   if (record === null) return null;
-  return isSameProcess(record.pid, record.procStart) ? record : null;
+  return (await isSameProcess(record.pid, record.procStart)) ? record : null;
 }
 
 /** Remove this process's record. Safe to call when none was written. */
@@ -270,15 +270,24 @@ export interface ListLiveSessionsOptions {
    * read-only callers can turn it off.
    */
   sweepStale?: boolean;
+  /**
+   * Propagate a non-ENOENT failure to read the registry directory instead
+   * of degrading to an empty list. Defaults to false: discovery callers
+   * treat "no peers" and "cannot look" alike, but a command that REPORTS
+   * the registry (like `sessions ps`) must not turn "cannot look" into a
+   * false "there is nothing running".
+   */
+  throwOnReadError?: boolean;
 }
 
 /**
  * Enumerate live sessions, newest first, sweeping records whose process
  * is provably gone.
  *
- * Returns an empty list rather than throwing when the registry directory
- * is missing or unreadable — "no peers" and "cannot look" are the same
- * outcome for every caller, and this sits on interactive paths.
+ * A missing registry directory is always an empty list. An UNREADABLE one
+ * is an empty list too unless `throwOnReadError` is set — discovery
+ * callers want "no peers" and "cannot look" collapsed, but a command that
+ * reports the registry must be able to tell them apart.
  */
 export async function listLiveSessions(
   options: ListLiveSessionsOptions = {},
@@ -287,6 +296,7 @@ export async function listLiveSessions(
     includeSelf = false,
     selfPid = process.pid,
     sweepStale = true,
+    throwOnReadError = false,
   } = options;
 
   const dir = getSessionRegistryDir();
@@ -295,6 +305,7 @@ export async function listLiveSessions(
     entries = await fs.readdir(dir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      if (throwOnReadError) throw error;
       debugLogger.debug(`listLiveSessions readdir failed: ${describe(error)}`);
     }
     return [];
@@ -321,20 +332,39 @@ export async function listLiveSessions(
           // owns it. Enumeration still has to check provenance — a
           // recycled PID means the record may predate this process (see
           // `readOwnSessionRecord`) — it just declines to delete it.
-          if (includeSelf && isSameProcess(record.pid, record.procStart)) {
+          if (
+            includeSelf &&
+            (await isSameProcess(record.pid, record.procStart))
+          ) {
             live.push(record);
           }
           return;
         }
 
-        if (isSameProcess(record.pid, record.procStart)) {
+        if (await isSameProcess(record.pid, record.procStart)) {
           live.push(record);
           return;
         }
 
         if (sweepStale) {
           try {
-            await fs.unlink(filePath);
+            // Re-verify immediately before deleting: between the check
+            // above and this unlink, the PID can be recycled and its new
+            // owner can atomically rewrite the record. Deleting by
+            // pathname alone would then destroy a live session's fresh
+            // record, so only delete a file that still holds the exact
+            // record this pass proved stale.
+            const current = await readRecord(filePath);
+            if (
+              current !== null &&
+              current.pid === record.pid &&
+              current.sessionId === record.sessionId &&
+              current.startedAt === record.startedAt &&
+              current.procStart === record.procStart &&
+              !(await isSameProcess(current.pid, current.procStart))
+            ) {
+              await fs.unlink(filePath);
+            }
           } catch {
             // Raced with another session's sweep, or not ours to delete.
           }
