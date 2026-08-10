@@ -54,6 +54,7 @@ describe('coding plan provider', () => {
       'providerMetadata.coding-plan': {
         baseUrl: CODING_PLAN_CHINA_BASE_URL,
         version,
+        builtinIds: getDefaultModelIds(codingPlanProvider),
       },
     });
   });

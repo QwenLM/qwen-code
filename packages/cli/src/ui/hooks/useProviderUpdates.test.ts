@@ -265,6 +265,61 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('drops stale renamed built-ins but keeps user-added custom models on update', async () => {
+    const customModel = {
+      id: 'my-custom-model',
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      envKey: CODING_PLAN_ENV_KEY,
+      name: '[Coding Plan] my-custom-model',
+    };
+    // A model that was built-in at install time but was renamed/removed
+    // upstream since — it must be cleaned up, unlike true user customs.
+    const staleBuiltinId = 'renamed-away-model';
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      builtinIds: [...chinaTemplate.map((m) => m.id), staleBuiltinId],
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate,
+        {
+          id: staleBuiltinId,
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          envKey: CODING_PLAN_ENV_KEY,
+          name: `[Coding Plan] ${staleBuiltinId}`,
+        },
+        customModel,
+      ],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    const ids = reloaded[AuthType.USE_OPENAI].map((m: { id: string }) => m.id);
+    expect(ids).toContain('my-custom-model');
+    expect(ids).not.toContain(staleBuiltinId);
+  });
+
   it('executes update when user confirms with "update"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY

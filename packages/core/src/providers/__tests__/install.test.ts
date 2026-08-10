@@ -394,6 +394,7 @@ describe('applyProviderInstallPlan', () => {
         codingPlan: {
           baseUrl: 'https://coding.example.com/v1',
           version: 'v1',
+          builtinIds: ['model-a', 'model-b'],
         },
       },
     };
@@ -413,6 +414,10 @@ describe('applyProviderInstallPlan', () => {
       'https://coding.example.com/v1',
     );
     expect(adapter.setValue).toHaveBeenCalledWith('codingPlan.version', 'v1');
+    expect(adapter.setValue).toHaveBeenCalledWith('codingPlan.builtinIds', [
+      'model-a',
+      'model-b',
+    ]);
   });
 
   it('appends models with append merge strategy', async () => {

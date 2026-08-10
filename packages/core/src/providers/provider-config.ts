@@ -229,7 +229,6 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
-  _models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
@@ -298,7 +297,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState: resolveProviderState(config, inputs.baseUrl),
   };
 }
 

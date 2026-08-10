@@ -158,7 +158,10 @@ export interface ProviderModelProvidersPatch {
  * Arbitrary key-value metadata to persist alongside a provider install.
  * Each top-level key becomes a settings path prefix (e.g. `codingPlan.version`).
  */
-export type ProviderInstallState = Record<string, Record<string, string>>;
+export type ProviderInstallState = Record<
+  string,
+  Record<string, string | string[]>
+>;
 
 export interface ProviderInstallPlan {
   providerId: ProviderId;
