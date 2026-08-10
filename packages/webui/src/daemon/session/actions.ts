@@ -92,7 +92,7 @@ export interface CreateDaemonSessionActionsArgs {
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
   manualSessionClearRef: RefBox<boolean>;
-  skipNextCleanupDetachSessionIdRef: RefBox<string | undefined>;
+  skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
@@ -163,7 +163,7 @@ export function createDaemonSessionActions({
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
   manualSessionClearRef,
-  skipNextCleanupDetachSessionIdRef,
+  skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
   createDetachedSession,
@@ -196,10 +196,10 @@ export function createDaemonSessionActions({
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
     if (pendingSessionLoadRef.current) {
       if (
-        skipNextCleanupDetachSessionIdRef.current ===
+        skipNextCleanupDetachSessionRef.current?.sessionId ===
         pendingSessionLoadRef.current.sessionId
       ) {
-        skipNextCleanupDetachSessionIdRef.current = undefined;
+        skipNextCleanupDetachSessionRef.current = undefined;
       }
       clearPendingLoadTimeout(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
@@ -243,6 +243,19 @@ export function createDaemonSessionActions({
           : setTimeout(() => {
               if (pendingSessionLoadRef.current?.id === loadId) {
                 pendingSessionLoadRef.current = undefined;
+                if (sessionRef.current?.sessionId !== sessionId) {
+                  setConnection((current) =>
+                    current.status === 'connecting' &&
+                    current.sessionId === sessionId
+                      ? {
+                          ...current,
+                          status: 'disconnected',
+                          loadingTranscript: undefined,
+                          catchingUp: undefined,
+                        }
+                      : current,
+                  );
+                }
                 reject(
                   dispatchActionError(
                     addNotice,
@@ -315,8 +328,14 @@ export function createDaemonSessionActions({
           );
         });
       if (reloadingCurrentSession) {
-        skipNextCleanupDetachSessionIdRef.current = sessionId;
-        void loadPromise.then(detachCurrentSession, () => undefined);
+        skipNextCleanupDetachSessionRef.current = currentSession;
+        void loadPromise
+          .then(detachCurrentSession, () => undefined)
+          .finally(() => {
+            if (skipNextCleanupDetachSessionRef.current === currentSession) {
+              skipNextCleanupDetachSessionRef.current = undefined;
+            }
+          });
       } else {
         void detachCurrentSession();
       }
@@ -406,6 +425,7 @@ export function createDaemonSessionActions({
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
+        options?.onAdmissionStarted?.();
         const accepted = await session.submitPrompt(
           promptRequest as Parameters<typeof session.submitPrompt>[0],
           ctrl.signal,
@@ -496,24 +516,27 @@ export function createDaemonSessionActions({
         promptRequest as Parameters<typeof session.submitPrompt>[0],
       );
       if (options?.signal?.aborted) {
-        await session
-          .removePendingPrompt(accepted.promptId)
-          .catch((err: unknown) => {
-            console.warn(
-              '[submitPrompt] removePendingPrompt failed after abort',
-              err,
-            );
-            addNotice({
-              severity: 'error',
-              category: 'user_action',
-              operation: 'send_prompt',
-              code: 'daemon.send_prompt.pending_cleanup_failed',
-              message:
-                'Prompt was accepted after cancellation but could not be removed from the queue.',
-              debugMessage: err instanceof Error ? err.message : String(err),
-              recoverable: true,
-            });
+        try {
+          const removal = await session.removePendingPrompt(accepted.promptId);
+          if (removal.removed) {
+            return { promptId: accepted.promptId, removedAfterAbort: true };
+          }
+        } catch (err) {
+          console.warn(
+            '[submitPrompt] removePendingPrompt failed after abort',
+            err,
+          );
+          addNotice({
+            severity: 'error',
+            category: 'user_action',
+            operation: 'send_prompt',
+            code: 'daemon.send_prompt.pending_cleanup_failed',
+            message:
+              'Prompt was accepted after cancellation but could not be removed from the queue.',
+            debugMessage: err instanceof Error ? err.message : String(err),
+            recoverable: true,
           });
+        }
         throw (
           options.signal.reason ?? new DOMException('Aborted', 'AbortError')
         );
@@ -575,7 +598,9 @@ export function createDaemonSessionActions({
           session.setModel(modelId),
           'Set model timed out',
         );
-        setConnection((current) => ({ ...current, currentModel: modelId }));
+        if (sessionRef.current === session) {
+          setConnection((current) => ({ ...current, currentModel: modelId }));
+        }
         return result;
       } catch (error) {
         throw dispatchActionError(
@@ -602,10 +627,12 @@ export function createDaemonSessionActions({
           }),
           'Set approval mode timed out',
         );
-        setConnection((current) => ({
-          ...current,
-          currentMode: result.mode || mode,
-        }));
+        if (sessionRef.current === session) {
+          setConnection((current) => ({
+            ...current,
+            currentMode: result.mode || mode,
+          }));
+        }
         return result;
       } catch (error) {
         throw dispatchActionError(
@@ -786,7 +813,7 @@ export function createDaemonSessionActions({
         }
         persistStableClientId(nextSession.clientId, nextSession.sessionId);
         sessionRef.current = nextSession;
-        skipNextCleanupDetachSessionIdRef.current = nextSession.sessionId;
+        skipNextCleanupDetachSessionRef.current = nextSession;
         setConnection((current) => ({
           ...current,
           status: 'connected',
@@ -904,13 +931,15 @@ export function createDaemonSessionActions({
           session.supportedCommands(),
           'Refresh commands timed out',
         );
-        const { commands, skills } = mapSupportedCommands(status);
-        setConnection((current) => ({
-          ...current,
-          commands,
-          skills,
-          supportedCommands: status,
-        }));
+        if (sessionRef.current === session) {
+          const { commands, skills } = mapSupportedCommands(status);
+          setConnection((current) => ({
+            ...current,
+            commands,
+            skills,
+            supportedCommands: status,
+          }));
+        }
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -933,14 +962,16 @@ export function createDaemonSessionActions({
           session.context(),
           'Load context timed out',
         );
-        setConnection((current) => ({
-          ...current,
-          context,
-          currentMode:
-            getModeFromSessionContext(context) ?? current.currentMode,
-          currentModel:
-            getModelFromSessionContext(context) ?? current.currentModel,
-        }));
+        if (sessionRef.current === session) {
+          setConnection((current) => ({
+            ...current,
+            context,
+            currentMode:
+              getModeFromSessionContext(context) ?? current.currentMode,
+            currentModel:
+              getModelFromSessionContext(context) ?? current.currentModel,
+          }));
+        }
         return context;
       } catch (error) {
         throw dispatchActionError(

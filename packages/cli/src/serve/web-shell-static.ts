@@ -14,7 +14,7 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
  *
- * Deliberately looser than the `/demo` page's `default-src 'none'`: the real
+ * Deliberately looser than a `default-src 'none'` static page: the real
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
@@ -158,9 +158,9 @@ function createSendIndex(
       (err) => {
         if (!err) return;
         // Only 5xx path in the serve app that would otherwise emit nothing —
-        // log it like the sibling /demo handler so an operator can see why the
-        // shell stopped loading (EACCES/ESTALE on a network mount, a perms
-        // change, a partial deploy).
+        // log it so an operator can see why the shell stopped loading
+        // (EACCES/ESTALE on a network mount, a perms change, a partial
+        // deploy).
         writeStderrLine(
           `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
         );

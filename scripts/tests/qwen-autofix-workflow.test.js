@@ -18,6 +18,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob } from './workflow-helpers.js';
+
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
@@ -7719,6 +7721,11 @@ exit 1
       /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
     );
     expect(pushAndReportStep).toContain('verification predates that merge');
+    // The STALE_BASE_RETRY handoff embeds a rejection written BEFORE the
+    // auto-update; the note un-poisons its framing for the retry agent.
+    expect(reviewAddressReportStep).toContain(
+      'the base has since been auto-updated',
+    );
     // Bounded: the loop gives up after the last attempt instead of spinning.
     // The structural pin connects the guard value to the error exit — a
     // mutation of == 3 to == 4 survives presence-only checks: the loop
@@ -8134,10 +8141,10 @@ exit 1
       reviewVerificationRunner.match(/retryable=true/g) ?? [],
     ).toHaveLength(1);
     expect(reviewVerificationRunner).toContain(
-      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
     );
     expect(reviewVerificationRunner).toContain(
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'cross-package contract verification failed'",
     );
     expect(pushAndReportStep).toContain(
       "steps.final_verify.outputs.outcome == 'fixed'",
@@ -8158,10 +8165,10 @@ exit 1
       'VERIFICATION_HEAD="$(git rev-parse HEAD)"',
     );
     const schemaCheck = reviewVerificationRunner.indexOf(
-      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
     );
     const contractCheck = reviewVerificationRunner.indexOf(
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'cross-package contract verification failed'",
     );
     const coreRebuild = reviewVerificationRunner.indexOf(
       "run_check 'core rebuild failed on the agent-committed fix'",
@@ -8736,6 +8743,28 @@ exit 1
     expect(staleConflict.split('|')[0]).toBe(NEWEST);
     expect(staleConflict).toContain('Could not produce a passing fix');
 
+    // Pre-existing verdicts pick their remedy from the compare the step
+    // already ran — swapping the two clause bodies must fail here, not ship
+    // a headline prescribing a merge that changes nothing.
+    const preAhead = run(
+      { OUTCOME: 'failed', PREEXISTING: 'true' },
+      { gateRejection: true },
+    );
+    expect(preAhead).toContain('PRE-EXISTING failure');
+    expect(preAhead).toContain('own pre-round code needs attention');
+    expect(preAhead).not.toContain('base update (merge main)');
+    const preBehindConflict = run(
+      {
+        OUTCOME: 'failed',
+        PREEXISTING: 'true',
+        CMP_STATUS_STUB: 'behind',
+        UPDATE_OK_STUB: '0',
+      },
+      { gateRejection: true },
+    );
+    expect(preBehindConflict).toContain('PRE-EXISTING failure');
+    expect(preBehindConflict).toContain('base update (merge main)');
+
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
     expect(crashed.split('|')[0]).toBe(SENTINEL);
@@ -8770,6 +8799,19 @@ exit 1
     expect(timedOutCapped).toContain(
       'split the PR or raise the agent time budget',
     );
+    // An IDLE timeout at the cap gets the sandbox remedy, not budget
+    // advice: more minutes cannot cure a sandbox that produced nothing.
+    const idleCapped = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      ROUND: '4',
+    });
+    expect(idleCapped).toContain('this was the last automatic attempt');
+    expect(idleCapped).toContain(
+      'raising the time budget cannot cure a silent sandbox',
+    );
+    expect(idleCapped).not.toContain('split the PR or raise');
 
     // At the cap the gate crash names the operator fix rather than promising a
     // retry the scan's round gate would refuse.
@@ -9122,6 +9164,50 @@ exit 1
     expect(interleaved.terminal).toBe(true);
     expect(interleaved.headline).toContain('time-budget exhaustions');
     expect(interleaved.headline).toContain('/retry');
+    // Idle (silent-sandbox) timeouts share the census — each burns a full
+    // budget — and when the window contains any, the breaker's advice says
+    // a budget increase cannot cure them.
+    const IDLE_HEAD =
+      '🤖 AutoFix ran out of time before finishing (idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)) (attempt 2/100) — it will retry on the next scan.';
+    const idleMixed = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleMixed.terminal).toBe(true);
+    expect(idleMixed.headline).toContain('time-budget exhaustions');
+    expect(idleMixed.headline).toContain(
+      'silent-sandbox (idle) timeouts that no budget increase can cure',
+    );
+    // An ALL-idle window swaps the closing remedy for the sandbox
+    // investigation — mirroring the round-level split — instead of
+    // prescribing the budget increase the clause above declared useless.
+    expect(idleMixed.headline).toContain(
+      'A human should investigate the sandbox image and runner docker daemon',
+    );
+    expect(idleMixed.headline).not.toContain('raise the agent time budget');
+    // A MIXED window (any real budget timeout) keeps the budget remedy.
+    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleSome.terminal).toBe(true);
+    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
+    expect(idleSome.headline).toContain('raise the agent time budget');
+    // The CURRENT round's idle timeout is counted by the increment, not
+    // the grep: cap-1 budget priors plus an idle current round render
+    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
+    // suppresses the clause entirely (the grep sees no idle prior) and
+    // must fail here.
+    const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleCurrentOnly.terminal).toBe(true);
+    expect(idleCurrentOnly.headline).toContain(
+      '1 of those were silent-sandbox (idle) timeouts',
+    );
+    // A window WITHOUT idle rounds keeps today's advice untouched.
+    expect(interleaved.headline).not.toContain('silent-sandbox');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
       terminal: false,
@@ -9183,6 +9269,9 @@ exit 1
     );
     expect(reviewAddressReportStep).toContain(
       'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'IDLE_N="$(grep -c \'idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
@@ -9265,12 +9354,12 @@ exit 1
     // is captured for the retry.
     for (const check of [
       "run_check 'core rebuild failed on the agent-committed fix'",
-      "run_check 'settings schema is stale on the agent-committed fix'",
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
-      "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
-      "run_check 'lint failed on the agent-committed fix' npm run lint",
-      'run_check "tests failed in ${p}"',
+      "run_check_no_ab 'typecheck failed on the agent-committed fix' npm run typecheck",
+      "run_check_no_ab 'lint failed on the agent-committed fix' npm run lint",
+      'run_check_no_ab "tests failed in ${p}"',
     ]) {
       expect(gate).toContain(check);
     }
@@ -11225,5 +11314,773 @@ exit 1
     const skill = readAutofixSkill();
     expect(skill).not.toContain('label/comment trigger');
     expect(skill).toContain('label event');
+  });
+});
+
+describe('review verification gate: baseline A/B on deterministic rejection', () => {
+  // The A/B re-runs a failed check at the pre-round ref and reports
+  // pre-existing ONLY when the baseline fails with a MATCHING failure
+  // signature (tsc diagnostics normalized to file + code): a bare nonzero
+  // baseline can be a different defect or an infrastructure hiccup, and
+  // gitignored dist survives the detach — which is why only the builds
+  // (root `npm run build` and the pre-commit core rebuild, which remake
+  // dist from checked-out sources) are A/B-eligible; typecheck, lint, and
+  // package tests consume
+  // round-built dist and are exempt. These tests execute the REAL script in
+  // a real git repo, config-isolated (a global core.hooksPath or
+  // pre-commit hook must not reach the fixture), with a stubbed npm whose
+  // failures and diagnostics are keyed by commit SHA.
+  const GIT_ISOLATION = {
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const runGate = ({
+    failAt = [],
+    agentCommit = true,
+    schemaFail = false,
+    typecheckFail = false,
+    addWorkspace = false,
+    noisySuccess = false,
+    touchCore = false,
+    baselineCode = '',
+    baselineMsg = '',
+    headMsg = '',
+    extraRoundDiag = false,
+    extraBaselineDiag = false,
+    restoreClash = false,
+    hugeFail = false,
+    noIdentity = false,
+    trackedDirt = false,
+  }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
+    try {
+      const sh = (cmd, cwd) =>
+        execFileSync('bash', ['-c', cmd], {
+          cwd,
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        });
+      const origin = join(dir, 'origin.git');
+      const work = join(dir, 'work');
+      sh(`git init -q --bare '${origin}'`, dir);
+      sh(`git clone -q '${origin}' '${work}'`, dir);
+      const g = (cmd) => sh(cmd, work);
+      g('git config user.email t@t && git config user.name t');
+      g('echo base > f.txt && git add . && git commit -qm base');
+      g('git branch -M main && git push -q origin main');
+      g('git checkout -qb feature');
+      if (touchCore) {
+        // Reaches the core-rebuild run_check BEFORE the commit gate, so a
+        // failure there exercises the no-round-commit guard.
+        g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
+        g('git add . && git commit -qm core');
+      } else {
+        g('echo branch > f.txt && git commit -qam branch');
+      }
+      g('git push -q origin feature');
+      if (agentCommit) {
+        if (addWorkspace) {
+          // The round ADDS a workspace — it does not exist at the baseline.
+          g('mkdir -p packages/newpkg');
+          g(
+            `printf '{"name":"newpkg","scripts":{"test":"vitest run"}}' > packages/newpkg/package.json`,
+          );
+          g('git add . && git commit -qm agent');
+        } else if (restoreClash) {
+          // A file the branch TRACKS but the baseline lacks: the baseline
+          // leg recreates it untracked, and the restore checkout refuses.
+          g('echo tracked > clash.txt && git add . && git commit -qm agent');
+        } else {
+          g('echo agent > f.txt && git commit -qam agent');
+        }
+      }
+      const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
+      const failShas = failAt.map(shaOf).join(' ');
+      const baselineSha = shaOf('origin/feature');
+
+      // Stub npm. A failing `run build` prints a marker AND a tsc-style
+      // diagnostic — the identity the A/B compares. BASELINE_CODE switches
+      // the diagnostic code on the baseline SHA so a different-cause
+      // baseline can be staged. `run test --workspace` mirrors measured npm:
+      // exit 1 "No workspaces found" for a missing workspace. NOISY_SUCCESS
+      // makes a PASSING build print >3 KB — the evidence-window flood shape.
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'npm'),
+        [
+          '#!/bin/bash',
+          'if [[ "$1" == "run" && "$2" == "build" ]]; then',
+          '  head="$(git rev-parse HEAD)"',
+          '  for s in ${FAIL_BUILD_SHAS}; do',
+          '    if [[ "$s" == "$head" ]]; then',
+          '      code=9999',
+          '      pos="(1,1)"; msg="stub failure"',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" ]]; then',
+          // The baseline leg emits a SHIFTED position — the strip is what
+          // makes the two legs comparable, so the fixture must exercise it.
+          '        pos="(7,3)"',
+          '        if [[ -n "${BASELINE_CODE:-}" ]]; then code="${BASELINE_CODE}"; fi',
+          '        if [[ -n "${BASELINE_MSG:-}" ]]; then msg="${BASELINE_MSG}"; fi',
+          '        if [[ "${RESTORE_CLASH:-}" == "1" ]]; then echo untracked > clash.txt; fi',
+          '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" ]]; then',
+          '        if [[ -n "${HEAD_MSG:-}" ]]; then msg="${HEAD_MSG}"; fi',
+          '      fi',
+          '      echo "stub build FAILED at $head"',
+          '      if [[ "${NO_IDENTITY:-}" == "1" ]]; then',
+          // vite/esbuild shape: a red build with no tsc diagnostic at all.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${TRACKED_DIRT:-}" == "1" ]]; then',
+          // The build rewrites a TRACKED file (the settings-schema shape):
+          // f.txt differs across refs, so an undiscarded rewrite makes the
+          // restore checkout refuse.
+          '        echo dirt > f.txt',
+          '      fi',
+          '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
+          '      if [[ "${HUGE_FAIL:-}" == "1" ]]; then',
+          '        for i in $(seq 1 200); do echo "verbose failure context line $i ****************************************"; done',
+          '        echo "root cause marker line"',
+          '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" && "${EXTRA_ROUND_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(2,2): error TS7777: round-introduced defect"',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${EXTRA_BASELINE_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(7,3): error TS8888: baseline-only defect"',
+          '      fi',
+          '      exit 1',
+          '    fi',
+          '  done',
+          '  if [[ "${NOISY_SUCCESS:-}" == "1" ]]; then',
+          '    for i in $(seq 1 200); do echo "baseline build banner line $i — all green, nothing to see"; done',
+          '  fi',
+          'fi',
+          'if [[ "$1" == "run" && "$2" == "typecheck" && "${TYPECHECK_FAIL:-}" == "1" ]]; then',
+          '  echo "stub typecheck FAILED"; exit 1',
+          'fi',
+          'if [[ "$1" == "run" && "$2" == "test" && "$3" == "--workspace" ]]; then',
+          '  if [[ ! -d "$4" ]]; then echo "npm error No workspaces found: --workspace=$4"; exit 1; fi',
+          '  if [[ "${WORKSPACE_TEST_FAIL:-}" == "1" ]]; then echo "stub workspace tests FAILED in $4"; exit 1; fi',
+          'fi',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'npm'), 0o755);
+      const rt = join(dir, 'rt');
+      mkdirSync(rt);
+      writeFileSync(
+        join(rt, 'check-settings-schema.sh'),
+        'if [[ "${SCHEMA_FAIL:-}" == "1" ]]; then echo "schema stale"; exit 1; fi\nexit 0\n',
+      );
+      writeFileSync(
+        join(rt, 'check-autofix-contracts.sh'),
+        'cat > /dev/null\nexit 0\n',
+      );
+      writeFileSync(
+        join(rt, 'resolve-owning-packages.sh'),
+        'cat > /dev/null\nprintf "%s" "${RESOLVED_PKGS:-}"\n',
+      );
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      const outFile = join(dir, 'gh-output');
+      writeFileSync(outFile, '');
+
+      const res = spawnSync(
+        'bash',
+        [resolve('.github/scripts/run-autofix-review-verification.sh')],
+        {
+          cwd: work,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ...GIT_ISOLATION,
+            PATH: `${bin}:${process.env.PATH}`,
+            BRANCH: 'feature',
+            WORKDIR: workdir,
+            RUNNER_TEMP: rt,
+            GITHUB_OUTPUT: outFile,
+            FAIL_BUILD_SHAS: failShas,
+            BASELINE_SHA: baselineSha,
+            BASELINE_CODE: baselineCode,
+            BASELINE_MSG: baselineMsg,
+            HEAD_MSG: headMsg,
+            EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
+            EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
+            RESTORE_CLASH: restoreClash ? '1' : '',
+            NO_IDENTITY: noIdentity ? '1' : '',
+            TRACKED_DIRT: trackedDirt ? '1' : '',
+            SCHEMA_FAIL: schemaFail ? '1' : '',
+            TYPECHECK_FAIL: typecheckFail ? '1' : '',
+            NOISY_SUCCESS: noisySuccess ? '1' : '',
+            HUGE_FAIL: hugeFail ? '1' : '',
+            WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
+            RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
+          },
+        },
+      );
+      return {
+        status: res.status,
+        stdout: `${res.stdout}\n${res.stderr}`,
+        outputs: readFileSync(outFile, 'utf8'),
+        rejection: existsSync(join(workdir, 'gate-rejection.md'))
+          ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
+          : '',
+        headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
+        baselineSha,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('charges a failure to the round when the baseline is green', () => {
+    const r = runGate({ failAt: ['feature'] });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    // The repair agent's only warning that dist/ now holds baseline-built
+    // artifacts — dropped, it burns its budget on phantom dist-consuming
+    // failures.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+    expect(r.outputs).not.toContain('preexisting=true');
+    // The A/B genuinely ran — the verdict is measured, not assumed.
+    expect(r.stdout).toContain('Baseline A/B');
+    expect(r.rejection).not.toContain('pre-existing');
+    // The tree is back on the branch for anything that reads it afterwards.
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('reports pre-existing only on a matching failure signature, with the baseline transcript as evidence', () => {
+    const r = runGate({ failAt: ['feature', 'origin/feature'] });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('preexisting=true');
+    // retryable stays unset: the repair step keys on it and must not run.
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.rejection).toContain('base update (merge main)');
+    // The baseline leg's own transcript is the ONLY proof behind the
+    // verdict — it must reach the rejection document.
+    expect(r.rejection).toContain(`stub build FAILED at ${r.baselineSha}`);
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('charges the round when the codes match but the messages differ', () => {
+    // Identity is file + code + MESSAGE: common codes (TS2339) collide
+    // across unrelated defects in one file, and a code-only signature would
+    // skip a repair that could have produced a green fix.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineMsg: 'an entirely different defect',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+  });
+
+  it('crashes verdict-less when the baseline leg breaks the restore (retry, not handoff)', () => {
+    // The baseline run recreates (untracked) a file the branch tracks
+    // (`git restore -- .` touches tracked files only), so the checkout back
+    // refuses — the tree can no longer be trusted, and the repair must not
+    // run in it (its commit would orphan on the detached baseline). But a
+    // transient git-state failure is NOT a verdict either: a plain
+    // outcome=failed is an EVALUATED rejection — the watermark advances and
+    // the item is handed off for good. The gate therefore leaves outcome
+    // UNSET (the report's gate-crashed path retries next scan) while still
+    // writing the detail document so the crash comment explains itself.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      restoreClash: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('outcome=');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('could not restore the verification tree');
+    expect(r.rejection).toContain('could not restore the verification tree');
+  });
+
+  it('short-circuits before the detach when the head has no failure identity', () => {
+    // vite/esbuild/crash failures carry no tsc diagnostic: an empty head
+    // signature fails closed REGARDLESS of the baseline, so the gate must
+    // decide before paying the detach + full baseline re-run + restore.
+    const r = runGate({ failAt: ['feature'], noIdentity: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('no failure identity in the head transcript');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('discards tracked build dirt so a real verdict survives the restore', () => {
+    // The baseline build REWRITES a tracked file (the settings-schema
+    // shape): without the pre-checkout `git restore -- .` the restore
+    // refuses and a clean pre-existing verdict degrades into the
+    // verdict-less crash.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      trackedDirt: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.stdout).not.toContain('could not restore the verification tree');
+  });
+
+  it('caps the LONG-preamble (pre-existing) rejection under the render window', () => {
+    // The short-preamble flood is pinned above; the pre-existing path adds
+    // ~490 bytes of preamble, and the ${#preamble} subtraction is what
+    // keeps THIS document under the cap — a constant would pass the short
+    // case and truncate this one's closing fence.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      hugeFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
+  });
+
+  it('keeps the full message past the first n (the bracket class ate it)', () => {
+    // In an ERE bracket expression `\` is literal, so the earlier
+    // `[^\n]*` meant "neither backslash nor the letter n" and truncated
+    // every message at its first 'n' — collapsing "Cannot find module
+    // './foo'" and "'./bar'" into one signature and skipping the only
+    // repair that could fix the round-caused one. `.*` keeps the message.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      headMsg: "Cannot find module './foo'",
+      baselineMsg: "Cannot find module './bar'",
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('charges the round when it ADDS a diagnostic to a failing baseline', () => {
+    // Pre-existing means the round's failing set is a SUBSET of the
+    // baseline's: sharing one signature with the baseline while adding
+    // another is a round-caused failure the repair can still fix — an
+    // intersection test labeled it pre-existing and skipped the repair.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraRoundDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('reports pre-existing when the baseline fails with a SUPERSET of the round signatures', () => {
+    // The other arm of the subset semantics: every failing signature of
+    // the round also fails at the baseline, which ADDITIONALLY carries a
+    // baseline-only diagnostic. Still pre-existing — the repair may only
+    // amend the round's fix, so the extra baseline diagnostic is equally
+    // beyond its reach. A set-equality comparator instead of the subset
+    // check would flip this round to retryable.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraBaselineDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('charges the round when the baseline fails for a DIFFERENT reason', () => {
+    // A nonzero baseline is not identity: reason A there, reason B here —
+    // reducing both to rc=1 would skip the only repair allowed to fix B.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineCode: '8888',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+  });
+
+  it('keeps the green path intact', () => {
+    const r = runGate({ failAt: [] });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.outputs).not.toContain('preexisting');
+  });
+
+  it('keeps the failure text in the evidence window past a chatty green baseline', () => {
+    const r = runGate({ failAt: ['feature'], noisySuccess: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('stub build FAILED');
+  });
+
+  it('keeps the closing fence when the failure saturates the evidence window', () => {
+    // The report renders head -c 3900 of the FINISHED document; reject_fix
+    // sizes its own tail against the preamble so the closing fence survives
+    // even when the captured failure dwarfs the window. A future preamble
+    // or constant change that breaks the invariant fails here, not in a
+    // posted comment.
+    const r = runGate({ failAt: ['feature'], hugeFail: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
+    expect(r.rejection).toContain('root cause marker line');
+  });
+
+  it('never A/Bs a check with no round commit to remove', () => {
+    const r = runGate({
+      agentCommit: false,
+      touchCore: true,
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('never A/Bs the dist-coupled and stdin-fed checks', () => {
+    // schema (round-built core dist), contracts (drained stdin), and now
+    // typecheck (sdk-typescript resolves core d.ts from dist) are exempt.
+    for (const opts of [{ schemaFail: true }, { typecheckFail: true }]) {
+      const r = runGate(opts);
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('retryable=true');
+      expect(r.outputs).not.toContain('preexisting=true');
+      expect(r.stdout).not.toContain('Baseline A/B');
+    }
+  });
+
+  it('never A/Bs package tests (dist-resolving dependencies)', () => {
+    const r = runGate({ addWorkspace: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('tests failed in packages/newpkg');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+});
+
+describe('review verification gate: preexisting output is consumed', () => {
+  it('Finalize verification selects the flag from the same attempt as the outcome', () => {
+    expect(workflow).toContain(
+      "FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'",
+    );
+    expect(workflow).toContain(
+      "REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'",
+    );
+    expect(workflow).toMatch(
+      /PREEXISTING="\$\{FIRST_PREEXISTING\}"\n\s*if \[\[ "\$\{REPAIR_ATTEMPTED\}" == 'true' \]\]; then\n\s*PREEXISTING="\$\{REPAIR_PREEXISTING\}"/,
+    );
+  });
+
+  it('the failure report reads it and picks the clause by the compare', () => {
+    expect(workflow).toContain(
+      "PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'",
+    );
+    // behind/diverged → base update; a MEASURED not-behind → the branch's
+    // own pre-round code (an up-to-date branch cannot be cured by merging
+    // main); an EMPTY CMP_R means the compare never ran (a transient API
+    // failure) and must not assert either — it says the base state could
+    // not be compared.
+    expect(workflow).toContain('needs a base update (merge main)');
+    expect(workflow).toContain('the base state could not be compared');
+    // The YAML embeds the apostrophe via shell quoting, so match around it.
+    expect(workflow).toContain('own pre-round code needs attention');
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then/,
+    );
+    expect(workflow).toMatch(/elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then/);
+    // Correspondence, not just existence: swapping the clause bodies must
+    // fail. Each {0,600} bound keeps the match inside this if/elif/else —
+    // a swapped clause puts its anchor on the wrong side of the arm it
+    // belongs to, more than 600 chars away.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then[\s\S]{0,600}?needs a base update \(merge main\)[\s\S]{0,600}?elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then[\s\S]{0,600}?could not be compared[\s\S]{0,600}?else[\s\S]{0,600}?own pre-round code needs attention/,
+    );
+  });
+
+  it('the evidence window flexes so the document clears the render cap', () => {
+    // The report renders head -c 3900 of the finished document; the script
+    // sizes the tail against its preamble so the closing fence survives.
+    expect(workflow).toContain('head -c 3900 "${WORKDIR}/gate-rejection.md"');
+    expect(reviewVerificationRunner).toContain(
+      'tail_budget=$(( 3300 - ${#preamble} ))',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'tail -c "${tail_budget}" "${GATE_LOG}"',
+    );
+  });
+});
+
+describe('run-agent idle watchdog', () => {
+  // Four observed sandbox hangs (#8663 x2, #8761 r3, #8763 r4) printed their
+  // last byte at docker container entry and then sat SILENT for the whole
+  // 2-hour absolute budget — four different runners, two image versions, so
+  // the watchdog lives in the runner script, not the environment. A wedged
+  // sandbox produces nothing; a legitimate run is never silent for 20
+  // minutes (the fleet's longest tolerated quiet is the review pipeline's
+  // 10-minute stream-idle window). These tests execute the REAL script with
+  // a stub agent whose only difference is whether it keeps talking.
+  const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'qwen');
+      writeFileSync(bin, stub);
+      chmodSync(bin, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve('.qwen/skills/autofix/scripts/run-agent.mjs'),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          bin,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            QWEN_IDLE_TIMEOUT_MS: String(idleMs),
+            QWEN_TIMEOUT_MS: String(timeoutMs),
+          },
+        },
+      );
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        timeoutSentinel: existsSync(join(workdir, 'agent-timeout'))
+          ? readFileSync(join(workdir, 'agent-timeout'), 'utf8')
+          : null,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('kills a silent agent at the idle window, naming the idle limit', () => {
+    // The hang shape: one line at startup, then nothing, ever.
+    const r = runAgent({
+      stub: '#!/bin/bash\necho "entering sandbox"\nsleep 600\n',
+      idleMs: 1200,
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // NOT the absolute-budget wording: the comment must say which limit
+    // fired, or the operator tunes the wrong knob.
+    expect(r.failure).not.toContain('timeout (60000ms)');
+    // The sentinel routes the round to RETRY; deleting `timedOut = true`
+    // from the idle branch must fail here (the absolute-timeout test pins
+    // the same sentinel for its own path).
+    expect(r.timeoutSentinel).toContain('idle-timeout (no output for 1200ms');
+  });
+
+  it('never fires while the agent keeps talking, however slowly', () => {
+    // Output every 400ms with a 1500ms idle window: an absolute-timer
+    // regression disguised as an idle watchdog would kill this run.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+        // The mode's output contract: a real run ends by writing its
+        // summary, and the script fails a run that produced neither output.
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('never fires while the agent talks on stderr only', () => {
+    // The sandbox launcher emits ContainerName on stderr, and a cold
+    // runner's image pull or docker progress is a realistic stderr-only
+    // span with quiet stdout — the liveness contract covers both streams.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "tick $i" >&2; sleep 0.4; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
+    // Number('-1') is truthy, so a bare `|| default` guard would arm a
+    // negative window: Date.now() - lastOutputAt >= -1 is instantly true
+    // and every agent dies at the first idle tick. `0` (an operator's
+    // "disable") arms a zero-length window that is true at the first tick,
+    // and NaN arms one too — every rejection class named in the parse
+    // guard's comment must fall back to the default.
+    for (const idleMs of [-1, 0, Number.NaN]) {
+      const r = runAgent({
+        stub: [
+          '#!/bin/bash',
+          'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+          'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+          'echo done',
+          'exit 0',
+        ].join('\n'),
+        idleMs,
+      });
+      expect(r.status).toBe(0);
+      expect(r.failure).toBe('');
+    }
+  });
+});
+
+describe('stale sandbox container cleanup', () => {
+  // Two layers. The kill path: run-agent.mjs captures the container name
+  // its child's launcher printed and force-removes exactly that container
+  // when a budget/idle kill fires — ownership is unambiguous there, which
+  // is why the startup reap below may not touch running containers. The
+  // startup reap: a JOB timeout still reaps only the host-side docker
+  // client, so both sandboxed jobs reap before the sandbox picks a name
+  // (observed: a later leg's name counter found qwen-code-0.21.8-0
+  // occupied) — but the docker daemon is per HOST and this pool runs
+  // several registrations on one OS, so a RUNNING container can belong to
+  // a concurrent job on another registration: the reap is restricted to
+  // provably-dead states.
+  it('both agent jobs remove stale qwen-code containers at start', () => {
+    const step = "- name: 'Remove stale sandbox containers'";
+    expect(workflow.split(step).length - 1).toBe(2);
+    for (const jobId of ['issue-autofix', 'review-address']) {
+      const j = getWorkflowJob(workflow, jobId);
+      expect(j, jobId).toContain(step);
+      expect(j, jobId).toContain(
+        "timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead'",
+      );
+      // Best-effort hygiene under bash -eo pipefail: a daemon blip, a
+      // racing reap on another registration, or a container that refuses
+      // removal must not kill the round at setup — and an alive-but-wedged
+      // daemon must not block the step until the job timeout, so every
+      // docker call runs under `timeout`.
+      expect(j, jobId).toContain(
+        "STALE=\"$(timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)\" || STALE=''",
+      );
+      expect(j, jobId).toContain(
+        'xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true',
+      );
+      // Before the sandbox can pick a colliding name.
+      expect(j.indexOf(step)).toBeLessThan(
+        j.indexOf("- name: 'Reset autofix workspace'"),
+      );
+    }
+  });
+
+  // The kill path is shared by the idle watchdog and the absolute budget
+  // timer (both fire escalateKill). Pin BOTH branches: a future edit that
+  // keeps the container removal on only one of them leaks the other's
+  // sandbox while a single-branch test still passes.
+  const runKillPath = (idleTimeoutMs, timeoutMs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-orphan-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'docker'),
+        '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
+      );
+      chmodSync(join(bin, 'docker'), 0o755);
+      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // prints it, then the wedge shape: one line, then silence.
+      const stub = join(dir, 'qwen');
+      writeFileSync(
+        stub,
+        '#!/bin/bash\necho "ContainerName (regular): qwen-code-9.9.9-9" >&2\nsleep 600\n',
+      );
+      chmodSync(stub, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve(autofixRunnerScriptPath),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          stub,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            PATH: `${bin}:${process.env.PATH}`,
+            QWEN_IDLE_TIMEOUT_MS: idleTimeoutMs,
+            QWEN_TIMEOUT_MS: timeoutMs,
+          },
+        },
+      );
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        calls: existsSync(join(workdir, 'docker-calls.txt'))
+          ? readFileSync(join(workdir, 'docker-calls.txt'), 'utf8').trim()
+          : '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('an idle kill removes only the running sandbox its own agent launched', () => {
+    // The startup reaper stays restricted to exited/dead containers (a
+    // running one can belong to a concurrent job on another registration),
+    // so the running orphan a kill creates is removed by the kill path
+    // itself: run-agent.mjs captures the container name its child's
+    // launcher printed and force-removes exactly that one.
+    const r = runKillPath('1200', '60000');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // The ONLY docker call is the owned container's removal.
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+
+  it('a budget kill removes only the running sandbox its own agent launched', () => {
+    // The idle window sits far above the absolute budget, so the budget
+    // timer is the branch that fires here (the idle variant above pins the
+    // shared kill path from the other side).
+    const r = runKillPath('600000', '1200');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('timeout (1200ms)');
+    expect(r.failure).not.toContain('idle-timeout');
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
   });
 });

@@ -97,6 +97,28 @@ export interface ReviewBudget {
    * crawl only feeds the wall clock.
    */
   agentToolBudget: number;
+  /**
+   * The reverse-audit loop's round cap: the full `MAX_REVERSE_AUDIT_ROUNDS`
+   * normally, or a reduced `HUGE_REVERSE_AUDIT_ROUNDS` for a diff large
+   * enough that the full loop cannot finish inside any budget.
+   *
+   * A reverse-audit round re-reads the whole diff against a growing
+   * findings list, so its cost scales with the diff — measured at ~90
+   * minutes a round on a 4,000-line PR, where the full five rounds alone
+   * (450 min) exceed the six-hour CI ceiling before the fan-out and tail
+   * are even counted. In a time-budgeted CI run the deadline gate already
+   * refuses a round that will not fit; this static cap is the belt it works
+   * under and the ONLY bound a local run (no deadline) has. Reduced to
+   * three, not two — not because two cannot converge (the all-dry
+   * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
+   * cap of two or more, since the convergence check runs before the cap
+   * gate) but to buy hot chunks one extra audit round before the cap.
+   *
+   * The budget tunes how many rounds the loop runs, never whether it runs:
+   * the reverse audit is a dimension of the high-effort contract. The CLI
+   * only ever writes three or five here.
+   */
+  reverseAuditRounds: number;
 }
 
 /**
@@ -104,6 +126,35 @@ export interface ReviewBudget {
  * it is the first pass again.
  */
 const SWEEP_FLOOR = 25;
+
+/**
+ * The reverse-audit loop's full round cap (SKILL.md Step 5's "stop at the
+ * plan's `reverseAuditRounds` cap"). The normal value; a huge diff gets
+ * `HUGE_REVERSE_AUDIT_ROUNDS` instead. `retirement.ts` re-exports it.
+ */
+export const MAX_REVERSE_AUDIT_ROUNDS = 5;
+
+/**
+ * The reduced cap for a huge diff — three, one audit round above the
+ * convergence floor of two, spent on hot chunks before the cap stops the
+ * loop. Not a convergability minimum: the all-dry rounds-1-and-2 shape
+ * reaches CONVERGED under any cap of two or more, because the reverse
+ * audit's convergence check runs before the round-cap gate.
+ */
+export const HUGE_REVERSE_AUDIT_ROUNDS = 3;
+
+/**
+ * The effective-line threshold above which a diff is "huge": its reverse
+ * audit is capped and its Agent 8 specialists are shed. Set from the
+ * timeout survey — the 6-hour CI reviews that ran to zero posted output
+ * were 4,000-5,300 line PRs (a single reverse-audit round already ~90 min);
+ * 3,000 triggers with margin below that band while leaving the full loop
+ * for the common case. `effective` (the plan's source-weighted line-span
+ * measure) slightly over-counts against source body lines, which only ever
+ * makes this fire a little EARLIER — the safe direction for a
+ * finishability gate.
+ */
+const HUGE_DIFF_FLOOR = 3000;
 
 /** Below this, "one domain dominates the diff" is not a finding about the diff. */
 const SPECIALIST_FLOOR = 80;
@@ -158,14 +209,49 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
   return {
     inlineAngles,
     sweep: effective >= SWEEP_FLOOR,
-    specialistCap: src >= SPECIALIST_FLOOR ? 2 : 0,
+    // Agent 8 sheds in the huge zone. A specialist is a whole-diff pass on
+    // top of the base fan-out, and on a diff too big to finish that extra
+    // pass is the marginal cost that guarantees zero posted output — while
+    // the per-chunk fan-out already covers the ground. Finishability over
+    // an added depth pass, in exactly the band where the review otherwise
+    // posts nothing.
+    specialistCap:
+      src >= SPECIALIST_FLOOR && effective < HUGE_DIFF_FLOOR ? 2 : 0,
     verifyShard: VERIFY_SHARD,
     agentToolBudget: clamp(
       MIN_AGENT_TOOL_BUDGET + Math.floor(effective / LINES_PER_TOOL_CALL),
       MIN_AGENT_TOOL_BUDGET,
       MAX_AGENT_TOOL_BUDGET,
     ),
+    reverseAuditRounds:
+      effective >= HUGE_DIFF_FLOOR
+        ? HUGE_REVERSE_AUDIT_ROUNDS
+        : MAX_REVERSE_AUDIT_ROUNDS,
   };
+}
+
+/**
+ * The reverse-audit round cap a plan's budget carries, for every reader
+ * that enforces or narrates it (the admission gate, the retirement
+ * scheduler, the cold-check note). A plan without the field — an older
+ * CLI — or a garbled value reads as the full cap: an old plan errs toward
+ * more auditing, never less, exactly like every other budget fallback.
+ *
+ * The accepted range is floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the
+ * smallest cap the CLI ever writes. A value of one or two is out of band
+ * (a hand-edited plan): honouring it would force a non-converged round-cap
+ * stop where the full loop would have kept auditing, so it too falls back
+ * to the full cap — never less.
+ */
+export function reverseAuditRoundCap(budget: unknown): number {
+  const v = (budget as { reverseAuditRounds?: unknown } | undefined)
+    ?.reverseAuditRounds;
+  return typeof v === 'number' &&
+    Number.isInteger(v) &&
+    v >= HUGE_REVERSE_AUDIT_ROUNDS &&
+    v <= MAX_REVERSE_AUDIT_ROUNDS
+    ? v
+    : MAX_REVERSE_AUDIT_ROUNDS;
 }
 
 /**
@@ -254,8 +340,13 @@ export function launchToolBudget(
  *    disclosures, and a disclosure lost to a bullet is unobservable —
  *    nothing downstream can tell "no gaps" from "gaps we failed to parse".
  */
+// Linear-by-construction, for the same reason the scan is line-based: the
+// bullet's leading whitespace rides INSIDE the optional group (no
+// overlapping `[ \t]*` pair), and the gap capture is greedy to the end of
+// a pre-trimmed line (no lazy-dot vs trailing-whitespace pair) — gap lines
+// carrying long whitespace runs must not stall the parse.
 const BUDGET_GAP_LINE_RE =
-  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*(`?)[*_~]{0,3}(?:budget gap|预算(?:缺口|不足|用尽))[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+?)[ \t]*$/i;
+  /^(?:[ \t]*(?:[-*+]|\d+[.)]))?[ \t]*(`?)[*_~]{0,3}(?:budget gap|预算(?:缺口|不足|用尽))[*_~]{0,3}[ \t]*[:：][*_~]{0,3}[ \t]*(.+)$/i;
 
 /** A cheap pre-filter so the line walk skips returns with nothing to find. */
 const GAP_HINT_RE = /budget gap|预算(?:缺口|不足|用尽)/i;
@@ -273,15 +364,49 @@ export const INLINE_BUDGET_GAP_RE =
   /(?:budget gap|预算(?:缺口|不足|用尽))[*_~`]{0,3}[ \t]*[:：]/i;
 
 /**
- * Templates and non-answers that must not become gaps someone rules on.
- * Tested against the gap with trailing punctuation stripped, and matched on
- * the LEADING token — `none.`, `None (all checks completed)` and
- * `N/A - stayed under budget` are all the agent saying it has nothing to
- * disclose, and a phantom gap costs real rounds downstream (a chunk that
- * never retires, a body that discloses "None." on an Approve).
+ * Templates and non-answers that must not become gaps someone rules on —
+ * the agent saying it has nothing to disclose. A phantom gap costs real
+ * rounds downstream (a chunk that never retires, a body that discloses
+ * "None." on an Approve), so these shapes are dropped.
+ *
+ * One classifier judges the paren-stripped text, bare and wrapped alike:
+ * #8388's posted body disclosed `(none — all planned checks completed)`
+ * because a leading `(` defeated the match, and a bare-vs-wrapped split
+ * judgment let the two forms diverge on identical content. The vocabulary
+ * lives in this one regex for the same reason.
+ *
+ * The shapes are deliberately NARROW, because the two errors are not
+ * symmetric: dropping a REAL gap certifies work that never happened (the
+ * failure #8388's body shipped), while keeping a placeholder only
+ * over-discloses. Anything outside them survives as a gap:
+ *
+ *  - the brief's own `<the check>` template, and dash-only text — both
+ *    end-anchored, so inner text merely STARTING with them keeps;
+ *  - a bare placeholder token in any trailing punctuation (`none`,
+ *    `None.`, `no gaps`), and the non-answer idioms `nothing skipped`,
+ *    `none found`, `nothing to report`;
+ *  - the stayed-under-budget idiom, end-anchored like its siblings
+ *    (`N/A - stayed under budget`); text continuing past `budget` keeps
+ *    (`N/A - stayed under budget, but the Windows matrix never ran`);
+ *  - the completion idiom — token, dash, an "all done" head, then a
+ *    completion word the text ENDS with (`none — all planned checks
+ *    completed`). The head alone is not completion (`none — all 5
+ *    Windows checks failed to start` keeps), the completion word must be
+ *    AFFIRMED (`none — all checks crashed, none completed` keeps), and
+ *    the span must not cross an exception (`none — all but the Windows
+ *    checks completed` keeps);
+ *  - a token followed by a parenthesized completion clause (`None (all
+ *    checks completed)`), inner padding tolerated — under the same
+ *    negation and exception guards.
+ *
+ * No two quantifiers overlap on whitespace: a placeholder token followed
+ * by a long whitespace run must stay linear (the module header's hazard
+ * note applies — this parse runs on every agent return). The completion
+ * spans are tempered (a per-character exception lookahead), which keeps
+ * them linear too.
  */
 const PLACEHOLDER_GAP_RE =
-  /^(?:<[^>]*>|none\b.*|n\/a\b.*|nothing\b.*|no (?:gaps?|checks?)\b.*|[-—*_~`]+)$/i;
+  /^(?:<[^>]*>$|[-—*_~`]+$|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b(?:[.!…,;:\s]*$|\s+(?:skipped|found|to report)\b[.!…,;:\s]*$|\s*[-—–]\s*(?:stayed\s+(?:under|within|below)\s+budget\b[.!…,;:\s]*$|(?:all|every(?:thing)?|planned|further|no further)\b(?:(?!\b(?:but|except|excepting|excluding)\b).)*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*$)|\s*\(\s*(?:all|every(?:thing)?)\b(?:(?!\b(?:but|except|excepting|excluding)\b)[^()])*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*\)\s*$))/i;
 
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;
@@ -327,6 +452,18 @@ function stripWrappers(s: string): string {
   return out;
 }
 
+const TRAILING_GAP_CHAR_RE = /[.!…,;:\s]/;
+
+/** Trailing punctuation/whitespace strip for the normalize and fold keys. */
+function stripTrailingGapChars(s: string): string {
+  // Walked backwards rather than replaced with an end-anchored class run:
+  // that shape backtracks quadratically when a long run fails to reach
+  // the end.
+  let end = s.length;
+  while (end > 0 && TRAILING_GAP_CHAR_RE.test(s.charAt(end - 1))) end--;
+  return s.slice(0, end);
+}
+
 /** Truncate on code points — a slice through a surrogate pair is mojibake. */
 function truncateGap(s: string): string {
   const points = [...s];
@@ -361,8 +498,11 @@ export function budgetGapDisclosures(finalText: string): string[] {
     if (/^[ \t]*>/.test(line)) continue;
     // Sanitized BEFORE matching: U+2028/29 are line terminators to the
     // regex dot, and a gap carrying one would otherwise fail the match and
-    // vanish — silent loss in a channel whose promise is delivery.
-    const m = BUDGET_GAP_LINE_RE.exec(line.replace(DANGEROUS_CHARS_RE, ' '));
+    // vanish — silent loss in a channel whose promise is delivery. The
+    // pre-trim keeps the greedy end-anchored capture's code-span
+    // `endsWith` semantics on lines with trailing whitespace.
+    const sanitized = line.replace(DANGEROUS_CHARS_RE, ' ').trimEnd();
+    const m = BUDGET_GAP_LINE_RE.exec(sanitized);
     if (!m) continue;
     // A line written as a code span (`Budget gap: …`) is only taken when
     // the backtick closes — and then unwrapped with its partner, so a
@@ -373,11 +513,20 @@ export function budgetGapDisclosures(finalText: string): string[] {
       raw = raw.slice(0, -1);
     }
     raw = stripWrappers(raw.trim()).trim();
-    const normalized = raw.replace(/[.!…,;:\s]+$/, '').trim();
-    if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(normalized)) {
+    const normalized = stripTrailingGapChars(raw).trim();
+    // Judged on the paren-stripped text, bare and wrapped alike, by the
+    // one strict classifier — its doc names why the shapes are narrow.
+    const unparenthesized =
+      normalized.startsWith('(') && normalized.endsWith(')')
+        ? normalized.slice(1, -1).trim()
+        : normalized;
+    if (normalized.length === 0 || PLACEHOLDER_GAP_RE.test(unparenthesized)) {
       continue;
     }
-    const key = normalized.toLowerCase();
+    // Folded on the paren-stripped text with its OWN trailing punctuation
+    // gone, so one gap restated with and without parentheses — `(auth
+    // flow untested.)` and `auth flow untested` — discloses once.
+    const key = stripTrailingGapChars(unparenthesized).toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     gaps.push(truncateGap(raw));

@@ -27,6 +27,7 @@ function setStatus(kind, heading, message, failure = '') {
   error.style.display = failure ? 'block' : 'none';
   error.textContent = failure;
   retry.hidden = kind !== 'error';
+  choose.hidden = kind === 'starting';
   choose.disabled = kind === 'starting';
 }
 
@@ -40,7 +41,8 @@ async function chooseWorkspace() {
   try {
     const path = await invoke('choose_workspace');
     if (path) setWorkspace(path);
-    else setStatus('idle', 'Choose where to work', 'No folder was selected.');
+    else
+      setStatus('idle', 'Choose another workspace', 'No folder was selected.');
   } catch (failure) {
     setStatus(
       'error',
@@ -120,13 +122,6 @@ async function initialize() {
   }
 
   await Promise.all([
-    listen('workspace-required', () => {
-      setStatus(
-        'idle',
-        'Choose where to work',
-        'Qwen Code runs locally and keeps the existing Web Shell as the only interface.',
-      );
-    }),
     listen('runtime-starting', ({ payload }) => {
       setWorkspace(payload);
       setStatus(
@@ -175,8 +170,8 @@ async function initialize() {
   } else {
     setStatus(
       'idle',
-      'Choose where to work',
-      'Qwen Code runs locally and keeps the existing Web Shell as the only interface.',
+      'Choose another workspace',
+      'The automatic workspace did not start.',
     );
   }
 }
