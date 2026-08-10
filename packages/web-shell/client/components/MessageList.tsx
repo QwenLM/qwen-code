@@ -641,16 +641,8 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   }
 }
 
-function isMidTurnInjectedDebugMessage(message: {
-  content?: string;
-  source?: string;
-}): boolean {
-  return (
-    message.source === 'mid_turn_message_injected' ||
-    message.content?.startsWith(
-      'mid_turn_message_injected (unrecognized daemon event):',
-    ) === true
-  );
+function isMidTurnInjectedDebugMessage(message: { source?: string }): boolean {
+  return message.source === 'mid_turn_message_injected';
 }
 
 export function getTurnTimelineNode(

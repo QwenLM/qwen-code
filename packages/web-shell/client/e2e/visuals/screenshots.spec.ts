@@ -1093,6 +1093,134 @@ for (const theme of THEMES) {
         ),
       ).toBeVisible();
       await captureScreenshot(page, `code-review-artifact-${theme}`);
+
+      // Fullscreen is only reachable once the panel is open; without
+      // expanding it here, the toggle and the fullscreen surface stay
+      // invisible to the before/after preview.
+      await page
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Exit fullscreen', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-fullscreen-${theme}`);
+
+      // Escape shrinks the panel back to its dock. Assert the restore
+      // path without a second capture: the docked layout is the same
+      // view as the code-review-artifact shot above.
+      await page.keyboard.press('Escape');
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Fullscreen', exact: true }),
+      ).toBeVisible();
+    });
+
+    test(`drawer fullscreen`, async ({ page }, testInfo) => {
+      // The floating drawer's fullscreen path is styled independently of the
+      // docked surface (width, rounding, borders, safe-area padding); at a
+      // narrow viewport the panel floats, so capture it there.
+      const reportPath = 'reports/summary.json';
+      const reportJson = JSON.stringify({
+        summary: 'Drawer fullscreen visual check',
+      });
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Open the saved report.', { id: 1 }),
+          {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'call-record-report',
+                toolName: 'record_artifact',
+                title: 'record_artifact',
+                kind: 'other',
+                status: 'completed',
+                rawInput: {
+                  title: 'Summary report',
+                  workspacePath: reportPath,
+                },
+                rawOutput: { recorded: true },
+              },
+            },
+          },
+          assistantTextEvent('Report saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-drawer', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-report',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Summary report',
+            workspacePath: reportPath,
+            mimeType: 'application/json',
+            sizeBytes: reportJson.length,
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-report',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reportPath]: reportJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Below the (min-width: 1001px) dock breakpoint the panel floats in a
+      // drawer instead of docking.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      const drawerAside = page.locator(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      );
+      await expect(drawerAside).toBeVisible();
+
+      await drawerAside
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('aside[class*="panelFullscreen"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `drawer-fullscreen-${theme}`);
+
+      // Escape shrinks the surface back to the drawer width; the drawer
+      // itself stays open.
+      await page.keyboard.press('Escape');
+      await expect(page.locator('aside[class*="panelFullscreen"]')).toHaveCount(
+        0,
+      );
+      await expect(drawerAside).toBeVisible();
     });
   });
 }

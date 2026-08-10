@@ -380,20 +380,25 @@ const SESSION_DRAIN_TIMEOUT_MS = 30_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
-type AcpSessionStartStage =
+type AcpSessionProfileStage =
   | 'settings_load'
+  | 'live_restore'
+  | 'existence_check'
   | 'config_setup'
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
   | 'response_build';
 
-interface AcpSessionStartSpan {
+interface AcpSessionProfileSpan {
   setAttribute(name: string, value: string | number | boolean): unknown;
 }
 
-function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
-  let failedStage: AcpSessionStartStage | undefined;
+function createAcpSessionProfiler(
+  span: AcpSessionProfileSpan | undefined,
+  attributePrefix: 'session_start' | 'session_restore',
+) {
+  let failedStage: AcpSessionProfileStage | undefined;
   const setAttribute = (
     name: string,
     value: string | number | boolean,
@@ -401,24 +406,30 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     try {
       span?.setAttribute(name, value);
     } catch {
-      // Telemetry must not affect session creation.
+      // Telemetry must not affect session creation or restore.
     }
   };
-  const recordStage = (stage: AcpSessionStartStage, start: number): void => {
+  const recordStage = (stage: AcpSessionProfileStage, start: number): void => {
     const durationMs = Math.round((performance.now() - start) * 100) / 100;
     if (Number.isFinite(durationMs) && durationMs >= 0) {
-      setAttribute(`qwen-code.daemon.session_start.${stage}_ms`, durationMs);
+      setAttribute(
+        `qwen-code.daemon.${attributePrefix}.${stage}_ms`,
+        durationMs,
+      );
     }
   };
-  const recordFailure = (stage: AcpSessionStartStage): void => {
+  const recordFailure = (stage: AcpSessionProfileStage): void => {
     if (failedStage !== undefined) return;
     failedStage = stage;
-    setAttribute('qwen-code.daemon.session_start.failed_stage', stage);
+    setAttribute(`qwen-code.daemon.${attributePrefix}.failed_stage`, stage);
   };
 
   return {
+    fail(stage: AcpSessionProfileStage): void {
+      recordFailure(stage);
+    },
     async time<T>(
-      stage: AcpSessionStartStage,
+      stage: AcpSessionProfileStage,
       fn: () => T | Promise<T>,
     ): Promise<T> {
       if (!span) return await fn();
@@ -432,7 +443,7 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
         recordStage(stage, start);
       }
     },
-    timeSync<T>(stage: AcpSessionStartStage, fn: () => T): T {
+    timeSync<T>(stage: AcpSessionProfileStage, fn: () => T): T {
       if (!span) return fn();
       const start = performance.now();
       try {
@@ -449,6 +460,22 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     },
   };
 }
+
+function createAcpSessionStartProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_start');
+}
+
+function createAcpSessionRestoreProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_restore');
+}
+
+type AcpSessionRestoreProfiler = ReturnType<
+  typeof createAcpSessionRestoreProfiler
+>;
 
 function workspaceMemoryErrorData(
   code: string,
@@ -4848,117 +4875,158 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    let sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_load',
+        'qwen-code.daemon.session_restore.action': 'load',
+        'session.id': sessionId,
+      },
+      async (span) =>
+        this.loadSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
+      parentContext ? { parentContext } : {},
+    );
+  }
+
+  private async loadSessionWithProfiler(
+    params: LoadSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<LoadSessionResponse> {
+    let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
-      const settings = loadSettingsCached(params.cwd);
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        sessionId,
-        liveSession,
-        async (config, sessionData) => {
-          const response: LoadSessionResponse = {
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          } as LoadSessionResponse;
-          const records = sessionData.conversation.messages;
-          const visibleRecords = selectVisibleHistoryRecords(
-            records,
-            shouldHideInheritedHistory(params),
-          );
-          if (visibleRecords.length === 0) return response;
-
-          const bulkReplay = isBulkLoadReplayRequest(params);
-          const replayPage = bulkReplay
-            ? selectRecentHistoryRecords(
-                visibleRecords,
-                getLoadReplayPageSize(params),
-              )
-            : { records: visibleRecords, hasMore: false };
-          const replay = await collectHistoryReplayUpdates({
-            sessionId,
-            config,
-            records: replayPage.records,
-            gaps: sessionData.historyGaps,
-            cumulativeUsage: createReplayCumulativeUsage(),
-            logger: debugLogger,
-          });
-          if (!bulkReplay) {
-            try {
-              for (const update of replay.updates) {
-                await liveSession.sendUpdate(update);
-              }
-            } finally {
-              // Replayed plan updates re-stamp the revision via sendUpdate;
-              // drop it so a replayed snapshot cannot bind a later approval
-              // (same rule Session.replayHistory applies to cold loads),
-              // even if delivery fails part-way. The bulk path keeps a live
-              // binding on purpose: it hands the updates to the client
-              // instead of replaying them through this session.
-              liveSession.clearActiveTodoPlanRevision();
-            }
-            if (replay.replayError !== undefined) {
-              throw RequestError.internalError(undefined, replay.replayError);
-            }
-            return response;
-          }
-
-          return {
-            ...response,
-            _meta: {
-              [LOAD_REPLAY_META_KEY]: {
-                v: LOAD_REPLAY_VERSION,
-                updates: replay.updates,
-                ...(replay.replayError !== undefined
-                  ? { partial: true as const, replayError: replay.replayError }
-                  : {}),
-                ...(replayPage.hasMore ? { hasMore: true as const } : {}),
-              },
-            },
-          };
-        },
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
       );
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          async (config, sessionData) => {
+            const response = profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(sessionData.artifactSnapshot
+                    ? { artifactSnapshot: sessionData.artifactSnapshot }
+                    : {}),
+                }) as LoadSessionResponse,
+            );
+            const records = sessionData.conversation.messages;
+            const visibleRecords = selectVisibleHistoryRecords(
+              records,
+              shouldHideInheritedHistory(params),
+            );
+            if (visibleRecords.length === 0) return response;
+
+            const bulkReplay = isBulkLoadReplayRequest(params);
+            const replayPage = bulkReplay
+              ? selectRecentHistoryRecords(
+                  visibleRecords,
+                  getLoadReplayPageSize(params),
+                )
+              : { records: visibleRecords, hasMore: false };
+            const replay = await collectHistoryReplayUpdates({
+              sessionId,
+              config,
+              records: replayPage.records,
+              gaps: sessionData.historyGaps,
+              cumulativeUsage: createReplayCumulativeUsage(),
+              logger: debugLogger,
+            });
+            if (!bulkReplay) {
+              try {
+                for (const update of replay.updates) {
+                  await liveSession.sendUpdate(update);
+                }
+              } finally {
+                // Replayed plan updates re-stamp the revision via sendUpdate;
+                // drop it so a replayed snapshot cannot bind a later approval
+                // (same rule Session.replayHistory applies to cold loads),
+                // even if delivery fails part-way. The bulk path keeps a live
+                // binding on purpose: it hands the updates to the client
+                // instead of replaying them through this session.
+                liveSession.clearActiveTodoPlanRevision();
+              }
+              if (replay.replayError !== undefined) {
+                throw RequestError.internalError(undefined, replay.replayError);
+              }
+              return response;
+            }
+
+            return {
+              ...response,
+              _meta: {
+                [LOAD_REPLAY_META_KEY]: {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: replay.updates,
+                  ...(replay.replayError !== undefined
+                    ? {
+                        partial: true as const,
+                        replayError: replay.replayError,
+                      }
+                    : {}),
+                  ...(replayPage.hasMore ? { hasMore: true as const } : {}),
+                },
+              },
+            };
+          },
+        );
+      });
     }
     const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
     try {
       // Load per-request settings only after reserving a non-live id. The check
       // must resolve `advanced.runtimeOutputDir` from this request's cwd.
-      const settings = loadSettingsCached(params.cwd);
-      const persistedSessionId = await this.runWithPinnedRuntimeBaseDir(
-        settings,
-        params.cwd,
-        async () => {
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) return sessionId;
+          if (await sessionService.sessionExists(sessionId)) {
+            return sessionId;
+          }
           return sessionService.findSessionIdIgnoringCase?.(sessionId);
-        },
+        }),
       );
       if (!persistedSessionId) {
+        profiler.fail('existence_check');
         throw RequestError.resourceNotFound(`session:${sessionId}`);
       }
       sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
       // Adopt into the "latest loaded" cache only once the session is
       // confirmed — a failed probe for a stale id must not repoint
       // agent-level readers at this request's workspace.
       this.settings = settings;
 
-      const config = await this.newSessionConfig(
-        params.cwd,
-        // `LoadSessionRequest.mcpServers` is required in today's ACP
-        // schema, but mirror `unstable_resumeSession` and tolerate a
-        // future loosening — `newSessionConfig` iterates the list, so
-        // a `null`/`undefined` would otherwise throw `TypeError`.
-        params.mcpServers ?? [],
-        settings,
-        sessionSource,
-        sessionId,
-        true,
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          // `LoadSessionRequest.mcpServers` is required in today's ACP
+          // schema, but mirror `unstable_resumeSession` and tolerate a
+          // future loosening — `newSessionConfig` iterates the list, so
+          // a `null`/`undefined` would otherwise throw `TypeError`.
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+        ),
       );
       const sessionData = config.getResumedSessionData();
       const bulkReplay = isBulkLoadReplayRequest(params);
@@ -4967,68 +5035,75 @@ class QwenAgent implements Agent {
         : undefined;
       let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
       try {
-        await this.ensureAuthenticated(config);
-        this.setupFileSystem(config);
-        await this.createAndStoreSession(config, settings, sessionData, {
-          enableLiveScreenContext: isCompatibleLiveSessionSource(
-            sessionSource ?? {},
-          ),
-          ...(bulkReplay ? { replayHistory: false } : {}),
-          beforeStartPostReplayServices: async (createdSession) => {
-            if (bulkReplay) {
-              const records = sessionData?.conversation.messages;
-              let replayUpdates: SessionUpdate[] = [];
-              if (records) {
-                createdSession.primeTurnFromHistory(records);
-                const visibleRecords = selectVisibleHistoryRecords(
-                  records,
-                  shouldHideInheritedHistory(params),
-                );
-                const replayPage = selectRecentHistoryRecords(
-                  visibleRecords,
-                  replayPageSize,
-                );
-                const replayUsage = createReplayCumulativeUsage();
-                const replay = await collectHistoryReplayUpdates({
-                  sessionId,
-                  config,
-                  records: replayPage.records,
-                  gaps: sessionData?.historyGaps,
-                  cumulativeUsage: replayUsage,
-                  supersedeUnrestorableGoal: true,
-                  logger: debugLogger,
-                });
-                replayUpdates = replay.updates;
-                copyCumulativeUsage(
-                  createdSession.cumulativeUsage,
-                  replayUsage,
-                );
-                if (replay.replayError !== undefined) {
-                  replayEnvelope = {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings, sessionData, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            ...(bulkReplay ? { replayHistory: false } : {}),
+            beforeStartPostReplayServices: async (createdSession) => {
+              if (bulkReplay) {
+                const records = sessionData?.conversation.messages;
+                let replayUpdates: SessionUpdate[] = [];
+                if (records) {
+                  createdSession.primeTurnFromHistory(records);
+                  const visibleRecords = selectVisibleHistoryRecords(
+                    records,
+                    shouldHideInheritedHistory(params),
+                  );
+                  const replayPage = selectRecentHistoryRecords(
+                    visibleRecords,
+                    replayPageSize,
+                  );
+                  const replayUsage = createReplayCumulativeUsage();
+                  const replay = await collectHistoryReplayUpdates({
+                    sessionId,
+                    config,
+                    records: replayPage.records,
+                    gaps: sessionData?.historyGaps,
+                    cumulativeUsage: replayUsage,
+                    supersedeUnrestorableGoal: true,
+                    logger: debugLogger,
+                  });
+                  replayUpdates = replay.updates;
+                  copyCumulativeUsage(
+                    createdSession.cumulativeUsage,
+                    replayUsage,
+                  );
+                  if (replay.replayError !== undefined) {
+                    replayEnvelope = {
+                      v: LOAD_REPLAY_VERSION,
+                      updates: replayUpdates,
+                      partial: true,
+                      replayError: replay.replayError,
+                      ...(replayPage.hasMore ? { hasMore: true } : {}),
+                    };
+                  }
+                  replayEnvelope ??= {
                     v: LOAD_REPLAY_VERSION,
                     updates: replayUpdates,
-                    partial: true,
-                    replayError: replay.replayError,
                     ...(replayPage.hasMore ? { hasMore: true } : {}),
                   };
                 }
                 replayEnvelope ??= {
                   v: LOAD_REPLAY_VERSION,
                   updates: replayUpdates,
-                  ...(replayPage.hasMore ? { hasMore: true } : {}),
                 };
               }
-              replayEnvelope ??= {
-                v: LOAD_REPLAY_VERSION,
-                updates: replayUpdates,
-              };
-            }
 
-            await this.#restoreWorktreeOnResume(config, createdSession);
-            await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-            this.#restoreGoalOnResume(config, createdSession);
-          },
-        });
+              await this.#restoreWorktreeOnResume(config, createdSession);
+              await this.#restoreBackgroundAgentsOnResume(
+                config,
+                createdSession,
+              );
+              this.#restoreGoalOnResume(config, createdSession);
+            },
+          }),
+        );
       } catch (error) {
         return this.cleanupAfterRequestFailure(error, async () => {
           if (
@@ -5038,27 +5113,23 @@ class QwenAgent implements Agent {
           }
         });
       }
-      const modesData = this.buildModesData(config);
-      const availableModels = this.buildAvailableModels(config);
-      const configOptions = this.buildConfigOptions(config);
-
-      const response: LoadSessionResponse = {
-        modes: modesData,
-        models: availableModels,
-        configOptions,
-        ...(sessionData?.artifactSnapshot
-          ? { artifactSnapshot: sessionData.artifactSnapshot }
-          : {}),
-      } as LoadSessionResponse;
-      if (!replayEnvelope) {
-        return response;
-      }
-      return {
-        ...response,
-        _meta: {
-          [LOAD_REPLAY_META_KEY]: replayEnvelope,
-        },
-      };
+      return profiler.timeSync('response_build', () => {
+        const response: LoadSessionResponse = {
+          modes: this.buildModesData(config),
+          models: this.buildAvailableModels(config),
+          configOptions: this.buildConfigOptions(config),
+          ...(sessionData?.artifactSnapshot
+            ? { artifactSnapshot: sessionData.artifactSnapshot }
+            : {}),
+        } as LoadSessionResponse;
+        if (!replayEnvelope) return response;
+        return {
+          ...response,
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: replayEnvelope,
+          },
+        };
+      });
     } finally {
       releaseStartingSessionId();
     }
@@ -5067,75 +5138,117 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    let sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_resume',
+        'qwen-code.daemon.session_restore.action': 'resume',
+        'session.id': sessionId,
+      },
+      async (span) =>
+        this.resumeSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
+      parentContext ? { parentContext } : {},
+    );
+  }
+
+  private async resumeSessionWithProfiler(
+    params: ResumeSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<ResumeSessionResponse> {
+    let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
-      const settings = loadSettingsCached(params.cwd);
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        sessionId,
-        liveSession,
-        async (config, sessionData) =>
-          ({
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          }) as ResumeSessionResponse,
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
       );
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          async (config, sessionData) =>
+            profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(sessionData.artifactSnapshot
+                    ? { artifactSnapshot: sessionData.artifactSnapshot }
+                    : {}),
+                }) as ResumeSessionResponse,
+            ),
+        );
+      });
     }
     const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
     try {
       // Same per-request settings discipline as `loadSession`.
-      const settings = loadSettingsCached(params.cwd);
-      const persistedSessionId = await this.runWithPinnedRuntimeBaseDir(
-        settings,
-        params.cwd,
-        async () => {
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          if (await sessionService.sessionExists(sessionId)) return sessionId;
+          if (await sessionService.sessionExists(sessionId)) {
+            return sessionId;
+          }
           return sessionService.findSessionIdIgnoringCase?.(sessionId);
-        },
+        }),
       );
       if (!persistedSessionId) {
+        profiler.fail('existence_check');
         throw RequestError.resourceNotFound(`session:${sessionId}`);
       }
       sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
       this.settings = settings;
 
-      const config = await this.newSessionConfig(
-        params.cwd,
-        params.mcpServers ?? [],
-        settings,
-        sessionSource,
-        sessionId,
-        true,
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+        ),
       );
       try {
-        await this.ensureAuthenticated(config);
-        this.setupFileSystem(config);
-        await this.createAndStoreSession(
-          config,
-          settings,
-          config.getResumedSessionData(),
-          {
-            enableLiveScreenContext: isCompatibleLiveSessionSource(
-              sessionSource ?? {},
-            ),
-            replayHistory: false,
-            beforeStartPostReplayServices: async (createdSession) => {
-              await this.#restoreWorktreeOnResume(config, createdSession);
-              await this.#restoreBackgroundAgentsOnResume(
-                config,
-                createdSession,
-              );
-              this.#restoreGoalOnResume(config, createdSession);
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(
+            config,
+            settings,
+            config.getResumedSessionData(),
+            {
+              enableLiveScreenContext: isCompatibleLiveSessionSource(
+                sessionSource ?? {},
+              ),
+              replayHistory: false,
+              beforeStartPostReplayServices: async (createdSession) => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+                this.#restoreGoalOnResume(config, createdSession);
+              },
             },
-          },
+          ),
         );
       } catch (error) {
         return this.cleanupAfterRequestFailure(error, async () => {
@@ -5147,19 +5260,19 @@ class QwenAgent implements Agent {
         });
       }
 
-      const modesData = this.buildModesData(config);
-      const availableModels = this.buildAvailableModels(config);
-      const configOptions = this.buildConfigOptions(config);
-
       const sessionData = config.getResumedSessionData();
-      return {
-        modes: modesData,
-        models: availableModels,
-        configOptions,
-        ...(sessionData?.artifactSnapshot
-          ? { artifactSnapshot: sessionData.artifactSnapshot }
-          : {}),
-      } as ResumeSessionResponse;
+      return profiler.timeSync(
+        'response_build',
+        () =>
+          ({
+            modes: this.buildModesData(config),
+            models: this.buildAvailableModels(config),
+            configOptions: this.buildConfigOptions(config),
+            ...(sessionData?.artifactSnapshot
+              ? { artifactSnapshot: sessionData.artifactSnapshot }
+              : {}),
+          }) as ResumeSessionResponse,
+      );
     } finally {
       releaseStartingSessionId();
     }

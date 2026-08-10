@@ -633,6 +633,15 @@ export interface CloseSessionOpts {
    * the close attempt ultimately fails.
    */
   requireAgentClose?: boolean;
+  /**
+   * Bound the agent-close round trip. The close notification is otherwise
+   * unbounded (it only loses to transport close), which is correct for an
+   * ordinary close but not when the caller already has reason to believe the
+   * child cannot answer. A timeout lands in the same unknown-outcome recovery
+   * as any other non-definitive failure: the channel is killed, which is what
+   * unblocks callers waiting on the session to drain.
+   */
+  agentCloseTimeoutMs?: number;
 }
 
 export interface BridgeClientRequestContext {
