@@ -161,6 +161,13 @@ function transcript(
      * clears a path-shaped floor without reading the file.
      */
     mentions?: string[];
+    /**
+     * `[offset, limit]` for the diff reads, making them RANGED — the shape
+     * a compliant agent's reads take, and the only shape `diffReads`
+     * records. The budget-gap tests need it: a disclosing agent's chunk
+     * credit narrows to its ranged reads.
+     */
+    range?: [number, number];
   } = {},
 ): void {
   const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -187,7 +194,18 @@ function transcript(
         message: {
           role: 'model',
           parts: [
-            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+            {
+              functionCall: {
+                name: 'read_file',
+                args: opts.range
+                  ? {
+                      file_path: DIFF,
+                      offset: opts.range[0],
+                      limit: opts.range[1],
+                    }
+                  : { file_path: DIFF },
+              },
+            },
           ],
         },
       }),
@@ -724,6 +742,130 @@ describe('Step 3A — dimension agents, no territory, no receipts', () => {
   });
 });
 
+describe('budget-gap disclosures — guarded, parsed, never punished', () => {
+  it("collects a working agent's gaps under its coverage label", () => {
+    transcript('a1', good(1), {
+      calls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — reviewed chunk 1 end to end.\n' +
+        'Budget gap: callers of parseArgs outside packages/cli\n' +
+        '- Budget gap: the removed retry path in fetch-pr',
+    });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.budgetGaps).toEqual([
+      {
+        agent: 'chunk 1',
+        gaps: [
+          'callers of parseArgs outside packages/cli',
+          'the removed retry path in fetch-pr',
+        ],
+      },
+    ]);
+    // The load-bearing half: this agent READ its territory (the ranged
+    // read), so its disclosure costs nothing — coverage stands and the gate
+    // passes. Failing on disclosure teaches agents not to disclose; the
+    // ruling on each gap belongs to the orchestrator, exactly as with
+    // whiffs.
+    expect(r.coveredChunks).toContain(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it('a disclosure costs no coverage credit — the gate must not punish it', () => {
+    // An earlier draft narrowed a disclosing agent's credit to its ranged
+    // reads. `rangeOf` records only reads carrying a positive `limit`, so
+    // a compliant offset-paged or whole-file read left an honest discloser
+    // with zero credit and a hard gate failure — while an agent that
+    // stopped WITHOUT disclosing kept its full credit. The `told`
+    // presumption is the same for every agent; a disclosed gap changes the
+    // RULING (Step 3D), never the arithmetic.
+    transcript('sec', wholeDiff(), {
+      calls: 1,
+      text: 'Walked what I could.\nBudget gap: chunk 2 exploration depth',
+    });
+
+    const r = coverageFromTranscripts(plan3a(), ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+    expect(r.budgetGaps).toHaveLength(1);
+  });
+
+  it("a gap-free compliant relaunch silences the failed attempt's gaps", () => {
+    // The repair pattern: attempt 1 hits the ceiling and discloses,
+    // attempt 2 (same verbatim prompt) finishes clean. Reporting attempt
+    // 1's stale gaps beside the repair would keep the report from ever
+    // converging — the same rule every failure flag in this file follows.
+    transcript('try1', good(1), {
+      calls: 2,
+      text: 'Partial.\nBudget gap: the rest of chunk 1',
+    });
+    transcript('try2', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+    const p = plan();
+    writeFileSync(join(promptRecordDir(p), 'chunk-1.txt'), good(1));
+
+    expect(coverageFromTranscripts(p, ENV).budgetGaps).toEqual([]);
+  });
+
+  it('two disclosing relaunches must not supersede each other into silence', () => {
+    // Both attempts hit the ceiling and both disclosed. Mutual
+    // supersession would drop every gap — nobody rules, nothing renders,
+    // and a required-trace gap never caps the verdict. Suppression
+    // requires a GAP-FREE superseding record: a genuine repair.
+    transcript('try1', good(1), {
+      calls: 2,
+      text: 'Partial.\nBudget gap: the callers of the renamed export',
+    });
+    transcript('try2', good(1), {
+      calls: 2,
+      text: 'Partial again.\nBudget gap: the callers of the renamed export',
+    });
+    transcript('a2', good(2), { calls: 2 });
+    const p = plan();
+    writeFileSync(join(promptRecordDir(p), 'chunk-1.txt'), good(1));
+
+    const gaps = coverageFromTranscripts(p, ENV).budgetGaps;
+    expect(gaps.length).toBeGreaterThan(0);
+    expect(gaps[0].gaps).toEqual(['the callers of the renamed export']);
+  });
+
+  it('does not credit an idle agent that copied the template back', () => {
+    // The brief hands every agent the literal `Budget gap: <the check>`
+    // format — the costume is issued with the uniform. A zero-tool-call
+    // agent's disclosure is the whiff wearing it.
+    transcript('idle1', good(1), {
+      calls: 0,
+      text: 'No issues found — thorough review.\nBudget gap: deeper caller tracing',
+    });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.idleAgents).toEqual(['chunk 1']);
+    expect(r.budgetGaps).toEqual([]);
+  });
+
+  it('does not credit a blind agent with a disclosed gap either', () => {
+    transcript('blind1', blind(1), {
+      calls: 2,
+      text: 'Reviewed.\nBudget gap: the other half of the chunk',
+    });
+    transcript('a2', good(2), { calls: 2, range: [100, 100] });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.blindAgents).toEqual(['chunk 1']);
+    expect(r.budgetGaps).toEqual([]);
+  });
+
+  it('reports none when nobody disclosed one', () => {
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    expect(coverageFromTranscripts(plan(), ENV).budgetGaps).toEqual([]);
+  });
+});
+
 describe('worked, but not on the diff', () => {
   it('catches the agent that was pointed at the diff and never opened it', () => {
     // The old bar was one successful tool call, and a `glob` for test files is a
@@ -981,6 +1123,53 @@ describe('the roster — who should have been here', () => {
         .find((l) => l.includes('required briefs never reached'));
       expect(roleError).toBeDefined();
       expect(roleError).toContain(`Looked for them in: ${promptRecordDir(p)}`);
+    } finally {
+      process.exitCode = prevExit;
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+  });
+
+  it('prints the budget-gap NOTE with its directives before the agent text', () => {
+    // stderr is the interface the orchestrator acts on, and this NOTE is
+    // the only channel telling it not to relaunch and how to rule each
+    // gap. The directive-before-disclosure ordering is deliberate —
+    // instructions that follow quoted material can be impersonated by it —
+    // and a disclosure must never move the exit code.
+    transcript('a1', good(1), {
+      calls: 3,
+      text: 'No issues found — walked it.\nBudget gap: the removed retry path',
+    });
+    transcript('a2', good(2), { calls: 2 });
+    const p = plan();
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    const prevExit = process.exitCode;
+    try {
+      vi.mocked(writeStderrLine).mockClear();
+      (checkCoverageCommand.handler as (a: Record<string, unknown>) => void)({
+        plan: p,
+        out: join(dir, 'cov.json'),
+      });
+
+      const note = vi
+        .mocked(writeStderrLine)
+        .mock.calls.map((c) => String(c[0]))
+        .find((l) => l.includes('budget-gap disclosure(s)'));
+      expect(note).toBeDefined();
+      expect(note).toContain(
+        'NOTE: 1 budget-gap disclosure(s) from 1 agent(s)',
+      );
+      expect(note).toContain('chunk 1: the removed retry path');
+      expect(note!.indexOf('Do not relaunch over these')).toBeLessThan(
+        note!.indexOf('chunk 1: the removed retry path'),
+      );
+      expect(process.exitCode).toBe(prevExit);
     } finally {
       process.exitCode = prevExit;
       if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];

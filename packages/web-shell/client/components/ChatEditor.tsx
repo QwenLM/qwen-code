@@ -51,6 +51,8 @@ import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { getContextUsageLevel } from '../utils/contextUsage';
+import { formatContextUsageDetail } from '../utils/formatTokenCount';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -91,6 +93,7 @@ import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'contextUsage'
   | 'gitBranch'
   | 'model'
   | 'commands'
@@ -101,6 +104,7 @@ export type ComposerToolbarAction =
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'contextUsage',
   'gitBranch',
   'model',
   'widthMode',
@@ -171,6 +175,11 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  /** Current context-window occupancy for the `contextUsage` toolbar ring. */
+  tokenCount?: number;
+  contextWindow?: number;
+  /** Show the context-usage breakdown, exactly like typing /context. */
+  onShowContextUsage?: () => void;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -205,6 +214,7 @@ interface ChatEditorProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -497,6 +507,46 @@ function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
       <path
         d="M473.532 524.327a8.16 8.16 0 0 1-8.17 8.17h-305.36l111.88 111.88c3.19 3.19 3.19 8.4 0 11.59l-25.09 25.09c-3.19 3.19-8.4 3.19-11.59 0l-168.6-168.61c-3.19-3.19-3.19-8.4 0-11.59l164.47-168.67c3.19-3.19 8.4-3.19 11.59 0l25.61 25.61c3.19 3.19 3.19 8.4 0 11.59l-106.59 110.78 303.62-0.11c4.52 0 8.23 3.71 8.23 8.23v36.04zM550.012 486.537a8.16 8.16 0 0 1 8.17-8.17h305.36l-111.88-111.89c-3.19-3.19-3.19-8.4 0-11.59l25.08-25.08c3.19-3.19 8.4-3.19 11.59 0l168.61 168.6c3.19 3.19 3.19 8.4 0 11.59l-164.47 168.67c-3.19 3.19-8.4 3.19-11.59 0l-25.61-25.61c-3.19-3.19-3.19-8.4 0-11.59l106.58-110.78-303.62 0.11c-4.52 0-8.23-3.71-8.23-8.23v-36.03z"
         fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+const CONTEXT_RING_RADIUS = 6;
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
+
+// The arc is visually capped at 100%; the numeric label keeps reporting
+// real overflow.
+function ContextUsageRing({ pct }: { pct: number }) {
+  const capped = Math.min(pct, 100);
+  const level = getContextUsageLevel(pct);
+  const valueClass =
+    level === 'error'
+      ? `${styles.contextRingValue} ${styles.contextRingValueError}`
+      : level === 'warning'
+        ? `${styles.contextRingValue} ${styles.contextRingValueWarning}`
+        : styles.contextRingValue;
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle
+        cx="8"
+        cy="8"
+        r={CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+        className={styles.contextRingTrack}
+      />
+      <circle
+        cx="8"
+        cy="8"
+        r={CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeDasharray={CONTEXT_RING_CIRCUMFERENCE}
+        strokeDashoffset={CONTEXT_RING_CIRCUMFERENCE * (1 - capped / 100)}
+        transform="rotate(-90 8 8)"
+        className={valueClass}
       />
     </svg>
   );
@@ -1181,6 +1231,9 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      tokenCount = 0,
+      contextWindow = 0,
+      onShowContextUsage,
       availableModels = [],
       onSelectMode,
       onSelectModel,
@@ -1209,6 +1262,7 @@ export const ChatEditor = memo(
       composerTagIcons,
       voiceTarget,
       voiceStatusRevision,
+      onImageIngestionNotice,
     } = props;
 
     const {
@@ -1251,6 +1305,7 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      onImageIngestionNotice,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -1694,6 +1749,7 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
+    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
     const mobileVoiceActive = showQuickActions && voiceActive;
 
     useEffect(() => {
@@ -1887,6 +1943,9 @@ export const ChatEditor = memo(
           className={styles.container}
           data-web-shell-composer-surface
           data-typewriter-visible={showTypewriterPlaceholder || undefined}
+          data-image-drag-active={core.imageDragActive || undefined}
+          aria-busy={core.pendingImageBatchCount > 0 || undefined}
+          {...core.imageTransferHandlers}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -2019,9 +2078,12 @@ export const ChatEditor = memo(
                           alt=""
                         />
                         <button
+                          type="button"
                           className={styles.imageRemove}
+                          disabled={disabled}
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (disabled) return;
                             core.removeImage(i);
                           }}
                         >
@@ -2091,7 +2153,6 @@ export const ChatEditor = memo(
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
                   onBlur={core.mobileComposer.onBlur}
-                  onPaste={core.mobileComposer.onPaste}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
                   rows={1}
@@ -2389,6 +2450,40 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
+                {showToolbarAction('contextUsage') &&
+                  contextWindow > 0 &&
+                  tokenCount > 0 && (
+                    <TooltipProvider delayDuration={300}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
+                            data-hide-during-mobile-voice
+                            data-web-shell-context-usage
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onShowContextUsage?.();
+                            }}
+                            disabled={!onShowContextUsage}
+                            aria-label={t('status.contextUsed', {
+                              pct: ((tokenCount / contextWindow) * 100).toFixed(
+                                1,
+                              ),
+                            })}
+                          >
+                            <span className={styles.toolBtnIcon}>
+                              <ContextUsageRing
+                                pct={(tokenCount / contextWindow) * 100}
+                              />
+                            </span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          {formatContextUsageDetail(tokenCount, contextWindow)}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
                 {showToolbarAction('voice') && (
                   <>
                     <LiveVoiceButton />
@@ -2409,23 +2504,23 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    isPreparing || showCancelButton
+                    composerPreparing || showCancelButton
                       ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                           cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                         }`
                       : styles.sendBtn
                   }
                   disabled={
-                    isPreparing
+                    composerPreparing
                       ? true
                       : showCancelButton
                         ? !onCancel
-                        : core.disabled || !core.hasContent
+                        : !core.canSubmit
                   }
                   data-web-shell-composer-submit
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isPreparing) {
+                    if (composerPreparing) {
                       return;
                     }
                     if (showCancelButton) {
@@ -2435,7 +2530,7 @@ export const ChatEditor = memo(
                     core.submitText();
                   }}
                   aria-label={
-                    isPreparing
+                    composerPreparing
                       ? t('common.loading')
                       : showCancelButton
                         ? cancelArmed
@@ -2449,7 +2544,7 @@ export const ChatEditor = memo(
                       : undefined
                   }
                 >
-                  {isPreparing ? (
+                  {composerPreparing ? (
                     <LoadingIcon />
                   ) : showCancelButton ? (
                     cancelArmed ? (
