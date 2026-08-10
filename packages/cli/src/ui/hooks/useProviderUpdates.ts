@@ -387,23 +387,41 @@ export function useProviderUpdates(
           }
         } else if (choice === 'later') {
           // Persist a cooldown so "later" does not re-prompt on every launch.
+          // One batched write keeps the version/timestamp pair atomic, so a
+          // partial persist cannot invalidate the cooldown guard on next launch.
           const persistScope = getPersistScopeForModelSelection(settings);
-          for (const p of pendingList) {
-            settings.setValue(
-              persistScope,
-              `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
-              p.currentVersion,
+          const postponedAt = Date.now();
+          try {
+            settings.setValues(
+              pendingList.flatMap((p) => [
+                {
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
+                  value: p.currentVersion,
+                },
+                {
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+                  value: postponedAt,
+                },
+              ]),
             );
-            settings.setValue(
-              persistScope,
-              `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+          } catch (error) {
+            addItem(
+              {
+                type: 'error',
+                text: t('Failed to save update postponement: {{message}}', {
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                }),
+              },
               Date.now(),
             );
           }
         }
       },
     });
-  }, [settings, config, executeUpdate]);
+  }, [settings, config, executeUpdate, addItem]);
 
   useEffect(() => {
     checkForUpdates();

@@ -53,6 +53,7 @@ describe('useProviderUpdates', () => {
       [PROVIDER_METADATA_NS]: {} as Record<string, unknown>,
     } as Record<string, unknown>,
     setValue: vi.fn(),
+    setValues: vi.fn(),
     forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
     isTrusted: true,
     workspace: { settings: {} },
@@ -478,24 +479,113 @@ describe('useProviderUpdates', () => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
 
-    await result.current.providerUpdateRequest!.onConfirm('later');
+    // Pin Date.now so the persisted timestamp can be asserted exactly.
+    const postponedAt = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(postponedAt);
+    try {
+      await result.current.providerUpdateRequest!.onConfirm('later');
+    } finally {
+      dateNowSpy.mockRestore();
+    }
 
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
     // "later" persists a postponement cooldown so the prompt does not reappear
-    // on every launch, but it must not apply the update.
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      'User',
-      `providerMetadata.${METADATA_KEY}.postponedVersion`,
-      expect.any(String),
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      'User',
-      `providerMetadata.${METADATA_KEY}.postponedAt`,
-      expect.any(Number),
-    );
+    // on every launch, but it must not apply the update. The single batched
+    // write must contain exactly these two keys — pinning the values the
+    // read-side guard compares against and bounding all persisted writes.
+    expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValues).toHaveBeenCalledWith([
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedVersion`,
+        value: chinaVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedAt`,
+        value: postponedAt,
+      },
+    ]);
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('does not show prompt while the "later" cooldown is active', () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: chinaVersion,
+      postponedAt: Date.now(),
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
+  it('shows prompt again after the "later" cooldown expires', async () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: chinaVersion,
+      postponedAt: Date.now() - 25 * 60 * 60 * 1000,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+  });
+
+  it('shows prompt for a newer version despite an active "later" cooldown', async () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: 'stale-postponed-hash',
+      postponedAt: Date.now(),
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
   });
 
   it('persists ignoredVersion when user chooses "skip"', async () => {
