@@ -58,6 +58,26 @@ const multiRequest: PermissionRequest = {
   },
 };
 
+const multipleQuestionsRequest: PermissionRequest = {
+  ...request,
+  id: 'req-multiple',
+  rawInput: {
+    questions: [
+      ...(request.rawInput?.questions as NonNullable<
+        PermissionRequest['rawInput']
+      >['questions']),
+      {
+        question: 'Pick a size',
+        header: 'Size',
+        options: [
+          { label: 'Small', description: 'compact' },
+          { label: 'Large', description: 'roomy' },
+        ],
+      },
+    ],
+  },
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -123,9 +143,15 @@ function submitButton(): HTMLButtonElement | null {
   );
 }
 
-function pressKey(target: Element, key: string): void {
+function pressKey(
+  target: Element,
+  key: string,
+  init: Omit<KeyboardEventInit, 'key' | 'bubbles'> = {},
+): void {
   act(() => {
-    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    target.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, ...init }),
+    );
   });
 }
 
@@ -144,10 +170,11 @@ function deferred<T>(): {
 }
 
 describe('AskUserQuestion accessibility', () => {
-  it('exposes an alertdialog of real buttons and focuses the first option', () => {
+  it('exposes a non-modal dialog of real buttons and focuses the first option', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-ask-panel]');
-    expect(panel?.getAttribute('role')).toBe('alertdialog');
+    expect(panel?.getAttribute('role')).toBe('dialog');
+    expect(panel?.hasAttribute('aria-modal')).toBe(false);
 
     // Two answer options + the "Other" trigger.
     const opts = optionButtons();
@@ -391,40 +418,73 @@ describe('AskUserQuestion accessibility', () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  it('ignores option shortcuts when focus is on an action button, not an option', () => {
+  it('exits custom-input editing on Escape, then cancels on a second Escape', () => {
     render(undefined);
-    // Click Blue so it is the committed single-select answer (arrow keys only
-    // move the highlight; they don't change the answer).
+    act(() => {
+      optionButtons()[2]!.click();
+    });
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Purple');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    pressKey(input, 'Escape');
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(container!.querySelector('input')).toBeNull();
+    const other = optionButtons()[2]!;
+    expect(other.textContent).toContain('Purple');
+    expect(document.activeElement).toBe(other);
+
+    pressKey(other, 'Escape');
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'cancel', undefined);
+  });
+
+  it('leaves custom-input Escape to an active IME composition', () => {
+    render(undefined);
+    act(() => {
+      optionButtons()[2]!.click();
+    });
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, 'isComposing', { value: true });
+
+    act(() => input.dispatchEvent(event));
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(container!.querySelector('input')).toBe(input);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('does not apply option shortcuts when focus is on an action button', () => {
+    render(undefined);
     act(() => {
       optionButtons()[1]!.click();
     });
     const submit = submitButton()!;
     submit.focus();
 
-    // Escape on Submit must not cancel the question...
-    act(() =>
-      submit.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Escape',
-          bubbles: true,
-          cancelable: true,
-        }),
-      ),
-    );
-    expect(onConfirm).not.toHaveBeenCalled();
-
-    // ...and a digit must not silently overwrite the selected answer.
-    act(() =>
-      submit.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: '1',
-          bubbles: true,
-          cancelable: true,
-        }),
-      ),
-    );
+    pressKey(submit, '1', { cancelable: true });
     act(() => submit.click());
     expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', { '0': 'Blue' });
+  });
+
+  it('cancels on Escape from an action button', () => {
+    render(undefined);
+    const submit = submitButton()!;
+    submit.focus();
+
+    pressKey(submit, 'Escape', { cancelable: true });
+
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'cancel', undefined);
   });
 
   it('keeps an accepted submission locked while awaiting resolution', async () => {
@@ -540,6 +600,78 @@ describe('AskUserQuestion accessibility', () => {
   });
 });
 
+describe('AskUserQuestion multiple questions', () => {
+  it('advances with Enter and focuses the destination answer', () => {
+    render(undefined, multipleQuestionsRequest);
+    const firstQuestionOptions = optionButtons();
+    pressKey(firstQuestionOptions[0]!, 'ArrowDown');
+
+    pressKey(firstQuestionOptions[1]!, 'Enter');
+
+    expect(container!.textContent).toContain('Pick a size');
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
+
+  it('restores focus to the checked answer when returning to a question', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'ArrowDown');
+    const next = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'next')!;
+    act(() => next.click());
+    const previous = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'previous')!;
+
+    act(() => previous.click());
+
+    const restoredOptions = optionButtons();
+    expect(restoredOptions[1]!.getAttribute('aria-checked')).toBe('true');
+    expect(document.activeElement).toBe(restoredOptions[1]);
+  });
+
+  it('focuses Submit instead of submitting when Enter is pressed on the last question', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'Enter');
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(submitButton());
+  });
+
+  it('submits all answers with Command/Ctrl+Enter when complete', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    pressKey(optionButtons()[1]!, 'Enter', { ctrlKey: true });
+
+    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
+      '0': 'Red',
+      '1': 'Small',
+    });
+  });
+
+  it('does not submit incomplete answers with Command/Ctrl+Enter', () => {
+    render(undefined, multipleQuestionsRequest);
+
+    pressKey(optionButtons()[0]!, 'Enter', { metaKey: true });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('shows contextual keyboard hints', () => {
+    render(undefined, multipleQuestionsRequest);
+    expect(container!.textContent).toContain(
+      '↑↓ select · Enter next · Esc ignore',
+    );
+
+    act(() => optionButtons()[2]!.click());
+    expect(container!.textContent).toContain(
+      'Enter confirm · Esc stop editing',
+    );
+  });
+});
+
 describe('AskUserQuestion multi-select', () => {
   it('uses group + toggle-button semantics, not radiogroup', () => {
     render(undefined, multiRequest);
@@ -578,5 +710,29 @@ describe('AskUserQuestion multi-select', () => {
     expect(onConfirm).toHaveBeenCalledWith('req-multi', 'submit', {
       '0': 'Option B',
     });
+  });
+
+  it('uses Space to toggle and Enter to advance without toggling', () => {
+    const requestWithNextQuestion: PermissionRequest = {
+      ...multipleQuestionsRequest,
+      rawInput: {
+        questions: [
+          ...(multiRequest.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+          ...(request.rawInput?.questions as NonNullable<
+            PermissionRequest['rawInput']
+          >['questions']),
+        ],
+      },
+    };
+    render(undefined, requestWithNextQuestion);
+    const first = optionButtons()[0]!;
+    expect(first.getAttribute('aria-pressed')).toBe('true');
+
+    pressKey(first, 'Enter');
+
+    expect(container!.textContent).toContain('Pick a color');
+    expect(first.getAttribute('aria-pressed')).toBe('true');
   });
 });
