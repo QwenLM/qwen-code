@@ -2883,6 +2883,13 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toContain('go read the claimed source first');
   });
 
+  it('wires capture-tui into the verify brief — the producer its rendering claims cite', () => {
+    // The brief teaches terminal-rendering claims to run `review capture-tui`;
+    // if the block drops out of the prompt the command exists with no consumer.
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review capture-tui');
+  });
+
   it('the verify brief is a verdict role: Exclusion Criteria yes, finding format no', () => {
     const p = buildRoleBrief(PLAN, 'verify');
     expect(p).toContain('What is NOT a finding'); // the Exclusion Criteria heading

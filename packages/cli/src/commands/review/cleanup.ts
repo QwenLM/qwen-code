@@ -14,9 +14,16 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { CAPTURE_SERVER_PREFIX, isNothingToKill } from './lib/tui-capture.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -371,6 +378,152 @@ function auditPrWrites(target: string, prNumber: string): void {
   }
 }
 
+/**
+ * Reap the capture servers capture-tui's own reap could not reach: a
+ * SIGKILL'd or OOM'd harness skips finally and the signal net alike, and
+ * the private server then lives until its pane holder's bounded hold loop
+ * expires (up to three hours) — the config-free server has nothing else to
+ * destroy it, so this sweep (or a hand kill-server) is the only reaper in
+ * that window. The launcher's pid rides in the socket name for exactly
+ * this — a socket whose pid is dead is an orphan. A reap that fails is
+ * noted on stderr and suppresses the "Nothing to clean" claim — but does
+ * NOT hold the target-scoped worktree lease: the sweep is host-wide, and
+ * an unrelated review's orphan would otherwise wedge this review's lease
+ * with nothing connecting the two in the output.
+ */
+function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
+  const uid = process.getuid?.();
+  // tmux is POSIX-only, and so is the socket dir layout below.
+  if (uid === undefined) return { reaped: false, failed: false };
+  // BOTH candidate socket dirs, not one: tmux's own resolution takes the
+  // first USABLE base (TMUX_TMPDIR, else /tmp) — a stale profile-exported
+  // TMUX_TMPDIR pointing at an unusable path means the real sockets live
+  // under /tmp while a single-base sweep scans the wrong directory forever
+  // (measured end-to-end: 'Nothing to clean' with a live orphan).
+  // UNTRIMMED, matching tmux: a whitespace-padded TMUX_TMPDIR is used
+  // verbatim by tmux (measured: socket under '/tmp/x /tmux-<uid>'), so a
+  // trimming sweep scanned a directory tmux never used.
+  const envBase = process.env['TMUX_TMPDIR'];
+  // De-duplicated by the directory the scan actually opens, not the raw
+  // string: an alias of /tmp (`/tmp/`, `/tmp/.`, `//tmp` — the same
+  // profile-exported family this fallback exists for) survived a
+  // string-keyed Set, so both entries joined to the same tmux-<uid> dir and
+  // every socket in it was listed, killed and reported TWICE.
+  const bases: string[] = [];
+  const seen = new Set<string>();
+  for (const base of [envBase || '/tmp', '/tmp']) {
+    const dir = join(base, `tmux-${uid}`);
+    // Keyed on the RESOLVED directory: string normalization collapses
+    // `/tmp/`, `/tmp/.` and `//tmp`, but a TMUX_TMPDIR that is a symlink to
+    // /tmp still named a different string while opening the same directory,
+    // so every socket in it was listed, killed and reported twice.
+    let key = dir;
+    try {
+      key = realpathSync(dir);
+    } catch {
+      // Not there (or unreadable): the raw path is a fine key, and the
+      // scan below reports what it cannot read.
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    bases.push(base);
+  }
+  let reapedAny = false;
+  let failedAny = false;
+  let entries: Array<{ dir: string; name: string }> = [];
+  for (const base of bases) {
+    const dir = join(base, `tmux-${uid}`);
+    try {
+      if (existsSync(dir)) {
+        entries = entries.concat(
+          readdirSync(dir).map((name) => ({ dir, name })),
+        );
+      }
+    } catch (e) {
+      // A directory we cannot READ can be hiding an orphan — that is a
+      // failure to surface, not a silent nothing (the doc contract above:
+      // noted on stderr AND surfaced as failed).
+      failedAny = true;
+      writeStderrLine(
+        `note: could not scan ${dir} for orphaned capture servers: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+  const orphanRe = new RegExp(`^${CAPTURE_SERVER_PREFIX}(\\d+)-`);
+  for (const { dir, name } of entries) {
+    const m = orphanRe.exec(name);
+    if (!m) continue;
+    let alive = true;
+    try {
+      process.kill(Number(m[1]), 0);
+    } catch (e) {
+      // ESRCH = the pid is dead (the orphan signal). EPERM means the pid
+      // is alive under another user — not ours to reap.
+      alive = (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+    if (alive) continue;
+    // Same rules as capture-tui's own reap: unlink the socket ONLY when
+    // the server is known dead — a kill that throws can leave it alive,
+    // and an unlinked socket makes a live server unreachable forever — and
+    // one retry before giving up: a transient client-spawn failure (EMFILE
+    // after a long review's many spawns) is the named shape, and the
+    // identical second attempt reaps what otherwise lives out the holder's
+    // bounded three-hour window.
+    let serverDead = false;
+    for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      try {
+        execFileSync('tmux', ['-L', name, 'kill-server'], {
+          stdio: 'pipe',
+          // The scan finds sockets under BOTH bases, but `-L` re-resolves
+          // the socket directory from THIS process's environment — and tmux
+          // does not fall back when the env base exists (it creates it).
+          // The two sides then disagree: an orphan found under /tmp while a
+          // stale profile-exported TMUX_TMPDIR points elsewhere answered
+          // `error connecting to <env>/tmux-<uid>/<name>` and survived
+          // (measured on 3.3a, with the same call succeeding under the base
+          // it was found in). Kill it where it was FOUND — `dir` is
+          // `<base>/tmux-<uid>`, so its parent is the base tmux wants.
+          env: { ...process.env, TMUX_TMPDIR: dirname(dir) },
+          // Same belt as capture-tui's own control calls: a wedged server
+          // must not hang the whole cleanup behind one socket — SIGKILL,
+          // because a TERM-immune child blocks the sync call past any belt.
+          timeout: 15_000,
+          killSignal: 'SIGKILL',
+        });
+        serverDead = true;
+      } catch (e) {
+        serverDead = isNothingToKill(
+          String((e as { stderr?: unknown }).stderr ?? ''),
+        );
+      }
+    }
+    if (!serverDead) {
+      failedAny = true;
+      writeStderrLine(
+        `note: could not reap orphaned capture server ${name} ` +
+          // WITH the base override: `-L` re-resolves the socket directory
+          // from the invoking environment and does not fall back, so on
+          // the very hosts where this note appears the bare command
+          // resolves elsewhere and answers 'no server running' — reading
+          // as "already gone" while the orphan runs out its window.
+          `(TMUX_TMPDIR=${JSON.stringify(dirname(dir))} tmux -L ${name} ` +
+          `kill-server to reap it by hand)`,
+      );
+      continue;
+    }
+    try {
+      rmSync(join(dir, name), { force: true });
+    } catch {
+      // Litter is cosmetic; the server itself is already gone.
+    }
+    writeStdoutLine(`Reaped orphaned capture server: ${name}`);
+    reapedAny = true;
+  }
+  return { reaped: reapedAny, failed: failedAny };
+}
+
 export function runCleanup(target: string): void {
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
@@ -479,6 +632,24 @@ export function runCleanup(target: string): void {
     }
   }
 
+  // --- Orphaned capture servers (capture-tui) ---------------------------
+  // Not target-scoped: any crashed capture on this host left them, and
+  // Step 9's sweep is the only deterministic pass that reliably runs. Its
+  // failure therefore must NOT gate the target-scoped lease below — an
+  // orphan from an UNRELATED review, a wedged server outlasting the belt,
+  // or a host where tmux vanished after the socket dir was created would
+  // otherwise wedge THIS review's worktree lease forever, with nothing in
+  // the output connecting the two. It still suppresses "Nothing to clean":
+  // stderr saying "could not reap" next to stdout's "nothing to clean" is
+  // the two streams contradicting each other, and stdout is the one a
+  // script reads.
+  let sweepFailed = false;
+  {
+    const sweep = reapOrphanedCaptureServers();
+    if (sweep.reaped) removedAny = true;
+    sweepFailed = sweep.failed;
+  }
+
   if (!failedAny) {
     clearReviewWorktreeLease(process.cwd(), target);
   }
@@ -486,7 +657,7 @@ export function runCleanup(target: string): void {
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It
   // is only true when there was nothing there — not when there was and we could
   // not get rid of it.
-  if (!removedAny && !failedAny) {
+  if (!removedAny && !failedAny && !sweepFailed) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
   }
 }
