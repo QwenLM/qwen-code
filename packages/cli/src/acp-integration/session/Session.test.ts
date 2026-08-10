@@ -12080,6 +12080,23 @@ describe('Session', () => {
                 'Loop tick — tasks from project loop.md',
           ).length;
           expect(labelledEchoes).toBe(2);
+          await vi.waitFor(() =>
+            expect(
+              mockChatRecordingService.recordCronPrompt,
+            ).toHaveBeenCalledTimes(2),
+          );
+          expect(
+            mockChatRecordingService.recordCronPrompt.mock.calls[1],
+          ).toEqual([
+            [
+              {
+                text: expect.stringContaining(
+                  'Work the tasks from the loop.md contents established earlier',
+                ),
+              },
+            ],
+            'Loop tick — tasks from project loop.md',
+          ]);
         } finally {
           await fs.rm(tmpDir, { recursive: true, force: true });
         }
@@ -13506,6 +13523,9 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
           1,
         );
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalledWith('do the normal cron thing');
         await vi.waitFor(() =>
           expect(
             (session as unknown as { cronProcessing: boolean }).cronProcessing,
@@ -14507,6 +14527,60 @@ describe('Session', () => {
             }),
           });
         });
+      });
+
+      it('records a tool-using cron fire only once', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        registerAllowedTool('read_file', execute);
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cron',
+                      name: 'read_file',
+                      args: { file_path: 'a.sql' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start cron' }],
+        });
+
+        await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
       });
 
       it('tracks unresolved preparation in a background notification stream', async () => {
