@@ -175,6 +175,7 @@ function makeTextChunkWithParent(
   const event = makeTextChunk(id, text);
   (event.data as { update: Record<string, unknown> }).update['_meta'] = {
     parentToolCallId,
+    subagentType: 'general-purpose',
   };
   return event;
 }
@@ -187,6 +188,7 @@ function makeThoughtChunkWithParent(
   const event = makeThoughtChunk(id, text);
   (event.data as { update: Record<string, unknown> }).update['_meta'] = {
     parentToolCallId,
+    subagentType: 'general-purpose',
   };
   return event;
 }
@@ -203,6 +205,7 @@ function extractTexts(events: BridgeEvent[]): string[] {
 
 type ChunkIdentity = {
   parentToolCallId?: string;
+  subagentType?: string;
   sourceRecordIds?: string[];
   promptId?: string;
   originatorClientId?: string;
@@ -216,12 +219,16 @@ function withIdentity(
   const update = (event.data as { update: Record<string, unknown> }).update;
   if (
     identity.parentToolCallId !== undefined ||
+    identity.subagentType !== undefined ||
     identity.sourceRecordIds !== undefined
   ) {
     update['_meta'] = {
       ...(identity.parentToolCallId === undefined
         ? {}
         : { parentToolCallId: identity.parentToolCallId }),
+      ...(identity.subagentType === undefined
+        ? {}
+        : { subagentType: identity.subagentType }),
       ...(identity.sourceRecordIds === undefined
         ? {}
         : {
@@ -717,8 +724,8 @@ describe('TurnBoundaryCompactionEngine', () => {
     it.each([
       {
         name: 'parentToolCallId',
-        first: { parentToolCallId: 'tool-a' },
-        second: { parentToolCallId: 'tool-b' },
+        first: { parentToolCallId: 'tool-a', subagentType: 'explore' },
+        second: { parentToolCallId: 'tool-b', subagentType: 'explore' },
       },
       {
         name: 'sourceRecordIds',
@@ -758,7 +765,10 @@ describe('TurnBoundaryCompactionEngine', () => {
     });
 
     it.each([
-      { name: 'parentToolCallId', identity: { parentToolCallId: 'tool-a' } },
+      {
+        name: 'parentToolCallId',
+        identity: { parentToolCallId: 'tool-a', subagentType: 'explore' },
+      },
       {
         name: 'sourceRecordIds',
         identity: { sourceRecordIds: ['record-a'] },
@@ -987,6 +997,36 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(extractTexts(engine.snapshot().compactedTurns)).toEqual([
         'firstsecond',
       ]);
+    });
+
+    it('merges live subagent chunks carrying the producer-stamped meta pair', () => {
+      // SubAgentTracker stamps streamed subagent fragments with both keys.
+      const withSubagentMeta = (event: BridgeEvent): BridgeEvent => {
+        (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+          parentToolCallId: 'tool-a',
+          subagentType: 'explore',
+        };
+        return event;
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withSubagentMeta(makeTextChunk(1, 'first')));
+      engine.ingest(withSubagentMeta(makeTextChunk(2, 'second')));
+
+      const live = engine.snapshot().liveJournal;
+      expect(live).toHaveLength(1);
+      expect(extractTexts(live)).toEqual(['firstsecond']);
+      expect(
+        (live[0]!.data as { update: { _meta?: Record<string, unknown> } })
+          .update._meta,
+      ).toEqual({ parentToolCallId: 'tool-a', subagentType: 'explore' });
+
+      engine.ingest(makeTurnComplete(3));
+      const compacted = engine.snapshot().compactedTurns;
+      expect(extractTexts(compacted)).toEqual(['firstsecond']);
+      expect(
+        (compacted[0]!.data as { update: { _meta?: Record<string, unknown> } })
+          .update._meta,
+      ).toEqual({ parentToolCallId: 'tool-a', subagentType: 'explore' });
     });
 
     it('merges chunks carrying buildUpdateMeta timestamp and plan shapes', () => {

@@ -1028,6 +1028,14 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
       if (typeof value !== 'string') return true;
       continue;
     }
+    if (key === 'subagentType') {
+      // Display label SubAgentTracker pairs with parentToolCallId. The
+      // completed-turn path merges by parentToolCallId alone and lets the
+      // latest meta carry the label, so the live view must match instead
+      // of splitting on it.
+      if (typeof value !== 'string') return true;
+      continue;
+    }
     if (key === 'qwenTranscript') {
       if (typeof value !== 'object' || value === null) return true;
       const transcript = value as Record<string, unknown>;
