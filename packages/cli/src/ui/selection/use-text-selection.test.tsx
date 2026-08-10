@@ -251,8 +251,11 @@ describe('TextSelectionController', () => {
       ex: 10,
       ey: 0,
     });
+    // The press-time copy survives so a repaint before release cannot lose
+    // the word; the release overwrites it with the grown range.
+    expect(copyToClipboard).toHaveBeenCalledWith('foo');
     expect(copyToClipboard).toHaveBeenCalledWith('foo bar baz');
-    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(copyToClipboard).toHaveBeenCalledTimes(2);
   });
 
   it('extends a triple-click line selection line-wise on drag', () => {
@@ -319,7 +322,23 @@ describe('TextSelectionController', () => {
       ey: 0,
     });
     expect(copyToClipboard).toHaveBeenCalledWith('a');
+    expect(copyToClipboard).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the double-click copy when streaming clears the selection before release', () => {
+    frame = makeFrame('foo bar');
+    viewportRect = { x: 0, y: 0, width: 7, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2));
+    handler(makeEvent('left-release', 2));
+    handler(makeEvent('left-press', 2)); // double-click -> copies "foo"
+    listener!(makeFrame('foo baz')); // streaming repaint clears the selection
+    handler(makeEvent('left-release', 2)); // release arrives after the clear
+    nowSpy.mockRestore();
+
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(copyToClipboard).toHaveBeenCalledWith('foo');
   });
 
   it('copies a one-cell line on a no-drag triple-click', () => {

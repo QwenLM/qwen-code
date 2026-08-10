@@ -271,8 +271,10 @@ export function TextSelectionController(
           const span = spanAtForMode(frame, mode, point);
           if (span) {
             // Enter a drag-capable word/line selection so a held double/triple
-            // click can extend by word/line on move (issue #8738). Copy happens
-            // on release, matching char drags.
+            // click can extend by word/line on move (issue #8738). Copy at
+            // press too: a streaming repaint before release clears the
+            // selection, skipping the release copy. Release copies again when
+            // the drag grew the range.
             selection.start({ x: span.sx, y: span.sy }, mode);
             selection.extend({ x: span.ex, y: span.ey });
             anchorSpanRef.current = { span, mode };
@@ -280,6 +282,7 @@ export function TextSelectionController(
               propsRef.current.getScrollState().scrollTop;
             recordBaseline();
             applyHighlight();
+            copySelection();
             return;
           }
         }
