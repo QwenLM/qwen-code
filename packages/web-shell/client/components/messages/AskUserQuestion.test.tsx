@@ -512,6 +512,25 @@ describe('AskUserQuestion accessibility', () => {
     });
   });
 
+  it('submits a custom answer for a single question with Enter', () => {
+    render();
+    act(() => optionButtons()[2]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Purple');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    pressKey(input, 'Enter');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'submit', {
+      '0': 'Purple',
+    });
+  });
+
   it('keeps an accepted submission locked while awaiting resolution', async () => {
     const pending = deferred<boolean>();
     onConfirm.mockReturnValue(pending.promise);
@@ -696,6 +715,9 @@ describe('AskUserQuestion multiple questions', () => {
       '↑↓ select · Enter submit · Esc ignore',
     );
     expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+    act(() => optionButtons()[2]!.click());
+    expect(container!.textContent).toContain('Enter submit · Esc stop editing');
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
 
     act(() => root?.unmount());
     container?.remove();
@@ -709,9 +731,7 @@ describe('AskUserQuestion multiple questions', () => {
     expect(container!.textContent).toContain('⌘/Ctrl+Enter submit');
 
     act(() => optionButtons()[2]!.click());
-    expect(container!.textContent).toContain(
-      'Enter confirm · Esc stop editing',
-    );
+    expect(container!.textContent).toContain('Enter next · Esc stop editing');
   });
 
   it('confirms a custom answer with Enter and advances', () => {
@@ -731,9 +751,44 @@ describe('AskUserQuestion multiple questions', () => {
     expect(container!.textContent).toContain('Pick a size');
     expect(document.activeElement).toBe(optionButtons()[0]);
   });
+
+  it('submits a custom answer with Enter on the last question', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'Enter');
+    act(() => optionButtons()[2]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Medium');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    pressKey(input, 'Enter');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-multiple', 'submit', {
+      '0': 'Red',
+      '1': 'Medium',
+    });
+  });
 });
 
 describe('AskUserQuestion multi-select', () => {
+  it('submits a single multi-select question with Enter without advertising the global shortcut', () => {
+    render(undefined, multiRequest);
+
+    expect(container!.textContent).toContain(
+      'Space toggle · Enter submit · Esc ignore',
+    );
+    expect(container!.textContent).not.toContain('⌘/Ctrl+Enter');
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(onConfirm).toHaveBeenCalledWith('req-multi', 'submit', {
+      '0': 'Option A',
+    });
+  });
+
   it('uses group + toggle-button semantics, not radiogroup', () => {
     render(undefined, multiRequest);
     const panel = container!.querySelector('[data-web-shell-ask-panel]')!;

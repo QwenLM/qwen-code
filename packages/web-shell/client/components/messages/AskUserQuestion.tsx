@@ -71,7 +71,6 @@ export function AskUserQuestion({
   // "Other" trigger that reveals the custom input.
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const customRef = useRef<HTMLButtonElement | null>(null);
-  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
   const selectedIdxRef = useRef<number | null>(selectedIdx);
   const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({});
   const focusAfterQuestionChangeRef = useRef(false);
@@ -388,8 +387,15 @@ export function AskUserQuestion({
       selectQuestion(currentIdx + 1);
       return;
     }
-    submitButtonRef.current?.focus();
-  }, [currentIdx, questions.length, selectQuestion]);
+    if (canSubmit && !submitting) handleSubmit();
+  }, [
+    canSubmit,
+    currentIdx,
+    handleSubmit,
+    questions.length,
+    selectQuestion,
+    submitting,
+  ]);
 
   useEffect(() => {
     if (!focusAfterQuestionChangeRef.current || !current) return;
@@ -512,18 +518,29 @@ export function AskUserQuestion({
 
   const displayIdx = Math.min(currentIdx, questions.length - 1);
   const isLastQuestion = currentIdx === questions.length - 1;
+  const isSingleQuestion = questions.length === 1;
   const shortcutHint = customFocused
-    ? t('askUser.shortcuts.input')
+    ? t(
+        isSingleQuestion
+          ? 'askUser.shortcuts.inputSingle'
+          : isLastQuestion
+            ? 'askUser.shortcuts.inputFinal'
+            : 'askUser.shortcuts.inputNext',
+      )
     : isMulti
       ? t(
-          isLastQuestion
-            ? 'askUser.shortcuts.multiFinal'
-            : 'askUser.shortcuts.multiNext',
+          isSingleQuestion
+            ? 'askUser.shortcuts.multiSingle'
+            : isLastQuestion
+              ? 'askUser.shortcuts.multiFinal'
+              : 'askUser.shortcuts.multiNext',
         )
       : t(
-          isLastQuestion
-            ? 'askUser.shortcuts.optionsFinal'
-            : 'askUser.shortcuts.optionsNext',
+          isSingleQuestion
+            ? 'askUser.shortcuts.optionsSingle'
+            : isLastQuestion
+              ? 'askUser.shortcuts.optionsFinal'
+              : 'askUser.shortcuts.optionsNext',
         );
 
   return (
@@ -791,7 +808,6 @@ export function AskUserQuestion({
             )}
             <button
               type="button"
-              ref={submitButtonRef}
               className={`${styles.button} ${styles.submitButton}`}
               disabled={submitting || !canSubmit}
               aria-busy={submitting}
