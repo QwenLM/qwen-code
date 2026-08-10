@@ -319,6 +319,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('keeps discrete thought messages separate with their metadata', () => {
+    const makeThought = (id: number, text: string, taskId: string) =>
+      normalizeDaemonEvent({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              qwenDiscreteMessage: true,
+              backgroundTask: { taskId },
+            },
+          },
+        },
+      });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...makeThought(11, 'first thought', 'task-a'),
+        ...makeThought(12, 'second thought', 'task-b'),
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'thought',
+        text: 'first thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-a' },
+        },
+      },
+      {
+        kind: 'thought',
+        text: 'second thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-b' },
+        },
+      },
+    ]);
+  });
+
   it('keeps discrete assistant messages separate from normal text blocks', () => {
     const normalBefore = normalizeDaemonEvent({
       id: 11,
@@ -3734,9 +3781,12 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       source: 'history_truncated',
       data,
       text: expect.stringContaining(
-        'kept the latest 10000 events and dropped 16371 older replay events',
+        'kept the latest 10000 source events and dropped 16371 older source events',
       ) as string,
     });
+    expect((event as { text: string }).text).toContain(
+      'limits: 10000 replay entries / 8388608 bytes',
+    );
     expect((event as { text: string }).text).toContain(
       'Complete content remains available after the turn finishes.',
     );

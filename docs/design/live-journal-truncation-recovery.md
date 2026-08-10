@@ -2,7 +2,7 @@
 
 ## Context
 
-The daemon keeps a bounded in-memory live journal for an unfinished turn. When the journal exceeds 10,000 events or 8 MiB, it discards the oldest replay events and prepends a `history_truncated` marker. The persisted transcript and turn-boundary compaction remain authoritative, so the complete turn becomes available again after a formal terminal event.
+The daemon keeps a bounded in-memory live journal for an unfinished turn. Consecutive compatible text or thought chunks share bounded replay entries, with at most 256 source events per entry. When the journal exceeds 10,000 replay entries or 8 MiB of serialized source events, it discards the oldest entries and prepends a `history_truncated` marker whose retained and truncated counts still describe source events. The persisted transcript and turn-boundary compaction remain authoritative, so the complete turn becomes available again after a formal terminal event.
 
 The marker previously had no prompt ownership, the SDK rendered a generic message, and WebUI either hid the marker behind history pagination or left the retained tail permanently visible. This design keeps the existing resource limits and eviction policy while making the loss precise and repairing the visible tail without another model request.
 

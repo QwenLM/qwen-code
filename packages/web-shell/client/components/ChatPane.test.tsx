@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import {
   WebShellCustomizationProvider,
@@ -797,6 +798,7 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
     expect(clearFollowup).not.toHaveBeenCalled();
@@ -832,6 +834,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -866,6 +869,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -880,6 +884,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -906,8 +911,33 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
       images,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
+  });
+
+  it('submits image-only prompts and preserves first-text naming eligibility', () => {
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
+    const onFirstPromptAdmitted = vi.fn();
+    render({ onFirstPromptAdmitted });
+
+    act(() => {
+      latestOnSubmit!('', images);
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('', {
+      images,
+      onAdmissionStarted: expect.any(Function),
+      onAdmitted: expect.any(Function),
+    });
+    act(() => sendPromptAdmit!());
+    expect(onFirstPromptAdmitted).not.toHaveBeenCalled();
+
+    act(() => {
+      latestOnSubmit!('name this task');
+    });
+    act(() => sendPromptAdmit!());
+    expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this task');
   });
 
   it('forwards composer annotations with an idle prompt', () => {
@@ -928,6 +958,7 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
       inputAnnotations,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -941,8 +972,32 @@ describe('ChatPane', () => {
       returned = latestOnSubmit!('queued next', undefined, commit);
     });
     expect(returned).toBe(true);
-    expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queued next',
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
     expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('names a side task when its first text prompt is admitted from the queue', () => {
+    streamingStateValue = 'responding';
+    const onFirstPromptAdmitted = vi.fn();
+    render({ onFirstPromptAdmitted });
+
+    act(() => {
+      latestOnSubmit!('name this queued task');
+    });
+
+    const onAdmitted = enqueuePrompt.mock.calls[0]?.[4] as
+      | (() => void)
+      | undefined;
+    expect(onAdmitted).toEqual(expect.any(Function));
+    act(() => onAdmitted?.());
+    expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this queued task');
   });
 
   it('forwards composer annotations with a queued prompt', () => {
@@ -967,6 +1022,7 @@ describe('ChatPane', () => {
       undefined,
       undefined,
       inputAnnotations,
+      expect.any(Function),
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -978,7 +1034,26 @@ describe('ChatPane', () => {
     act(() => {
       latestOnSubmit!('queued image', images);
     });
-    expect(enqueuePrompt).toHaveBeenCalledWith('queued image', images);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queued image',
+      images,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
+  });
+
+  it('queues an image-only prompt while the pane is already running', () => {
+    streamingStateValue = 'responding';
+    const images = [{ data: 'image-data', media_type: 'image/bmp' }];
+    render();
+
+    act(() => {
+      latestOnSubmit!('', images);
+    });
+
+    expect(enqueuePrompt).toHaveBeenCalledWith('', images);
+    expect(sendPrompt).not.toHaveBeenCalled();
   });
 
   it('does not submit while the pane is disconnected', () => {
@@ -1019,10 +1094,16 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('reports an idle prompt failure to the pane error handler', async () => {
+  it('locks the pane when idle prompt admission outcome is unknown', async () => {
     const onError = vi.fn();
-    sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
-    render({ onError });
+    const onImageIngestionNotice = vi.fn();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
+    render({ onError, onImageIngestionNotice });
     const commit = vi.fn();
     await act(async () => {
       latestOnSubmit!('hi', undefined, commit);
@@ -1030,10 +1111,132 @@ describe('ChatPane', () => {
     });
     expect(commit).not.toHaveBeenCalled();
     expect(clearFollowup).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('uncertain'),
+    );
+    const notice = testid('pane-prompt-admission-unknown');
+    expect(notice).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    act(() => latestOnSubmit!('do not retry'));
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      notice?.querySelectorAll('button').item(0).click();
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps.disabled).toBe(true);
+
+    confirm.mockReturnValue(true);
+    act(() => {
+      notice?.querySelectorAll('button').item(0).click();
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('keeps an unknown admission locked across an unrelated stream', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('response lost');
+    });
+    render();
+
+    await act(async () => {
+      latestOnSubmit!('hi');
+      await Promise.resolve();
+    });
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+
+    streamingStateValue = 'responding';
+    rerender();
+
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('does not mark a turn error unknown after admission', async () => {
+    const onError = vi.fn();
+    let rejectTurn!: (error: unknown) => void;
+    sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      sendPromptAdmit = options?.onAdmitted;
+      return new Promise((_resolve, reject) => {
+        rejectTurn = reject;
+      });
+    });
+    render({ onError });
+    const commit = vi.fn();
+
+    act(() => {
+      latestOnSubmit!('hi', undefined, commit);
+      sendPromptAdmit?.();
+    });
+    await act(async () => {
+      rejectTurn(new Error('turn failed'));
+      await Promise.resolve();
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(testid('pane-prompt-admission-unknown')).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
     expect(onError).toHaveBeenCalledWith(
-      expect.any(Error),
+      expect.objectContaining({ message: 'turn failed' }),
       'Failed to send prompt',
     );
+  });
+
+  it('discards an unknown local payload without hiding its marker', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
+    render();
+    const commit = vi.fn();
+    await act(async () => {
+      latestOnSubmit!('hi', undefined, commit);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testid('pane-prompt-admission-unknown')
+        ?.querySelectorAll('button')
+        .item(1)
+        .click();
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('keeps the pane editable after a definite 413 rejection', async () => {
+    const onError = vi.fn();
+    sendPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(413, undefined, 'Too large'),
+    );
+    render({ onError });
+
+    await act(async () => {
+      latestOnSubmit!('hi');
+      await Promise.resolve();
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(DaemonHttpError),
+      'Failed to send prompt',
+    );
+    expect(latestChatEditorProps.disabled).toBe(false);
   });
 
   it('keeps pane approvals click-only (no global keyboard shortcuts)', () => {

@@ -136,6 +136,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         mockComposerCoreState.pastedImages.length > 0 ||
         mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
+      canSubmit: false,
+      pendingImageBatchCount: 0,
+      imageDragActive: false,
+      imageTransferHandlers: {},
       handle: {
         focus: vi.fn(),
         insertText: vi.fn(),
@@ -278,6 +282,9 @@ function renderChatEditor(props: {
     value: string,
   ) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
+  tokenCount?: number;
+  contextWindow?: number;
+  onShowContextUsage?: () => void;
   placeholderText?: string;
   animatePlaceholder?: boolean;
   disabled?: boolean;
@@ -353,6 +360,131 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor context usage ring', () => {
+  const ring = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-context-usage]',
+    );
+
+  it('renders in toolbarRight before the voice actions', () => {
+    const container = renderChatEditor({
+      tokenCount: 34_298,
+      contextWindow: 100_000,
+      onShowContextUsage: vi.fn(),
+    });
+
+    const button = ring(container)!;
+    expect(button).not.toBeNull();
+    expect(button.getAttribute('aria-label')).toBe('34.3% context used');
+    const liveVoice = container.querySelector(
+      '[data-testid="live-voice-button"]',
+    )!;
+    // The ring sits immediately left of the voice cluster.
+    expect(
+      button.compareDocumentPosition(liveVoice) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('is controlled by the contextUsage toolbar action', () => {
+    const shown = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      visibleToolbarActions: ['contextUsage'],
+    });
+    const hidden = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      visibleToolbarActions: ['voice'],
+    });
+
+    expect(ring(shown)).not.toBeNull();
+    expect(ring(hidden)).toBeNull();
+  });
+
+  it('stays hidden while usage or the context window is unknown', () => {
+    const noUsage = renderChatEditor({ tokenCount: 0, contextWindow: 1000 });
+    const noWindow = renderChatEditor({ tokenCount: 100, contextWindow: 0 });
+
+    expect(ring(noUsage)).toBeNull();
+    expect(ring(noWindow)).toBeNull();
+  });
+
+  it('opens the context breakdown when clicked', () => {
+    const onShowContextUsage = vi.fn();
+    const container = renderChatEditor({
+      tokenCount: 100,
+      contextWindow: 1000,
+      onShowContextUsage,
+    });
+
+    act(() => {
+      ring(container)!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onShowContextUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the used/total detail in a tooltip on focus', async () => {
+    const container = renderChatEditor({
+      tokenCount: 53_600,
+      contextWindow: 1_000_000,
+      onShowContextUsage: vi.fn(),
+    });
+
+    await act(async () => {
+      ring(container)!.focus();
+    });
+
+    expect(document.body.textContent).toContain('53.6k / 1.0M tokens (5.4%)');
+    // The arrow must be the Radix-positioned element: a pseudo-element pinned
+    // to the content center stops pointing at the trigger once collision
+    // avoidance shifts the content near the viewport edge. jsdom has no
+    // layout, so pin the positioning classes the rendered arrow depends on —
+    // a shadcn regeneration that drops them would detach the arrow visually
+    // while an existence check stayed green.
+    const arrowClass = document
+      .querySelector('[data-slot="tooltip-arrow"]')
+      ?.getAttribute('class');
+    expect(arrowClass).toContain('rotate-45');
+    expect(arrowClass).toContain('translate-y-[calc(-50%_-_2px)]');
+  });
+
+  it('escalates the arc color at the /context panel thresholds', () => {
+    const arcClass = (container: HTMLElement) =>
+      ring(container)!.querySelectorAll('circle')[1].getAttribute('class') ??
+      '';
+
+    const warn = renderChatEditor({ tokenCount: 61, contextWindow: 100 });
+    const error = renderChatEditor({ tokenCount: 81, contextWindow: 100 });
+    const normal = renderChatEditor({ tokenCount: 60, contextWindow: 100 });
+    // Both thresholds are strict: exactly 80% is still warning, matching the
+    // /context panel.
+    const atError = renderChatEditor({ tokenCount: 80, contextWindow: 100 });
+
+    expect(arcClass(warn)).toContain('contextRingValueWarning');
+    expect(arcClass(error)).toContain('contextRingValueError');
+    expect(arcClass(normal)).not.toContain('Warning');
+    expect(arcClass(normal)).not.toContain('Error');
+    expect(arcClass(atError)).toContain('contextRingValueWarning');
+    expect(arcClass(atError)).not.toContain('contextRingValueError');
+  });
+
+  it('caps the arc at 100% while the label keeps the real overflow', () => {
+    const container = renderChatEditor({
+      tokenCount: 150,
+      contextWindow: 100,
+    });
+
+    const button = ring(container)!;
+    expect(button.getAttribute('aria-label')).toBe('150.0% context used');
+    const arc = button.querySelectorAll('circle')[1];
+    expect(arc.getAttribute('stroke-dashoffset')).toBe('0');
   });
 });
 
@@ -540,6 +672,15 @@ describe('ChatEditor attachment reporting', () => {
       onAttachmentsChange: onImageAttachmentsChange,
     });
     expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const disabled = renderChatEditor({
+      disabled: true,
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+    });
+    expect(disabled.querySelector('img')?.nextElementSibling).toHaveProperty(
+      'disabled',
+      true,
+    );
   });
 });
 
