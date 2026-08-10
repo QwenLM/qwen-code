@@ -552,7 +552,7 @@ async function performCdpDetach(error: Error): Promise<void> {
   }
   teardownAttachments();
   activeSend = null;
-  const pendingDetaches: Promise<void>[] = [];
+  const pendingDetaches: Array<Promise<void>> = [];
   for (const tabId of tabIds) {
     if (detachingTabIds.has(tabId)) continue;
     detachingTabIds.add(tabId);

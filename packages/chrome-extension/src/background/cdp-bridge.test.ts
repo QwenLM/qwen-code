@@ -293,9 +293,6 @@ describe('CDP bridge', () => {
         settled = true;
       })
       .catch(() => {});
-    const rejection = expect(pending).rejects.toThrow(
-      'WebBridge action timed out after 55s',
-    );
     await vi.waitFor(() =>
       expect(chromeHarness.sendCommand).toHaveBeenCalledOnce(),
     );
@@ -314,7 +311,9 @@ describe('CDP bridge', () => {
     ).rejects.toThrow('WebBridge action is already in progress');
 
     chromeHarness.finishDetach();
-    await rejection;
+    await expect(pending).rejects.toThrow(
+      'WebBridge action timed out after 55s',
+    );
     await expect(
       bridge.withDirectBrowserAction(async () => undefined),
     ).resolves.toBeUndefined();
