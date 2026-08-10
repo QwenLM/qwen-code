@@ -14,7 +14,8 @@ import {
 } from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
-import { isSubpath, QWEN_DIR } from './paths.js';
+import { isSubpath, QWEN_DIR, tildeifyPath } from './paths.js';
+import { stripAnsiAndControl } from './textUtils.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from './debugLogger.js';
 import { findProjectRoot } from './projectRoot.js';
@@ -317,24 +318,26 @@ async function readGeminiMdFiles(
 /**
  * Renders a context file path for display: relative to the CWD when the
  * file is inside the CWD tree, otherwise a `~/...` shortcut when the file
- * lives under the user home (instead of a long `../../..` chain).
+ * lives under the user home (instead of a long `../../..` chain). Output
+ * is sanitized because directory names are attacker-influenceable.
  */
 export function formatContextFileDisplayPath(
   filePath: string,
   currentWorkingDirectory: string,
-  userHomePath = homedir(),
 ): string {
   if (!path.isAbsolute(filePath)) {
-    return filePath;
+    return stripAnsiAndControl(filePath);
   }
   const relativePath = path.relative(currentWorkingDirectory, filePath);
-  if (
-    relativePath.startsWith('..') &&
-    filePath.startsWith(userHomePath + path.sep)
-  ) {
-    return path.join('~', path.relative(userHomePath, filePath));
+  if (relativePath.startsWith('..')) {
+    // Pass homedir() explicitly: tildeifyPath's own lookup goes through a
+    // node:os default import that this module's test mock doesn't reach.
+    const tildeified = tildeifyPath(filePath, homedir());
+    if (tildeified !== filePath) {
+      return stripAnsiAndControl(tildeified);
+    }
   }
-  return relativePath;
+  return stripAnsiAndControl(relativePath);
 }
 
 function concatenateInstructions(
@@ -535,13 +538,16 @@ export async function loadServerHierarchicalMemory(
       memoryFilenames.has(path.basename(item.filePath)),
     );
     fileCount = memoryItems.length;
-    contextFilePaths = memoryItems.map((item) =>
-      formatContextFileDisplayPath(
-        item.filePath,
-        currentWorkingDirectory,
-        userHomePath,
-      ),
-    );
+    // Mirror concatenateInstructions' empty-content filter: only files whose
+    // content actually reached the system prompt count as "attached".
+    contextFilePaths = memoryItems
+      .filter(
+        (item) =>
+          typeof item.content === 'string' && item.content.trim().length > 0,
+      )
+      .map((item) =>
+        formatContextFileDisplayPath(item.filePath, currentWorkingDirectory),
+      );
   }
 
   // Load path-based context rules from .qwen/rules/ directories.

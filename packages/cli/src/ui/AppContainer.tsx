@@ -2473,9 +2473,15 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
+      // Mirror the downstream input classification (trim + btw + shell-mode
+      // exclusions) so the latch is only consumed by submissions that
+      // actually reach the model.
+      const trimmedPrompt = userPromptText.trim();
       if (
         !contextFilesAnnouncedRef.current &&
-        !isSlashCommand(userPromptText)
+        !isSlashCommand(trimmedPrompt) &&
+        !isBtwCommand(trimmedPrompt) &&
+        !shellModeActive
       ) {
         contextFilesAnnouncedRef.current = true;
         const contextFilePaths = config.getContextFilePaths();
@@ -2711,6 +2717,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
       setBufferText,
+      shellModeActive,
       vimEnabled,
     ],
   );

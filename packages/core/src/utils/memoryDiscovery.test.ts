@@ -1314,33 +1314,70 @@ describe('loadServerHierarchicalMemory', () => {
 });
 
 describe('formatContextFileDisplayPath', () => {
+  // Fixtures share one volume (os.tmpdir()) so `..` relationships hold on
+  // every platform; POSIX literals like '/proj' behave differently under
+  // path.win32 and would fail the Windows merge-queue gate.
+  const root = os.tmpdir();
+  const proj = path.join(root, 'proj');
+  const other = path.join(root, 'other');
+  const home = path.join(root, 'u');
+  const siblingHome = path.join(root, 'u2');
+
+  beforeEach(() => {
+    vi.mocked(os.homedir).mockReturnValue(home);
+  });
+
   it('returns CWD-relative paths for files inside the CWD tree', () => {
-    expect(formatContextFileDisplayPath('/proj/QWEN.md', '/proj')).toBe(
+    expect(formatContextFileDisplayPath(path.join(proj, 'QWEN.md'), proj)).toBe(
       'QWEN.md',
     );
-    expect(formatContextFileDisplayPath('/proj/sub/QWEN.md', '/proj')).toBe(
-      path.join('sub', 'QWEN.md'),
-    );
+    expect(
+      formatContextFileDisplayPath(path.join(proj, 'sub', 'QWEN.md'), proj),
+    ).toBe(path.join('sub', 'QWEN.md'));
   });
 
   it('shortens home-dir files outside the CWD tree to ~ paths', () => {
-    const home = os.homedir();
     expect(
-      formatContextFileDisplayPath(
-        path.join(home, '.qwen', 'QWEN.md'),
-        '/proj',
-        home,
-      ),
+      formatContextFileDisplayPath(path.join(home, '.qwen', 'QWEN.md'), proj),
     ).toBe(path.join('~', '.qwen', 'QWEN.md'));
   });
 
-  it('keeps relative paths for files outside both CWD and home', () => {
+  it('prefers CWD-relative paths for projects under the home dir', () => {
+    const projUnderHome = path.join(home, 'proj');
     expect(
-      formatContextFileDisplayPath('/other/QWEN.md', '/proj', '/home/u'),
-    ).toBe(path.join('..', 'other', 'QWEN.md'));
+      formatContextFileDisplayPath(
+        path.join(projUnderHome, 'QWEN.md'),
+        projUnderHome,
+      ),
+    ).toBe('QWEN.md');
+  });
+
+  it('does not tildeify sibling directories sharing the home prefix', () => {
+    const file = path.join(siblingHome, 'proj', 'QWEN.md');
+    expect(formatContextFileDisplayPath(file, proj)).toBe(
+      path.relative(proj, file),
+    );
+  });
+
+  it('keeps relative paths for files outside both CWD and home', () => {
+    const file = path.join(other, 'QWEN.md');
+    expect(formatContextFileDisplayPath(file, proj)).toBe(
+      path.relative(proj, file),
+    );
   });
 
   it('passes through non-absolute paths unchanged', () => {
-    expect(formatContextFileDisplayPath('QWEN.md', '/proj')).toBe('QWEN.md');
+    expect(formatContextFileDisplayPath('QWEN.md', proj)).toBe('QWEN.md');
+  });
+
+  it('strips ANSI escapes and control characters from display paths', () => {
+    // CSI parameter bytes span 0x30-0x3F, so ESC[2J consumes the 'b' too;
+    // BEL is removed by the residual control-char pass.
+    expect(
+      formatContextFileDisplayPath(
+        path.join(proj, 'a\u001b[2Jb\u0007.md'),
+        proj,
+      ),
+    ).toBe('a.md');
   });
 });

@@ -65,10 +65,12 @@ const UNESCAPE_REGEX = (() => {
 /**
  * Replaces the home directory with a tilde.
  * @param filePath - The path to tildeify.
+ * @param homeOverride - Optional home directory override (for callers/tests
+ * that track home themselves instead of relying on os.homedir()).
  * @returns The tildeified path.
  */
-export function tildeifyPath(filePath: string): string {
-  const rawHomeDir = os.homedir();
+export function tildeifyPath(filePath: string, homeOverride?: string): string {
+  const rawHomeDir = homeOverride ?? os.homedir();
   if (!rawHomeDir) {
     return filePath;
   }

@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import {
@@ -56,6 +58,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
+    getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
   } as unknown as Config;
 }
 
@@ -87,6 +90,7 @@ describe('collectContextData (contextCommand)', () => {
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
   });
 
@@ -209,6 +213,7 @@ describe('collectContextData (contextCommand)', () => {
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -254,6 +259,7 @@ describe('collectContextData (contextCommand)', () => {
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -280,6 +286,29 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(1);
     expect(data.memoryFiles[0].path).toBe(t('auto memory'));
     expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+  });
+
+  it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {
+    // Memory markers store paths relative to the session working directory;
+    // global files must render as `~/...` instead of `../../..` chains.
+    const workingDir = process.cwd();
+    const globalFile = path.join(os.homedir(), '.qwen', 'QWEN.md');
+    const markerPath = path.relative(workingDir, globalFile);
+    const memory =
+      `--- Context from: ${markerPath} ---\n` +
+      `global rules\n` +
+      `--- End of Context from: ${markerPath} ---`;
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(1);
+    expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
   });
 });
 
