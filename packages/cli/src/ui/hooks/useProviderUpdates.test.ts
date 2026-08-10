@@ -612,7 +612,16 @@ describe('useProviderUpdates', () => {
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     await waitFor(() => {
-      expect(mockSettings.setValue).toHaveBeenCalled();
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+        chinaVersion,
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
+        tokenVersion,
+      );
     });
 
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
@@ -626,6 +635,71 @@ describe('useProviderUpdates', () => {
       expect.anything(),
     );
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('migrates the model only for the active provider in a mixed batch', async () => {
+    // The model-selection gate must run per provider inside executeUpdate.
+    // If it were hoisted into the batch loop, the inactive Token Plan entry
+    // would keep its modelSelection and rewrite model.name a second time
+    // after the active Coding Plan entry migrated the selection — the exact
+    // #8863 symptom.
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+    // Default mock credentials point at Coding Plan, so only the first entry
+    // is the active provider. The current model exists in neither template,
+    // so the active entry must migrate the selection to its fallback model.
+    mockConfig.getModel.mockReturnValue('removed-model');
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    expect(result.current.providerUpdateRequest!.entries.length).toBe(2);
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    // Both entries ran to completion, regardless of provider order.
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+    });
+
+    const modelNameWrites = mockSettings.setValue.mock.calls.filter(
+      (call: unknown[]) => call[1] === 'model.name',
+    );
+    expect(modelNameWrites).toEqual([
+      [expect.anything(), 'model.name', chinaTemplate[0]!.id],
+    ]);
+    const modelBaseUrlWrites = mockSettings.setValue.mock.calls.filter(
+      (call: unknown[]) => call[1] === 'model.baseUrl',
+    );
+    expect(modelBaseUrlWrites).toHaveLength(1);
+    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledTimes(1);
+    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      chinaTemplate[0]!.id,
+      undefined,
+    );
   });
 
   it('persists a cooldown (not a full update) when user chooses "later"', async () => {
