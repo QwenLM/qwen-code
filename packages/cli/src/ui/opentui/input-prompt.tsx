@@ -508,6 +508,22 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onSubmit(decision.text.trim());
   }, [onSubmit]);
 
+  // Force Enter=submit after mount (override any default newline mapping).
+  useEffect(() => {
+    const el = editorRef.current as
+      | (TextareaRenderable & { keyBindings?: unknown })
+      | null;
+    if (el) {
+      el.keyBindings = [
+        { name: 'return', action: 'submit' },
+        { name: 'kpenter', action: 'submit' },
+        { name: 'return', shift: true, action: 'newline' },
+        { name: 'return', ctrl: true, action: 'newline' },
+        { name: 'return', meta: true, action: 'newline' },
+      ];
+    }
+  }, []);
+
   const columns = Math.max(width - 2, 1);
   const dashLine = '─'.repeat(columns);
   const { visible, startIndex, hasMoreAbove, hasMoreBelow } = suggestionWindow(
