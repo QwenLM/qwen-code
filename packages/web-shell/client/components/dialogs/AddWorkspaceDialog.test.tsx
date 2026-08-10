@@ -306,11 +306,13 @@ describe('AddWorkspaceDialog', () => {
 
     it('opens the system picker and fills the selected absolute path', async () => {
       const onPick = vi.fn().mockResolvedValue('/Users/me/code');
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
         <AddWorkspaceDialog
           onClose={vi.fn()}
           onAdd={vi.fn()}
           onPick={onPick}
+          onSuggest={onSuggest}
         />,
       );
 
@@ -321,6 +323,37 @@ describe('AddWorkspaceDialog', () => {
 
       expect(onPick).toHaveBeenCalledTimes(1);
       expect(input().value).toBe('/Users/me/code');
+      expect(document.activeElement).not.toBe(input());
+      await settle();
+      expect(listbox()).toBeNull();
+    });
+
+    it('keeps suggestions closed when a lookup finishes after blur', async () => {
+      let resolveSuggestions!: (value: typeof SUGGESTIONS) => void;
+      const onSuggest = vi.fn(
+        () =>
+          new Promise<typeof SUGGESTIONS>((resolve) => {
+            resolveSuggestions = resolve;
+          }),
+      );
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+
+      expect(listbox()).toBeNull();
     });
 
     it('leaves the path unchanged when the system picker is cancelled', async () => {

@@ -104,7 +104,10 @@ export function AddWorkspaceDialog({
           setSuggestions(result.suggestions);
           setHostSep(result.sep || '/');
           setHighlight(-1);
-          if (openOnResult || listOpenRef.current) {
+          if (
+            inputRef.current === document.activeElement &&
+            (openOnResult || listOpenRef.current)
+          ) {
             setListOpen(result.suggestions.length > 0);
           }
         },
@@ -149,6 +152,7 @@ export function AddWorkspaceDialog({
 
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
+    inputRef.current?.blur();
     setBrowsing(true);
     setError(null);
     try {
@@ -304,7 +308,6 @@ export function AddWorkspaceDialog({
                   <Button
                     type="button"
                     variant="outline"
-                    onMouseDown={(event) => event.preventDefault()}
                     onClick={() => void pickDirectory()}
                     disabled={submitting || browsing}
                   >
