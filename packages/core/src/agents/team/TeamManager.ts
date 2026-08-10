@@ -99,8 +99,6 @@ export interface TeammateSpawnConfig {
   prompt?: string;
   /** Working directory (defaults to team leader's cwd). */
   cwd?: string;
-  /** Registered worktree owned by the leader, when this is the writer. */
-  worktreePath?: string;
   /** Start this teammate in plan mode and require leader plan approval. */
   planModeRequired?: boolean;
   /** Restrict this teammate to read-only inspection and team coordination. */
@@ -302,7 +300,6 @@ export class TeamManager {
       joinedAt: Date.now(),
       cwd,
       tmuxPaneId: '',
-      worktreePath: config.worktreePath,
       backendType: this.backend.type,
       isActive: undefined,
       subscriptions: [],
@@ -536,6 +533,7 @@ export class TeamManager {
     message: string,
     from?: string,
     summary?: string,
+    automatic = false,
   ): Promise<void> {
     // Messages addressed to the leader go to leader's mailbox.
     if (
@@ -567,7 +565,7 @@ export class TeamManager {
         read: false,
         type: shutdownResponse,
       });
-      if (sender) {
+      if (sender && !automatic) {
         this.explicitLeaderReports.add(sender.agentId);
       }
       this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
@@ -1466,6 +1464,7 @@ export class TeamManager {
                 `${agentName} completed a turn without a model-visible final answer. Check the shared task list or send a follow-up if more detail is needed.`,
               agentName,
               `${agentName} completed a turn`,
+              true,
             ),
           );
         }
@@ -1741,6 +1740,7 @@ export class TeamManager {
     const agent = this.getAgentFromBackend(agentId);
     if (!agent) return;
     if (agent.getStatus() !== AgentStatus.IDLE) return;
+    if (this._shutdownPending.has(agentName)) return;
 
     const pendingTasks =
       pending ??
@@ -1753,6 +1753,7 @@ export class TeamManager {
     for (const task of pendingTasks) {
       if (task.owner) continue;
       if (task.blockedBy.length > 0) continue;
+      if (this._shutdownPending.has(agentName)) return;
 
       const claimed = await claimTask(this.teamFile.name, task.id, agentId, {
         checkAgentBusy: true,
@@ -1807,9 +1808,8 @@ export class TeamManager {
       if (!agent) return false;
       if (agent.getStatus() !== AgentStatus.IDLE) return false;
       // Don't auto-claim a task for a teammate the leader is shutting
-      // down — it would start work it's about to abandon. flushNextMessage
-      // gates its own auto-claim on the same set; this is the task-update
-      // -triggered path, which reaches tryAutoClaimTask directly.
+      // down — it would start work it's about to abandon. tryAutoClaimTask
+      // repeats this check after async task reads for both claim paths.
       if (this._shutdownPending.has(member.name)) return false;
       const queue = this.pendingMessages.get(member.agentId) ?? [];
       return queue.length === 0;

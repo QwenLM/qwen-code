@@ -112,6 +112,29 @@ describe('TeamCoordinationHarness', () => {
       });
       expect(worker.getReceivedMessages()).toHaveLength(1);
 
+      worker.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+        subagentId: worker.agentId,
+        round: 2,
+        text: 'follow-up finding',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      worker.getEventEmitter().emit(AgentEventType.STATUS_CHANGE, {
+        agentId: worker.agentId,
+        previousStatus: AgentStatus.IDLE,
+        newStatus: AgentStatus.IDLE,
+        timestamp: Date.now(),
+      });
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            from: 'worker',
+            text: 'follow-up finding',
+          }),
+        ]);
+      });
+
       await h.spawnTeammate('silent-worker');
       await h.teamManager.sendMessage('silent-worker', 'inspect', 'leader');
 
@@ -218,6 +241,23 @@ describe('TeamCoordinationHarness', () => {
       const workerMsgs = h.getAgent('worker').getReceivedMessages();
       expect(workerMsgs).toHaveLength(1);
       expectTeamMessage(workerMsgs[0], 'leader', 'work');
+    });
+
+    it('does not auto-claim while shutdown is pending', async () => {
+      const h = await createHarness();
+      const worker = await h.spawnTeammate('worker');
+
+      h.teamManager.markShutdownRequested('worker');
+      await createTask(h.teamName, {
+        subject: 'Do not claim',
+        description: 'Wait for another worker',
+      });
+
+      worker.setStatus(AgentStatus.RUNNING);
+      worker.setStatus(AgentStatus.IDLE);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(worker.getReceivedMessages()).toHaveLength(0);
     });
   });
 

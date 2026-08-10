@@ -863,7 +863,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Caller-owned working_dir launches default to foreground except for persistent named teammates, whose lifecycle belongs to the team.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates may run in the background, but must be shut down before their caller-owned worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -951,7 +951,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -985,7 +985,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches default to foreground and cannot run in the background; named teammates may use one, but must be shut down before it is removed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
@@ -1234,7 +1234,13 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
       }
-      if (params.name !== undefined) {
+      if (
+        params.name !== undefined &&
+        params.working_dir === undefined &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
         return 'Parameter "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".';
       }
     }
@@ -1254,11 +1260,8 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "working_dir" must be a non-empty string when set.';
       }
-      // A caller-owned worktree has no lifecycle coupling to a background
-      // agent: nothing stops the caller from removing the worktree while a
-      // detached agent is still running in it (ENOENT on its own cwd). The
-      // isolation:'worktree' path is safe in background because the tool owns
-      // and reaps the worktree; working_dir does not.
+      // Unnamed background agents have no lifecycle coupling to a
+      // caller-owned worktree. Named teammates are team-managed instead.
       if (params.run_in_background === true && params.name === undefined) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
@@ -2331,6 +2334,30 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (!this.config.getTeamManager()) {
         const msg =
           'plan_mode_required requires an active team. Use TeamCreate first.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
+    if (this.params.read_only === true) {
+      if (
+        !this.params.name ||
+        this.params.name.trim() === '' ||
+        isSubagentLikeExecutionContext()
+      ) {
+        const msg =
+          'read_only can only be used when spawning a named teammate from the team leader.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      if (!this.config.getTeamManager()) {
+        const msg = 'read_only requires an active team. Use TeamCreate first.';
         return {
           llmContent: msg,
           returnDisplay: msg,
@@ -4362,7 +4389,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         prompt: this.params.prompt,
         agentType: this.params.subagent_type,
         cwd,
-        worktreePath: this.params.working_dir ? cwd : undefined,
         planModeRequired: this.params.plan_mode_required === true,
         readOnly: this.params.read_only === true,
       });

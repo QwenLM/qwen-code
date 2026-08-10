@@ -82,8 +82,6 @@ export interface TeamMember {
   cwd: string;
   /** Tmux pane ID (empty string for in-process). */
   tmuxPaneId: string;
-  /** Git worktree path if isolated. */
-  worktreePath?: string;
   /** Backend type used to spawn this member. */
   backendType?: DisplayMode;
   /** false = idle, undefined/true = active. */

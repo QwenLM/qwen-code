@@ -1333,6 +1333,31 @@ describe('AgentTool', () => {
         }),
       ).toBeNull();
     });
+
+    it('accepts redundant isolation for a named worktree teammate', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({} as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'writer',
+          working_dir: '.qwen/tmp/writer',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('allows named isolation to fall back without an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -1561,6 +1586,27 @@ describe('AgentTool', () => {
       expect(spawnTeammate).not.toHaveBeenCalled();
     });
 
+    it('rejects read_only direct execution from a subagent context', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Inspect implementation',
+        prompt: 'Inspect the coordination boundary',
+        name: 'reader',
+        read_only: true,
+      });
+
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('from the team leader');
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
     it('pins a named teammate to a validated caller-owned worktree', async () => {
       const { GitWorktreeService } = await import(
         '../../services/gitWorktreeService.js'
@@ -1597,6 +1643,7 @@ describe('AgentTool', () => {
           subagent_type: 'file-search',
           name: 'reviewer',
           working_dir: '.qwen/tmp/review-pr-1',
+          isolation: 'worktree',
         });
 
         await invocation.execute(new AbortController().signal);
@@ -1605,7 +1652,6 @@ describe('AgentTool', () => {
           expect.objectContaining({
             name: 'reviewer',
             cwd: '/test/project/.qwen/tmp/review-pr-1',
-            worktreePath: '/test/project/.qwen/tmp/review-pr-1',
           }),
         );
       } finally {
