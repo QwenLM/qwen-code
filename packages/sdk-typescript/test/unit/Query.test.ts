@@ -21,6 +21,7 @@ import type {
 import { ControlRequestType } from '../../src/types/protocol.js';
 import { AbortError } from '../../src/types/errors.js';
 import { Stream } from '../../src/utils/Stream.js';
+import { SdkLogger } from '../../src/utils/logger.js';
 
 // Mock Transport implementation
 class MockTransport implements Transport {
@@ -370,6 +371,129 @@ describe('Query', () => {
         },
       });
       await query.close();
+    });
+
+    it('should expose the CLI reason on a shadowed initial effort status', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        effort: 'high',
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(initRequest.request_id, true, {
+          effort_status: {
+            effort: 'high',
+            applied: false,
+            override: {
+              source: 'extra_body',
+              field: 'thinking_budget',
+            },
+            reason:
+              'thinking may be disabled; extra_body.thinking_budget takes precedence',
+          },
+        }),
+      );
+
+      await query.initialized;
+      expect(query.getInitialEffortStatus()).toEqual({
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+        reason:
+          'thinking may be disabled; extra_body.thinking_budget takes precedence',
+      });
+      await query.close();
+    });
+
+    it('should warn with the CLI-assembled reason when the effort is not applied', async () => {
+      const logged: string[] = [];
+      SdkLogger.configure({
+        logLevel: 'warn',
+        stderr: (message) => logged.push(message),
+      });
+      try {
+        const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+        await vi.waitFor(() => {
+          expect(transport.writtenMessages.length).toBeGreaterThan(0);
+        });
+        const initRequest =
+          transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(initRequest.request_id, true, {
+            effort_status: {
+              effort: 'high',
+              applied: false,
+              override: {
+                source: 'extra_body',
+                field: 'thinking_budget',
+              },
+              reason:
+                'thinking may be disabled; extra_body.thinking_budget takes precedence',
+            },
+          }),
+        );
+
+        await query.initialized;
+        expect(
+          logged.some((line) =>
+            line.includes(
+              'Initial reasoning effort was not applied (thinking may be disabled; extra_body.thinking_budget takes precedence)',
+            ),
+          ),
+        ).toBe(true);
+        await query.close();
+      } finally {
+        SdkLogger.configure({});
+      }
+    });
+
+    it('should fall back to a derived reason when the CLI sends none', async () => {
+      const logged: string[] = [];
+      SdkLogger.configure({
+        logLevel: 'warn',
+        stderr: (message) => logged.push(message),
+      });
+      try {
+        const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+        await vi.waitFor(() => {
+          expect(transport.writtenMessages.length).toBeGreaterThan(0);
+        });
+        const initRequest =
+          transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(initRequest.request_id, true, {
+            effort_status: {
+              effort: 'high',
+              applied: false,
+              override: {
+                source: 'extra_body',
+                field: 'thinking_budget',
+              },
+            },
+          }),
+        );
+
+        await query.initialized;
+        expect(
+          logged.some((line) =>
+            line.includes(
+              'Initial reasoning effort was not applied (extra_body.thinking_budget takes precedence)',
+            ),
+          ),
+        ).toBe(true);
+        await query.close();
+      } finally {
+        SdkLogger.configure({});
+      }
     });
 
     it('should generate unique session ID', async () => {

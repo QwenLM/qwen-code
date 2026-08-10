@@ -78,13 +78,15 @@ function parseEffortStatus(value: unknown): EffortStatus | undefined {
   ) {
     return undefined;
   }
+  const record = value as {
+    applied: boolean;
+    override?: EffortOverride | null;
+    reason?: unknown;
+  };
   return {
-    applied: value.applied,
-    override:
-      ((value as { override?: EffortOverride | null }).override as
-        | EffortOverride
-        | null
-        | undefined) ?? null,
+    applied: record.applied,
+    override: record.override ?? null,
+    reason: typeof record.reason === 'string' ? record.reason : undefined,
   };
 }
 
@@ -342,9 +344,13 @@ export class Query implements AsyncIterable<SDKMessage> {
       );
       this.initialEffortStatus = parseEffortStatus(response?.['effort_status']);
       if (this.initialEffortStatus?.applied === false) {
-        const reason = this.initialEffortStatus.override
-          ? `${this.initialEffortStatus.override.source}.${this.initialEffortStatus.override.field} takes precedence`
-          : 'thinking may be disabled';
+        // The CLI-side reason joins every cause that holds; prefer it over
+        // re-deriving one so no cause is silently dropped here.
+        const reason =
+          this.initialEffortStatus.reason ??
+          (this.initialEffortStatus.override
+            ? `${this.initialEffortStatus.override.source}.${this.initialEffortStatus.override.field} takes precedence`
+            : 'thinking may be disabled');
         logger.warn(`Initial reasoning effort was not applied (${reason})`);
       }
       logger.info('Query initialized successfully');

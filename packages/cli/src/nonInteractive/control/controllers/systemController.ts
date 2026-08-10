@@ -31,6 +31,7 @@ import {
   normalizeReasoningEffort,
   loadUsageDashboard,
   type MCPOAuthConfig,
+  type ReasoningEffortOverride,
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
@@ -165,10 +166,8 @@ export class SystemController extends BaseController {
       | {
           effort: string;
           applied: boolean;
-          override: {
-            source: 'extra_body' | 'samplingParams';
-            field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
-          } | null;
+          override: ReasoningEffortOverride | null;
+          reason?: string;
         }
       | undefined;
 
@@ -192,15 +191,17 @@ export class SystemController extends BaseController {
           const effortMatches =
             this.context.config.getReasoningEffort() === normalized;
           const applied = effortMatches && override === null;
-          effortStatus = { effort: normalized, applied, override };
+          const reason = applied
+            ? undefined
+            : [
+                ...(effortMatches ? [] : ['thinking may be disabled']),
+                ...(override
+                  ? [`${override.source}.${override.field} takes precedence`]
+                  : []),
+              ].join('; ');
+          effortStatus = { effort: normalized, applied, override, reason };
 
           if (!applied) {
-            const reason = [
-              ...(effortMatches ? [] : ['thinking may be disabled']),
-              ...(override
-                ? [`${override.source}.${override.field} takes precedence`]
-                : []),
-            ].join('; ');
             debugLogger.warn(
               `[SystemController] Effort '${normalized}' was not applied (${reason})`,
             );

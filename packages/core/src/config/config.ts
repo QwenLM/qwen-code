@@ -1700,6 +1700,15 @@ export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
 
+/**
+ * A higher-priority static DashScope thinking knob that shadows the global
+ * reasoning-effort tier on the wire (see getReasoningEffortOverride).
+ */
+export type ReasoningEffortOverride = {
+  source: 'extra_body' | 'samplingParams';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+};
+
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
 function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
@@ -4216,12 +4225,7 @@ export class Config {
    * wire. The provider resolves extra_body before samplingParams before the
    * unified reasoning setting; same-layer explicit effort still wins budget.
    */
-  getReasoningEffortOverride():
-    | {
-        source: 'extra_body' | 'samplingParams';
-        field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
-      }
-    | undefined {
+  getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
     if (
       !cfg ||

@@ -507,6 +507,7 @@ describe('SystemController', () => {
     });
 
     it('warns when effort not applied during initialize (thinking disabled)', async () => {
+      mockDebugLogger.warn.mockClear();
       const context = createContext();
       (
         context.config.getReasoningEffort as ReturnType<typeof vi.fn>
@@ -525,6 +526,15 @@ describe('SystemController', () => {
       expect(context.config.setReasoningEffort).toHaveBeenCalledWith('high');
       expect(context.config.getReasoningEffort).toHaveBeenCalled();
       expect(result).toHaveProperty('subtype', 'initialize');
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: false,
+        override: null,
+        reason: 'thinking may be disabled',
+      });
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "[SystemController] Effort 'high' was not applied (thinking may be disabled)",
+      );
     });
 
     it('reports the higher-priority override during initialize', async () => {
@@ -557,9 +567,48 @@ describe('SystemController', () => {
           source: 'samplingParams',
           field: 'enable_thinking',
         },
+        reason: 'samplingParams.enable_thinking takes precedence',
       });
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         "[SystemController] Effort 'high' was not applied (samplingParams.enable_thinking takes precedence)",
+      );
+    });
+
+    it('joins every held cause in the effort_status reason during initialize', async () => {
+      mockDebugLogger.warn.mockClear();
+      const context = createContext();
+      (
+        context.config.getReasoningEffort as ReturnType<typeof vi.fn>
+      ).mockReturnValue('medium');
+      (
+        context.config.getReasoningEffortOverride as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      const result = await controller.handleRequest(
+        { subtype: 'initialize', effort: 'high' },
+        'init-effort-both-causes',
+      );
+
+      expect(result).toHaveProperty('effort_status', {
+        effort: 'high',
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+        reason:
+          'thinking may be disabled; extra_body.thinking_budget takes precedence',
+      });
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "[SystemController] Effort 'high' was not applied (thinking may be disabled; extra_body.thinking_budget takes precedence)",
       );
     });
 

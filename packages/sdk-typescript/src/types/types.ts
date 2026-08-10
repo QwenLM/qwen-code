@@ -204,6 +204,12 @@ export interface EffortOverride {
 export interface EffortStatus {
   applied: boolean;
   override: EffortOverride | null;
+  /**
+   * Human-readable reason assembled by the CLI for why the effort was not
+   * applied. Absent when the CLI predates this field or the effort applied;
+   * derive a fallback from `applied`/`override` when missing.
+   */
+  reason?: string;
 }
 
 /**

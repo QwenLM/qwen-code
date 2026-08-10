@@ -1105,6 +1105,12 @@ export class ContentGenerationPipeline {
       if (typed['enable_thinking'] === false) {
         delete typed['enable_thinking'];
       }
+      // `reasoning_effort: 'none'` is the tiered family's canonical disable
+      // shape (the provider canonicalizes the extra_body escape hatch into
+      // it); a thinking-mandatory model rejects it like the boolean shapes.
+      if (typed['reasoning_effort'] === 'none') {
+        delete typed['reasoning_effort'];
+      }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
         | undefined;
@@ -1138,8 +1144,7 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
-            (thinkingBudget !== undefined &&
-              typed['enable_thinking'] !== false) ||
+            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
             (typeof reasoningEffort === 'string' &&
               reasoningEffort !== 'none'))))
     ) {
