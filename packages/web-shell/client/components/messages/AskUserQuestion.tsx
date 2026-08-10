@@ -520,6 +520,7 @@ export function AskUserQuestion({
   const isLastQuestion = currentIdx === questions.length - 1;
   const isSingleQuestion = questions.length === 1;
   const isEmptyCustomTrigger =
+    current !== undefined &&
     !customFocused &&
     selectedIdx === current.options.length &&
     !customInputs[currentIdx];
