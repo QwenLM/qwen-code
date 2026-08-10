@@ -57,6 +57,34 @@ export function defangEnvelopeTags(text: string): string {
 }
 
 /**
+ * Non-global twin of {@link CROSS_SESSION_TAG_RE}, also matching the
+ * defanged spelling {@link defangEnvelopeTags} produces.
+ *
+ * A separate object because `test()` on a `g`-flagged regex advances
+ * `lastIndex` and so alternates true/false across calls.
+ */
+const CROSS_SESSION_MARKER_RE = new RegExp(
+  `(<|&lt;)(\\/?\\s*${CROSS_SESSION_TAG})(?=[\\s>/]|$)`,
+  'i',
+);
+
+/**
+ * Whether text carries a peer-envelope delimiter.
+ *
+ * For callers that have lost the out-of-band provenance of a string and
+ * must decide from the bytes alone — a prompt restored from disk, or a
+ * history turn whose role says `user` but whose text was written by
+ * another session. Deliberately one-way: it answers "treat this as peer
+ * content", and every caller must use it in the direction where a false
+ * positive costs a little friction and a false negative costs the
+ * guarantee. It is not authentication, and typed text that happens to
+ * contain the delimiter will match.
+ */
+export function containsPeerEnvelopeMarker(text: string): boolean {
+  return CROSS_SESSION_MARKER_RE.test(text);
+}
+
+/**
  * Quote a value for an XML-ish attribute.
  *
  * `from` is a socket path or a peer-chosen display name, so it is

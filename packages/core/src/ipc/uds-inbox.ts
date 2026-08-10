@@ -54,37 +54,76 @@ export interface PeerInbox {
  * Returned as a closure per connection because framing state (the partial
  * line) is per-connection: two peers writing concurrently must not splice
  * their halves together.
+ *
+ * Every step here is O(chunk), never O(buffer). The pacing of a sender's
+ * writes is entirely its own choice, so anything proportional to the
+ * accumulated buffer is quadratic work an unauthenticated same-uid peer
+ * can bill to this session's event loop for free: dripping bytes with no
+ * newline until the cap is reached costs it one syscall per event and
+ * costs us a full re-scan per event. The cap bounds memory, not CPU.
  */
 function createLineReader(
   onLine: (line: string) => void,
   onOverflow: () => void,
 ): (chunk: string) => void {
-  let buffer = '';
+  // Held as unjoined chunks with a running byte count. Joining, scanning
+  // or re-measuring is deferred until a newline proves a frame is actually
+  // complete, and by then the bytes being paid for are bytes being retired.
+  let pending: string[] = [];
+  let pendingBytes = 0;
+  const reset = () => {
+    pending = [];
+    pendingBytes = 0;
+  };
   return (chunk: string) => {
-    buffer += chunk;
+    if (chunk.length === 0) return;
+    // Everything left in `pending` is an incomplete line, so a chunk with
+    // no newline in it cannot complete one — there is nothing to extract
+    // and nothing to scan. Cap it anyway, or a peer that never writes a
+    // newline grows the buffer until the process dies.
+    if (!chunk.includes('\n')) {
+      pending.push(chunk);
+      pendingBytes += Buffer.byteLength(chunk, 'utf8');
+      if (pendingBytes > MAX_FRAME_BYTES) {
+        reset();
+        onOverflow();
+      }
+      return;
+    }
+    pending.push(chunk);
+    const buffer = pending.join('');
+    reset();
     // Complete lines are extracted before the cap is applied. Capping the
     // whole accumulated buffer first would discard legal, under-cap frames
     // whenever a pipelining sender happened to put several of them in one
     // chunk, and would reject a line of exactly MAX_FRAME_BYTES because its
     // own terminating newline pushed the buffer one over.
+    //
+    // Walked with an index rather than by re-slicing the head off `buffer`:
+    // a chunk of N newlines would otherwise copy the remainder N times.
+    let start = 0;
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
+      const line = buffer.slice(start, newline);
+      start = newline + 1;
       if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) {
-        buffer = '';
         onOverflow();
         return;
       }
       if (line.trim().length > 0) onLine(line);
-      newline = buffer.indexOf('\n');
+      newline = buffer.indexOf('\n', start);
     }
-    // What is left is an incomplete line. Cap it too, or a peer that never
-    // writes a newline grows the buffer until the process dies.
-    if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES) {
-      buffer = '';
+    // The tail follows the last newline in this chunk, so it is bounded by
+    // the chunk and measuring it is O(chunk) too.
+    const tail = buffer.slice(start);
+    if (tail.length === 0) return;
+    const tailBytes = Buffer.byteLength(tail, 'utf8');
+    if (tailBytes > MAX_FRAME_BYTES) {
       onOverflow();
+      return;
     }
+    pending.push(tail);
+    pendingBytes = tailBytes;
   };
 }
 

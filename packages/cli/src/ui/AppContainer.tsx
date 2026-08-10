@@ -72,6 +72,7 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
+  containsPeerEnvelopeMarker,
   type GoalTurnHost,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -1298,6 +1299,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
+      // The stash is the one way composer text outlives the session, and
+      // `composerHoldsPeerContentRef` cannot follow it across a restart.
+      // Nothing stops a popped envelope from being stashed, so on the way
+      // back in the text itself is the only provenance left to read.
+      composerHoldsPeerContentRef.current = containsPeerEnvelopeMarker(text);
       buffer.setText(text);
     });
   }, [buffer, promptStashTargetDir]);

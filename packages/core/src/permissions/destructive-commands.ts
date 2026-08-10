@@ -16,6 +16,7 @@
 
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
+import { containsPeerEnvelopeMarker } from '../ipc/peer-envelope.js';
 
 /**
  * Destructive git commands that discard local work.
@@ -88,6 +89,16 @@ function stripShellQuotes(command: string): string {
 /**
  * Extract the last user-role text from the conversation messages.
  * Used to determine whether the user explicitly requested destructive actions.
+ *
+ * `user` is a wire role, not a claim about who wrote the words: a message
+ * from another session is delivered as a user-role turn carrying a peer
+ * envelope, and the inbound gate can auto-deliver one into a prompting
+ * receiver with no user action at all. Those turns are skipped, so the
+ * exemptions below can only ever be satisfied by something this user
+ * actually typed. Skipping is the safe direction in both branches —
+ * finding no user prompt leaves the block in place — which is why the
+ * marker test does not need to be precise about text that merely quotes
+ * the delimiter.
  */
 export function extractLastUserPrompt(
   messages: readonly Content[],
@@ -98,7 +109,10 @@ export function extractLastUserPrompt(
     const texts = (msg.parts ?? [])
       .filter((p): p is Part => typeof (p as Part).text === 'string')
       .map((p) => (p as Part).text!);
-    if (texts.length > 0) return texts.join(' ');
+    if (texts.length === 0) continue;
+    const joined = texts.join(' ');
+    if (containsPeerEnvelopeMarker(joined)) continue;
+    return joined;
   }
   return undefined;
 }

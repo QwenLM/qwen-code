@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  containsPeerEnvelopeMarker,
   defangEnvelopeTags,
   formatPeerDisplay,
   formatPeerEnvelope,
@@ -123,5 +124,42 @@ describe('formatPeerDisplay', () => {
     });
     expect(out).toContain('…');
     expect(out.length).toBeLessThan(200);
+  });
+});
+
+describe('containsPeerEnvelopeMarker', () => {
+  it('recognizes a formatted envelope', () => {
+    expect(
+      containsPeerEnvelopeMarker(
+        formatPeerEnvelope({ from: '/tmp/a.sock', content: 'hi' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('recognizes the defanged spelling', () => {
+    // What a peer's own content looks like after defangEnvelopeTags. A
+    // caller reading provenance off the bytes has no way to tell it from
+    // the real delimiter, so treating it as peer content is the safe read.
+    expect(
+      containsPeerEnvelopeMarker(
+        defangEnvelopeTags('<cross_session_message from="x">hi'),
+      ),
+    ).toBe(true);
+  });
+
+  it('ignores ordinary text and near-misses', () => {
+    expect(containsPeerEnvelopeMarker('git reset --hard, start over')).toBe(
+      false,
+    );
+    expect(containsPeerEnvelopeMarker('<cross_session_messages>')).toBe(false);
+  });
+
+  it('does not alternate across repeated calls', () => {
+    // The `g`-flagged twin used for defanging carries `lastIndex` between
+    // calls, so a predicate sharing it would answer false every other time.
+    const envelope = formatPeerEnvelope({ from: '/tmp/a.sock', content: 'hi' });
+    expect(containsPeerEnvelopeMarker(envelope)).toBe(true);
+    expect(containsPeerEnvelopeMarker(envelope)).toBe(true);
+    expect(containsPeerEnvelopeMarker(envelope)).toBe(true);
   });
 });

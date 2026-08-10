@@ -10,7 +10,7 @@
  * bits, cleanup on close — only exist at the socket boundary.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -85,6 +85,35 @@ function writeRaw(socketPath: string, chunks: string[]): Promise<void> {
       socket.end();
     });
     socket.on('close', () => resolve());
+  });
+}
+
+/**
+ * Write one chunk per event-loop turn.
+ *
+ * `writeRaw` hands every chunk over in a single turn, which coalesces into
+ * a handful of large `data` events and so hides any per-event cost. Pacing
+ * is entirely the sender's choice, and a sender that wants to be expensive
+ * picks this shape.
+ */
+function writePaced(socketPath: string, chunks: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ path: socketPath });
+    socket.on('error', reject);
+    socket.on('close', () => resolve());
+    socket.on('connect', () => {
+      let i = 0;
+      const step = () => {
+        if (i >= chunks.length) {
+          socket.end();
+          return;
+        }
+        socket.write(chunks[i]!);
+        i += 1;
+        setImmediate(step);
+      };
+      step();
+    });
   });
 }
 
@@ -278,6 +307,79 @@ describe.skipIf(isWindows)('framing', () => {
     await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }));
     await settle();
     expect(received).toHaveLength(1);
+  });
+
+  it('keeps per-event framing cost proportional to the chunk, not the buffer', async () => {
+    // Regression: the reader concatenated onto one string and re-scanned
+    // all of it (indexOf + Buffer.byteLength) on every `data` event, so a
+    // sender dripping bytes with no newline paid one syscall per event and
+    // billed this process a full re-scan — quadratic, ~4.6s of saturated
+    // event loop to reach the cap once. The cap bounds memory, not CPU.
+    //
+    // Asserted on how much string gets measured rather than on wall clock:
+    // the timing gap is the symptom, but a duration threshold on a shared
+    // CI runner is a coin flip, and the size of what gets scanned is the
+    // same signal without the flake.
+    const started = await listen();
+    const chunkBytes = 256;
+    const chunk = 'x'.repeat(chunkBytes);
+    // One short of the cap, so the drip never trips the overflow path.
+    const chunks = Array.from(
+      { length: Math.floor(MAX_FRAME_BYTES / chunkBytes) - 1 },
+      () => chunk,
+    );
+
+    const measured: number[] = [];
+    const realByteLength = Buffer.byteLength.bind(Buffer);
+    const spy = vi.spyOn(Buffer, 'byteLength').mockImplementation(((
+      value: string,
+      encoding?: BufferEncoding,
+    ) => {
+      if (typeof value === 'string') measured.push(value.length);
+      return realByteLength(value, encoding);
+    }) as typeof Buffer.byteLength);
+    try {
+      await writePaced(started.socketPath, chunks);
+      await settle();
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Pre-fix this peaked just under MAX_FRAME_BYTES; the writer's own
+    // per-write measurement of one chunk is the only thing left.
+    expect(Math.max(...measured)).toBeLessThan(chunkBytes * 4);
+    // Pre-fix the total ran to ~n²/2 ≈ 2 GiB for 1 MiB of traffic.
+    const written = chunkBytes * chunks.length;
+    expect(measured.reduce((sum, n) => sum + n, 0)).toBeLessThan(written * 8);
+  });
+
+  it('still caps a paced drip that never sends a newline', async () => {
+    // The no-newline fast path has its own cap check now, so it needs its
+    // own coverage: the single-write case above cannot reach it.
+    const started = await listen();
+    const chunk = 'x'.repeat(4096);
+    const chunks = Array.from(
+      { length: Math.floor(MAX_FRAME_BYTES / 4096) + 1 },
+      () => chunk,
+    );
+    await writePaced(started.socketPath, chunks);
+    await settle();
+    expect(received).toHaveLength(0);
+
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }));
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('reassembles a frame dripped one byte per event', async () => {
+    const started = await listen();
+    const line = encodePeerFrame(buildUserFrame({ content: 'dripped' }));
+    await writePaced(started.socketPath, [...line]);
+    await settle();
+    expect(received).toHaveLength(1);
+    expect(
+      (received[0] as { message: { content: string } }).message.content,
+    ).toBe('dripped');
   });
 
   it('does not let a throwing handler take down the server', async () => {

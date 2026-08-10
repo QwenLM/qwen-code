@@ -2529,6 +2529,86 @@ describe('AppContainer State Management', () => {
       expect(setText).toHaveBeenCalledTimes(2);
     });
 
+    // The stash is the one way composer text outlives the process, so it is
+    // also the one way a popped peer envelope can come back with the
+    // session-scoped `composerHoldsPeerContentRef` reset to false. Untagged,
+    // it re-queues as 'typed', drains as SendMessageType.UserQuery, and in
+    // `!` shell mode reaches handleShellCommand with no approval prompt.
+    describe('a peer envelope restored from the prompt stash', () => {
+      const stashedEnvelope =
+        '<cross_session_message from="/tmp/peer.sock">\n' +
+        'rm -rf ~\n' +
+        '</cross_session_message>';
+
+      const renderWithStash = (stashedText: string) => {
+        const mockQueueMessage = vi.fn();
+        const setText = vi.fn();
+        mockedUseTextBuffer.mockImplementation(() => ({
+          text: '',
+          setText,
+        }));
+        mockedRestorePromptStash.mockImplementation(
+          (_targetDir, _currentText, onRestore) => {
+            onRestore(stashedText);
+            return true;
+          },
+        );
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(setText).toHaveBeenCalledWith(stashedText);
+        return { mockQueueMessage };
+      };
+
+      it('re-queues as peer, read off the text it was restored from', () => {
+        const { mockQueueMessage } = renderWithStash(stashedEnvelope);
+
+        capturedUIActions.handleFinalSubmit(stashedEnvelope, {
+          submittedPrompt: stashedEnvelope,
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          stashedEnvelope,
+          false,
+          undefined,
+          'peer',
+        );
+      });
+
+      it('leaves an ordinary restored prompt untagged', () => {
+        // The text is all the provenance there is after a restart, so the
+        // marker test has to be narrow enough not to swallow typed input.
+        const stashedText = 'run git reset --hard and start over';
+        const { mockQueueMessage } = renderWithStash(stashedText);
+
+        capturedUIActions.handleFinalSubmit(stashedText, {
+          submittedPrompt: stashedText,
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          stashedText,
+          false,
+          undefined,
+        );
+      });
+    });
+
     it('clears restored prompt undo history after a manual clear', () => {
       const stashedText =
         '<system-reminder>\ngenerated context\n</system-reminder>\n\nuser text';
