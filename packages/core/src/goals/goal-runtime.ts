@@ -1321,11 +1321,26 @@ export function createGoalRuntime(
           goal: nextGoal,
           activity: 'idle',
         };
-        await options.journal.recordGoalState(recordUuid, {
-          v: GOAL_STATE_VERSION,
-          cause: request.action,
-          snapshot: nextSnapshot,
-        });
+        try {
+          await options.journal.recordGoalState(recordUuid, {
+            v: GOAL_STATE_VERSION,
+            cause: request.action,
+            snapshot: nextSnapshot,
+          });
+        } catch (error) {
+          // A lost session writer surfaces here as `SessionWriterUnavailableError`
+          // or as the raw latched write failure, neither of which callers can
+          // tell apart from a bug by class. Speak the same error `restore` uses
+          // for its migration write, so "this session cannot persist goals"
+          // stays one type: `/goal status` and `/goal clear` degrade to the
+          // empty snapshot instead of failing the caller's whole request.
+          throw error instanceof GoalPersistenceUnavailableError
+            ? error
+            : new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
+        }
         assertAvailable();
         const invalidatesPermit =
           request.action === 'create' ||
