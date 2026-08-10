@@ -4165,4 +4165,117 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain('No issues found. LGTM! ✅');
   });
+
+  it('leaves an already-linked entry untouched — never nests a second link', () => {
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '8388';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({
+      cannotTellCriticals: [
+        '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855) — body truncated',
+      ],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    // Byte-identical passthrough: the model linked it itself.
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855) — body truncated',
+    );
+    expect(r.body).not.toContain('[[comment');
+  });
+
+  it('renders reasonless entries as their own bullets — no collapse, no dangling dash', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: ['old blocker', 'second blocker'],
+      }),
+    );
+    expect(r.body).toContain('\n- **[Critical]** old blocker\n');
+    expect(r.body).toContain('\n- **[Critical]** second blocker\n');
+    expect(r.body).not.toContain('entries —');
+  });
+
+  it('reads a dangling " — " as reasonless, not an empty group key', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: ['a.ts:1 — ', 'b.ts:2 — '],
+      }),
+    );
+    expect(r.body).toContain('\n- **[Critical]** a.ts:1\n');
+    expect(r.body).toContain('\n- **[Critical]** b.ts:2\n');
+    expect(r.body).not.toContain('entries —');
+  });
+
+  it('collapses embedded newlines so a multi-line entry stays one list item', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          'comment 3733696855 (a.ts) — body truncated\nsee also b.ts',
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated see also b.ts',
+    );
+  });
+
+  it('counts entries, not groups, in the Chinese fold', () => {
+    // Three entries collapsing into two groups — the fold must carry 3.
+    const r = composeReview({
+      cannotTellCriticals: [
+        'one (a.ts) — body truncated',
+        'two (b.ts) — body truncated',
+        'three (c.ts) — quarantined by the harness',
+      ],
+      planPath: coveredPlan(undefined, { han: true }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('未决，请确认：共 3 条');
+  });
+
+  it("anchors comment ids at the plan's GHE host, short ids included", () => {
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    parsed.ownerRepo = 'corp/widgets';
+    parsed.prNumber = '12';
+    parsed.host = 'ghe.example.com';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({
+      cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 12345](https://ghe.example.com/corp/widgets/pull/12#discussion_r12345)',
+    );
+  });
+
+  it('leaves short ids bare on github.com — ordinals are not anchors', () => {
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '8388';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({
+      cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 12345 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r12345');
+  });
 });

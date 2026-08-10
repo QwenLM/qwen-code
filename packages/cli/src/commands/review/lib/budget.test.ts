@@ -302,6 +302,24 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('keeps a REAL gap in parentheses — the paren strip fires only for placeholders', () => {
+    // The strip exists for `(none — all planned checks completed)`; a
+    // genuine parenthesized disclosure must survive it …
+    expect(budgetGapDisclosures('Budget gap: (chunk 2 unfetchable)')).toEqual([
+      '(chunk 2 unfetchable)',
+    ]);
+    // … including the ones that merely START with a placeholder token: the
+    // greedy leading-token class swallows them otherwise, certifying work
+    // that never happened.
+    for (const gap of [
+      '(none of the chunk-2 checks ran — the runner died)',
+      '(N/A — the Windows runner was unavailable)',
+      '(no checks ran on Windows — runner unavailable)',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+  });
+
   it('folds duplicate disclosures into one gap', () => {
     // An agent commonly states its gap mid-return and restates it in the
     // closing summary — one gap, not two, and duplicates must not consume
@@ -313,6 +331,12 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
           'Budget gap: Second-order callers',
       ),
     ).toEqual(['second-order callers']);
+    // … whether or not the restatement wraps the gap in parentheses.
+    expect(
+      budgetGapDisclosures(
+        'Budget gap: auth flow untested\n' + 'Budget gap: (auth flow untested)',
+      ),
+    ).toEqual(['auth flow untested']);
   });
 
   it('sanitizes and caps what will reach a terminal and the posted body', () => {

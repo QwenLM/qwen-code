@@ -181,7 +181,7 @@ export function findUnsanctionedReviews(
   );
 }
 
-const OWNER_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+export const OWNER_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
 function readAuditWindow(
   target: string,

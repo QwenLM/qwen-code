@@ -36,7 +36,14 @@ import {
   readBudgetStop,
 } from './lib/deadline.js';
 import { shellQuotePath } from './lib/shell-quote.js';
-import { gh, setGhHost } from './lib/gh.js';
+import {
+  HOSTNAME_RE,
+  gh,
+  getGhHost,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
+import { OWNER_REPO_RE } from './cleanup.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
@@ -243,24 +250,39 @@ function withMarker(line: string): string {
 interface PrIdentity {
   ownerRepo: string;
   prNumber: string;
+  /** The host fetch-pr recorded for a non-default instance, else null. */
+  host: string | null;
+}
+
+/**
+ * The one rule for "this parsed plan names a PR" — the bilingual recovery
+ * and the comment anchors both read it, so a hardening of plan-identity
+ * validation lands once, not twice in this file.
+ */
+function planPrIdentity(plan: unknown): PrIdentity | null {
+  if (typeof plan !== 'object' || plan === null) return null;
+  const p = plan as {
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+    host?: unknown;
+  };
+  const ownerRepo =
+    typeof p.ownerRepo === 'string' && OWNER_REPO_RE.test(p.ownerRepo)
+      ? p.ownerRepo
+      : null;
+  const prNumber = isPositivePrNumber(p.prNumber) ? String(p.prNumber) : null;
+  // The plan is a file on disk; hold a recorded host to the same standard
+  // the rest of this surface applies (HOSTNAME_RE in setGhHost) before it
+  // rides into a posted anchor URL.
+  const host =
+    typeof p.host === 'string' && HOSTNAME_RE.test(p.host) ? p.host : null;
+  return ownerRepo && prNumber ? { ownerRepo, prNumber, host } : null;
 }
 
 function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
   if (!planPath) return null;
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      ownerRepo?: unknown;
-      prNumber?: unknown;
-    };
-    const ownerRepo =
-      typeof plan?.ownerRepo === 'string' &&
-      /^[\w.-]+\/[\w.-]+$/.test(plan.ownerRepo)
-        ? plan.ownerRepo
-        : null;
-    const prNumber = isPositivePrNumber(plan?.prNumber)
-      ? String(plan.prNumber)
-      : null;
-    return ownerRepo && prNumber ? { ownerRepo, prNumber } : null;
+    return planPrIdentity(JSON.parse(readFileSync(planPath, 'utf8')));
   } catch {
     return null;
   }
@@ -276,9 +298,22 @@ function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
  */
 function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
   if (!pr || text.includes('](')) return text;
-  const base = `https://github.com/${pr.ownerRepo}/pull/${pr.prNumber}`;
+  // The anchor must point at the instance the PR lives on: the host the
+  // plan recorded, else this run's routed host, else an operator-exported
+  // GH_HOST — the same effective-host resolution `submit` posts through.
+  // Defaulting to github.com 404s a GHE review's anchors, or lands them on
+  // a same-named public repo's different PR.
+  const host = resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com';
+  const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
+  // github.com's comment ids run long, so a short number after "comment"
+  // reads likelier as an ordinal; a GHE instance's id space is its own and
+  // often short, and the floor would leave the feature inert there.
+  const commentRef =
+    host === 'github.com'
+      ? /\b(issue-level )?comment (\d{6,})\b/g
+      : /\b(issue-level )?comment (\d+)\b/g;
   return text.replace(
-    /\b(issue-level )?comment (\d{6,})\b/g,
+    commentRef,
     (_m, issueLevel: string | undefined, id: string) =>
       issueLevel
         ? `[issue-level comment ${id}](${base}#issuecomment-${id})`
@@ -300,16 +335,25 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  */
 function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
   const parsed = cannotTell.map((raw) => {
+    // Entries render as one-line list items: an unindented newline ends a
+    // list item (CommonMark), so a model-written entry spanning lines would
+    // leak its continuation out of the list. Collapse them first.
     const line = linkifyCommentRefs(
-      raw.startsWith(CRITICAL_PREFIX)
+      (raw.startsWith(CRITICAL_PREFIX)
         ? raw.slice(CRITICAL_PREFIX.length).trim()
-        : raw,
+        : raw
+      ).replace(/\s*\n+\s*/g, ' '),
       pr,
     );
     const idx = line.indexOf(' — ');
+    // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
+    // empty-string reason would become a group key and render `2 entries — :`.
     return idx === -1
       ? { head: line, reason: null }
-      : { head: line.slice(0, idx), reason: line.slice(idx + 3) };
+      : {
+          head: line.slice(0, idx),
+          reason: line.slice(idx + 3).trim() || null,
+        };
   });
   // Grouped on the exact reason text, in first-appearance order. A reasonless
   // entry stays its own item — there is nothing to share.
@@ -1969,29 +2013,23 @@ function bilingualFromPlan(
   fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
 ): boolean {
   if (!planPath) return false;
-  let plan: {
-    prDescriptionHasHan?: unknown;
-    ownerRepo?: unknown;
-    prNumber?: unknown;
-  };
+  let plan: unknown;
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
     return false;
   }
-  if (typeof plan?.prDescriptionHasHan === 'boolean') {
-    return plan.prDescriptionHasHan;
+  const han = (plan as { prDescriptionHasHan?: unknown })?.prDescriptionHasHan;
+  if (typeof han === 'boolean') {
+    return han;
   }
-  const ownerRepo =
-    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
-      ? plan.ownerRepo
-      : undefined;
-  const prNumber = isPositivePrNumber(plan?.prNumber)
-    ? String(plan.prNumber)
-    : undefined;
-  if (!ownerRepo || !prNumber) return false;
+  // The identity rule is shared with the comment anchors (planPrIdentity).
+  // The stricter ownerRepo shape changes no outcome: a misshapen one failed
+  // the gh fetch and fell back to English anyway.
+  const pr = planPrIdentity(plan);
+  if (!pr) return false;
   try {
-    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
+    return /\p{Script=Han}/u.test(fetchPrBody(pr.ownerRepo, pr.prNumber));
   } catch {
     return false;
   }

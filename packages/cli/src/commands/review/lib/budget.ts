@@ -283,6 +283,18 @@ export const INLINE_BUDGET_GAP_RE =
 const PLACEHOLDER_GAP_RE =
   /^(?:<[^>]*>|none\b.*|n\/a\b.*|nothing\b.*|no (?:gaps?|checks?)\b.*|[-—*_~`]+)$/i;
 
+/**
+ * Placeholder shapes allowed INSIDE parentheses, where the leading-token
+ * class above is too greedy for the stripped inner text: a real gap can
+ * merely START with a placeholder word (`(none of the chunk-2 checks ran —
+ * the runner died)`), and dropping it certifies work that never happened.
+ * Only the bare token (`(None.)`) and the completion idiom — the token, a
+ * dash, then an "all done" word (`(none — all planned checks completed)`) —
+ * read as a non-answer there.
+ */
+const PAREN_PLACEHOLDER_RE =
+  /^(?:<[^>]*>|[-—*_~`]+|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b\s*(?:[.!…,;:\s]*$|[-—–]\s*(?:all|every|planned|further|no further)\b))/i;
+
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;
 const MAX_GAPS_PER_AGENT = 8;
@@ -376,7 +388,10 @@ export function budgetGapDisclosures(finalText: string): string[] {
     const normalized = raw.replace(/[.!…,;:\s]+$/, '').trim();
     // A placeholder does not stop being one inside parentheses: #8388's
     // posted body disclosed `(none — all planned checks completed)` as a
-    // gap because the leading `(` defeated the leading-token match.
+    // gap because the leading `(` defeated the leading-token match. The
+    // paren strip is judged by the strict shapes only — the greedy
+    // leading-token class would also swallow a real gap that merely starts
+    // with a placeholder word.
     const unparenthesized =
       normalized.startsWith('(') && normalized.endsWith(')')
         ? normalized.slice(1, -1).trim()
@@ -384,11 +399,14 @@ export function budgetGapDisclosures(finalText: string): string[] {
     if (
       normalized.length === 0 ||
       PLACEHOLDER_GAP_RE.test(normalized) ||
-      PLACEHOLDER_GAP_RE.test(unparenthesized)
+      (unparenthesized !== normalized &&
+        PAREN_PLACEHOLDER_RE.test(unparenthesized))
     ) {
       continue;
     }
-    const key = normalized.toLowerCase();
+    // Folded on the paren-stripped text, so one gap restated with and
+    // without parentheses discloses once.
+    const key = unparenthesized.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     gaps.push(truncateGap(raw));

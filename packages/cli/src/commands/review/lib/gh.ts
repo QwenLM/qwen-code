@@ -67,7 +67,7 @@ function execGhWithRetry(args: string[], options: { input?: string }): string {
 
 let ghHost: string | undefined;
 
-const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
+export const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
 
 /**
  * Route every subsequent `gh` invocation in this process at a GitHub host
