@@ -43,25 +43,166 @@ git checkout "${BRANCH}"
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
 reject_fix() {
-  echo "❌ ${1}"
+  local label="${1}"
+  local preexisting="${2:-false}"
+  local retryable="${3:-true}"
+  echo "❌ ${label}"
   # Declare the verdict before writing its detail. An empty outcome on a failed
   # step means the gate itself crashed, so losing the detail file must not turn
   # a deterministic rejection into an infrastructure retry.
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
-  echo "retryable=true" >> "${GITHUB_OUTPUT}"
+  if [[ "${preexisting}" == 'true' ]]; then
+    # NOT retryable: the repair agent is only allowed to amend this round's
+    # fix, and a failure that exists without the fix is outside that boundary
+    # by definition — the 18-minute repair budget cannot reach it. The remedy
+    # is a base update (merge main into the branch), not a repair.
+    echo "preexisting=true" >> "${GITHUB_OUTPUT}"
+  elif [[ "${retryable}" == 'true' ]]; then
+    echo "retryable=true" >> "${GITHUB_OUTPUT}"
+  fi
+  # The evidence tail flexes so the WHOLE document stays under the report
+  # step's head -c 3900 render cap: truncating the finished document from
+  # the outside cuts the closing fence and malforms everything after it in
+  # the posted comment. Budget = 3300 minus the preamble, floored at 500.
+  local preamble tail_budget
+  preamble="**${label}**"
+  if [[ "${preexisting}" == 'true' ]]; then
+    # shellcheck disable=SC2016
+    preamble+="$(printf '\n\nMeasured fact: the same check also fails at `origin/%s` (the branch as pushed, before this round) in this environment, with a matching failure signature. The repair pass may only amend the round'"'"'s own fix, so it cannot reach this failure. If the branch is behind `main`, a base update (merge main) is the usual cure; otherwise the failure lives in the branch'"'"'s own pre-round commits.' "${BRANCH}")"
+  fi
+  tail_budget=$(( 3300 - ${#preamble} ))
+  (( tail_budget < 500 )) && tail_budget=500
   {
-    echo "**${1}**"
+    printf '%s\n' "${preamble}"
     echo
     # Captured output can contain triple-backtick fences.
     echo '````'
-    tail -c 3000 "${GATE_LOG}" 2> /dev/null
+    tail -c "${tail_budget}" "${GATE_LOG}" 2> /dev/null
     echo '````'
   } > "${WORKDIR}/gate-rejection.md" ||
     echo "::warning::could not write the gate rejection detail; the verdict stands."
   exit 1
 }
+baseline_also_fails() {
+  # A deterministic rejection is only chargeable to this round if the same
+  # check passes WITHOUT the round's commits. Measured counterexample, run
+  # 31276008548: PR #8614's branch predated #8693's tsconfig guard while
+  # node_modules came from the post-#8693 trusted base, so `npm run build`
+  # was just as red at origin/<branch> — 63 minutes of accepted agent work
+  # were discarded and an 18-minute repair burned on a failure the repair
+  # agent is forbidden to touch, thirteen rounds in a row.
+  # Returns 0 (pre-existing) only when the SAME command demonstrably fails
+  # at the pre-round ref; any A/B infrastructure problem returns 1 so the
+  # rejection keeps today's semantics (fail closed toward "charge the fix").
+  local current baseline rc
+  current="$(git rev-parse HEAD)" || return 1
+  baseline="$(git rev-parse --quiet --verify "origin/${BRANCH}^{commit}")" ||
+    return 1
+  # No round commit (the core-rebuild check runs before the commit gate and
+  # is A/B-eligible) — the baseline IS the tree under test; nothing to
+  # compare.
+  [[ "${baseline}" != "${current}" ]] || return 1
+  echo "🔁 Baseline A/B: re-running the failed check at origin/${BRANCH}" \
+    "(${baseline})" | tee -a "${GATE_LOG}"
+  git checkout --quiet --detach "${baseline}" 2>> "${GATE_LOG}" || return 1
+  # The baseline transcript goes to a SIDE log: gate-rejection.md renders
+  # the dynamic `tail_budget` tail of GATE_LOG as the evidence window, and
+  # on a green baseline a chatty success transcript would fill it and push the actual
+  # failure text out — misdirecting the repair agent, the PR comment, and
+  # the next round's LAST_REJECTION block all at once.
+  local ab_log="${GATE_LOG}.baseline"
+  : > "${ab_log}"
+  rc=0
+  if ! "$@" >> "${ab_log}" 2>&1; then
+    rc=1
+  fi
+  if ! git checkout --quiet "${BRANCH}" 2>> "${GATE_LOG}"; then
+    # The tree is no longer the one under verification and nothing after
+    # this point may trust it. Not retryable either: the repair agent works
+    # in this very checkout and performs no git recovery, so on a detached
+    # tree its commit would land on the baseline and be orphaned. The round
+    # ends here; the next one starts clean from the trusted checkout.
+    reject_fix 'could not restore the verification tree after the baseline check' \
+      false false
+  fi
+  if [[ "${rc}" -ne 1 ]]; then
+    echo "🔁 baseline is green — the failure belongs to this round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
+  # A nonzero baseline is NOT enough: the branch can fail there for reason A
+  # while the round fails for reason B, and an infrastructure hiccup in the
+  # baseline leg is a nonzero exit too. Pre-existing requires the round's
+  # failing signatures to be a SUBSET of the baseline's — compiler
+  # diagnostics normalized to file + error code + message (line/column shift
+  # with the round's edits): a round that ADDS a diagnostic charges the
+  # failure to the round even when it also shares baseline diagnostics. The
+  # difference is captured before testing — piping `comm` into `grep -q`
+  # exits `grep` at the first match and SIGPIPEs `comm` under pipefail once
+  # the shared output outruns the pipe buffer, flipping identical large
+  # failure sets to NO-MATCH. No diagnostics on either side means identity
+  # cannot be established, and the rejection stays charged to the round
+  # (fail closed).
+  local sig_head sig_base new_in_round
+  # `|| true`: grep exits 1 on the NORMAL no-match case, and these
+  # assignments only survive `set -e` today because this function is called
+  # from an `if` condition (which suspends errexit). A future unconditional
+  # call site would otherwise turn the documented fail-closed path into a
+  # verdict-less gate crash.
+  sig_head="$(fail_signature "${GATE_LOG}.check")" || true
+  sig_base="$(fail_signature "${ab_log}")" || true
+  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" ||
+    return 1
+  if [[ -z "${sig_head}" || -z "${sig_base}" ]] || [[ -n "${new_in_round}" ]]; then
+    echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
+      | tee -a "${GATE_LOG}"
+    return 1
+  fi
+  # Only a FAILING baseline transcript with a matching signature is
+  # evidence — merge its tail into the window, where it backs the label.
+  tail -c 1500 "${ab_log}" >> "${GATE_LOG}" 2> /dev/null || true
+  return 0
+}
+fail_signature() {
+  # Stable identity of a failed check: tsc-style diagnostics with the
+  # position stripped but the MESSAGE kept ("src/a.ts: error TS2504: …").
+  # Position strips because line/column shift with the round's edits; the
+  # message stays because file + code alone collide — two unrelated defects
+  # in one file sharing a common code (TS2339 is everywhere) would compare
+  # as "the same failure" and skip a repair that could have worked. A
+  # message naming a round-renamed identifier then under-matches — the
+  # fail-closed direction. Sorted unique so two transcripts compare with
+  # comm(1). KNOWN LIMIT: only tsc diagnostics carry identity; vite/esbuild
+  # failures yield an empty signature and deliberately fail closed (charged
+  # to the round) — widening needs their position formats normalized first.
+  grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+.*" "${1}" 2> /dev/null \
+    | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
+}
 run_check() {
-  # pipefail makes the pipeline carry the command's status, not tee's.
+  # pipefail makes the pipeline carry the command's status, not tee's. The
+  # side copy holds THIS check's transcript alone — the identity comparison
+  # must not match diagnostics an earlier check left in the shared log.
+  local label="${1}"
+  shift
+  : > "${GATE_LOG}.check"
+  if ! "$@" 2>&1 | tee -a "${GATE_LOG}" "${GATE_LOG}.check"; then
+    if baseline_also_fails "$@"; then
+      reject_fix "${label} (pre-existing: also fails without this round's commit)" 'true'
+    fi
+    reject_fix "${label}"
+  fi
+}
+run_check_no_ab() {
+  # A/B-exempt: for checks whose baseline re-run would compare a DIFFERENT
+  # computation than the one that failed, so a baseline verdict proves
+  # nothing. The contracts check consumes its file list from stdin, which
+  # the first run drains — the baseline leg would re-check an empty list
+  # and pass vacuously. The schema check reads packages/core/dist, which
+  # the core-rebuild guard built from the ROUND's sources and which,
+  # being gitignored, survives the detach and confounds the baseline. Their
+  # rejections stay charged to the round — which is also where the repair
+  # agent can actually act on them (generate:settings-schema is in its
+  # allowlist).
   local label="${1}"
   shift
   if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
@@ -112,10 +253,10 @@ fi
 # that predates the script does not contain it (bash would exit 127
 # and kill the gate with no outcome), and the gate logic must come
 # from the trusted base, not the branch under verification.
-run_check 'settings schema is stale on the agent-committed fix' \
+run_check_no_ab 'settings schema is stale on the agent-committed fix' \
   bash "${RUNNER_TEMP}/check-settings-schema.sh"
 CHANGED_FILES="$(git diff --name-only "origin/main...${BRANCH}")"
-run_check 'cross-package contract verification failed' \
+run_check_no_ab 'cross-package contract verification failed' \
   bash "${RUNNER_TEMP}/check-autofix-contracts.sh" <<< "${CHANGED_FILES}"
 assert_verification_tree
 
@@ -140,8 +281,14 @@ fi
 
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
 run_check 'build failed on the agent-committed fix' npm run build
-run_check 'typecheck failed on the agent-committed fix' npm run typecheck
-run_check 'lint failed on the agent-committed fix' npm run lint
+# Typecheck consumes core's dist (sdk-typescript resolves
+# @qwen-code/qwen-code-core through the package exports to ./dist/*.d.ts),
+# and dist is gitignored — it survives the baseline detach carrying the
+# ROUND's build, so a baseline typecheck would run reverted sources against
+# round-built declarations. Probe-verified three-arm flip on this tree. Same
+# class as the schema check: A/B-exempt.
+run_check_no_ab 'typecheck failed on the agent-committed fix' npm run typecheck
+run_check_no_ab 'lint failed on the agent-committed fix' npm run lint
 
 # Test changed/related files for the packages this PR touches.
 # --changed follows the import graph so transitive breakage is caught.
@@ -172,7 +319,14 @@ else
       continue
     fi
     echo "🧪 Testing ${p} (changed files only)..."
-    run_check "tests failed in ${p}" \
+    # A/B-exempt: package tests resolve sibling workspaces through their
+    # dist exports (channels/github -> @qwen-code/channel-base/dist), and
+    # dist survives the baseline detach carrying the ROUND's build — a
+    # baseline leg would test reverted sources against round-built
+    # dependencies. (A round-ADDED workspace also has no baseline at all:
+    # npm exits 1 there with "No workspaces found".) Their rejections stay
+    # charged to the round, where the repair agent can act.
+    run_check_no_ab "tests failed in ${p}" \
       npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
   done
 fi
