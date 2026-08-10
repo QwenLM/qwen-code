@@ -228,6 +228,14 @@ describe('sendToPeer', () => {
 
     expect(outcome).toMatchObject({ kind: 'sent' });
     expect(sendPeerFrame.mock.calls[0][0]).toBe('/tmp/s2.sock');
+    // The reported recipient must match the socket actually dialed: a
+    // regression that dials the right socket but reports the wrong peer
+    // would misidentify the recipient in exactly this ambiguous case,
+    // where the address is the only thing disambiguating the two.
+    if (outcome.kind === 'sent') {
+      expect(outcome.address).toBe(`app-ab [${two.ref}]`);
+      expect(outcome.peer).toMatchObject({ sessionId: 's2', cwd: '/w/two' });
+    }
   });
 
   it('suggests near-misses when the name is unknown', async () => {

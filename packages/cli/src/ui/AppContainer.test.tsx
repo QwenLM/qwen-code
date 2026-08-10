@@ -2487,10 +2487,14 @@ describe('AppContainer State Management', () => {
 
         capturedUIActions.handleFinalSubmit(envelope);
 
+        // The optionless path still carries the restored submission's
+        // one-line summary: without the fallback the resubmitted envelope
+        // would lose its display text and a resumed session would render
+        // the raw envelope where the summary belongs.
         expect(mockQueueMessage).toHaveBeenCalledWith(
           envelope,
           false,
-          undefined,
+          'message from session b',
           'peer',
         );
       });

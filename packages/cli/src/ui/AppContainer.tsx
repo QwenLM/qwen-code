@@ -42,6 +42,7 @@ import {
   ideContextStore,
   createDebugLogger,
   describeHoldCause,
+  isPeerEnvelope,
   getErrorMessage,
   getAllGeminiMdFilenames,
   ShellExecutionService,
@@ -1298,6 +1299,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
+      // The stash carries text only, so a stashed peer envelope returns
+      // without its origin tag. Re-detect it, or the envelope drains as a
+      // user query and reaches the shell/slash/@ preprocessing the tag
+      // exists to skip.
+      composerHoldsPeerContentRef.current = isPeerEnvelope(text);
       buffer.setText(text);
     });
   }, [buffer, promptStashTargetDir]);
@@ -2350,7 +2356,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // down one at a time — and announcing those would report the user's
       // own decision back as a fresh inbound hold.
       if (!added) return;
-      historyManager.addItem(
+      addHistoryItem(
         {
           type: MessageType.INFO,
           text:
@@ -2360,7 +2366,7 @@ export const AppContainer = (props: AppContainerProps) => {
         Date.now(),
       );
     });
-  }, [historyManager, peerMessaging]);
+  }, [addHistoryItem, peerMessaging]);
 
   // A held message may only be waiting on a mode mismatch, so re-run the
   // gate whenever the approval mode changes rather than making the user
@@ -2524,7 +2530,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
-      const submittedPrompt =
+      let submittedPrompt =
         submittedPromptProvenanceUnavailable || !provenanceEnabled
           ? undefined
           : restoredSubmission === null
@@ -2532,6 +2538,18 @@ export const AppContainer = (props: AppContainerProps) => {
             : restoredSubmission.modelText === submittedValue
               ? restoredSubmission.submittedPrompt
               : undefined;
+      // Vim's Enter submits without options, so the computation above sees
+      // no restored submission even when the composer holds one. Fall back
+      // to its summary when the contents still match, or a resubmitted peer
+      // envelope loses its one-line display text.
+      if (
+        submittedPrompt === undefined &&
+        !consumesComposerState &&
+        restoredSubmissionRef.current !== null &&
+        restoredSubmissionRef.current.modelText === submittedValue
+      ) {
+        submittedPrompt = restoredSubmissionRef.current.submittedPrompt;
+      }
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
       }
@@ -2866,11 +2884,23 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
-        buffer.setText(
-          currentText
-            ? `${popped.modelText}\n${currentText}`
-            : popped.modelText,
-        );
+        const mergedText = currentText
+          ? `${popped.modelText}\n${currentText}`
+          : popped.modelText;
+        buffer.setText(mergedText);
+        if (mergedText !== popped.modelText) {
+          // setText's change handler just invalidated provenance because the
+          // merged buffer no longer equals popped.modelText. Re-attach the
+          // summary against the merged text so resubmitting it keeps the
+          // one-line display instead of rendering the raw envelope.
+          restoredSubmissionRef.current = {
+            modelText: mergedText,
+            ...(popped.submittedPrompt === undefined
+              ? {}
+              : { submittedPrompt: popped.submittedPrompt }),
+          };
+          submittedPromptProvenanceUnavailableRef.current = false;
+        }
       }
 
       // A cancelled Goal continuation turn appended its synthetic prompt to

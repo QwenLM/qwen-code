@@ -296,7 +296,9 @@ export * from './ipc/peer-envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/socket-path.js';
 export * from './ipc/uds-client.js';
-export * from './ipc/uds-inbox.js';
+// Named exports keep @internal test helpers out of the barrel.
+export { startPeerInbox } from './ipc/uds-inbox.js';
+export type { PeerInbox, PeerInboxOptions } from './ipc/uds-inbox.js';
 export * from './services/session-registry.js';
 export * from './services/sessionService.js';
 export * from './services/session-writer-lease.js';

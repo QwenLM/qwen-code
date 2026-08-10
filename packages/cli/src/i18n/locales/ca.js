@@ -2835,4 +2835,6 @@ export default {
     "Els canvis del gestor d'habilitats automàtiques estan desactivats en mode segur.",
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    "Revisa els missatges retinguts d'altres sessions de Qwen Code (accept | deny)",
 };

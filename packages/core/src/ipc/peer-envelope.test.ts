@@ -25,6 +25,19 @@ describe('defangEnvelopeTags', () => {
     );
   });
 
+  // The lookahead defangs on `>`, whitespace, `/`, or end of input; the
+  // end-of-input branch is the only thing that catches content that
+  // terminates exactly on the token, which is what a peer appending the
+  // delimiter last would produce.
+  it('neutralizes a bare delimiter token at end of input', () => {
+    expect(defangEnvelopeTags('x<cross_session_message')).toBe(
+      'x&lt;cross_session_message',
+    );
+    expect(defangEnvelopeTags('x</cross_session_message')).toBe(
+      'x&lt;/cross_session_message',
+    );
+  });
+
   it('is case-insensitive and tolerates whitespace after the slash', () => {
     expect(defangEnvelopeTags('</ CROSS_SESSION_MESSAGE>')).toContain('&lt;');
     expect(defangEnvelopeTags('<Cross_Session_Message >')).toContain('&lt;');

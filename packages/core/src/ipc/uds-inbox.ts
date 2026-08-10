@@ -72,17 +72,27 @@ function createLineReader(
   let buffer = '';
   return (chunk: string) => {
     buffer += chunk;
-    if (buffer.length > MAX_FRAME_BYTES) {
-      buffer = '';
-      onOverflow();
-      return;
-    }
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
+      if (Buffer.byteLength(line, 'utf8') > MAX_FRAME_BYTES) {
+        buffer = '';
+        onOverflow();
+        return;
+      }
       if (line.trim().length > 0) onLine(line);
       newline = buffer.indexOf('\n');
+    }
+    // The cap binds the unterminated tail only; complete frames were already
+    // extracted above, so a pipelining sender does not lose a valid frame
+    // because its neighbor pushed the combined span over the bound. A tail
+    // of exactly MAX_FRAME_BYTES can still grow into a legal terminated
+    // line, so it is accepted until it exceeds the cap. Measured in bytes,
+    // like the wire: a multibyte line can be shorter than it is large.
+    if (Buffer.byteLength(buffer, 'utf8') > MAX_FRAME_BYTES) {
+      buffer = '';
+      onOverflow();
     }
   };
 }
@@ -240,7 +250,7 @@ export async function startPeerInbox(
       },
       () => {
         debugLogger.error(
-          'peer sent more than 1 MiB without a newline; dropping the connection',
+          'peer sent a frame over the 1 MiB line limit; dropping the connection',
         );
         socket.destroy();
       },
@@ -295,6 +305,11 @@ export async function startPeerInbox(
     debugLogger.error(
       `peer inbox socket could not be restricted to 0600, refusing to listen: ${describe(error)}`,
     );
+    // A connection can race into the listen→chmod window; settle it the
+    // same way close() would before the server goes away.
+    for (const socket of connections) socket.destroy();
+    connections.clear();
+    server.unref();
     server.close();
     try {
       fsSync.unlinkSync(socketPath);

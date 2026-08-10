@@ -119,18 +119,21 @@ describe('mode parity (no explicit setting)', () => {
     h.setMode(ApprovalMode.YOLO);
     expect(h.gate.admit(frame())).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
+    expect(h.delivered).toHaveLength(0);
   });
 
   it('fails closed when the mode is unknown', () => {
     h.setMode(null);
     expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-unknown');
+    expect(h.delivered).toHaveLength(0);
   });
 
   it('fails closed when the mode getter throws', () => {
     h.throwOnMode();
     expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-unknown');
+    expect(h.delivered).toHaveLength(0);
   });
 });
 
@@ -295,7 +298,9 @@ describe('shutdown', () => {
     // going to be held in the first place.
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.gate.shutdown();
-    expect(h.gate.admit(frame())).toBe('accept');
+    const f = frame();
+    expect(h.gate.admit(f)).toBe('accept');
+    expect(h.delivered).toEqual([f]);
   });
 });
 

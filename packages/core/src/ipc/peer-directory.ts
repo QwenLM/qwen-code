@@ -169,11 +169,21 @@ export function suggestPeerNames(
 ): string[] {
   const needle = target.trim().toLowerCase();
   if (needle.length === 0) return [];
-  return peers
-    .filter((peer) => {
-      const name = peer.name.toLowerCase();
-      return name.startsWith(needle) || name.includes(needle);
-    })
-    .slice(0, limit)
-    .map((peer) => formatPeerAddress(peer, peers));
+  return (
+    peers
+      .filter((peer) => {
+        const name = peer.name.toLowerCase();
+        return name.startsWith(needle) || name.includes(needle);
+      })
+      // Prefix matches first: the near-miss this exists for is a truncated
+      // target, and substring-only names earlier in the list would otherwise
+      // push them past the cap.
+      .sort(
+        (a, b) =>
+          Number(b.name.toLowerCase().startsWith(needle)) -
+          Number(a.name.toLowerCase().startsWith(needle)),
+      )
+      .slice(0, limit)
+      .map((peer) => formatPeerAddress(peer, peers))
+  );
 }

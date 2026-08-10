@@ -35,7 +35,14 @@ export const SOCKET_DIR_NAME = 'qwen-socks';
  * one box cannot collide.
  */
 export function resolvePeerSocketPath(pid: number = process.pid): string {
-  const runtimeDir = process.env['XDG_RUNTIME_DIR'] || os.tmpdir();
+  const runtimeDirEnv = process.env['XDG_RUNTIME_DIR'];
+  // A relative value is treated as unset: the socket path it produced
+  // would be rejected by isLocalIpcPath on the receiving side, silently
+  // disabling the inbox.
+  const runtimeDir =
+    runtimeDirEnv !== undefined && path.isAbsolute(runtimeDirEnv)
+      ? runtimeDirEnv
+      : os.tmpdir();
   const preferred = path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`);
   if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) return preferred;
 

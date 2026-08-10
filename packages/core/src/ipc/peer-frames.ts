@@ -11,7 +11,7 @@
  * framing is chosen over a length prefix because it stays debuggable: a
  * frame can be delivered by hand with
  *
- *     echo '{"msgV":1,"type":"user","message":{"role":"user","content":"hi"}}' \
+ *     echo '{"msgV":1,"msgId":"manual-1","type":"user","message":{"role":"user","content":"hi"}}' \
  *       | socat - UNIX-CONNECT:/run/user/1000/qwen-socks/1234.sock
  *
  * Every field is validated on arrival. A frame comes from another process

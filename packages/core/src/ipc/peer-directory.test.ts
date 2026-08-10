@@ -269,4 +269,22 @@ describe('suggestPeerNames', () => {
     );
     expect(suggestPeerNames(many, 'app')).toHaveLength(3);
   });
+
+  it('orders prefix matches ahead of substring matches', () => {
+    // The near-miss this exists for is a truncated target, so prefix
+    // matches must survive the cap even when substring-only names are
+    // listed first.
+    const substrings = Array.from({ length: 4 }, (_, i) =>
+      peer({ sessionId: `w${i}`, name: `myapp-worker-${i}` }),
+    );
+    const prefixes = [
+      peer({ sessionId: 'p1', name: 'app-server' }),
+      peer({ sessionId: 'p2', name: 'app-worker' }),
+    ];
+    expect(suggestPeerNames([...substrings, ...prefixes], 'app')).toEqual([
+      'app-server',
+      'app-worker',
+      'myapp-worker-0',
+    ]);
+  });
 });

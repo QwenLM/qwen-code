@@ -2300,4 +2300,6 @@ export default {
     'As alterações do gerenciador de habilidades automáticas estão desativadas no modo seguro.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    'Revisar mensagens retidas de outras sessões do Qwen Code (accept | deny)',
 };

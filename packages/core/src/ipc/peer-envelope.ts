@@ -96,6 +96,18 @@ export function formatPeerEnvelope(fields: PeerEnvelopeFields): string {
 }
 
 /**
+ * Whether composer text is a peer envelope rather than user-typed input.
+ *
+ * The envelope's origin tag lives only in the queue; surfaces that carry
+ * bare text (the prompt stash) lose it. Re-detecting the opening tag is
+ * how a round-tripped envelope keeps draining as peer content instead of
+ * reaching the shell/slash/@ preprocessing the tag exists to skip.
+ */
+export function isPeerEnvelope(text: string): boolean {
+  return text.startsWith(`<${CROSS_SESSION_TAG}`);
+}
+
+/**
  * One-line form for the transcript and the queue preview, where the full
  * envelope would be noise.
  */

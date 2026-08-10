@@ -2291,4 +2291,6 @@ export default {
     'Изменения куратора автоматических навыков отключены в безопасном режиме.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    'Просмотреть сообщения, удержанные из других сессий Qwen Code (accept | deny)',
 };

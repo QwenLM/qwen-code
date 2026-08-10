@@ -113,14 +113,31 @@ describe('qwen sessions ps', () => {
 
   it('neutralizes control sequences coming from another process record', async () => {
     listLiveSessions.mockResolvedValue([
-      record({ name: 'ev[31mil\r', cwd: '/w/a\nb' }),
+      record({ name: 'ev\x1b[31mil\r', cwd: '/w/a\nb' }),
     ]);
     await run({ json: false, all: false });
 
     const row = stdout[1];
-    expect(row).not.toContain('');
+    expect(row).not.toContain('\x1b');
     expect(row).not.toContain('\r');
     expect(row).not.toContain('\n');
+  });
+
+  it('strips bare control bytes the ANSI pass does not touch', async () => {
+    // BEL, BS, VT, SO, DEL, and a C1 byte: none of these is part of an
+    // escape sequence, so only the final control-byte strip removes them.
+    // SO/SI in particular garble everything after them on terminals that
+    // honor charset shifting.
+    listLiveSessions.mockResolvedValue([
+      record({ name: 'a\x07b\x08c\x0bd\x0ee\x7ff\x9bg' }),
+    ]);
+    await run({ json: false, all: false });
+
+    const row = stdout[1];
+    for (const byte of ['\x07', '\x08', '\x0b', '\x0e', '\x7f', '\x9b']) {
+      expect(row).not.toContain(byte);
+    }
+    expect(row).toContain('abcdefg');
   });
 
   it('truncates an over-long name instead of breaking the columns', async () => {

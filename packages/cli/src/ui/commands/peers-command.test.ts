@@ -118,6 +118,18 @@ describe('resolveHeld', () => {
   it('is case-insensitive', () => {
     expect(resolveHeld(messages, 'BBBBBB')).toMatchObject({ kind: 'one' });
   });
+
+  it('resolves the exact displayed handle of a mixed-case id', () => {
+    // msgId is validated only as a non-empty string, so a crafted id can
+    // carry uppercase into the displayed short handle. The typed token is
+    // lowercased before matching, so the handle formatHeldList prints must
+    // still resolve — both sides of the comparison get lowered.
+    const mixed = [held({ msgId: '-AbCdEf99' })];
+    expect(resolveHeld(mixed, 'AbCdEf')).toEqual({
+      kind: 'one',
+      msgId: '-AbCdEf99',
+    });
+  });
 });
 
 describe('formatHeldList', () => {

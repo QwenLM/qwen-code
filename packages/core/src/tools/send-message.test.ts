@@ -550,6 +550,9 @@ describe('SendMessageTool — peer mode', () => {
       expect.objectContaining({
         target: 'docs-cd',
         message: 'check the tests',
+        // The gate decision on the receiving side depends on this mode, so
+        // the hand-off must actually carry it.
+        approvalMode: DEFAULT_MODE,
       }),
     );
   });
@@ -622,6 +625,57 @@ describe('SendMessageTool — peer mode', () => {
 
     expect(sendMessage).toHaveBeenCalled();
     expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
+  // In-process wins, but winning must not disable the peer route for
+  // everyone who happens to have an active team: a name the team does not
+  // know still falls through to peer resolution.
+  it('falls through to peer routing when an active team has no such member', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    sendToPeer.mockResolvedValue({
+      kind: 'sent',
+      address: 'docs-cd',
+      peer: { cwd: '/w/docs' },
+    });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({ members: [{ name: 'alice' }] }),
+        },
+      }),
+    );
+
+    const result = await tool
+      .build({ to: 'docs-cd', message: 'check the tests' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('docs-cd');
+    expect(sendToPeer).toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses a whitespace-only message to a teammate', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({ members: [{ name: 'alice' }] }),
+        },
+      }),
+    );
+
+    const result = await tool
+      .build({ to: 'alice', message: '   ' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('Re-send with the message text');
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('never sends a structured control message across a session boundary', async () => {

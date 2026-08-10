@@ -97,6 +97,16 @@ const RECORD_FILENAME = /^\d+\.json$/;
 const RECORD_NAME = /^[\w.-]+$/;
 
 /**
+ * Longest `name` a record may carry.
+ *
+ * {@link deriveSessionName} is structurally bounded at 35 characters
+ * (32-char basename + '-' + 2 hex), so anything longer is provably not a
+ * name this code derived. The bound keeps a planted record from bloating
+ * every `list_agents` result and `sessions ps` row with a ~64 KiB name.
+ */
+const MAX_RECORD_NAME_LENGTH = 64;
+
+/**
  * Longest `cwd` a record may carry.
  *
  * `PATH_MAX` is 4096 bytes on Linux and 1024 on macOS, so no real working
@@ -256,6 +266,10 @@ export async function patchSessionRecord(
   try {
     const existing = await readRecord(filePath);
     if (existing === null) return;
+    // Same guard as readOwnSessionRecord: a record whose contents name a
+    // different PID was not written by this code, and merging our fields
+    // into it would adopt a foreign identity.
+    if (existing.pid !== pid) return;
     await atomicWriteJSON(
       filePath,
       { ...existing, ...patch },
@@ -443,7 +457,9 @@ async function readRecord(
     !Number.isInteger(pid) ||
     pid <= 0 ||
     typeof sessionId !== 'string' ||
+    sessionId.length === 0 ||
     typeof cwd !== 'string' ||
+    cwd.length === 0 ||
     // `cwd` is as attacker-influenced as `name` and reaches further — into
     // model context, not just the terminal — so it is bounded at the same
     // parse boundary rather than at each of its three sinks.
@@ -451,6 +467,7 @@ async function readRecord(
     RECORD_CWD_CONTROL_CHARS.test(cwd) ||
     typeof name !== 'string' ||
     !RECORD_NAME.test(name) ||
+    name.length > MAX_RECORD_NAME_LENGTH ||
     (kind !== 'interactive' && kind !== 'headless') ||
     typeof startedAt !== 'number' ||
     !Number.isFinite(startedAt) ||

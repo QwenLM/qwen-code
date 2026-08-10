@@ -82,6 +82,19 @@ describe('isSameProcess', () => {
     }
   });
 
+  it('keeps a recorded token alive when the current read fails', () => {
+    // A transient `/proc` read failure (hidepid, or the process dying
+    // between the two reads) must not read as a token mismatch: there is
+    // nothing to compare against, and deleting a live session's record is
+    // the worse failure.
+    const spy = vi.spyOn(process, 'kill').mockReturnValue(true);
+    try {
+      expect(isSameProcess(DEAD_PID, '12345')).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('accepts a live pid whose token still matches', () => {
     const token = readProcStartToken(process.pid);
     expect(isSameProcess(process.pid, token)).toBe(true);

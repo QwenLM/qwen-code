@@ -10,8 +10,31 @@
  * bits, cleanup on close — only exist at the socket boundary.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import type { Mode, PathLike } from 'node:fs';
+
+type ChmodFn = (path: PathLike, mode: Mode) => Promise<void>;
+
+// A module namespace is not configurable in ESM, so `fs.chmod` cannot be
+// spied on directly. Mock the module with a passthrough that an
+// individual test can override via the hoisted slot.
+const chmodSlot = vi.hoisted(() => ({
+  override: null as ChmodFn | null,
+  passthrough: null as ChmodFn | null,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  chmodSlot.passthrough = actual.chmod as ChmodFn;
+  return {
+    ...actual,
+    chmod: ((...args: Parameters<typeof actual.chmod>) =>
+      (chmodSlot.override ?? (actual.chmod as ChmodFn))(
+        ...args,
+      )) as typeof actual.chmod,
+  };
+});
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -125,6 +148,38 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     expect(targetStat.mode & 0o777).toBe(0o755);
   });
 
+  // The documented fail-closed branch: a socket whose permission bits
+  // cannot be locked down is worse than no socket at all. Pin it, or a
+  // refactor turning the catch into log-and-continue ships green.
+  it('refuses to listen when the socket chmod fails', async () => {
+    const socketPath = path.join(tmpDir, 'socks', 'a.sock');
+    const passthrough = chmodSlot.passthrough;
+    if (!passthrough) throw new Error('fs/promises mock not initialized');
+    chmodSlot.override = (p, mode) => {
+      if (String(p).endsWith('.sock')) {
+        return Promise.reject(
+          Object.assign(new Error('operation not permitted'), {
+            code: 'EPERM',
+          }),
+        );
+      }
+      return passthrough(p, mode);
+    };
+
+    try {
+      const started = await startPeerInbox({
+        socketPath,
+        onFrame: (frame) => received.push(frame),
+      });
+
+      expect(started).toBeNull();
+      await expect(fs.stat(socketPath)).rejects.toThrow();
+      expect(await probePeerSocket(socketPath)).toBe(false);
+    } finally {
+      chmodSlot.override = null;
+    }
+  });
+
   it('reclaims a socket file left behind by a crashed session', async () => {
     const dir = path.join(tmpDir, 'socks');
     await fs.mkdir(dir, { recursive: true });
@@ -149,6 +204,24 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     await started.close();
     inbox = null;
     await expect(fs.stat(started.socketPath)).rejects.toThrow();
+  });
+
+  it('close settles a sender that is still connected', async () => {
+    const started = await listen();
+    const socket = net.connect({ path: started.socketPath });
+    socket.on('error', () => {});
+    await new Promise<void>((resolve) => socket.once('connect', resolve));
+
+    // With allowHalfOpen a connection the server never destroys would keep
+    // server.close() pending, so resolving here proves close() settles it.
+    await Promise.race([
+      started.close(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('close() did not settle')), 2000),
+      ),
+    ]);
+    inbox = null;
+    socket.destroy();
   });
 
   it('is safe to close twice', async () => {
@@ -227,13 +300,86 @@ describe.skipIf(isWindows)('framing', () => {
     expect(received[0]).toMatchObject({ message: { content: 'after' } });
   });
 
-  it('drops a connection that never sends a newline', async () => {
+  it('destroys a connection that never sends a newline', async () => {
     const started = await listen();
-    await writeRaw(started.socketPath, ['x'.repeat(MAX_FRAME_BYTES + 1)]);
-    await settle();
+    // Hold the socket open: the guard must destroy the connection, not
+    // merely read nothing from it, or deleting the guard would ship green.
+    const destroyed = new Promise<void>((resolve) => {
+      const socket = net.connect({ path: started.socketPath });
+      socket.on('error', () => {});
+      socket.on('close', () => resolve());
+      socket.on('connect', () => {
+        socket.write('x'.repeat(MAX_FRAME_BYTES + 1));
+      });
+    });
+    await destroyed;
     expect(received).toHaveLength(0);
 
     // The inbox is still usable afterwards.
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }));
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  // MAX_FRAME_BYTES is the longest single line ACCEPTED, so a terminated
+  // line of exactly the cap must arrive, and complete frames must survive
+  // a neighbour that pushes the buffered span over the bound.
+  function frameLineOfLength(length: number): string {
+    let content = 'x';
+    let line = encodePeerFrame(buildUserFrame({ content })).slice(0, -1);
+    const overhead = line.length - content.length;
+    content = 'x'.repeat(length - overhead);
+    line = encodePeerFrame(buildUserFrame({ content })).slice(0, -1);
+    expect(line.length).toBe(length);
+    return line;
+  }
+
+  it('accepts a line of exactly the frame cap', async () => {
+    const started = await listen();
+    await writeRaw(started.socketPath, [
+      frameLineOfLength(MAX_FRAME_BYTES) + '\n',
+    ]);
+    await settle();
+
+    expect(received).toHaveLength(1);
+  });
+
+  it('keeps valid frames pipelined with a near-cap frame', async () => {
+    const started = await listen();
+    // Together the two frames cross the cap; individually both are legal.
+    const big = frameLineOfLength(MAX_FRAME_BYTES - 100) + '\n';
+    const small = encodePeerFrame(buildUserFrame({ content: 'after' }));
+    await writeRaw(started.socketPath, [big + small]);
+    await settle();
+
+    expect(received).toHaveLength(2);
+    expect(received[1]).toMatchObject({ message: { content: 'after' } });
+  });
+
+  it('measures the cap in bytes, not code units', async () => {
+    const started = await listen();
+    // Two-byte characters: the line stays under the cap in code units but
+    // crosses it in bytes, which is what the wire contract measures.
+    const content = '\u00e9'.repeat(MAX_FRAME_BYTES / 2 + 100);
+    const line = encodePeerFrame(buildUserFrame({ content })).slice(0, -1);
+    expect(line.length).toBeLessThan(MAX_FRAME_BYTES);
+    expect(Buffer.byteLength(line, 'utf8')).toBeGreaterThan(MAX_FRAME_BYTES);
+
+    await writeRaw(started.socketPath, [line + '\n']);
+    await settle();
+    expect(received).toHaveLength(0);
+  });
+
+  it('drops a terminated line that exceeds the cap', async () => {
+    const started = await listen();
+    const oversized = frameLineOfLength(MAX_FRAME_BYTES + 1) + '\n';
+    const canary = encodePeerFrame(buildUserFrame({ content: 'canary' }));
+    await writeRaw(started.socketPath, [oversized + canary]);
+    await settle();
+
+    expect(received).toHaveLength(0);
+
+    // The inbox itself survives the dropped connection.
     await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }));
     await settle();
     expect(received).toHaveLength(1);

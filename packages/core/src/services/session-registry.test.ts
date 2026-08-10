@@ -109,6 +109,11 @@ describe('registerSession', () => {
       cwd: '/w/app',
       kind: 'interactive',
       qwenVersion: '1.2.3',
+      // The PID-reuse guard is only as strong as this token: without it
+      // isSameProcess degrades to trust-by-PID on exactly the platform
+      // that produces one.
+      procStart:
+        process.platform === 'linux' ? expect.stringMatching(/^\d+$/) : null,
     });
     expect(live[0].name).toMatch(/^app-[0-9a-f]{2}$/);
   });
@@ -211,6 +216,8 @@ describe('patchSessionRecord', () => {
       qwenVersion: '1.2.3',
     });
 
+    const [before] = await listLiveSessions({ includeSelf: true });
+
     await patchSessionRecord({ sessionId: 'new', name: 'renamed' });
 
     const [record] = await listLiveSessions({ includeSelf: true });
@@ -220,6 +227,9 @@ describe('patchSessionRecord', () => {
       cwd: '/w/app',
       qwenVersion: '1.2.3',
     });
+    // Dropping the token in the merge would silently re-open the PID-reuse
+    // hole the registry exists to close.
+    expect(record.procStart).toBe(before.procStart);
   });
 
   it('does not create a record for a session that never registered', async () => {
@@ -229,11 +239,13 @@ describe('patchSessionRecord', () => {
 
   // Symlinks are not creatable without elevation on the win32 gate.
   it.skipIf(process.platform === 'win32')(
-    'replaces a planted symlink instead of contaminating its target',
+    'does not merge into the target of a planted symlink',
     async () => {
       // readRecord follows the link and accepts a *valid* record, so the
       // damaging shape is a link aimed at a sibling session's record: the
-      // merge lands the patch on the sibling's pid and reply address.
+      // merge would land the patch on the sibling's pid and reply address.
+      // The pid-vs-filename guard rejects it outright, so the patch is a
+      // clean no-op and the link's target is never written.
       const sibling = {
         schemaVersion: 1,
         pid: DEAD_PID,
@@ -251,12 +263,12 @@ describe('patchSessionRecord', () => {
 
       await patchSessionRecord({ sessionId: 'patched' });
 
-      // The sibling record is untouched and the link was replaced by a
-      // real file, not written through.
+      // The sibling record is untouched and nothing was written through
+      // the link: the patch refused the foreign record and did nothing.
       expect(JSON.parse(await fs.readFile(victim, 'utf8'))).toEqual(sibling);
-      expect((await fs.lstat(getSessionRecordPath(process.pid))).isFile()).toBe(
-        true,
-      );
+      expect(
+        (await fs.lstat(getSessionRecordPath(process.pid))).isSymbolicLink(),
+      ).toBe(true);
     },
   );
 });
@@ -368,6 +380,41 @@ describe('listLiveSessions', () => {
 
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
     expect(() => new Date(1e300).toISOString()).toThrow(RangeError);
+  });
+
+  it('rejects a startedAt below the negative epoch bound', async () => {
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: readProcStartToken(process.pid),
+      sessionId: 's-poison',
+      cwd: '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: -1e300,
+      ipcPath: '/tmp/poison.sock',
+    });
+
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+    expect(() => new Date(-1e300).toISOString()).toThrow(RangeError);
+  });
+
+  it.each([
+    ['sessionId', 'an empty sessionId'],
+    ['cwd', 'an empty cwd'],
+  ])('rejects a record with %s', async (field) => {
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.pid,
+      procStart: readProcStartToken(process.pid),
+      sessionId: field === 'sessionId' ? '' : 's-empty',
+      cwd: field === 'cwd' ? '' : '/w/app',
+      name: 'app-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
   });
 
   it('ignores files that are not <pid>.json', async () => {
@@ -528,6 +575,28 @@ describe('readOwnSessionRecord', () => {
 
     expect(await readOwnSessionRecord()).toBeNull();
   });
+
+  it('does not merge a patch into a record whose contents name a different pid', async () => {
+    await writeRaw(`${process.pid}.json`, {
+      schemaVersion: 1,
+      pid: process.ppid,
+      procStart: readProcStartToken(process.ppid),
+      sessionId: 's-planted',
+      cwd: '/w/attacker',
+      name: 'ops-admin',
+      kind: 'interactive',
+      startedAt: Date.now(),
+    });
+
+    await patchSessionRecord({ name: 'patched-by-us' });
+
+    // The foreign record is left untouched, on disk and in enumeration.
+    const raw = JSON.parse(
+      await fs.readFile(getSessionRecordPath(process.pid), 'utf8'),
+    ) as { name: string };
+    expect(raw.name).toBe('ops-admin');
+    expect(await readOwnSessionRecord()).toBeNull();
+  });
 });
 
 describe('readRecord name validation', () => {
@@ -569,6 +638,22 @@ describe('readRecord name validation', () => {
   ])('rejects a record named %j (%s)', async (name) => {
     await plantNamed(name);
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+  });
+
+  it('rejects a record whose name is longer than any derived name', async () => {
+    // deriveSessionName is structurally capped at 35 characters, so
+    // anything longer is provably planted — and would otherwise bloat
+    // every list_agents result and sessions ps row up to the 64 KiB
+    // record cap.
+    await plantNamed('a'.repeat(65));
+    expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+  });
+
+  it('accepts a name at the length bound', async () => {
+    await plantNamed('a'.repeat(64));
+    expect(
+      (await listLiveSessions({ includeSelf: true })).map((r) => r.sessionId),
+    ).toEqual(['s-planted']);
   });
 
   it('accepts every name deriveSessionName can produce', async () => {

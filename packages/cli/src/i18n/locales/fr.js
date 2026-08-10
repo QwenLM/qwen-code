@@ -2321,4 +2321,6 @@ export default {
     'Les modifications du gestionnaire de compétences automatiques sont désactivées en mode sécurisé.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    "Examiner les messages retenus provenant d'autres sessions Qwen Code (accept | deny)",
 };

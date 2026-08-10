@@ -398,6 +398,21 @@ class SendMessageInvocation extends BaseToolInvocation<
         return { llmContent: msg, returnDisplay: msg };
       }
 
+      // A blank message has nothing for the recipient to act on. The peer
+      // route rejects this in `sendToPeer`; the team route needs the same
+      // guard or a whitespace-only message interrupts the teammate with
+      // nothing to execute.
+      if (this.params.message.trim().length === 0) {
+        const msg =
+          'A message with no text has nothing for the recipient to act on. ' +
+          'Re-send with the message text.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'Empty message.',
+          error: { message: msg },
+        };
+      }
+
       await teamManager.sendMessage(
         to,
         this.params.message,
@@ -457,8 +472,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
             // A peer session's wire format rejects empty content and drops
             // the frame without a receipt, so an empty send has no meaning
             // on any route. This only covers the literal empty string —
-            // whitespace-only content passes here and is caught in
-            // `sendToPeer`, which answers with the 'empty' guidance below.
+            // whitespace-only content passes here and is rejected before
+            // delivery on both routes: by `sendToPeer` for peers ('empty'
+            // guidance below) and by the team route in `execute`.
             minLength: 1,
             // Cap message size so a teammate can't grow the
             // recipient's inbox file unboundedly with a single send.

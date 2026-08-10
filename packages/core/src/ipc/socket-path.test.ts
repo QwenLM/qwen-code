@@ -46,6 +46,15 @@ describe.skipIf(isWindows)('resolvePeerSocketPath', () => {
     );
   });
 
+  it('treats a relative XDG_RUNTIME_DIR as unset', () => {
+    // The socket path it produced would be rejected by isLocalIpcPath on
+    // the receiving side, silently disabling the inbox.
+    process.env['XDG_RUNTIME_DIR'] = 'run/user/1000';
+    expect(resolvePeerSocketPath(4242)).toBe(
+      `${os.tmpdir()}/qwen-socks/4242.sock`.replace(/\/+/g, '/'),
+    );
+  });
+
   it('falls back to a short /tmp path when the preferred one cannot be bound', () => {
     process.env['XDG_RUNTIME_DIR'] = `/run/${'d'.repeat(120)}`;
     const resolved = resolvePeerSocketPath(4242);
