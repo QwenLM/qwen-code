@@ -381,6 +381,16 @@ describe('AskUserQuestion accessibility', () => {
     expect(document.activeElement).toBe(optionButtons()[0]);
   });
 
+  it('handles a shorter new request while viewing a later question', () => {
+    render(undefined, multipleQuestionsRequest);
+    pressKey(optionButtons()[0]!, 'Enter');
+
+    expect(() =>
+      rerender(undefined, { ...request, id: 'req-shorter' }),
+    ).not.toThrow();
+    expect(container!.textContent).toContain('Pick a color');
+  });
+
   it('advances on rapid repeated ArrowDown without a re-render in between', () => {
     // Regression: moveSelection must write selectedIdxRef synchronously, else a
     // held key (repeating faster than React re-renders) reads a stale ref and
