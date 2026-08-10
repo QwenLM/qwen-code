@@ -17669,6 +17669,10 @@ describe('Session', () => {
             toolName: 'read_file',
             args: { path: '/normalized/final.txt' },
             signal: expect.any(AbortSignal),
+            // The daemon policy falls back to the session and needs to know
+            // where the tool will run.
+            sessionId: 'test-session-id',
+            cwd: process.cwd(),
           });
           expect(executeSpy).not.toHaveBeenCalled();
           expect(
@@ -17733,6 +17737,10 @@ describe('Session', () => {
             toolName: 'read_file',
             args: { path: '/normalized/final.txt' },
             signal: expect.any(AbortSignal),
+            // The daemon policy falls back to the session and needs to know
+            // where the tool will run.
+            sessionId: 'test-session-id',
+            cwd: process.cwd(),
           });
           expect(executeSpy).toHaveBeenCalledOnce();
         });
