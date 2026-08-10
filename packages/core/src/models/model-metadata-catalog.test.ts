@@ -421,7 +421,16 @@ describe('getCatalogModalities', () => {
     expect(
       getCatalogModalities(
         {
+          alibaba: {
+            api: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+            env: ['DASHSCOPE_API_KEY'],
+            models: {
+              'shared-model': { modalities: { input: ['text'] } },
+            },
+          },
           'alibaba-cn': {
+            api: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            env: ['DASHSCOPE_API_KEY'],
             models: {
               'shared-model': { modalities: { input: ['text', 'image'] } },
             },
@@ -1261,9 +1270,12 @@ describe('loadModelMetadataCatalog', () => {
     tempDirs.push(dir);
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
     const firstResponse = deferred<Response>();
-    const EnvHttpProxyAgent = vi.fn(() => ({
-      close: vi.fn(async () => undefined),
-    }));
+    const closes: Array<ReturnType<typeof vi.fn>> = [];
+    const EnvHttpProxyAgent = vi.fn(() => {
+      const close = vi.fn(async () => undefined);
+      closes.push(close);
+      return { close };
+    });
     const undiciFetch = vi
       .fn()
       .mockImplementationOnce(() => firstResponse.promise)
@@ -1279,6 +1291,10 @@ describe('loadModelMetadataCatalog', () => {
     firstResponse.resolve(new Response(JSON.stringify(catalog)));
 
     await vi.waitFor(() => expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      expect(closes).toHaveLength(2);
+      for (const close of closes) expect(close).toHaveBeenCalledOnce();
+    });
     expect(EnvHttpProxyAgent).toHaveBeenLastCalledWith({
       httpProxy: 'http://second-proxy:8080',
       httpsProxy: 'http://second-proxy:8080',

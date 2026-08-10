@@ -197,8 +197,23 @@ describe('buildInstallPlan', () => {
   });
 
   it('uses prebuiltModels when provided', () => {
-    const config = makeConfig();
-    const prebuilt = [{ id: 'pre-1', baseUrl: 'https://x.com', envKey: 'X' }];
+    const config = makeConfig({
+      models: [
+        {
+          id: 'pre-1',
+          contextWindowSize: 8192,
+          modalities: { image: true },
+        },
+      ],
+    });
+    const prebuilt = [
+      {
+        id: 'pre-1',
+        baseUrl: 'https://x.com',
+        envKey: 'X',
+        generationConfig: { modalities: { image: true } },
+      },
+    ];
     const plan = buildInstallPlan(config, {
       baseUrl: 'https://api.test.com/v1',
       apiKey: 'sk-test',
@@ -207,6 +222,9 @@ describe('buildInstallPlan', () => {
     });
 
     expect(plan.modelProviders?.[0]?.models).toBe(prebuilt);
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig?.modalities,
+    ).toEqual({ image: true });
     expect(plan.modelSelection).toEqual({ modelId: 'pre-1' });
   });
 
