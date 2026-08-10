@@ -25,6 +25,7 @@ import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { DaemonWorkspaceService } from './workspace-service/index.js';
 import type { DaemonLogger } from './daemon-logger.js';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 
 const BASE_WORKSPACE = '/work/status';
@@ -130,6 +131,69 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.limits.maxTotalSessions).toBe(50);
   });
 
+  it('reports the modeled partition without claiming it is applied', async () => {
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = budget;
+    const policy = createChildHeapPolicy({ budget, mode: 'observe' });
+    policy.decide(10_000); // one would-be refusal, so the counter is not trivially 0
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    // The figures an operator needs to judge the partition for themselves —
+    // publishing them is the substitute for a refusal count that cannot say
+    // whether the ceiling would fit their workload.
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: {
+        mode: 'observe',
+        maxConcurrentChildren: 7,
+        perChildCeilingMb: 526,
+        refusals: 1,
+      },
+    });
+  });
+
+  it('reports no child-heap policy as null rather than as a disabled one', async () => {
+    // Direct-embed and the bootstrap window build no policy. `null` says
+    // "there is no policy", which a client must not read as "mode off".
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 8_192,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: null,
+    });
+  });
+
+  it('reports an off policy as present but modeling nothing', async () => {
+    // The third state, and the reason the two above are not enough: a policy
+    // exists and its mode is visible, but it published no partition. On this
+    // same budget `observe` reports 7 children at 526 MB, so carrying those
+    // figures here would show an operator a partition they turned off.
+    const options = makeOptions();
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 8_192 });
+    options.opts.daemonMemoryBudget = budget;
+    const policy = createChildHeapPolicy({ budget, mode: 'off' });
+    options.getChildHeapPolicySnapshot = () => policy.snapshot();
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.limits.memory).toMatchObject({
+      enforced: false,
+      childHeap: {
+        mode: 'off',
+        maxConcurrentChildren: null,
+        perChildCeilingMb: null,
+        refusals: 0,
+      },
+    });
+  });
+
   it('reports the resolved memory budget in daemon status limits', () => {
     const options = makeOptions();
     options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
@@ -181,11 +245,17 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory).toEqual({
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
-      childRssCoverage: 'primary_only',
+      childRssCoverage: 'active_children',
+      // No registry in this case, so there are no bridges to enumerate — the
+      // honest reading is "nothing measured", not "no children".
+      children: { rssBytes: 0, sampled: 0, oldestReadingAgeMs: null },
       modeled: {
         recommendedShareAtRegisteredMb: 15_360,
         recommendedShareAtActiveMb: 15_360,
       },
+      // Real process figures; asserted for shape here and for arithmetic in
+      // the dedicated pressure tests. `toEqual` still fails on an extra key.
+      pressure: expect.objectContaining({ mode: 'observe' }),
     });
   });
 
@@ -221,11 +291,15 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.runtime.memory).toEqual({
       registeredWorkspaces: 0,
       activeAcpChildren: 0,
-      childRssCoverage: 'primary_only',
+      childRssCoverage: 'active_children',
+      // No registry in this case, so there are no bridges to enumerate — the
+      // honest reading is "nothing measured", not "no children".
+      children: { rssBytes: 0, sampled: 0, oldestReadingAgeMs: null },
       modeled: {
         recommendedShareAtRegisteredMb: null,
         recommendedShareAtActiveMb: null,
       },
+      pressure: expect.objectContaining({ mode: 'observe' }),
     });
   });
 
@@ -283,6 +357,200 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('sums only the children that actually reported, and says how many did', async () => {
+    // Every state a live child can be in, in one response. `sampled` is what
+    // separates "measured and small" from "never measured": without it, the
+    // three unreported children below are indistinguishable from children
+    // using no memory.
+    const liveWith = (rssBytes: number, ageMs: number) =>
+      ({
+        getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+        isChannelLive: () => true,
+        getChildResourceSnapshot: () => ({ rssBytes, cpuPercent: 1, ageMs }),
+        lastActivityAt: null,
+      }) as unknown as AcpSessionBridge;
+    const liveUnpolled = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      // Live, but stale or never polled — the hook exists and returns nothing.
+      getChildResourceSnapshot: () => undefined,
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const liveOlderContract = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      // An injected bridge predating the hook entirely.
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const dormant = {
+      getDaemonStatusSnapshot: () => ({
+        ...BASE_BRIDGE_SNAPSHOT,
+        channelLive: false,
+      }),
+      isChannelLive: () => false,
+      // Deliberately unfaithful: the real hook self-gates on a live channel
+      // and would return undefined here. This stub does not, so the test
+      // fails unless the sum gates on `isChannelLive` itself.
+      getChildResourceSnapshot: () => ({
+        rssBytes: 999,
+        cpuPercent: 1,
+        ageMs: 1,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+
+    const runtimes = [
+      // Descending age on purpose: with the oldest reading enumerated FIRST,
+      // a plain-overwrite accumulator yields 1_000 and fails. Ascending order
+      // would let "last contributor wins" pass with the same expectation.
+      {
+        workspaceId: 'a',
+        workspaceCwd: BASE_WORKSPACE,
+        bridge: liveWith(100, 9_000),
+      },
+      {
+        workspaceId: 'b',
+        workspaceCwd: '/work/b',
+        bridge: liveWith(200, 1_000),
+      },
+      { workspaceId: 'c', workspaceCwd: '/work/c', bridge: liveUnpolled },
+      { workspaceId: 'd', workspaceCwd: '/work/d', bridge: liveOlderContract },
+      { workspaceId: 'e', workspaceCwd: '/work/e', bridge: dormant },
+    ];
+    const options = makeOptions();
+    options.bridge = runtimes[0].bridge;
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: runtimes[0].bridge },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => runtimes.map(() => ({})),
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.childRssCoverage).toBe('active_children');
+    // Four children are live; only two reported. The dormant one is excluded
+    // from both figures even though its stub would have returned a value.
+    expect(response.runtime.memory?.activeAcpChildren).toBe(4);
+    expect(response.runtime.memory?.children).toEqual({
+      rssBytes: 300,
+      sampled: 2,
+      // The oldest contributor, not the newest: the sum spans this much time.
+      oldestReadingAgeMs: 9_000,
+    });
+    // The gap is visible without the client having to know it exists.
+    expect(response.runtime.memory!.children.sampled).toBeLessThan(
+      response.runtime.memory!.activeAcpChildren,
+    );
+  });
+
+  it('reports a zero age as zero, and ages a mixed-contract sum by the ones that can', async () => {
+    // `ageMs` is exactly 0 when a status read lands in the same millisecond as
+    // the sampler's stamp. A truthiness guard, or a trailing `|| null`, turns
+    // that measured-fresh reading into `null` — which the field's own docs say
+    // never means fresh.
+    const freshBridge = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({
+        rssBytes: 100,
+        cpuPercent: 1,
+        ageMs: 0,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const withRegistry = (bridges: AcpSessionBridge[]) => {
+      const runtimes = bridges.map((bridge, i) => ({
+        workspaceId: `w${i}`,
+        workspaceCwd: i === 0 ? BASE_WORKSPACE : `/work/w${i}`,
+        bridge,
+      }));
+      const options = makeOptions();
+      options.bridge = bridges[0];
+      options.workspaceRegistry = {
+        primary: { workspaceCwd: BASE_WORKSPACE, bridge: bridges[0] },
+        list: () => runtimes,
+        listManaged: () => runtimes,
+        listEntries: () => runtimes.map(() => ({})),
+      } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+      options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+        availableMemoryMb: 32_768,
+      });
+      return options;
+    };
+
+    const fresh = await buildDaemonStatusResponse(
+      'summary',
+      withRegistry([freshBridge]),
+    );
+    expect(fresh.runtime.memory?.children.oldestReadingAgeMs).toBe(0);
+
+    // Mixing an age-carrying contributor with a pre-`ageMs` one must age the
+    // sum by the ones that can report, not reset the whole thing to null.
+    const olderContract = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({ rssBytes: 50, cpuPercent: 1 }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const aged = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({
+        rssBytes: 70,
+        cpuPercent: 1,
+        ageMs: 5_000,
+      }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const mixed = await buildDaemonStatusResponse(
+      'summary',
+      withRegistry([olderContract, aged]),
+    );
+    expect(mixed.runtime.memory?.children).toMatchObject({
+      rssBytes: 120,
+      sampled: 2,
+      oldestReadingAgeMs: 5_000,
+    });
+  });
+
+  it('counts a child whose bridge predates ageMs, but cannot age the sum', async () => {
+    // Distinct from a missing hook: the hook is present and returns a reading,
+    // it just carries no age. That child must still contribute memory, and
+    // `null` must not be mistaken for "sampled nothing".
+    const preAgeMs = {
+      getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT,
+      isChannelLive: () => true,
+      getChildResourceSnapshot: () => ({ rssBytes: 512, cpuPercent: 3 }),
+      lastActivityAt: null,
+    } as unknown as AcpSessionBridge;
+    const runtimes = [
+      { workspaceId: 'a', workspaceCwd: BASE_WORKSPACE, bridge: preAgeMs },
+    ];
+    const options = makeOptions();
+    options.bridge = preAgeMs;
+    options.workspaceRegistry = {
+      primary: { workspaceCwd: BASE_WORKSPACE, bridge: preAgeMs },
+      list: () => runtimes,
+      listManaged: () => runtimes,
+      listEntries: () => [{}],
+    } as unknown as BuildDaemonStatusOptions['workspaceRegistry'];
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.children).toEqual({
+      rssBytes: 512,
+      sampled: 1,
+      oldestReadingAgeMs: null,
+    });
+  });
+
   it('counts a draining workspace that still holds a live child', async () => {
     // A workspace mid-drain (or mid-replacement, or blocked) is dropped by
     // list() — active-state only — yet its ACP child is still alive. The live
@@ -297,6 +565,15 @@ describe('buildDaemonStatusResponse', () => {
     const drainingBridge = {
       getDaemonStatusSnapshot: () => BASE_BRIDGE_SNAPSHOT, // channelLive: true
       isChannelLive: () => true,
+      // Reports RSS too: `list()` is active-state only and would drop this
+      // draining-but-process-holding workspace, so summing over it instead of
+      // `listManaged()` under-reports child RSS in exactly the drain window
+      // while `activeAcpChildren` still counts the child.
+      getChildResourceSnapshot: () => ({
+        rssBytes: 4_096,
+        cpuPercent: 1,
+        ageMs: 10,
+      }),
       lastActivityAt: null,
     } as unknown as AcpSessionBridge;
     const primaryRuntime = {
@@ -329,6 +606,15 @@ describe('buildDaemonStatusResponse', () => {
       registeredWorkspaces: 2,
       activeAcpChildren: 2,
     });
+    // Only the draining bridge reports a reading, so this byte count can come
+    // from nowhere else: it pins that the sum enumerates the process-holding
+    // set (`listManaged()`), not the active-state set (`list()`), which would
+    // drop this child and leave `sampled` at 0 — a silent under-report
+    // confined to the drain window, while `activeAcpChildren` still counts it.
+    expect(response.runtime.memory?.children).toMatchObject({
+      rssBytes: 4_096,
+      sampled: 1,
+    });
   });
 
   it('counts a single workspace on the external-bridge path', async () => {
@@ -344,6 +630,141 @@ describe('buildDaemonStatusResponse', () => {
       registeredWorkspaces: 1,
       activeAcpChildren: 1,
     });
+  });
+
+  it('reports pressure figures in both modes, but only observe raises an issue', async () => {
+    // A 1 MiB denominator puts this test process far past `critical`, which is
+    // the only way to exercise the gate: at a realistic denominator the level
+    // is `normal` and no issue is raised in either mode, so the assertion
+    // below would hold even with the gate deleted.
+    const responses = await Promise.all(
+      (['off', 'observe'] as const).map((mode) => {
+        const options = makeOptions();
+        options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+          availableMemoryMb: 1,
+        });
+        options.opts.memoryPressureMode = mode;
+        return buildDaemonStatusResponse('summary', options);
+      }),
+    );
+    const [offResponse, observeResponse] = responses;
+
+    // Both report the reading — that is the point of `off` still observing.
+    for (const response of responses) {
+      expect(response.runtime.memory?.pressure.level).toBe('critical');
+      expect(response.runtime.memory?.pressure.availableBytes).toBe(
+        1024 * 1024,
+      );
+    }
+    expect(offResponse.runtime.memory?.pressure.mode).toBe('off');
+    expect(observeResponse.runtime.memory?.pressure.mode).toBe('observe');
+
+    // Only `observe` turns it into a verdict.
+    const pressureIssues = (r: (typeof responses)[number]) =>
+      r.issues.filter((issue) => issue.code === 'daemon_memory_pressure');
+    expect(pressureIssues(offResponse)).toHaveLength(0);
+    expect(pressureIssues(observeResponse)).toHaveLength(1);
+    // Warning, not error, while the thresholds are uncalibrated.
+    expect(pressureIssues(observeResponse)[0].severity).toBe('warning');
+    // Pin the wire strings at runtime. Both the issue-code union member and
+    // the `pressure` field declaration are otherwise guarded only by tsc,
+    // which vitest does not run — a rename would ship green.
+    expect(pressureIssues(observeResponse)[0].code).toBe(
+      'daemon_memory_pressure',
+    );
+    expect(
+      Object.keys(observeResponse.runtime.memory!.pressure).sort(),
+    ).toEqual([
+      'availableBytes',
+      'heapLimitBytes',
+      'heapRatio',
+      'heapUsedBytes',
+      'level',
+      'mode',
+      'ratio',
+      'rssBytes',
+      'rssRatio',
+      'source',
+    ]);
+    // The denominator named in the message follows `source`; inverting the
+    // ternary is otherwise invisible, and would send an operator hunting RSS
+    // growth during a heap-driven incident.
+    expect(pressureIssues(observeResponse)[0].message).toContain(
+      'of available memory',
+    );
+    // Both halves of the documented contract: the issue reaches the rollup in
+    // `observe` (a severity or list that bypassed it would leave this `ok`),
+    // and `off` leaves the rollup exactly where it was. Same input, so the
+    // only difference between these two is the mode.
+    expect(observeResponse.status).not.toBe('ok');
+    expect(offResponse.status).toBe('ok');
+  });
+
+  it('raises nothing on a healthy daemon, and a warning once pressure leaves normal', async () => {
+    // The `level !== 'normal'` half of the gate. Without this, deleting that
+    // clause keeps the whole suite green while every /daemon/status response
+    // on a healthy daemon carries a daemon_memory_pressure warning and a
+    // top-level `warning` status — the exact false positive `off` exists for.
+    const healthy = makeOptions();
+    healthy.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 1_048_576,
+    });
+    const healthyResponse = await buildDaemonStatusResponse('summary', healthy);
+    expect(healthyResponse.runtime.memory?.pressure.level).toBe('normal');
+    expect(
+      healthyResponse.issues.filter(
+        (issue) => issue.code === 'daemon_memory_pressure',
+      ),
+    ).toHaveLength(0);
+    expect(healthyResponse.status).toBe('ok');
+
+    // And the other side of the same clause: a denominator sized so this
+    // process lands between the soft and hard thresholds must raise exactly
+    // one warning. Tightening the gate to `=== 'critical'` fails here.
+    const rss = process.memoryUsage().rss;
+    const softOptions = makeOptions();
+    softOptions.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      // Target ~57% — comfortably inside [0.5, 0.65) at either rounding edge.
+      availableMemoryMb: Math.ceil(rss / 0.57 / (1024 * 1024)),
+    });
+    const softResponse = await buildDaemonStatusResponse(
+      'summary',
+      softOptions,
+    );
+    expect(softResponse.runtime.memory?.pressure.level).toBe('soft');
+    expect(
+      softResponse.issues.filter(
+        (issue) => issue.code === 'daemon_memory_pressure',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('defaults to observe when no mode was configured', async () => {
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 32_768,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    expect(response.runtime.memory?.pressure.mode).toBe('observe');
+  });
+
+  it('converts the budget from megabytes when computing the ratio', async () => {
+    // The budget module speaks MB and the pressure module speaks bytes. A
+    // missing 1024x here still yields a plausible-looking ratio, so assert the
+    // denominator directly rather than trusting the level.
+    const options = makeOptions();
+    options.opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
+      availableMemoryMb: 4_096,
+    });
+    const response = await buildDaemonStatusResponse('summary', options);
+
+    const pressure = response.runtime.memory!.pressure;
+    expect(pressure.availableBytes).toBe(4_096 * 1024 * 1024);
+    expect(pressure.rssRatio).toBeCloseTo(
+      pressure.rssBytes / (4_096 * 1024 * 1024),
+      10,
+    );
   });
 
   it('omits memory reporting when no budget was resolved', async () => {

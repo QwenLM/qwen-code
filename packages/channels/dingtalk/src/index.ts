@@ -3,6 +3,7 @@ export { downloadMedia } from './media.js';
 
 import { DingtalkChannel } from './DingtalkAdapter.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
+import { DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM } from './interactive-card-types.js';
 
 export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
@@ -23,6 +24,49 @@ export const plugin: ChannelPlugin = {
         kind: 'secret',
         required: true,
         envResolvable: true,
+      },
+      {
+        key: 'interactiveCards',
+        label: 'Interactive Cards',
+        kind: 'object',
+        properties: [
+          {
+            key: 'enabled',
+            label: 'Enabled',
+            kind: 'boolean',
+          },
+          {
+            key: 'statusCard',
+            label: 'Status Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+            ],
+          },
+          {
+            key: 'questionCard',
+            label: 'Question Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+              {
+                key: 'timeoutMs',
+                label: 'Timeout (ms)',
+                kind: 'number',
+                exclusiveMinimum:
+                  DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+              },
+            ],
+          },
+        ],
       },
     ],
   },

@@ -87,7 +87,7 @@ describe('useProviderUpdates', () => {
       apiKeyEnvKey: CODING_PLAN_ENV_KEY,
     });
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
-    mockModelsConfig.syncAfterAuthRefresh.mockClear();
+    mockModelsConfig.syncAfterAuthRefresh.mockReset();
     delete process.env[CODING_PLAN_ENV_KEY];
   });
 
@@ -315,39 +315,65 @@ describe('useProviderUpdates', () => {
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
     expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
-  });
-
-  it('does not refresh auth when updating an inactive provider on the same protocol', async () => {
-    mockConfig.getContentGeneratorConfig.mockReturnValue({
-      authType: AuthType.USE_OPENAI,
-      baseUrl: TOKEN_PLAN_BASE_URL,
-      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
-    });
-    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
-      METADATA_KEY
-    ] = {
-      baseUrl: CODING_PLAN_CHINA_BASE_URL,
-      version: 'old-version-hash',
-    };
-    mockSettings.merged['modelProviders'] = {
-      [AuthType.USE_OPENAI]: chinaTemplate,
-    };
-
-    const { result } = renderHook(() =>
-      useProviderUpdates(
-        mockSettings as never,
-        mockConfig as never,
-        mockAddItem,
-      ),
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'security.auth.selectedType',
+      expect.anything(),
     );
-
-    await waitFor(() => {
-      expect(result.current.providerUpdateRequest).toBeDefined();
-    });
-    await result.current.providerUpdateRequest!.onConfirm('update');
-
-    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      name: 'on the same protocol',
+      activeConfig: {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: TOKEN_PLAN_BASE_URL,
+        apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+      },
+    },
+    {
+      name: 'on a different protocol',
+      activeConfig: {
+        authType: AuthType.USE_GEMINI,
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        apiKeyEnvKey: 'GEMINI_API_KEY',
+      },
+    },
+  ])(
+    'does not change auth when updating an inactive provider $name',
+    async ({ activeConfig }) => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue(activeConfig);
+      (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+        METADATA_KEY
+      ] = {
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        version: 'old-version-hash',
+      };
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: chinaTemplate,
+      };
+
+      const { result } = renderHook(() =>
+        useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.providerUpdateRequest).toBeDefined();
+      });
+      await result.current.providerUpdateRequest!.onConfirm('update');
+
+      expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'security.auth.selectedType',
+        expect.anything(),
+      );
+    },
+  );
 
   it('does not refresh auth before auth initialization completes', async () => {
     mockConfig.getContentGeneratorConfig.mockReturnValue(undefined as never);
@@ -418,7 +444,13 @@ describe('useProviderUpdates', () => {
   });
 
   it('switches model when previous model is no longer available', async () => {
-    mockConfig.getModel.mockReturnValue('removed-model');
+    let activeModel = 'removed-model';
+    mockConfig.getModel.mockImplementation(() => activeModel);
+    mockModelsConfig.syncAfterAuthRefresh.mockImplementation(
+      (_authType, modelId) => {
+        activeModel = modelId;
+      },
+    );
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -452,6 +484,79 @@ describe('useProviderUpdates', () => {
       AuthType.USE_OPENAI,
       'qwen3.5-plus',
       undefined,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'Coding Plan configuration updated successfully. Model switched to "qwen3.5-plus".',
+      },
+      expect.any(Number),
+    );
+  });
+
+  it.each([
+    { name: 'registered under the same protocol', registered: true },
+    { name: 'provided by the active runtime config only', registered: false },
+  ])('does not move the user off a model $name', async ({ registered }) => {
+    const foreignModel = {
+      id: 'my-own-model',
+      baseUrl: 'https://my-own-gateway.example.com/v1',
+      envKey: 'MY_OWN_KEY',
+      name: '[Mine] my-own-model',
+    };
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: foreignModel.baseUrl,
+      apiKeyEnvKey: foreignModel.envKey,
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: registered
+        ? [foreignModel, ...chinaTemplate]
+        : chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'Coding Plan configuration updated successfully.',
+      },
+      expect.any(Number),
     );
   });
 

@@ -517,7 +517,7 @@ export class MonitorRegistry {
       '<status>running</status>',
       `<event-count>${entry.eventCount}</event-count>`,
       `<summary>Monitor "${escapeXml(desc)}" emitted event #${entry.eventCount}.</summary>`,
-      `<result>${escapeXml(eventLine)}</result>`,
+      `<result>${escapeXml(safeEventLine)}</result>`,
       '</task-notification>',
     );
 
