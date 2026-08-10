@@ -294,7 +294,12 @@ import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
-import { MessageEmitter } from './emitters/MessageEmitter.js';
+import {
+  MessageEmitter,
+  buildGoalStateUpdate,
+  buildGoalStatusUpdate,
+} from './emitters/MessageEmitter.js';
+import type { HistoryItemGoalStatus } from '../../ui/types.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
@@ -1839,6 +1844,55 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Render the recovered-Goal cards instead of streaming them.
+   *
+   * The bulk load-replay path (`historyReplay: 'response'`) does not stream
+   * its replay: `loadSession` collects the page into the `LOAD_REPLAY`
+   * envelope and the bridge seeds those updates onto the session's event bus
+   * *after* the ACP `session/load` call returns. A card streamed from inside
+   * that call therefore lands on the bus **before** the replayed
+   * pre-migration `set` card — the reverse of the ordering
+   * {@link publishRecoveredGoalState} exists to produce, leaving the phantom
+   * running goal exactly as it was. Returning the cards lets the caller
+   * append them to the envelope, after the replay page.
+   *
+   * Appending after a truncated page (`hasMore`) is still correct: paging
+   * drops the oldest records, so the authoritative state belongs last either
+   * way.
+   *
+   * Marks the publication as delivered, so the runtime subscription cannot
+   * emit a duplicate card for the same `(cause, snapshot)` once the session
+   * goes live.
+   */
+  async renderRecoveredGoalUpdates(
+    replayedRecords?: readonly ChatRecord[],
+  ): Promise<SessionUpdate[]> {
+    if (this.disposed || this.closing) return [];
+    let runtime;
+    try {
+      runtime = await this.config.getGoalRuntimeReady();
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      const status = this.#unrestorableGoalStatus(replayedRecords);
+      return status ? [buildGoalStatusUpdate(status)] : [];
+    }
+    const cause = runtime.getRecoveryCause?.();
+    // Nothing was recovered, so the replay already told the whole story.
+    if (!cause) return [];
+    const snapshot = runtime.getSnapshot();
+    const publicationKey = this.#goalPublicationKey(snapshot, cause);
+    if (publicationKey === this.lastGoalPublicationKey) return [];
+    this.lastGoalPublicationKey = publicationKey;
+    return [
+      buildGoalStateUpdate(
+        snapshot,
+        cause,
+        this.lastGoalSnapshot?.goal ?? null,
+      ),
+    ];
+  }
+
+  /**
    * Emit a trailing `cleared` card for an active legacy goal the runtime
    * refused to recover.
    *
@@ -1848,19 +1902,39 @@ export class Session implements SessionContext {
   async #supersedeUnrestorableGoal(
     replayedRecords?: readonly ChatRecord[],
   ): Promise<void> {
-    if (!replayedRecords?.length) return;
+    const status = this.#unrestorableGoalStatus(replayedRecords);
+    if (!status) return;
+    await this.messageEmitter.emitGoalStatus(status);
+  }
+
+  /**
+   * The `cleared` card for an active legacy goal the runtime refused to
+   * recover, or `undefined` when there is nothing to supersede. Shared by the
+   * streaming and rendering recovery paths so they cannot drift.
+   */
+  #unrestorableGoalStatus(
+    replayedRecords?: readonly ChatRecord[],
+  ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
+    if (!replayedRecords?.length) return undefined;
     const active = findGoalToRestore(
       collectGoalStatusItemsFromRecords(replayedRecords),
     );
-    if (!active) return;
-    await this.messageEmitter.emitGoalStatus({
+    if (!active) return undefined;
+    return {
       kind: 'cleared',
       condition: active.condition,
       iterations: active.iterations,
       ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
       lastReason:
         'Goal not restored: its saved state could not be read, so this session is not driving it.',
-    });
+    };
+  }
+
+  #goalPublicationKey(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+  ): string | undefined {
+    return cause ? `${cause}:${JSON.stringify(snapshot)}` : undefined;
   }
 
   async #publishGoalState(
@@ -1868,9 +1942,7 @@ export class Session implements SessionContext {
     cause?: GoalStateCause,
     previousGoal: GoalRecord | null = this.lastGoalSnapshot?.goal ?? null,
   ): Promise<void> {
-    const publicationKey = cause
-      ? `${cause}:${JSON.stringify(snapshot)}`
-      : undefined;
+    const publicationKey = this.#goalPublicationKey(snapshot, cause);
     if (publicationKey && publicationKey === this.lastGoalPublicationKey) {
       return;
     }

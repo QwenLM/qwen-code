@@ -14406,6 +14406,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendAvailableCommandsUpdate: ReturnType<typeof vi.fn>;
         replayHistory: ReturnType<typeof vi.fn>;
         primeTurnFromHistory: ReturnType<typeof vi.fn>;
+        publishRecoveredGoalState: ReturnType<typeof vi.fn>;
+        renderRecoveredGoalUpdates: ReturnType<typeof vi.fn>;
         cumulativeUsage: {
           promptTokens: number;
           cachedTokens: number;
@@ -14564,6 +14566,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     resumedConversation?: { messages: unknown[] };
     replayHistoryImpl?: (...args: unknown[]) => Promise<void>;
     primeTurnFromHistoryImpl?: (...args: unknown[]) => unknown;
+    recoveredGoalUpdates?: unknown[];
   }) {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: opts.resumedConversation,
@@ -14595,6 +14598,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             opts.replayHistoryImpl ?? (async () => undefined),
           ),
         primeTurnFromHistory: vi.fn(opts.primeTurnFromHistoryImpl),
+        publishRecoveredGoalState: vi.fn().mockResolvedValue(undefined),
+        renderRecoveredGoalUpdates: vi
+          .fn()
+          .mockResolvedValue(opts.recoveredGoalUpdates ?? []),
         cumulativeUsage: {
           promptTokens: 7,
           cachedTokens: 3,
@@ -15137,6 +15144,88 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     ).toBeLessThan(
       lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  // The bulk path sets `replayHistory: false`, which skips the recovered-Goal
+  // publication in `createAndStoreSession`. Left there, the web-shell's
+  // primary load path replays the pre-migration `set` card as the newest goal
+  // card and shows a phantom running goal. The card has to ride inside the
+  // envelope, after the page — streaming it would land it on the event bus
+  // before the bridge seeds these updates.
+  it('appends the recovered Goal card after the bulk replay page', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const goalUpdate = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalState: { v: 2, activity: 'idle' },
+        goalStatus: { kind: 'paused', condition: 'ship the thing' },
+      },
+    };
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [goalUpdate],
+    });
+    const replayUpdate = {
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+      _meta: { timestamp: 4242 },
+    };
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        await context.sendUpdate(replayUpdate);
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as { _meta?: Record<string, { updates: unknown[] }> };
+
+    const updates = response._meta?.['qwen.session.loadReplay']?.updates;
+    // Order is the fix: the authoritative card must be the LAST goal card.
+    expect(updates).toEqual([{ ...replayUpdate, timestamp: 4242 }, goalUpdate]);
+    expect(lastSessionMock?.renderRecoveredGoalUpdates).toHaveBeenCalledWith(
+      messages,
+    );
+    // Rendered, never streamed — a streamed card would sort ahead of the
+    // envelope the bridge seeds after this call returns.
+    expect(lastSessionMock?.sendUpdate).not.toHaveBeenCalled();
+    expect(lastSessionMock?.publishRecoveredGoalState).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  // The other half of the same gap: resume also runs with
+  // `replayHistory: false`, so without an explicit publication the client is
+  // never told what the recovered goal is. Streaming is correct here —
+  // resume replays nothing for the card to sort against.
+  it('publishes the recovered Goal state on unstable_resumeSession', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.unstable_resumeSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(lastSessionMock?.publishRecoveredGoalState).toHaveBeenCalledWith(
+      messages,
+    );
+    expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

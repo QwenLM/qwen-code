@@ -5022,6 +5022,27 @@ class QwenAgent implements Agent {
                     createdSession.cumulativeUsage,
                     replayUsage,
                   );
+                  // Strictly after the replay page, mirroring the streamed
+                  // path in `createAndStoreSession`: the page re-emits the
+                  // pre-migration `set` card, so the authoritative state has
+                  // to be the newest goal card or the client keeps showing a
+                  // phantom running goal. It rides *inside* the envelope
+                  // because this path hands its updates to the client rather
+                  // than streaming them — see
+                  // `Session.renderRecoveredGoalUpdates`. Never fatal: a
+                  // session that cannot publish its goal state must still
+                  // open.
+                  try {
+                    replayUpdates = replayUpdates.concat(
+                      await createdSession.renderRecoveredGoalUpdates(records),
+                    );
+                  } catch (error) {
+                    debugLogger.debug(
+                      `Failed to render recovered Goal state: ${
+                        error instanceof Error ? error.message : String(error)
+                      }`,
+                    );
+                  }
                   if (replay.replayError !== undefined) {
                     replayEnvelope = {
                       v: LOAD_REPLAY_VERSION,
@@ -5187,6 +5208,23 @@ class QwenAgent implements Agent {
               ),
               replayHistory: false,
               beforeStartPostReplayServices: async (createdSession) => {
+                // `replayHistory: false` skips the publication in
+                // `createAndStoreSession`, so without this a resumed session
+                // never tells the client what the recovered goal actually is.
+                // Safe to stream here, unlike the bulk load path: resume
+                // replays nothing, so there is no envelope this card could
+                // sort ahead of. Never fatal.
+                try {
+                  await createdSession.publishRecoveredGoalState(
+                    config.getResumedSessionData()?.conversation.messages,
+                  );
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to publish recovered Goal state: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
                 await this.#restoreWorktreeOnResume(config, createdSession);
                 await this.#restoreBackgroundAgentsOnResume(
                   config,

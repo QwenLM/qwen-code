@@ -13996,6 +13996,126 @@ describe('Session', () => {
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
       });
 
+      // The bulk load-replay path collects its page into the `LOAD_REPLAY`
+      // envelope and the bridge seeds it onto the event bus only after
+      // `session/load` returns. Streaming the recovered card from inside
+      // that call would put it *before* the replayed legacy `set` card —
+      // the wrong end — so this path renders instead of sending.
+      describe('renderRecoveredGoalUpdates', () => {
+        const migratedSnapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-migrated',
+            revision: 1,
+            objective: 'ship the thing',
+            status: 'paused',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+
+        it('returns the recovered Goal card instead of streaming it', async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue(migratedSnapshot);
+          mockGoalRuntime.getRecoveryCause.mockReturnValue('migrated');
+
+          const updates = await session.renderRecoveredGoalUpdates([]);
+
+          expect(updates).toEqual([
+            {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: expect.objectContaining({
+                goalState: migratedSnapshot,
+                goalStatus: expect.objectContaining({
+                  kind: 'paused',
+                  condition: 'ship the thing',
+                }),
+              }),
+            },
+          ]);
+          // The whole point: nothing may reach the client early.
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        // Without this the runtime subscription re-publishes the same
+        // (cause, snapshot) once the session goes live and the client
+        // renders the recovered card twice — once from the envelope, once
+        // from the stream.
+        it('marks the rendered card as delivered so a live publish cannot duplicate it', async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue(migratedSnapshot);
+          mockGoalRuntime.getRecoveryCause.mockReturnValue('migrated');
+
+          const updates = await session.renderRecoveredGoalUpdates([]);
+          expect(updates).toHaveLength(1);
+
+          await session.publishRecoveredGoalState([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        it('returns nothing when no Goal was recovered', async () => {
+          mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+          expect(await session.renderRecoveredGoalUpdates([])).toEqual([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        it('returns the superseding cleared card when recovery is unavailable', async () => {
+          vi.mocked(mockConfig.getGoalRuntimeReady).mockRejectedValueOnce(
+            new core.GoalPersistenceUnavailableError('unsupported record'),
+          );
+
+          const updates = await session.renderRecoveredGoalUpdates([
+            {
+              uuid: 'legacy-goal',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'system',
+              subtype: 'slash_command',
+              cwd: '/tmp',
+              version: 'test',
+              systemPayload: {
+                phase: 'result',
+                outputHistoryItems: [
+                  {
+                    type: 'goal_status',
+                    kind: 'set',
+                    condition: 'ship the thing',
+                    iterations: 2,
+                    setAt: 1234,
+                  },
+                ],
+              },
+            } as unknown as core.ChatRecord,
+          ]);
+
+          expect(updates).toEqual([
+            {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: expect.objectContaining({
+                  kind: 'cleared',
+                  condition: 'ship the thing',
+                }),
+              },
+            },
+          ]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        it('returns nothing when recovery is unavailable and no goal was active', async () => {
+          vi.mocked(mockConfig.getGoalRuntimeReady).mockRejectedValueOnce(
+            new core.GoalPersistenceUnavailableError('unsupported record'),
+          );
+          expect(await session.renderRecoveredGoalUpdates([])).toEqual([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+      });
+
       // `/clear` makes Config dispose the Goal runtime and build a new one
       // under this same long-lived Session, so the constructor's subscription
       // is left on the abandoned instance and no `_meta.goalState` update
