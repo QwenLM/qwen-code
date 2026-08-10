@@ -136,6 +136,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         mockComposerCoreState.pastedImages.length > 0 ||
         mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
+      canSubmit: false,
+      pendingImageBatchCount: 0,
+      imageDragActive: false,
+      imageTransferHandlers: {},
       handle: {
         focus: vi.fn(),
         insertText: vi.fn(),
@@ -655,6 +659,15 @@ describe('ChatEditor attachment reporting', () => {
       onAttachmentsChange: onImageAttachmentsChange,
     });
     expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const disabled = renderChatEditor({
+      disabled: true,
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+    });
+    expect(disabled.querySelector('img')?.nextElementSibling).toHaveProperty(
+      'disabled',
+      true,
+    );
   });
 });
 
