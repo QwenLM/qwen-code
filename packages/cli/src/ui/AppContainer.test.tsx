@@ -1028,14 +1028,10 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      const wakeMod = await import('./hooks/use-wake-repaint.js');
+      // Let ink-testing-library's scheduled initial render flush.
+      await Promise.resolve();
       const wakeCallback = useWakeRepaintMock.mock.calls.at(-1)?.[0];
-      expect(
-        typeof wakeCallback,
-        `same=${wakeMod.useWakeRepaint === useWakeRepaintMock} calls=${
-          useWakeRepaintMock.mock.calls.length
-        }`,
-      ).toBe('function');
+      expect(typeof wakeCallback).toBe('function');
       act(() => {
         wakeCallback();
       });
