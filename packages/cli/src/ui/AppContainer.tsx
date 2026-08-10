@@ -1275,6 +1275,10 @@ export const AppContainer = (props: AppContainerProps) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
     }
+    // Re-derive from content, not history: undo after a pop can put
+    // purely typed text back, and the marker test is the one source of
+    // truth for what the composer holds right now.
+    composerHoldsPeerContentRef.current = containsPeerEnvelopeMarker(text);
   }, []);
 
   const buffer = useTextBuffer({
@@ -2557,10 +2561,20 @@ export const AppContainer = (props: AppContainerProps) => {
       // envelope out of the exit-word check just below, where a peer
       // message reading `/quit` would otherwise close the session.
       if (submitsPeerContent) {
+        // The optionless (vim Enter) path never ran provenance, so
+        // `submittedPrompt` is undefined there even though the popped
+        // batch still carries the summary. Fall back to it, but only
+        // when the buffer is byte-identical to what was popped: an
+        // edited envelope must not resurrect a summary that no longer
+        // describes it.
+        const restored = restoredSubmissionRef.current;
         addMessage(
           submittedValue,
           options?.deferUntilIdle ?? false,
-          submittedPrompt,
+          submittedPrompt ??
+            (restored !== null && restored.modelText === submittedValue
+              ? restored.submittedPrompt
+              : undefined),
           'peer',
         );
         return;

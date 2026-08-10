@@ -178,6 +178,7 @@ describe('patchSessionRecord', () => {
       kind: 'interactive',
       qwenVersion: '1.2.3',
     });
+    const [before] = await listLiveSessions({ includeSelf: true });
 
     await patchSessionRecord({ sessionId: 'new', name: 'renamed' });
 
@@ -188,6 +189,9 @@ describe('patchSessionRecord', () => {
       cwd: '/w/app',
       qwenVersion: '1.2.3',
     });
+    // The start token is the PID-recycle guard: a patch merge that drops
+    // it degrades every later liveness check to a plain PID probe.
+    expect(record.procStart).toBe(before.procStart);
   });
 
   it('does not create a record for a session that never registered', async () => {
@@ -278,6 +282,29 @@ describe('listLiveSessions', () => {
     // path rather than the trust-our-own-record shortcut.
     expect(await listLiveSessions({ selfPid: DEAD_PID })).toEqual([]);
   });
+
+  it.skipIf(process.platform !== 'linux')(
+    "sweeps a stale leftover under the caller's own recycled PID",
+    async () => {
+      // Filename and PID both match this process, but the start token
+      // belongs to a dead session whose PID was recycled into it — a
+      // crash leftover plus a process that never registered. The PID
+      // match must not be trusted as ownership.
+      const filePath = await writeRaw(`${process.pid}.json`, {
+        schemaVersion: 1,
+        pid: process.pid,
+        procStart: '1',
+        sessionId: 's-leftover',
+        cwd: '/w/app',
+        name: 'app-aa',
+        kind: 'interactive',
+        startedAt: Date.now(),
+      });
+
+      expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+      await expect(fs.stat(filePath)).rejects.toThrow();
+    },
+  );
 
   it('ignores files that are not <pid>.json', async () => {
     await writeRaw('2026-planning-notes.json', { hello: 'world' });

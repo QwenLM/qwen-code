@@ -269,6 +269,7 @@ export class InboundGate {
     const stillHeld: HeldMessage[] = [];
     const release: HeldMessage[] = [];
     let dropped = 0;
+    let causesChanged = false;
 
     for (const entry of this.held) {
       const { policy, cause } = this.resolvePolicy(entry.frame);
@@ -278,6 +279,7 @@ export class InboundGate {
         dropped += 1;
         this.options.reportStatus?.(entry.frame, 'denied');
       } else {
+        if (cause !== entry.cause) causesChanged = true;
         stillHeld.push(cause === entry.cause ? entry : { ...entry, cause });
       }
     }
@@ -290,7 +292,9 @@ export class InboundGate {
       this.options.reportStatus?.(entry.frame, 'delivered');
     }
 
-    if (release.length > 0 || dropped > 0) {
+    // A refreshed cause is a held-set change too: the UI caches what it
+    // was told, and "why this message is parked" is part of it.
+    if (release.length > 0 || dropped > 0 || causesChanged) {
       debugLogger.debug(
         `reevaluate (${reason}): released ${release.length}, dropped ${dropped}, ${this.held.length} still held`,
       );

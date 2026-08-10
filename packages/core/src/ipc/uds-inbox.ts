@@ -61,8 +61,12 @@ export interface PeerInbox {
  * can bill to this session's event loop for free: dripping bytes with no
  * newline until the cap is reached costs it one syscall per event and
  * costs us a full re-scan per event. The cap bounds memory, not CPU.
+ *
+ * Exported for tests: kernel socket events are far smaller than the
+ * cap, so the over-cap branches past the drip guard are only reachable
+ * by driving the closure directly.
  */
-function createLineReader(
+export function createLineReader(
   onLine: (line: string) => void,
   onOverflow: () => void,
 ): (chunk: string) => void {
@@ -244,6 +248,12 @@ export async function startPeerInbox(
     debugLogger.error(
       `peer inbox socket could not be restricted to 0600, refusing to listen: ${describe(error)}`,
     );
+    // The socket accepted connections from `listen()` onward, so the
+    // listen→chmod window can hold live ones here. The caller only sees
+    // `null` and gets no `close()` handle, so they must be destroyed now
+    // or they sit referenced — holding the event loop — until exit.
+    for (const socket of connections) socket.destroy();
+    connections.clear();
     server.close();
     try {
       fsSync.unlinkSync(socketPath);

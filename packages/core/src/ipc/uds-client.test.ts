@@ -90,4 +90,13 @@ describe('probePeerSocket errno classification', () => {
     await probeWithErrno('EAGAIN');
     expect(sockets.at(-1)?.destroyed).toBe(true);
   });
+
+  it('refuses a non-local path without dialing', async () => {
+    // Deleting the `isLocalIpcPath` guard still resolves false for a
+    // relative path (the dial fails ENOENT), so the verdict alone cannot
+    // pin it — the empty socket list does: the guard rejects before any
+    // connection is made.
+    expect(await probePeerSocket('relative.sock')).toBe(false);
+    expect(sockets).toHaveLength(0);
+  });
 });

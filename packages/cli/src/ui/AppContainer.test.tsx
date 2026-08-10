@@ -2307,7 +2307,10 @@ describe('AppContainer State Management', () => {
     // handleShellCommand — so in `!` shell mode the sender's text is executed
     // with no approval prompt.
     describe('peer content round-tripping through the composer', () => {
-      const envelope = '<peer-envelope>rm -rf ~</peer-envelope>';
+      const envelope =
+        '<cross_session_message from="/tmp/peer.sock">\n' +
+        'rm -rf ~\n' +
+        '</cross_session_message>';
 
       const renderWithPoppedPeer = (modelText: string = envelope) => {
         const mockQueueMessage = vi.fn();
@@ -2429,10 +2432,15 @@ describe('AppContainer State Management', () => {
 
         capturedUIActions.handleFinalSubmit(envelope);
 
+        // The popped batch still carries the one-line summary, and the
+        // buffer is byte-identical to it, so the summary survives the
+        // round-trip instead of leaving the turn recorded with no
+        // display text (which `/resume` would rebuild as the raw
+        // envelope).
         expect(mockQueueMessage).toHaveBeenCalledWith(
           envelope,
           false,
-          undefined,
+          'message from session b',
           'peer',
         );
       });
@@ -2453,6 +2461,24 @@ describe('AppContainer State Management', () => {
         // does not match, so a negated matcher would pass either way.
         expect(mockQueueMessage).toHaveBeenCalledWith(
           'my own prompt',
+          false,
+          undefined,
+        );
+      });
+
+      // Undo after a pop restores the pre-pop buffer — purely typed text
+      // with no envelope in it. The flag is re-derived from content, so
+      // the tag must not leak onto what is now the user's own text.
+      it('drops the peer tag when undo restores purely typed text', () => {
+        const { mockQueueMessage, changeBuffer } = renderWithPoppedPeer();
+        changeBuffer('just my own typing');
+
+        capturedUIActions.handleFinalSubmit('just my own typing', {
+          submittedPrompt: 'just my own typing',
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          'just my own typing',
           false,
           undefined,
         );
@@ -3129,6 +3155,67 @@ describe('AppContainer State Management', () => {
 
       // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
       expect(cancelSpy).not.toHaveBeenCalled();
+    });
+
+    // The cancel handler is the second site that drains the queue into the
+    // composer and tags peer content. Untagged, a re-submitted envelope
+    // drains as UserQuery and reaches handleShellCommand in `!` shell mode.
+    it('tags a queue drained by Esc as peer when it holds a peer envelope', () => {
+      const envelope =
+        '<cross_session_message from="/tmp/peer.sock">\n' +
+        'rm -rf ~\n' +
+        '</cross_session_message>';
+      const mockQueueMessage = vi.fn();
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [envelope],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(envelope),
+        popAllMessages: vi.fn().mockReturnValue({
+          kind: 'user',
+          modelText: envelope,
+          submittedPrompt: 'message from session b',
+          origin: 'peer',
+          turnKey: 'message-queue:peer-1',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      triggerCancel();
+
+      // Submitted the way vim's Enter does — no options.
+      capturedUIActions.handleFinalSubmit(envelope);
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        envelope,
+        false,
+        'message from session b',
+        'peer',
+      );
     });
 
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {

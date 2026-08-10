@@ -101,7 +101,28 @@ export class PeerMessaging {
         : {}),
       onFrame: (frame) => messaging.onFrame(frame),
     });
-    if (!inbox) return null;
+    if (!inbox) {
+      // The gate went live the moment the socket started listening, and a
+      // bind that fails after `listen()` (the chmod path) leaves it
+      // standing behind a null return. Settle everything it admitted:
+      // held frames expire through `shutdown()`, and accepted frames
+      // buffered before `submitFn` existed get a corrective `expired` to
+      // replace the premature `delivered` receipt — this session just
+      // left the network, so no decision is ever coming.
+      gate.shutdown();
+      for (const buffered of messaging.buffered.splice(
+        0,
+        messaging.buffered.length,
+      )) {
+        if (buffered.from) {
+          void sendDeliveryStatus(buffered.from, {
+            status: 'expired',
+            origMsgId: buffered.msgId,
+          });
+        }
+      }
+      return null;
+    }
 
     messaging.inbox = inbox;
 

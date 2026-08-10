@@ -280,9 +280,13 @@ describe('reevaluate', () => {
     expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
 
     h.setPolicy('hold');
+    const before = h.heldChanges;
     expect(h.gate.reevaluate('setting-changed')).toBe(0);
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.gate.getHeld()[0].cause).toBe('explicit-setting');
+    // The cause is part of the held set: a UI caching the old one would
+    // keep explaining the message with the reason it was parked under.
+    expect(h.heldChanges).toBe(before + 1);
   });
 
   it('is a cheap no-op when nothing is held', () => {

@@ -283,15 +283,15 @@ export async function listLiveSessions(
         // never sweep it — we cannot reason about which PID it describes.
         if (`${record.pid}.json` !== name) return;
 
-        if (record.pid === selfPid) {
-          // Trust our own record without probing: `isSameProcess` on self
-          // is always true, and the token read is pure overhead.
-          if (includeSelf) live.push(record);
-          return;
-        }
-
+        // A record under our own PID still has to prove it is ours when
+        // it carries a start token: PIDs are recycled, and a crashed
+        // session's leftover can end up under a PID later recycled into a
+        // process that never registered (`qwen sessions ps` is a fresh
+        // process; registration can also fail). Trusting that leftover on
+        // the PID match alone would list a dead session's details for
+        // this one and leave the file where no sweep can ever reach it.
         if (isSameProcess(record.pid, record.procStart)) {
-          live.push(record);
+          if (record.pid !== selfPid || includeSelf) live.push(record);
           return;
         }
 

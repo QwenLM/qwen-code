@@ -15,6 +15,29 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+// Lets one test stall and then fail the inbox's socket chmod — the
+// failure path that returns null *after* `listen()` has started
+// accepting connections.
+const chmodGate = vi.hoisted(() => ({
+  stallSocket: false,
+  fail: null as (() => void) | null,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    chmod: ((pathLike: string, mode: number) => {
+      if (chmodGate.stallSocket && pathLike.endsWith('.sock')) {
+        return new Promise<never>((_resolve, reject) => {
+          chmodGate.fail = () => reject(new Error('chmod denied'));
+        });
+      }
+      return actual.chmod(pathLike, mode);
+    }) as typeof actual.chmod,
+  };
+});
 import {
   MAX_FRAME_BYTES,
   buildUserFrame,
@@ -23,7 +46,11 @@ import {
 } from './peer-frames.js';
 import { MAX_SOCKET_PATH_BYTES } from './socket-path.js';
 import { probePeerSocket, sendPeerFrame, PeerSendError } from './uds-client.js';
-import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
+import {
+  createLineReader,
+  startPeerInbox,
+  type PeerInbox,
+} from './uds-inbox.js';
 
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
@@ -60,6 +87,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  chmodGate.stallSocket = false;
+  chmodGate.fail = null;
   await inbox?.close();
   inbox = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
@@ -169,6 +198,56 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
       onFrame: () => {},
     });
     expect(started).toBeNull();
+  });
+
+  it('destroys connections accepted before a chmod failure', async () => {
+    // The socket accepts from `listen()` onward, and the chmod that can
+    // still fail runs after it. A connection made in that window must be
+    // destroyed by the failure path: the caller only gets null, so no
+    // `close()` is ever coming for it.
+    const socketPath = path.join(tmpDir, 'socks', 'c.sock');
+    chmodGate.stallSocket = true;
+    const inboxPromise = startPeerInbox({
+      socketPath,
+      onFrame: () => {},
+    });
+
+    // Wait for bind (the socket file appears) before dialing in.
+    for (let i = 0; i < 200; i += 1) {
+      try {
+        await fs.stat(socketPath);
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+
+    const clientClosed = new Promise<void>((resolve, reject) => {
+      const client = net.connect({ path: socketPath });
+      const timer = setTimeout(() => {
+        client.destroy();
+        reject(new Error('client connection was not closed'));
+      }, 2000);
+      client.on('connect', () => {
+        // Fail the chmod while this connection is live in the window.
+        // The kernel can complete the handshake from the backlog before
+        // the server's chmod call exists, so retry until the gate is
+        // actually standing.
+        const trip = () => {
+          if (chmodGate.fail) chmodGate.fail();
+          else setTimeout(trip, 1);
+        };
+        trip();
+      });
+      client.on('error', () => {});
+      client.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+
+    await expect(inboxPromise).resolves.toBeNull();
+    await expect(clientClosed).resolves.toBeUndefined();
   });
 
   it('unlinks the socket on close', async () => {
@@ -297,6 +376,125 @@ describe.skipIf(isWindows)('framing', () => {
     expect(received).toHaveLength(1);
   });
 
+  it('accepts a multibyte line sized exactly at the byte cap', async () => {
+    // The cap is bytes, not UTF-16 units: 'é' is one code unit but two
+    // UTF-8 bytes, so this line rides the byte limit with multibyte
+    // content. A guard measuring `.length` would reject it off the limit.
+    const started = await listen();
+    const base = buildUserFrame({ content: '' });
+    const overhead = Buffer.byteLength(encodePeerFrame(base)) - 1;
+    const budget = MAX_FRAME_BYTES - overhead;
+    const content =
+      budget % 2 === 0
+        ? 'é'.repeat(budget / 2)
+        : `a${'é'.repeat((budget - 1) / 2)}`;
+    const line = encodePeerFrame(buildUserFrame({ content }));
+    expect(Buffer.byteLength(line) - 1).toBe(MAX_FRAME_BYTES);
+
+    await writeRaw(started.socketPath, [line]);
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('enforces the cap in bytes when the char count stays under it', async () => {
+    // The mirror direction: 600k 'é' stay under the cap in UTF-16 units
+    // while their UTF-8 encoding crosses it. A char-based guard would
+    // deliver the frame; the byte-based one destroys the connection.
+    const started = await listen();
+    const line = encodePeerFrame(
+      buildUserFrame({ content: 'é'.repeat(600_000) }),
+    );
+    expect(line.length).toBeLessThan(MAX_FRAME_BYTES);
+    expect(Buffer.byteLength(line)).toBeGreaterThan(MAX_FRAME_BYTES);
+
+    // Do not `end()` the connection: the drop has to be observable as the
+    // server destroying it, not the client leaving.
+    const dropped = new Promise<void>((resolve, reject) => {
+      const socket = net.connect({ path: started.socketPath });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('connection was not dropped'));
+      }, 2000);
+      socket.on('connect', () => socket.write(line));
+      // ECONNRESET is the destroy arriving — `close` follows it.
+      socket.on('error', () => {});
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await expect(dropped).resolves.toBeUndefined();
+    expect(received).toHaveLength(0);
+
+    // The inbox survives the dropped connection.
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }));
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
+  it('drops an over-cap line completed by a newline chunk', async () => {
+    // End-to-end shape of a line that only completes after pending is
+    // near the cap; the extraction-path check itself is pinned by the
+    // direct createLineReader tests below.
+    const started = await listen();
+    const base = encodePeerFrame(
+      buildUserFrame({ content: 'é'.repeat(600_000) }),
+    ).replace(/\n$/, '');
+    const prefixLen = base.indexOf('é');
+    const splitAt = Math.floor(
+      prefixLen + (MAX_FRAME_BYTES - 4096 - prefixLen) / 2,
+    );
+    const firstHalf = base.slice(0, splitAt);
+    expect(Buffer.byteLength(firstHalf)).toBeLessThan(MAX_FRAME_BYTES);
+
+    const dropped = new Promise<void>((resolve, reject) => {
+      const socket = net.connect({ path: started.socketPath });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('connection was not dropped'));
+      }, 2000);
+      socket.on('connect', () => {
+        socket.write(firstHalf);
+        socket.write(`${base.slice(splitAt)}\n`);
+      });
+      socket.on('error', () => {});
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await expect(dropped).resolves.toBeUndefined();
+    expect(received).toHaveLength(0);
+  });
+
+  it('caps the leftover partial line after extraction', async () => {
+    // A chunk holding a complete frame plus a newline-free tail over the
+    // cap must still deliver the frame and then destroy the connection.
+    // The tail check itself is pinned by the direct createLineReader
+    // tests below.
+    const started = await listen();
+    const first = encodePeerFrame(buildUserFrame({ content: 'legal' }));
+    const tail = 'é'.repeat(600_000);
+    expect(Buffer.byteLength(tail)).toBeGreaterThan(MAX_FRAME_BYTES);
+
+    const dropped = new Promise<void>((resolve, reject) => {
+      const socket = net.connect({ path: started.socketPath });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('connection was not dropped'));
+      }, 2000);
+      socket.on('connect', () => socket.write(first + tail));
+      socket.on('error', () => {});
+      socket.on('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await expect(dropped).resolves.toBeUndefined();
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ message: { content: 'legal' } });
+  });
+
   it('drops a connection that never sends a newline', async () => {
     const started = await listen();
     await writeRaw(started.socketPath, ['x'.repeat(MAX_FRAME_BYTES + 1)]);
@@ -345,12 +543,20 @@ describe.skipIf(isWindows)('framing', () => {
       spy.mockRestore();
     }
 
+    // Guard against the guard passing vacuously: `Math.max(...[])` is
+    // -Infinity, so a reimplementation that stops measuring through
+    // `Buffer.byteLength` would sail through an unchecked maximum. The
+    // fixed reader measures once per chunk on the no-newline path.
+    expect(measured).not.toHaveLength(0);
     // Pre-fix this peaked just under MAX_FRAME_BYTES; the writer's own
     // per-write measurement of one chunk is the only thing left.
     expect(Math.max(...measured)).toBeLessThan(chunkBytes * 4);
     // Pre-fix the total ran to ~n²/2 ≈ 2 GiB for 1 MiB of traffic.
     const written = chunkBytes * chunks.length;
     expect(measured.reduce((sum, n) => sum + n, 0)).toBeLessThan(written * 8);
+    // A quadratic regression that dodges this spy must measure the buffer
+    // in UTF-16 units instead of bytes to keep the cap working, and the
+    // multibyte cap tests below pin that direction.
   });
 
   it('still caps a paced drip that never sends a newline', async () => {
@@ -383,20 +589,83 @@ describe.skipIf(isWindows)('framing', () => {
   });
 
   it('does not let a throwing handler take down the server', async () => {
+    // Containment has to mean "the connection keeps working", not only
+    // "the listener survives": destroying the connection inside the catch
+    // would still keep the server up while dropping everything the peer
+    // writes next. Two frames on one connection pin the stronger property.
+    const frames: PeerFrame[] = [];
+    let calls = 0;
     const started = await startPeerInbox({
       socketPath: path.join(tmpDir, 'socks', 'b.sock'),
-      onFrame: () => {
-        throw new Error('handler exploded');
+      onFrame: (frame) => {
+        calls += 1;
+        if (calls === 1) throw new Error('handler exploded');
+        frames.push(frame);
       },
     });
     if (!started) throw new Error('inbox failed to start');
     inbox = started;
 
-    await expect(
-      sendPeerFrame(started.socketPath, buildUserFrame({ content: 'boom' })),
-    ).resolves.toBeUndefined();
+    // The frames must arrive in separate reads: two frames in one chunk
+    // are extracted in the same pass, so a connection destroyed after
+    // the first throw would still deliver the second from that batch.
+    const client = net.connect({ path: started.socketPath });
+    await new Promise<void>((resolve, reject) => {
+      client.on('error', reject);
+      client.on('connect', () => resolve());
+    });
+    client.on('error', () => {
+      // A destroyed connection surfaces as ECONNRESET on later writes.
+    });
+    client.write(encodePeerFrame(buildUserFrame({ content: 'boom' })));
     await settle();
+    client.write(encodePeerFrame(buildUserFrame({ content: 'after' })));
+    client.end();
+    await settle();
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ message: { content: 'after' } });
     expect(await probePeerSocket(started.socketPath)).toBe(true);
+  });
+});
+
+describe('createLineReader cap branches', () => {
+  // Driven directly because socket events (~64 KiB) cannot carry the
+  // shapes that reach these branches: the drip guard always trips first
+  // when bytes accumulate event by event.
+  function collect(): {
+    read: (chunk: string) => void;
+    lines: string[];
+    overflows: () => number;
+  } {
+    const lines: string[] = [];
+    const state = { overflows: 0 };
+    const read = createLineReader(
+      (line) => lines.push(line),
+      () => {
+        state.overflows += 1;
+      },
+    );
+    return { read, lines, overflows: () => state.overflows };
+  }
+
+  it('overflows on a line over the cap when the drip stayed under it', () => {
+    // Chars vs bytes matters here: the line is MAX chars but twice that
+    // in UTF-8 bytes, so a char-based check lets it through.
+    const { read, lines, overflows } = collect();
+    const line = 'é'.repeat(MAX_FRAME_BYTES);
+    read(line.slice(0, (MAX_FRAME_BYTES - 2048) / 2));
+    expect(overflows()).toBe(0);
+    read(line.slice((MAX_FRAME_BYTES - 2048) / 2) + '\n');
+    expect(overflows()).toBe(1);
+    expect(lines).toEqual([]);
+  });
+
+  it('overflows on an over-cap tail left after the last newline', () => {
+    const { read, lines, overflows } = collect();
+    read('\n' + 'é'.repeat(600_000));
+    expect(overflows()).toBe(1);
+    expect(lines).toEqual([]);
   });
 });
 
@@ -422,9 +691,12 @@ describe.skipIf(isWindows)('client errors', () => {
   });
 
   it('refuses a non-local path before dialing', async () => {
+    // `code: undefined` is the guard's fingerprint: a dial failure would
+    // carry an errno, so this assertion fails if the guard is deleted and
+    // the rejection comes from a real connect instead.
     await expect(
       sendPeerFrame('relative.sock', buildUserFrame({ content: 'hi' })),
-    ).rejects.toMatchObject({ name: 'PeerSendError' });
+    ).rejects.toMatchObject({ name: 'PeerSendError', code: undefined });
   });
 });
 
