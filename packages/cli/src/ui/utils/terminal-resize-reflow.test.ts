@@ -572,8 +572,11 @@ describe('installTerminalResizeReflow', () => {
     const optimizer = installTerminalRedrawOptimizer(
       stdout as unknown as NodeJS.WriteStream,
     );
+    // Force the sync wrapper on regardless of the host terminal's
+    // TERM_PROGRAM so the LIFO contract is tested identically in CI.
     const sync = installSynchronizedOutput(
       stdout as unknown as NodeJS.WriteStream,
+      { QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT: '1' },
     );
     const reflow = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
@@ -591,6 +594,7 @@ describe('installTerminalResizeReflow', () => {
     );
     const sync2 = installSynchronizedOutput(
       stdout2 as unknown as NodeJS.WriteStream,
+      { QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT: '1' },
     );
     const reflow2 = installTerminalResizeReflow(
       stdout2 as unknown as NodeJS.WriteStream,
