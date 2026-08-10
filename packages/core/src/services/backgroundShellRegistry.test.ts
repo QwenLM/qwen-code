@@ -31,10 +31,11 @@ import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
 /**
- * Mirror of how the registry renders a path into the notification XML. The
- * expected paths below are built from `tmpdir()`, which can legally contain
- * XML metacharacters (`&` on Windows, `<` on POSIX), so hand-rolling the
- * escaping here would make these cases depend on the host's TMPDIR.
+ * Builds the expected `<output-file>` element with the same
+ * `stripDisplayControlChars` + `escapeXml` pipeline the registry applies.
+ * Expected paths below come from `tmpdir()`, which can legally contain XML
+ * metacharacters (`&` on Windows, `<` on POSIX) or bidi overrides, so
+ * hand-rolling the escaping would make these cases depend on the host's TMPDIR.
  */
 function expectedOutputFileElement(path: string): string {
   return `<output-file>${escapeXml(stripDisplayControlChars(path))}</output-file>`;
@@ -420,7 +421,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('\uFFFD');
     });
 
-    it('strips control characters from cwd and output-file XML fields', () => {
+    it('strips control and bidi characters from cwd and output-file XML fields', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
@@ -429,7 +430,7 @@ describe('BackgroundShellRegistry', () => {
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath: join(dir, 'out\x03.log'),
+          outputPath: join(dir, 'out\x03\u202e.log'),
         }),
       );
 
@@ -437,14 +438,15 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
-      // Whole element: pins that only the control byte is stripped and the
-      // rest of the path survives intact.
+      // Whole element: pins exactly which characters are stripped and that
+      // the rest of the path survives intact.
       expect(modelText).toContain(
         expectedOutputFileElement(join(dir, 'out.log')),
       );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
+      expect(modelText).not.toContain('\u202e');
     });
 
     const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
