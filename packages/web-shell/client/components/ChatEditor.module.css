@@ -1399,6 +1399,34 @@
   flex-shrink: 0;
 }
 
+.contextUsageBtn {
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+
+.contextRingTrack {
+  stroke: var(--border);
+}
+
+.contextRingValue {
+  stroke: var(--agent-blue-500);
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+.contextRingValueWarning {
+  stroke: var(--warning-color);
+}
+
+.contextRingValueError {
+  stroke: var(--error-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contextRingValue {
+    transition: none;
+  }
+}
+
 .widthModeBtn .toolBtnIcon svg {
   width: 18px;
   height: 18px;
