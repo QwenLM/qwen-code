@@ -20766,6 +20766,24 @@ describe('session idle reaper', () => {
     await bridge.shutdown();
   });
 
+  it('does not cancel a session the agent already closed', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.closeSession(session.sessionId);
+
+    expect(handle.agent.cancelCalls).toEqual([]);
+    await bridge.shutdown();
+  });
+
   it('reaps multiple orphaned sessions in one tick', async () => {
     vi.useFakeTimers();
     try {
