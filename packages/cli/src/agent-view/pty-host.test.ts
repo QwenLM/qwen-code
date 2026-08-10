@@ -117,6 +117,20 @@ describe('validateAgentViewLaunchConfig', () => {
       ]),
     });
   });
+
+  it('rejects a non-string initialPrompt', () => {
+    const result = validateAgentViewLaunchConfig({
+      ...createLaunch(),
+      initialPrompt: 42,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errors: expect.arrayContaining([
+        'initialPrompt must be a string when present',
+      ]),
+    });
+  });
 });
 
 describe('launchAgentViewPtyHost', () => {

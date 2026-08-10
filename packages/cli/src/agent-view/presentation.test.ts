@@ -136,6 +136,7 @@ describe('deriveAgentViewPresentation', () => {
       recoverability: 'restartable',
       iconShape: 'exited',
       iconTone: 'failed',
+      subtitle: 'Session failed',
       actions: {
         canAttach: true,
         canReply: true,

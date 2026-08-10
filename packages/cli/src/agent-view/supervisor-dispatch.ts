@@ -159,7 +159,9 @@ async function cleanupFailedDispatchCreation(
   }
 
   try {
-    await removeAgentViewRosterEntry(sessionId, options);
+    if (options.publishRoster ?? true) {
+      await removeAgentViewRosterEntry(sessionId, options);
+    }
   } catch {
     // Best-effort rollback only.
   }
