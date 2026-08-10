@@ -241,12 +241,7 @@ function selectModelCandidateDocuments(
     .filter((doc) => !selected.has(doc.filePath))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, MAX_MODEL_CANDIDATE_DOCS - lexical.length);
-  const reservedRecent = recent.slice(0, RECENT_MODEL_CANDIDATE_RESERVE);
-  return [
-    ...reservedRecent,
-    ...lexical,
-    ...recent.slice(reservedRecent.length),
-  ];
+  return [...lexical, ...recent];
 }
 
 function truncateBody(body: string): string {

@@ -308,11 +308,11 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThanOrEqual(25_000);
   });
 
-  it('does not let long descriptions starve later candidates', async () => {
+  it('does not let long descriptions starve lexical-first candidates', async () => {
     const longDocs = Array.from({ length: 20 }, (_, index) => ({
       ...docs[0],
       filePath: `/tmp/recent-${index}.md`,
-      description: 'x'.repeat(1_190),
+      description: '界'.repeat(512),
     }));
     const lexicalDoc = {
       ...docs[1],
@@ -326,9 +326,12 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       selectRelevantAutoMemoryDocumentsByModel(
         mockConfig,
         'find the lexical target',
-        [...longDocs, lexicalDoc],
+        [lexicalDoc, ...longDocs],
         5,
       ),
     ).resolves.toEqual([lexicalDoc]);
+
+    const content = vi.mocked(runSideQuery).mock.calls[0]![1].contents[0];
+    expect(content?.parts?.[0]?.text).toContain(lexicalDoc.filePath);
   });
 });

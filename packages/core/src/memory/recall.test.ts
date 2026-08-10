@@ -481,8 +481,8 @@ describe('auto-memory relevant recall', () => {
     const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
       .mock.calls[0]![2];
     expect(modelCandidates).toHaveLength(200);
-    expect(modelCandidates.slice(0, 20)).toEqual(recentDocs);
-    expect(modelCandidates[20]).toBe(lexicalTarget);
+    expect(modelCandidates[0]).toBe(lexicalTarget);
+    expect(modelCandidates.slice(-20)).toEqual(recentDocs);
     expect(result.selectedDocs).toEqual([lexicalTarget]);
   });
 
