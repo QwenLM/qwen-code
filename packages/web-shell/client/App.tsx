@@ -4909,32 +4909,29 @@ export function App({
           ? allocatedOwner.workspaceCwd
           : undefined
         : existingSessionWorkspaceCwd;
+      let admissionStarted = false;
+      let admitted = false;
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
         inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
-        ...(opts?.onAdmissionStarted
-          ? {
-              onAdmissionStarted: () =>
-                opts.onAdmissionStarted?.(
-                  connectionRef.current.sessionId ?? allocatedSessionId,
-                ),
-            }
-          : {}),
-        ...(sessionIdAfterEnsure && promptWorkspaceCwd
-          ? {
-              onAdmitted: () => {
-                sessionCatalogController.promptAdmitted(
-                  promptWorkspaceCwd,
-                  sessionIdAfterEnsure,
-                );
-                opts?.onAdmitted?.();
-              },
-            }
-          : opts?.onAdmitted
-            ? { onAdmitted: opts.onAdmitted }
-            : {}),
+        onAdmissionStarted: () => {
+          admissionStarted = true;
+          opts?.onAdmissionStarted?.(
+            connectionRef.current.sessionId ?? allocatedSessionId,
+          );
+        },
+        onAdmitted: () => {
+          admitted = true;
+          if (sessionIdAfterEnsure && promptWorkspaceCwd) {
+            sessionCatalogController.promptAdmitted(
+              promptWorkspaceCwd,
+              sessionIdAfterEnsure,
+            );
+          }
+          opts?.onAdmitted?.();
+        },
       };
       if (sessionIdAfterEnsure && (text.trim() || (images?.length ?? 0) > 0)) {
         dispatchSessionChangeRef.current?.({
@@ -4966,7 +4963,19 @@ export function App({
           });
         }
       }
-      return await resultPromise;
+      try {
+        return await resultPromise;
+      } catch (error) {
+        if (
+          admissionStarted &&
+          !admitted &&
+          !isDefinitelyRejectedPromptAdmission(error) &&
+          promptWorkspaceCwd
+        ) {
+          sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
+        }
+        throw error;
+      }
     },
     [
       clearFollowup,
@@ -6369,24 +6378,64 @@ export function App({
   ]);
 
   const lastRenameSessionRef = useRef<string | undefined>(undefined);
+  const lastRenameWorkspaceCwdRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
+  const lastReconciledRenameRef = useRef<
+    | {
+        workspaceCwd?: string;
+        sessionId: string;
+        displayName: string;
+      }
+    | undefined
+  >(undefined);
+  const reconcileCatalogRename = useCallback(
+    (
+      workspaceCwd: string | undefined,
+      sessionId: string,
+      displayName: string,
+    ) => {
+      lastReconciledRenameRef.current = {
+        workspaceCwd,
+        sessionId,
+        displayName,
+      };
+      if (workspaceCwd) {
+        sessionCatalogController.renamed(workspaceCwd, sessionId, displayName);
+      }
+    },
+    [sessionCatalogController],
+  );
   useEffect(() => {
     const sessionId = connection.sessionId;
     const displayName = connection.displayName;
     if (!sessionId || !displayName) return;
-    if (sessionId !== lastRenameSessionRef.current) {
+    if (
+      sessionId !== lastRenameSessionRef.current ||
+      connection.workspaceCwd !== lastRenameWorkspaceCwdRef.current
+    ) {
       lastRenameSessionRef.current = sessionId;
+      lastRenameWorkspaceCwdRef.current = connection.workspaceCwd;
       lastRenameNameRef.current = displayName;
+      lastReconciledRenameRef.current = undefined;
       return;
     }
     if (displayName === lastRenameNameRef.current) return;
     lastRenameNameRef.current = displayName;
-    if (connection.workspaceCwd) {
-      sessionCatalogController.renamed(
-        connection.workspaceCwd,
-        sessionId,
-        displayName,
-      );
+    const reconciled = lastReconciledRenameRef.current;
+    lastReconciledRenameRef.current = undefined;
+    const alreadyReconciled =
+      reconciled !== undefined &&
+      reconciled.workspaceCwd === connection.workspaceCwd &&
+      reconciled.sessionId === sessionId &&
+      reconciled.displayName === displayName;
+    if (!alreadyReconciled) {
+      if (connection.workspaceCwd) {
+        sessionCatalogController.renamed(
+          connection.workspaceCwd,
+          sessionId,
+          displayName,
+        );
+      }
     }
     dispatchSessionChangeRef.current?.({
       type: 'rename',
@@ -8235,8 +8284,8 @@ export function App({
             sessionActions
               .renameSession(displayName)
               .then(() => {
-                if (renamedSessionId && renamedWorkspaceCwd) {
-                  sessionCatalogController.renamed(
+                if (renamedSessionId) {
+                  reconcileCatalogRename(
                     renamedWorkspaceCwd,
                     renamedSessionId,
                     displayName,
@@ -8561,6 +8610,7 @@ export function App({
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       restartSseOnPrompt,
       resumeChatBottomFollow,
@@ -10012,6 +10062,7 @@ export function App({
                     setMainView('chat');
                     closePanel();
                   }}
+                  onSessionRenameConfirmed={reconcileCatalogRename}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}

@@ -688,6 +688,79 @@ describe('SessionCatalogStore', () => {
     unsubscribe();
   });
 
+  it('defers a visible trailing background refresh when the page becomes hidden', async () => {
+    const stale = deferred<DaemonSessionListPage>();
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(page('visible'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    await flushMicrotasks();
+    const unsubscribe = store.subscribe(target, vi.fn());
+
+    store.invalidateWorkspace('/work', { background: true });
+    expect(legacy).toHaveBeenCalledTimes(2);
+    store.invalidateWorkspace('/work', { background: true });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    stale.resolve(page('stale'));
+    await flushMicrotasks();
+
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot(target)).toMatchObject({
+      page: page('cached'),
+      loading: false,
+      stale: true,
+    });
+
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      value: false,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushMicrotasks();
+
+    expect(legacy).toHaveBeenCalledTimes(3);
+    expect(store.getSnapshot(target).page).toEqual(page('visible'));
+    unsubscribe();
+  });
+
+  it('drops a trailing background refresh after the last subscriber leaves', async () => {
+    const stale = deferred<DaemonSessionListPage>();
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce(page('resubscribed'));
+    const target = query('/work');
+    await store.loadOnce(target, { fresh: true });
+    await flushMicrotasks();
+    const unsubscribe = store.subscribe(target, vi.fn());
+
+    store.invalidateWorkspace('/work', { background: true });
+    expect(legacy).toHaveBeenCalledTimes(2);
+    store.invalidateWorkspace('/work', { background: true });
+    unsubscribe();
+    stale.resolve(page('stale'));
+    await flushMicrotasks();
+
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot(target)).toMatchObject({
+      page: page('cached'),
+      loading: false,
+      stale: true,
+    });
+
+    const unsubscribeAgain = store.subscribe(target, vi.fn());
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(3);
+    expect(store.getSnapshot(target).page).toEqual(page('resubscribed'));
+    unsubscribeAgain();
+  });
+
   it('restores snapshot-only background work removed from the visible queue', async () => {
     legacy.mockResolvedValueOnce(page('cached'));
     const target = query('/work');

@@ -382,6 +382,7 @@ const {
       invalidateWorkspace: vi.fn(),
       sessionCreated: vi.fn(),
       promptAdmitted: vi.fn(),
+      promptAdmissionUncertain: vi.fn(),
       renamed: vi.fn(),
       turnCompleted: vi.fn(),
     },
@@ -11074,6 +11075,10 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="prompt-admission-unknown"]'),
     ).not.toBeNull();
     expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(
+      sessionCatalogController.promptAdmissionUncertain,
+    ).toHaveBeenCalledWith('/tmp/project');
+    expect(sessionCatalogController.promptAdmitted).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -14298,6 +14303,44 @@ describe('App session callbacks', () => {
     ).toBe(true);
   });
 
+  it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const lostResponse = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      return lostResponse.promise;
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+    });
+
+    await act(async () => {
+      lostResponse.reject(new Error('response lost after admission started'));
+      await Promise.resolve();
+    });
+
+    expect(
+      sessionCatalogController.promptAdmissionUncertain,
+    ).toHaveBeenCalledOnce();
+    expect(
+      sessionCatalogController.promptAdmissionUncertain,
+    ).toHaveBeenCalledWith('/tmp/project');
+  });
+
   it('marks the chat view aria-hidden while a panel is shown', async () => {
     const { container } = renderApp();
     await flush();
@@ -14370,8 +14413,66 @@ describe('App session callbacks', () => {
     expect(onSessionChange).not.toHaveBeenCalled();
   });
 
+  it('does not report an existing title loaded during a session switch as a rename', async () => {
+    const onSessionChange = vi.fn();
+    const { rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.displayName = undefined;
+      rerender({ onSessionChange });
+    });
+    act(() => {
+      mockConnection.displayName = 'Existing Session';
+      rerender({ onSessionChange });
+    });
+
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
+    expect(onSessionChange).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'rename' }),
+    );
+  });
+
+  it('does not report an existing title when the same session id changes workspace', async () => {
+    const onSessionChange = vi.fn();
+    const { rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    act(() => {
+      mockConnection.workspaceCwd = '/tmp/other';
+      mockConnection.displayName = 'Existing Other Session';
+      rerender({ onSessionChange });
+    });
+
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
+    expect(onSessionChange).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'rename' }),
+    );
+  });
+
+  it('handles a rename event before the session workspace is known', async () => {
+    mockConnection.workspaceCwd = undefined;
+    const onSessionChange = vi.fn();
+    const { rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    act(() => {
+      mockConnection.displayName = 'Renamed before workspace';
+      rerender({ onSessionChange });
+    });
+
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'rename',
+      sessionId: 'session-1',
+      newName: 'Renamed before workspace',
+    });
+  });
+
   it('patches and resynchronizes the catalog after a confirmed /rename', async () => {
-    const { container } = renderApp();
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
     await flush();
 
     testState.prompt = '/rename Catalog title';
@@ -14385,6 +14486,51 @@ describe('App session callbacks', () => {
       '/tmp/project',
       'session-1',
       'Catalog title',
+    );
+    expect(onSessionChange).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'rename' }),
+    );
+
+    act(() => {
+      mockConnection.displayName = 'Catalog title';
+      rerender({ onSessionChange });
+    });
+    expect(sessionCatalogController.renamed).toHaveBeenCalledTimes(1);
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'rename',
+      sessionId: 'session-1',
+      newName: 'Catalog title',
+    });
+  });
+
+  it('reconciles a name reused after the session loaded a different title', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/rename Reused title';
+    await clickSubmit(container);
+    await flush();
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.displayName = 'Other session';
+      rerender();
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      mockConnection.displayName = 'Externally renamed';
+      rerender();
+    });
+    sessionCatalogController.renamed.mockClear();
+
+    testState.prompt = '/rename Reused title';
+    await clickSubmit(container);
+    await flush();
+
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+      'Reused title',
     );
   });
 });
@@ -14452,6 +14598,9 @@ describe('App prompt send failure retry', () => {
     expect(
       document.querySelector('[data-testid="prompt-admission-unknown"]'),
     ).not.toBeNull();
+    expect(
+      sessionCatalogController.promptAdmissionUncertain,
+    ).toHaveBeenCalledWith('/workspace');
   });
 
   it('locks duplicate submission when prompt admission is unknown', async () => {

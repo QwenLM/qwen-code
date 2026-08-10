@@ -97,6 +97,9 @@ vi.mock('./ChatPane', () => ({
         data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
         data-hidden={props.hidden ? 'true' : 'false'}
+        data-report-catalog-turn-completion={
+          props.reportCatalogTurnCompletion ? 'true' : 'false'
+        }
         data-voice-user-revision={String(props.voiceUserRevision ?? 0)}
         data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
@@ -222,6 +225,30 @@ describe('SplitView', () => {
     const s2ClientId = providers[1].getAttribute('data-clientid') ?? '';
     const nonce = clientId.slice('split-pane:'.length, -':s1'.length);
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
+  });
+
+  it('leaves the outer session as the sole catalog turn-completion owner', () => {
+    render({ sessionIds: ['s3', 's1'] });
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('false');
+    expect(
+      panes()[1]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
+  });
+
+  it('reports completion for the same session id in another workspace', async () => {
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 's3', workspaceCwd: '/wsB', displayName: 'Other Three' },
+    ];
+
+    render({ sessionIds: ['s3'], workspaceCwd: '/wsB' });
+    await flushAsync();
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
   });
 
   it('passes the prompt SSE restart option to pane providers', () => {

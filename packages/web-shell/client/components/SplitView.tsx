@@ -485,6 +485,10 @@ export function SplitView({
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}
+                      reportCatalogTurnCompletion={
+                        sessionId !== currentSessionId ||
+                        paneWorkspaceCwd !== connection.workspaceCwd
+                      }
                       renderHeaderActions={renderPaneHeaderActions}
                       hidden={isHidden}
                       voiceUserRevision={voiceUserRevision}

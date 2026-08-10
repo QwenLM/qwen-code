@@ -78,6 +78,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
       archived: makeSessions(),
     };
   });
+const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => connection,
@@ -103,20 +104,22 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
         : options?.group === 'pinned'
           ? pinned
           : active;
+    const catalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: connection.workspaceCwd,
+      options,
+    };
     if (options?.enabled === false) {
-      return { ...state, sessions: [], data: undefined };
+      return { ...state, sessions: [], data: undefined, catalogQuery };
     }
     return {
       ...state,
       data: state.data ?? state.sessions,
-      catalogQuery: {
-        routeKind: 'legacy',
-        workspaceCwd: connection.workspaceCwd,
-        options,
-      },
+      catalogQuery,
     };
   },
   useSessionCatalogController: () => ({
+    refreshQueries: refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
     renamed: vi.fn(),
   }),
@@ -283,6 +286,7 @@ beforeEach(() => {
   pinned.data = pinned.sessions;
   archived.sessions = [];
   archived.data = archived.sessions;
+  refreshSessionCatalogQueries.mockReset();
 });
 
 afterEach(() => {
@@ -330,6 +334,35 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       '[title="Archived task"]',
     );
     expect(sessionName?.textContent).toContain('Archived task');
+  });
+
+  it('refreshes archived sessions each time the section expands', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+
+    renderSidebar();
+    await flushSidebar();
+
+    const archivedHeader = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((btn) => btn.textContent?.includes('Archived'));
+    expect(archivedHeader).not.toBeNull();
+
+    act(() => click(archivedHeader!));
+    expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(1);
+    expect(refreshSessionCatalogQueries).toHaveBeenLastCalledWith([
+      expect.objectContaining({
+        routeKind: 'legacy',
+        workspaceCwd: '/tmp/project',
+        options: expect.objectContaining({ archiveState: 'archived' }),
+      }),
+    ]);
+
+    act(() => click(archivedHeader!));
+    act(() => click(archivedHeader!));
+    expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(2);
   });
 
   it('writes collapsed section ids with the qwen-code-web-shell-* key', async () => {

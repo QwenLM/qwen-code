@@ -480,7 +480,15 @@ export class SessionCatalogStore {
           const background = entry.trailingBackground ?? true;
           entry.trailingPriority = undefined;
           entry.trailingBackground = undefined;
-          this.ensureScheduled(entry, priority, background);
+          if (!background || (!this.isHidden() && entry.subscribers.size > 0)) {
+            this.ensureScheduled(entry, priority, background);
+          } else {
+            if (entry.snapshot.loading) {
+              this.setSnapshot(entry, { ...entry.snapshot, loading: false });
+            }
+            this.schedulePollFromNow(entry);
+            if (entry.subscribers.size === 0) this.scheduleCleanup(entry);
+          }
         } else {
           entry.trailingPriority = undefined;
           entry.trailingBackground = undefined;

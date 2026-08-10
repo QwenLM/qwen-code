@@ -195,6 +195,8 @@ export interface ChatPaneProps {
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
+  /** Whether this pane owns Session Catalog turn-completion reconciliation. */
+  reportCatalogTurnCompletion?: boolean;
   hidden?: boolean;
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
@@ -227,6 +229,7 @@ export function ChatPane({
   restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
+  reportCatalogTurnCompletion = true,
   hidden = false,
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
@@ -354,13 +357,15 @@ export function ChatPane({
       connection.sessionId &&
       connection.sessionId === catalogStreamingSessionIdRef.current &&
       catalogOwnerCwd &&
-      catalogOwnerCwd === catalogStreamingWorkspaceCwdRef.current
+      catalogOwnerCwd === catalogStreamingWorkspaceCwdRef.current &&
+      reportCatalogTurnCompletion
     ) {
       sessionCatalogController.turnCompleted(catalogOwnerCwd);
     }
   }, [
     catalogOwnerCwd,
     connection.sessionId,
+    reportCatalogTurnCompletion,
     sessionCatalogController,
     streamingState,
   ]);
@@ -619,6 +624,11 @@ export function ChatPane({
             if (admitted || !admissionStarted || definitelyRejected) {
               reportError(error, 'Failed to send prompt');
               return;
+            }
+            if (catalogOwnerCwd) {
+              sessionCatalogController.promptAdmissionUncertain(
+                catalogOwnerCwd,
+              );
             }
             setUnknownPromptAdmission({
               owner: admissionOwner,

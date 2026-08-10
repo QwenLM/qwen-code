@@ -298,6 +298,11 @@ interface WebShellSidebarProps {
     workspaceCwd?: string,
   ) => Promise<void> | void;
   onSelectCurrentSession?: () => void;
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string,
+    sessionId: string,
+    displayName: string,
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -518,6 +523,7 @@ export function WebShellSidebar({
   onNewSession,
   onLoadSession,
   onSelectCurrentSession,
+  onSessionRenameConfirmed,
   onError,
   theme,
   onThemeChange,
@@ -651,6 +657,7 @@ export function WebShellSidebar({
     reload: reloadArchived,
     deleteSession: deleteArchivedSession,
     unarchiveSession,
+    catalogQuery: archivedCatalogQuery,
   } = useWebShellSessions({
     autoLoad: true,
     enabled:
@@ -887,6 +894,27 @@ export function WebShellSidebar({
   const secondaryArchivedError = secondaryArchivedSnapshots.some(
     (snapshot) => snapshot.error !== undefined,
   );
+  const toggleArchived = useCallback(() => {
+    if (!archivedExpanded) {
+      const queries = [
+        ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
+          ? [archivedCatalogQuery]
+          : []),
+        ...(workspaceQualifiedRestCoreEnabled ? secondaryArchivedQueries : []),
+      ];
+      if (queries.length > 0) {
+        sessionCatalogController.refreshQueries(queries);
+      }
+    }
+    setArchivedExpanded((expanded) => !expanded);
+  }, [
+    archivedCatalogQuery,
+    archivedExpanded,
+    includePrimaryWorkspaceSessions,
+    secondaryArchivedQueries,
+    sessionCatalogController,
+    workspaceQualifiedRestCoreEnabled,
+  ]);
   const liveWorkspaces = useMemo(
     () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
     [displayedWorkspaces],
@@ -1726,6 +1754,7 @@ export function WebShellSidebar({
       return;
     }
     const sessionId = currentSessionId;
+    const workspaceCwd = connection.workspaceCwd;
     const sessionIdentity = currentSessionIdentity;
     if (!sessionIdentity || busySessionIdsRef.current.has(sessionIdentity)) {
       return;
@@ -1736,9 +1765,12 @@ export function WebShellSidebar({
       .renameSession(nextName)
       .then(() => {
         renamed = true;
-        const workspaceCwd = connection.workspaceCwd;
         if (workspaceCwd) {
-          sessionCatalogController.renamed(workspaceCwd, sessionId, nextName);
+          if (onSessionRenameConfirmed) {
+            onSessionRenameConfirmed(workspaceCwd, sessionId, nextName);
+          } else {
+            sessionCatalogController.renamed(workspaceCwd, sessionId, nextName);
+          }
         }
         cancelRename();
         bumpWorkspaceReload();
@@ -1748,11 +1780,10 @@ export function WebShellSidebar({
         cancelRename();
       })
       .finally(() => {
-        const workspaceCwd = connection.workspaceCwd;
         if (!renamed && workspaceCwd) {
           sessionCatalogController.invalidateWorkspace(workspaceCwd);
         }
-        setSessionBusy(sessionId, false, connection.workspaceCwd);
+        setSessionBusy(sessionId, false, workspaceCwd);
       });
   }, [
     actions,
@@ -1764,6 +1795,7 @@ export function WebShellSidebar({
     currentSessionId,
     editingName,
     editingSessionIdentity,
+    onSessionRenameConfirmed,
     onError,
     sessionCatalogController,
     setSessionBusy,
@@ -3476,7 +3508,7 @@ export function WebShellSidebar({
         type="button"
         className={styles.archivedHeader}
         aria-expanded={archivedExpanded}
-        onClick={() => setArchivedExpanded((expanded) => !expanded)}
+        onClick={toggleArchived}
       >
         <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
           {t('sidebar.archivedTitle')}
@@ -3551,6 +3583,7 @@ export function WebShellSidebar({
     sessionCatalogController,
     sessionArchiveEnabled,
     t,
+    toggleArchived,
   ]);
 
   return (

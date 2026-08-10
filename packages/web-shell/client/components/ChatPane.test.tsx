@@ -22,6 +22,7 @@ const catalogController = vi.hoisted(() => ({
   invalidateWorkspace: vi.fn(),
   sessionCreated: vi.fn(),
   promptAdmitted: vi.fn(),
+  promptAdmissionUncertain: vi.fn(),
   renamed: vi.fn(),
   turnCompleted: vi.fn(),
 }));
@@ -333,6 +334,7 @@ beforeEach(() => {
   transcriptDispatch.mockClear();
   catalogController.invalidateWorkspace.mockClear();
   catalogController.promptAdmitted.mockClear();
+  catalogController.promptAdmissionUncertain.mockClear();
   catalogController.turnCompleted.mockClear();
 });
 
@@ -1034,6 +1036,16 @@ describe('ChatPane', () => {
     expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
   });
 
+  it('does not duplicate turn completion owned by the outer session', () => {
+    streamingStateValue = 'responding';
+    render({ reportCatalogTurnCompletion: false });
+
+    streamingStateValue = 'idle';
+    rerender({ reportCatalogTurnCompletion: false });
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
   it('does not attribute a completed pane turn to a different workspace', () => {
     streamingStateValue = 'responding';
     render();
@@ -1194,6 +1206,10 @@ describe('ChatPane', () => {
     const notice = testid('pane-prompt-admission-unknown');
     expect(notice).not.toBeNull();
     expect(latestChatEditorProps.disabled).toBe(true);
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
     act(() => latestOnSubmit!('do not retry'));
     expect(sendPrompt).toHaveBeenCalledTimes(1);
 

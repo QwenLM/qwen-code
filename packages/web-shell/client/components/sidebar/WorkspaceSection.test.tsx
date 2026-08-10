@@ -232,6 +232,109 @@ describe('WorkspaceSection label', () => {
   });
 });
 
+describe('WorkspaceSection session loading', () => {
+  it('refreshes the catalog when an expanded workspace loses trust', async () => {
+    const listWorkspaceSessionsPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-1',
+            displayName: 'Trusted session',
+          } as DaemonSessionSummary,
+        ],
+      })
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-2',
+            displayName: 'Read-only session',
+          } as DaemonSessionSummary,
+        ],
+      });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const trustedSecondary = { ...untrustedWorkspace, trusted: true };
+
+    renderSection({
+      workspace: trustedSecondary,
+      client,
+      expanded: true,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Trusted session');
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Read-only session');
+  });
+
+  it('refreshes a retained read-only catalog when the section reopens', async () => {
+    const listWorkspaceSessionsPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-1',
+            displayName: 'Initial session',
+          } as DaemonSessionSummary,
+        ],
+      })
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-2',
+            displayName: 'Updated session',
+          } as DaemonSessionSummary,
+        ],
+      });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Initial session');
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: false,
+    });
+    await flush();
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Updated session');
+  });
+});
+
 describe('WorkspaceSection git chip', () => {
   it('renders a clickable git chip for a trusted repo', async () => {
     const status: DaemonWorkspaceGitStatus = {

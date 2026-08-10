@@ -165,6 +165,13 @@ export function useSessionCatalogController(client: DaemonClient) {
       }
     };
     return {
+      refreshQueries(queries: readonly SessionCatalogQuery[]) {
+        for (const query of queries) {
+          void store.loadOnce(query, { fresh: true }).catch((error) => {
+            console.warn('[session-catalog] failed to refresh catalog:', error);
+          });
+        }
+      },
       invalidateWorkspace(workspaceCwd: string) {
         update(() => store.invalidateWorkspace(workspaceCwd));
       },
@@ -179,6 +186,12 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.patchSession(workspaceCwd, sessionId, {
             hasActivePrompt: true,
           });
+          store.invalidateWorkspace(workspaceCwd);
+          store.scheduleWorkspaceRefresh(workspaceCwd);
+        });
+      },
+      promptAdmissionUncertain(workspaceCwd: string) {
+        update(() => {
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });

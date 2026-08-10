@@ -188,6 +188,28 @@ export function WorkspaceSection({
     enabled: sessionsEnabled && sessionsVisible,
     ...(sessionsVisible && !readOnly ? { pollIntervalMs: 10_000 } : {}),
   });
+  const {
+    page: sessionsPage,
+    reload: reloadSessions,
+    stale: sessionsStale,
+  } = sessionsResult;
+  const sessionsActive = sessionsEnabled && sessionsVisible;
+  const previousSessionsActiveRef = useRef(sessionsActive);
+  const previousReadOnlyRef = useRef(readOnly);
+  useEffect(() => {
+    const wasActive = previousSessionsActiveRef.current;
+    const wasReadOnly = previousReadOnlyRef.current;
+    previousSessionsActiveRef.current = sessionsActive;
+    previousReadOnlyRef.current = readOnly;
+    if (
+      sessionsActive &&
+      (!wasActive || wasReadOnly !== readOnly) &&
+      sessionsPage &&
+      !sessionsStale
+    ) {
+      void reloadSessions().catch(() => undefined);
+    }
+  }, [readOnly, reloadSessions, sessionsActive, sessionsPage, sessionsStale]);
   const sessions = sessionsResult.sessions;
   const loadError = Boolean(sessionsResult.error);
 

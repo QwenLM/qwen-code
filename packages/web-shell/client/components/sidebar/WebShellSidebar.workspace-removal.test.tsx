@@ -26,6 +26,8 @@ const {
   exportArchivedSession,
   sessionActions,
   invalidateSessionCatalog,
+  renameSessionCatalog,
+  refreshSessionCatalogQueries,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
@@ -66,6 +68,8 @@ const {
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
   const invalidateSessionCatalog = vi.fn();
+  const renameSessionCatalog = vi.fn();
+  const refreshSessionCatalogQueries = vi.fn();
   return {
     connection: {
       status: 'connected',
@@ -117,6 +121,8 @@ const {
     exportArchivedSession,
     sessionActions,
     invalidateSessionCatalog,
+    renameSessionCatalog,
+    refreshSessionCatalogQueries,
   };
 });
 
@@ -137,25 +143,32 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
       sourceType?: string;
     }) => {
       const state = useSessions(options);
+      const catalogQuery = {
+        routeKind: 'legacy',
+        workspaceCwd: connection.workspaceCwd,
+        options,
+      };
       if (options?.enabled === false) {
-        return { ...state, sessions: [], data: undefined };
+        return { ...state, sessions: [], data: undefined, catalogQuery };
       }
       return {
         ...state,
         data: state.sessions,
-        catalogQuery: {
-          routeKind: 'legacy',
-          workspaceCwd: connection.workspaceCwd,
-          options,
-        },
+        catalogQuery,
       };
     },
     useSessionCatalogController: () => ({
+      refreshQueries: refreshSessionCatalogQueries,
       invalidateWorkspace: (workspaceCwd: string) => {
         invalidateSessionCatalog(workspaceCwd);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
-      renamed: (workspaceCwd: string) => {
+      renamed: (
+        workspaceCwd: string,
+        sessionId: string,
+        displayName: string,
+      ) => {
+        renameSessionCatalog(workspaceCwd, sessionId, displayName);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
     }),
@@ -602,6 +615,8 @@ beforeEach(() => {
   workspaceActions.addWorkspace.mockReset();
   workspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
   invalidateSessionCatalog.mockReset();
+  renameSessionCatalog.mockReset();
+  refreshSessionCatalogQueries.mockReset();
   active.reload.mockReset();
   active.reload.mockResolvedValue(undefined);
   active.deleteSession.mockReset();
@@ -707,6 +722,18 @@ describe('WebShellSidebar workspace removal', () => {
     ).find((button) => button.textContent?.includes('Archived'));
     expect(archivedButton).toBeDefined();
     act(() => click(archivedButton!));
+    expect(refreshSessionCatalogQueries).toHaveBeenCalledWith([
+      expect.objectContaining({
+        routeKind: 'qualified',
+        workspaceCwd: '/tmp/other',
+        options: expect.objectContaining({ archiveState: 'archived' }),
+      }),
+    ]);
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ routeKind: 'legacy' }),
+      ]),
+    );
     const archivedCallIndex = listSecondarySessions.mock.calls.findIndex(
       ([options]) => options?.archiveState === 'archived',
     );
@@ -929,6 +956,11 @@ describe('WebShellSidebar workspace removal', () => {
       await sessionActions.renameSession.mock.results.at(-1)?.value;
     });
     expect(sessionActions.renameSession).toHaveBeenCalledWith(
+      'Renamed locked current',
+    );
+    expect(renameSessionCatalog).toHaveBeenCalledWith(
+      '/tmp/other',
+      'locked-current',
       'Renamed locked current',
     );
   });
@@ -1284,6 +1316,9 @@ describe('WebShellSidebar workspace removal', () => {
       },
     });
     await expandWorkspace('other');
+    await expandArchived();
+
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
 
     expect(
       inlineSessionAction('Without rest capability', 'Pin'),
