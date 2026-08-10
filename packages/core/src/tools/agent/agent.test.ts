@@ -1495,6 +1495,29 @@ describe('AgentTool', () => {
       );
     });
 
+    it('passes enforced read-only mode through to TeamManager', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Inspect implementation',
+        prompt: 'Inspect the coordination boundary',
+        name: 'reader',
+        read_only: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'reader',
+          readOnly: true,
+        }),
+      );
+    });
+
     it('blocks a model grade if a team becomes active after validation', async () => {
       const spawnTeammate = vi.fn().mockResolvedValue(undefined);
       vi.mocked(config.getTeamManager).mockReturnValue({
@@ -1538,26 +1561,56 @@ describe('AgentTool', () => {
       expect(spawnTeammate).not.toHaveBeenCalled();
     });
 
-    it('rejects working_dir when a named teammate would spawn (worktree pin would be silently ignored)', async () => {
-      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
-      vi.mocked(config.getTeamManager).mockReturnValue({
-        spawnTeammate,
-      } as never);
-
-      const invocation = agentTool.build({
-        description: 'Review',
-        prompt: 'Review the diff',
-        subagent_type: 'file-search',
-        name: 'reviewer',
-        working_dir: '.qwen/tmp/review-pr-1',
-      });
-
-      const result = await invocation.execute(new AbortController().signal);
-
-      expect(partToString(result.llmContent)).toMatch(
-        /not supported for a named teammate/i,
+    it('pins a named teammate to a validated caller-owned worktree', async () => {
+      const { GitWorktreeService } = await import(
+        '../../services/gitWorktreeService.js'
       );
-      expect(spawnTeammate).not.toHaveBeenCalled();
+      const spies = [
+        vi
+          .spyOn(GitWorktreeService.prototype, 'checkGitAvailable')
+          .mockResolvedValue({ available: true }),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isGitRepository')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRepoTopLevel')
+          .mockResolvedValue('/test/project'),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'isRegisteredLinkedWorktree')
+          .mockResolvedValue(true),
+        vi
+          .spyOn(GitWorktreeService.prototype, 'getRegisteredWorktreeBranch')
+          .mockResolvedValue({
+            branch: 'worktree-writer',
+            headCommit: 'abc123',
+          }),
+      ];
+      try {
+        const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+        vi.mocked(config.getTeamManager).mockReturnValue({
+          spawnTeammate,
+        } as never);
+
+        const invocation = agentTool.build({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          name: 'reviewer',
+          working_dir: '.qwen/tmp/review-pr-1',
+        });
+
+        await invocation.execute(new AbortController().signal);
+
+        expect(spawnTeammate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'reviewer',
+            cwd: '/test/project/.qwen/tmp/review-pr-1',
+            worktreePath: '/test/project/.qwen/tmp/review-pr-1',
+          }),
+        );
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
     });
   });
 

@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
@@ -84,6 +85,48 @@ describe('TeamCoordinationHarness', () => {
   // ─── 1. Message routing ────────────────────────────────────
 
   describe('message routing', () => {
+    it('notifies the leader when a teammate does not report explicitly', async () => {
+      const h = await createHarness();
+      const worker = await h.spawnTeammate('worker', {
+        onMessage: (_message, agent) => {
+          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+            subagentId: agent.agentId,
+            round: 1,
+            text: 'final finding',
+            thoughtText: '',
+            timestamp: Date.now(),
+          });
+        },
+      });
+
+      await h.teamManager.sendMessage('worker', 'inspect', 'leader');
+      await h.waitForStatus('worker', AgentStatus.IDLE);
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            from: 'worker',
+            text: 'final finding',
+          }),
+        ]);
+      });
+      expect(worker.getReceivedMessages()).toHaveLength(1);
+
+      await h.spawnTeammate('silent-worker');
+      await h.teamManager.sendMessage('silent-worker', 'inspect', 'leader');
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            from: 'silent-worker',
+            text: expect.stringContaining(
+              'completed a turn without a model-visible final answer',
+            ),
+          }),
+        ]);
+      });
+    });
+
     it('sends message from leader to teammate', async () => {
       const h = await createHarness();
       const worker = await h.spawnTeammate('worker');
@@ -499,6 +542,26 @@ describe('TeamCoordinationHarness', () => {
   // ─── Spawn lifecycle ────────────────────────────────────────
 
   describe('spawn cap', () => {
+    it('gives read-only teammates only inspection and coordination tools', async () => {
+      const h = await createHarness();
+      await h.teamManager.spawnTeammate({
+        name: 'reader',
+        cwd: h.tmpDir,
+        readOnly: true,
+      });
+
+      const member = h.teamManager.getTeamFile().members[0]!;
+      const toolConfig = h.backend.getSpawnConfig(member.agentId)?.inProcess
+        ?.runtimeConfig.toolConfig;
+
+      expect(toolConfig?.tools).toEqual(toolConfig?.executionAllowedTools);
+      expect(toolConfig?.tools).toContain('read_file');
+      expect(toolConfig?.tools).toContain('send_message');
+      expect(toolConfig?.tools).not.toContain('run_shell_command');
+      expect(toolConfig?.tools).not.toContain('save_memory');
+      expect(toolConfig?.tools).not.toContain('create_sub_session');
+    });
+
     it('concurrent spawns cannot exceed MAX_TEAMMATES', async () => {
       // Regression: the cap check was synchronous but the push to
       // `members` happened after `loadSubagent`/`convertToRuntimeConfig`

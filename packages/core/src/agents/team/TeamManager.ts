@@ -30,6 +30,7 @@ import { PermissionMode } from '../../hooks/types.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
 import type {
+  AgentRoundTextEvent,
   AgentStatusChangeEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
@@ -75,6 +76,8 @@ import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 import { runOutsideAgentContext } from '../runtime/agent-context.js';
+import { READ_ONLY_INSPECTION_TOOLS } from '../runtime/subagent-plan-tool-policy.js';
+import { ToolNames } from '../../tools/tool-names.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 
@@ -96,8 +99,12 @@ export interface TeammateSpawnConfig {
   prompt?: string;
   /** Working directory (defaults to team leader's cwd). */
   cwd?: string;
+  /** Registered worktree owned by the leader, when this is the writer. */
+  worktreePath?: string;
   /** Start this teammate in plan mode and require leader plan approval. */
   planModeRequired?: boolean;
+  /** Restrict this teammate to read-only inspection and team coordination. */
+  readOnly?: boolean;
 }
 
 export interface TeamPlanApprovalRequest {
@@ -188,8 +195,14 @@ export class TeamManager {
    *  agentId so we can release each agent's listeners as soon as
    *  it reaches a terminal status — not just at full team
    *  cleanup. Otherwise long-running sessions accumulate dead
-   *  listeners (4 per spawn) on shared emitters. */
+   *  listeners (5 per spawn) on shared emitters. */
   private readonly eventBridgeCleanups = new Map<string, () => void>();
+
+  /** Last model-visible answer from each teammate's active turn. */
+  private readonly pendingFinalReports = new Map<string, string>();
+
+  /** Teammates that explicitly reported to the leader during this turn. */
+  private readonly explicitLeaderReports = new Set<string>();
 
   /** Unsubscribe from task update notifications. */
   private taskUpdateUnsubscribe?: () => void;
@@ -289,6 +302,7 @@ export class TeamManager {
       joinedAt: Date.now(),
       cwd,
       tmuxPaneId: '',
+      worktreePath: config.worktreePath,
       backendType: this.backend.type,
       isActive: undefined,
       subscriptions: [],
@@ -394,12 +408,28 @@ export class TeamManager {
         }
       }
 
+      if (config.readOnly) {
+        const tools = [
+          ...READ_ONLY_INSPECTION_TOOLS,
+          ToolNames.SEND_MESSAGE,
+          ToolNames.TASK_LIST,
+          ToolNames.TASK_UPDATE,
+        ];
+        toolConfig = {
+          tools: [...tools],
+          executionAllowedTools: [...tools],
+        };
+      }
+
       // Build system prompt: subagent prompt (if any) or user prompt + team addendum.
       const addendum = buildTeammatePromptAddendum(
         name,
         this.teamFile.name,
         LEADER_NAME,
-        { planModeRequired: config.planModeRequired },
+        {
+          planModeRequired: config.planModeRequired,
+          readOnly: config.readOnly,
+        },
       );
       const basePrompt = subagentPrompt ?? config.prompt;
       const systemPrompt = basePrompt
@@ -537,6 +567,9 @@ export class TeamManager {
         read: false,
         type: shutdownResponse,
       });
+      if (sender) {
+        this.explicitLeaderReports.add(sender.agentId);
+      }
       this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
         from: from ?? 'unknown',
         to: LEADER_NAME,
@@ -1360,6 +1393,8 @@ export class TeamManager {
     }
 
     this.pendingMessages.clear();
+    this.pendingFinalReports.clear();
+    this.explicitLeaderReports.clear();
     this.lastActivityAt.clear();
     this.agentIdentities.clear();
     this.teamEventEmitter.removeAllListeners();
@@ -1403,6 +1438,11 @@ export class TeamManager {
     const onStatusChange = (event: AgentStatusChangeEvent) => {
       recordActivity();
 
+      if (event.newStatus === AgentStatus.RUNNING) {
+        this.pendingFinalReports.delete(agentId);
+        this.explicitLeaderReports.delete(agentId);
+      }
+
       this.teamEventEmitter.emit(TeamEventType.TEAMMATE_STATUS_CHANGE, {
         agentId,
         name: agentName,
@@ -1412,6 +1452,24 @@ export class TeamManager {
       });
 
       if (event.newStatus === AgentStatus.IDLE) {
+        const finalReport = this.pendingFinalReports.get(agentId);
+        const explicitlyReported = this.explicitLeaderReports.has(agentId);
+        this.pendingFinalReports.delete(agentId);
+        this.explicitLeaderReports.delete(agentId);
+
+        if (!explicitlyReported && !event.roundCancelledByUser) {
+          this.fireAndForget(
+            `reportFinalAnswer(${agentId})`,
+            this.sendMessage(
+              LEADER_NAME,
+              finalReport ??
+                `${agentName} completed a turn without a model-visible final answer. Check the shared task list or send a follow-up if more detail is needed.`,
+              agentName,
+              `${agentName} completed a turn`,
+            ),
+          );
+        }
+
         this.teamEventEmitter.emit(TeamEventType.TEAMMATE_IDLE, {
           agentId,
           name: agentName,
@@ -1463,6 +1521,8 @@ export class TeamManager {
         // lost — better to refuse the send (handled at sendMessage
         // by the missing entry) than accept it and drop it.
         this.pendingMessages.delete(agentId);
+        this.pendingFinalReports.delete(agentId);
+        this.explicitLeaderReports.delete(agentId);
         this.lastActivityAt.delete(agentId);
         this.agentIdentities.delete(agentId);
         this._shutdownPending.delete(agentName);
@@ -1483,7 +1543,16 @@ export class TeamManager {
       recordActivity();
     };
 
+    const onRoundText = (event: AgentRoundTextEvent) => {
+      recordActivity();
+      const text = event.text.trim();
+      if (text) {
+        this.pendingFinalReports.set(agentId, text);
+      }
+    };
+
     emitter.on(AgentEventType.STATUS_CHANGE, onStatusChange);
+    emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.on(AgentEventType.TOOL_CALL, onToolCall);
     emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
 
@@ -1513,6 +1582,7 @@ export class TeamManager {
     // release this agent's listeners on terminal status.
     this.eventBridgeCleanups.set(agentId, () => {
       emitter.off(AgentEventType.STATUS_CHANGE, onStatusChange);
+      emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
       emitter.off(AgentEventType.TOOL_CALL, onToolCall);
       emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
