@@ -465,7 +465,7 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     // The placeholder classifier's own hazard shape — a token followed by
     // a long whitespace run — must stay linear too; it was measured
     // quadratic (seconds at 40k spaces) when its quantifiers overlapped.
-    const spaced = `Budget gap: (none${' '.repeat(40_000)}x)`;
+    const spaced = `Budget gap: (none${' '.repeat(160_000)}x)`;
     const t1 = performance.now();
     expect(budgetGapDisclosures(spaced)).toHaveLength(1);
     expect(performance.now() - t1).toBeLessThan(1000);
