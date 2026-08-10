@@ -1,14 +1,14 @@
 # Selective session restore implementation plan
 
-- Status: Proposed; the design may land independently, but implementation must
-  land after #8691 and transactional WebUI session switching
+- Status: Proposed; as of 2026-08-10, #8691 is merged and #8824 remains open;
+  the design may land independently, but implementation must land after #8824
 - Design: `docs/design/2026-08-08-selective-session-restore.md`
 - Tracks: #8678
 
 ## Delivery rule
 
-The delivery order is #8691, transactional WebUI session switching, this
-selective-restore implementation, and then the durable checkpoint.
+The delivery order is merged #8691, transactional WebUI session switching in
+#8824, this selective-restore implementation, and then the durable checkpoint.
 
 Implement selective restore as one end-to-end daemon fix. Reviewable commits may
 follow the phases below, but do not merge an intermediate PR that only removes a
@@ -176,22 +176,28 @@ returns the requested replay semantics.
   mutating, unregistering, or closing the already-live Session on overflow. Keep
   the daemon bridge's existing live-attach fallback to in-memory replay instead
   of surfacing that direct-ACP error as REST 413.
-- Reserve a cold session id before configuration/scanning and hold it until
-  atomic publication or failure. Run all fallible preparation before replacing
-  the reservation with `sessions.set`. Validate reservation ownership and the
-  absence of an active entry before touching attribution. Then apply attribution,
-  publish the map entry, clear initializing state, and best-effort notify the
-  reporter in one no-`await`, no-remaining-failure block. Use a map-independent
-  teardown for provisional state: dispose Session and Goal hooks/observers,
-  release MCP and telemetry ownership, then shut down Config, recorder, and lease
-  without replacing the original failure.
+- Reuse #8691's `startingSessionIds`/`reserveStartingSessionId()` reservation;
+  do not create a parallel preparation set. Hold the existing reservation from
+  before settings/existence I/O until atomic publication or failure, extending
+  its handle only as needed for final ownership validation. Run all fallible
+  preparation before publishing with `sessions.set`. Validate reservation
+  ownership and the absence of an active entry before touching attribution. Then
+  apply attribution, publish the map entry, clear initializing state, and
+  best-effort notify the reporter in one no-`await`, no-remaining-failure block.
+  Use a map-independent teardown for provisional state: dispose Session and Goal
+  hooks/observers, release MCP and telemetry ownership, then shut down Config,
+  recorder, and lease without replacing the original failure.
 - Make `activateAfterPublication()` synchronous, idempotent, and non-throwing.
-  Enable event receivers first, switch capture-only callbacks to sending mode and
-  drain them second, then schedule Goal checkpoint/continuation, file-history
-  validation, restored background work, cron, and command producers. Give every
-  receiver/producer an independent latch and error boundary; one failure skips
-  only its dependent producer, and activation/reporting never rolls back the
-  committed Session or changes its prebuilt response.
+  Use one Session-level activation gate, reuse existing component idempotency,
+  and add a narrower latch only for a component independently callable outside
+  that gate. Enable event receivers first, switch capture-only callbacks to
+  sending mode and drain them second, then schedule Goal
+  checkpoint/continuation, file-history validation, restored background work,
+  cron, and command producers. Give every activation action an error boundary;
+  chain an asynchronous receiver's dependent producer from successful receiver
+  completion. One failure skips only its dependent producer, and
+  activation/reporting never rolls back the committed Session or changes its
+  prebuilt response.
 
 ## Phase 4: Errors and observability
 
@@ -229,8 +235,13 @@ returns the requested replay semantics.
 - Verify every child pre-publication failure leaves the process-global
   attribution singleton unchanged and successful child publication applies the
   projected snapshot once. Inject a failed final reservation/active-entry guard
-  and assert attribution is still untouched. Document rather than assert rollback
-  for #8691 late abandoned-result cleanup.
+  and assert attribution is still untouched. Document that a #8691 late-abandoned
+  child can briefly apply attribution and run activated Goal, file-history,
+  background, cron, or command work before cleanup. Obtain explicit maintainer
+  acceptance for that existing child-publication/parent-adoption window; if it is
+  rejected, make a parent/child adoption acknowledgement a prerequisite instead
+  of adding it implicitly to this PR. Verify every activated producer remains
+  owned by Session teardown and stops when #8691 closes the late-abandoned child.
 - Verify a response-builder failure occurs before FileHistory hydration,
   provisional Session construction, or any Session map entry.
 - Verify live projection and envelope-limit failures release the close gate and
@@ -266,8 +277,15 @@ returns the requested replay semantics.
 - Exercise missing file-history backups and due autonomous work: envelope or
   prepare failure appends nothing and emits nothing; successful publication
   restores once, validates once, enables receivers before producers, and arms
-  each buffered notification/cron/timer exactly once. Inject each activation
-  failure independently and prove unrelated steps still activate.
+  each buffered notification/cron/timer exactly once through the Session-level
+  activation gate. Inject each activation failure independently, including an
+  asynchronous receiver failure, and prove unrelated steps still activate while
+  only the receiver's direct producer is skipped.
+- Rebase onto #8824 and run its transactional integration coverage with
+  selective-restore 409, 413, timeout/504, cancellation, and staging failures.
+  Assert the committed session-id and workspace-cwd source tuple remains attached
+  and usable, and successful adoption changes transcript, connection, metadata,
+  and ownership atomically.
 - Run `npm run build && npm run typecheck` from the repository root.
 - Record a benchmark-only full-loader baseline and run the selective projection
   on 64 KiB, 1 MiB, and 4 MiB fixtures under the same runtime. Report absolute
@@ -278,6 +296,9 @@ returns the requested replay semantics.
 - Run the opt-in approximately 80 MiB/30,000-record benchmark with a live
   sibling and report wall time, peak and settled memory, event-loop lag,
   selected bytes, replay bytes, compression fallback, and sibling continuity.
+  Report #8824's overlapping source-plus-staged-target WebUI peak separately from
+  ACP child index/projection memory; do not add cross-process samples into one
+  peak.
 - Read the complete diff and all untracked files in open-ended audit passes.
   Fix every actionable finding, rerun affected verification, reset the clean
   pass count, and stop only after two consecutive clean passes.
@@ -286,9 +307,10 @@ returns the requested replay semantics.
 
 ## Acceptance checklist
 
-- [ ] #8691 and transactional WebUI session switching have landed, and the
-      implementation branch is rebased onto their final restore and attach
-      lifecycle.
+- [x] #8691 has landed.
+- [ ] #8824 transactional WebUI session switching has landed with green CI and
+      maintainer approval, and the implementation branch is rebased onto its
+      final attach lifecycle.
 - [ ] Projection acquisition, runtime-consumer migration, and old-loader removal
       ship as one end-to-end implementation; no intermediate production PR leaves
       an unused projection or removes the post-lease authoritative read without
@@ -365,7 +387,8 @@ returns the requested replay semantics.
 - [ ] Successful load, failed load, and `startNewSession()` release all pending
       projection payloads; Config does not become a second lifetime history
       cache.
-- [ ] Session-id reservation covers scan through atomic publication; concurrent
+- [ ] #8691's existing session-id reservation, without a second preparation set,
+      covers settings/existence I/O through atomic publication; concurrent
       direct-ACP restores of one id cannot both prepare, and every failure frees
       the reservation for a clean retry.
 - [ ] Provisional teardown is independent of the sessions map and leaves no
@@ -377,15 +400,23 @@ returns the requested replay semantics.
 - [ ] Every child pre-publication failure leaves process-global attribution
       unchanged; the projected snapshot is applied once in the successful
       no-`await` child commit after final reservation validation. A failing
-      validation leaves attribution untouched. Late-abandoned cleanup is
-      documented as outside the rollback guarantee.
+      validation leaves attribution untouched. The broader late-abandoned window
+      for attribution and activated autonomous work is documented and has
+      maintainer acceptance, or an adoption acknowledgement is made a
+      prerequisite. Every activated producer stops with #8691 Session teardown
+      and leaves no detached work after late cleanup.
 - [ ] The complete ACP success value is built before FileHistory hydration and
       provisional Session construction; a response-builder failure performs
       neither and leaves no Session.
 - [ ] Goal work, notification drains, cron, command timers, file-history
       validation, and all session-visible callbacks do not execute or emit before
-      publication. Receivers activate before producers; each independent step
-      arms once, and one injected failure skips only its direct dependents.
+      publication. One Session-level gate activates receivers before producers;
+      existing component idempotency arms each step once, and one injected
+      failure skips only its direct dependents.
+- [ ] #8824 integration proves selective-restore 409, 413, timeout/504,
+      cancellation, and staging failures preserve the committed session-id and
+      workspace-cwd source tuple, while a successful switch commits transcript,
+      connection, metadata, and ownership atomically.
 - [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
       limits, none, action, stream/response mode, and inherited-history policy;
       only identical shapes share a restore and its typed result.

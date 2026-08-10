@@ -2,7 +2,8 @@
 
 - Status: Draft for review
 - Tracks: #8678
-- Implementation prerequisites: #8691 and transactional WebUI session switching
+- Prerequisite status on 2026-08-10: #8691 merged; transactional WebUI session
+  switching in #8824 remains an open Draft
 
 ## Scope and ordering
 
@@ -12,14 +13,16 @@ durable checkpoint. This document uses selective runtime projection to implement
 the bounded-hydration slice without leaving full runtime materialization in
 place.
 
-The design document may land while its prerequisites are in progress, but the
-selective-restore implementation must land after both #8691 and transactional
-switching, and before checkpoint work. The boundaries are distinct: #8691 fences
-timeouts and late results; transactional switching keeps the current UI session
-attached until the target commits; selective restore removes the leased mode's
-duplicate full read and reduces reconstruction, materialization, and replay cost
-but does not replace transactional commit semantics or make a slow restore
-responsive by itself. The lease-off path still scans the frozen transcript once.
+PR #8691 has merged and, as of 2026-08-10, #8824 remains in progress. The design
+document may land before #8824, but the selective-restore implementation must
+rebase onto and land after it, and before checkpoint work. The boundaries are
+distinct: #8691 fences timeouts and late results; #8824 keeps the current UI
+session attached until a fully staged target wins its final
+identity/generation/deadline check and commits; selective restore removes the
+leased mode's duplicate full read and reduces reconstruction, materialization,
+and replay cost but does not replace transactional commit semantics or make a
+slow restore responsive by itself. The lease-off path still scans the frozen
+transcript once.
 
 This design PR changes no runtime behavior and does not close #8678.
 
@@ -87,9 +90,9 @@ index machinery.
   the transcript once and remains O(file bytes).
 - Making restore proportional only to the JSONL tail. That is the checkpoint
   follow-up.
-- Implementing transactional WebUI session switching. This design assumes that
-  its prepare/commit boundary lands first, but does not change attach, detach, or
-  commit ownership.
+- Implementing transactional WebUI session switching. #8824 owns that
+  prepare/stage/CAS/commit boundary and must land first; this design does not
+  change attach, detach, or WebUI commit ownership.
 - Changing TUI `--resume`, `--continue`, session export, archive reads, fork, or
   branch behavior.
 - Changing the standalone legacy `qwen/session/loadUpdates` extension or the
@@ -630,11 +633,18 @@ sequenceDiagram
   B-->>D: "restored session"
 ```
 
-The target construction shown above runs inside transactional switching's
-prepare phase. The outer switch keeps the previous WebUI session attached until
-the target is ready and commits only after a successful return. A target-side
-failure leaves the previous attachment unchanged; selective restore does not own
-an attach or detach transition.
+The target construction shown above runs inside #8824's transactional prepare
+phase. The outer switch keeps the previous WebUI session attached until the
+target is ready and commits only after a successful return and final
+generation/deadline/target check. Its committed identity is the session-id and
+workspace-cwd tuple, so same-id cross-workspace navigation is still a real
+switch. Target-side 409, 413, timeout/504, cancellation, or staging failure must
+leave that committed source tuple attached and usable; selective restore does
+not own an attach or detach transition. Transactional staging temporarily holds
+the source transcript and candidate replay together in the WebUI. End-to-end
+memory evidence must therefore report that WebUI overlap separately from ACP
+child index/projection memory instead of adding measurements from different
+processes into one ambiguous peak.
 
 ACP `newSessionConfig()` passes an internal projection source, including the
 `SelectiveSessionRestoreOptions`, through `loadCliConfig()`'s named host-options
@@ -730,7 +740,19 @@ snapshot before late cleanup, and rolling the singleton back is unsafe while a
 sibling can mutate it concurrently. Session-scoped attribution and a second
 parent/child commit acknowledgement remain outside this PR, as do the existing
 ownership semantics among multiple successfully published live sessions. The
-projection reader has already reduced transcript file-history records into
+same child-publication gap is broader than attribution: after the ACP child has
+published but before the parent bridge/WebUI has accepted the result, Goal,
+file-history validation, restored background work, cron, or command producers
+may be activated. If the parent has already timed out, those producers may
+briefly write or emit before #8691 recognizes the late result and closes the
+abandoned child Session. #8824 preserves the old visible source but does not add
+a parent-to-child adoption acknowledgement. The implementation PR must call out
+this existing residual and obtain explicit maintainer acceptance; if it is not
+accepted, a parent/child adoption acknowledgement is a prerequisite scope change
+rather than an implicit addition to selective restore. Every activated producer
+must remain owned by Session teardown and stop when #8691 closes a late-abandoned
+Session; selective restore must not create detached work that survives cleanup.
+The projection reader has already reduced transcript file-history records into
 snapshots, but it has not hydrated `FileHistoryService`.
 `Config.getFileHistoryService()` remains the single lazy owner of that runtime
 state. Split its synchronous snapshot restore from
@@ -759,12 +781,15 @@ register a fully initialized runtime and report bounded
 
 ### Atomic Session publication and cleanup
 
-Reserve the session id in a `preparingSessions` set before cold configuration or
-scanning begins. Active and reserved ids both reject a second direct-ACP
+Reuse #8691's existing `startingSessionIds` reservation and
+`reserveStartingSessionId()` lifecycle; do not add a second `preparingSessions`
+set. The reservation is acquired before cold settings/existence I/O and remains
+owned through projection, complete response construction, and atomic
+publication or failure. Active and reserved ids both reject a second direct-ACP
 prepare, so two restores cannot build independent provisional Sessions for the
-same id. On success, atomically replace the reservation with the `sessions` map
-entry and emit the reporter notification; every failure releases the
-reservation.
+same id. Evolve the existing reservation handle only as needed to validate final
+ownership, atomically publish the `sessions` entry, and release exactly once on
+every failure.
 
 All fallible preparation runs before publication: authentication and tool
 setup, model initialization, envelope validation, complete response construction,
@@ -785,7 +810,9 @@ Autonomous or session-visible callbacks are armed only after publication. A
 provisional Session may install capture-only callbacks where a one-shot event
 could otherwise be missed, but they may only append to bounded in-memory state;
 they cannot persist, drain, or emit. `activateAfterPublication()` is synchronous,
-idempotent, and never throws to the restore caller. It first enables receivers
+idempotent, and never throws to the restore caller. One Session-level activation
+gate owns the transition; reuse existing component idempotency and add a narrower
+latch only where a component can be invoked independently. It first enables receivers
 for background-agent, monitor, shell, workflow-approval, title,
 recording-diagnostic, subsession, Goal-observer, and MCP-budget events; it then
 switches capture-only callbacks to sending mode and drains their buffers; only
@@ -793,16 +820,17 @@ then does it schedule producer work such as Goal checkpoint/continuation,
 file-history validation, restored background work, cron, and command updates.
 Async producer completion is not awaited by the restore response.
 
-Each receiver and producer owns an independent activation latch and error
-boundary. One failure is caught and logged without skipping unrelated steps. A
-producer whose required receiver failed is the only dependent step skipped; all
-other receivers and producers still activate once. Reporter failure follows the
-same best-effort rule. None of these failures rolls back an already-published
+Each activation action has an error boundary. One failure is caught and logged
+without skipping unrelated steps. A producer whose required receiver failed is
+the only dependent step skipped; when receiver setup is asynchronous, schedule
+that producer from the receiver's successful completion rather than racing both.
+All other receivers and producers still activate once. Reporter failure follows
+the same best-effort rule. None of these failures rolls back an already-published
 Session or replaces its prebuilt response. Here publication means addressability
-in the ACP child, not acknowledgement of the WebUI's local switch commit. #8691
-owns late-result fencing and cleanup, and the transactional-switch prerequisite
-owns the old WebUI attachment; this PR does not add a second client-commit
-protocol.
+in the ACP child, not acknowledgement of #8824's WebUI commit. #8691 owns
+late-result fencing and cleanup, and #8824 owns the old WebUI attachment; absent
+the explicitly out-of-scope adoption acknowledgement, the late-abandoned
+autonomous-work window above remains.
 
 ### Live session load or resume
 
@@ -1049,15 +1077,18 @@ behavior rather than inventing a new fallback.
 - Every ACP-child pre-publication failure leaves process-global attribution
   unchanged; a successful child publication applies its snapshot once in the
   final no-`await` commit. Reservation/active-entry invariants are checked before
-  attribution is applied. A later #8691 abandoned-result cleanup is the
-  documented singleton limitation and is not claimed as rollback-safe.
+  attribution is applied. A later #8691 abandoned-result cleanup is not claimed
+  as rollback-safe for either the singleton or autonomous work activated between
+  child publication and parent adoption; the implementation PR records explicit
+  maintainer acceptance or adds an adoption-ack prerequisite.
 - The complete ACP success response is built before runtime FileHistoryService
   hydration or provisional Session construction. A response-builder failure
   performs neither and leaves no map entry.
-- Post-publication receivers activate before their producers. An injected
-  activation failure skips only its dependent producer; every unrelated
-  receiver/producer still arms once, and no activation or reporter failure
-  converts the prebuilt success into a restore failure.
+- Post-publication receivers activate before their producers. One Session-level
+  activation gate plus existing component idempotency arms each step once. An
+  injected activation failure skips only its dependent producer; every unrelated
+  receiver/producer still arms, and no activation or reporter failure converts
+  the prebuilt success into a restore failure.
 - ACP `errorKind: transcript_too_large` is request-scoped, REST maps it to
   `413 transcript_too_large`, and a registered sibling remains usable.
 - Cold projection and cold envelope-limit failures do not register new runtime
@@ -1069,8 +1100,14 @@ behavior rather than inventing a new fallback.
 - A timed-out selective projection follows #8691's abandoned-restore fence,
   same-id retry, late cleanup, settlement-grace, and condemned-channel drain
   semantics. In particular, an overdue child that cannot answer a close probe
-  must still be locally torn down after its clients detach.
+  must still be locally torn down after its clients detach, and every activated
+  Goal, file-history, background, cron, or command producer stops with Session
+  teardown rather than surviving as detached work.
 - #8691 timeout and late-result fencing tests continue to pass.
+- #8824 integration tests prove that selective-restore 409, 413, timeout/504,
+  cancellation, and staging failures preserve the committed session-id and
+  workspace-cwd source tuple and that successful adoption changes transcript,
+  connection, metadata, and ownership atomically.
 
 ### E2E and benchmark
 
@@ -1221,6 +1258,12 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
   Retain the snapshot in the one-shot projection and apply it only in the final
   non-fallible child commit block; guarantee only pre-publication failures and
   document that a #8691 late-abandoned success cannot be rolled back safely.
+- **A late-abandoned child starts hidden autonomous work.** Child publication is
+  not parent adoption. Document that Goal, file-history, background, cron, or
+  command work may briefly run until #8691 late cleanup, require maintainer
+  acceptance, make teardown own and stop every producer, and make a parent/child
+  adoption acknowledgement a prerequisite if that residual is rejected rather
+  than quietly widening this PR.
 - **The Session publishes before its response is known to be buildable.** Build
   the complete ACP success value before FileHistory hydration and Session
   construction, then make every later activation best-effort.
@@ -1252,13 +1295,14 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 
 ## Rollout and follow-ups
 
-The design document may land before its implementation prerequisites. The
-selective-restore implementation lands after #8691 and transactional switching,
-followed by the durable checkpoint. Keep selective restore as one end-to-end
-implementation PR, using reviewable commits for the phases below; do not land an
-unused projection API or a partial early-paging step. `historyPageSize` cannot
-bound pre-materialization I/O without the consumer projection, and the
-writer-lease path's post-acquisition read remains authoritative.
+The design document may land before its remaining implementation prerequisite.
+#8691 is merged; the selective-restore implementation lands after #8824's
+transactional switching, followed by the durable checkpoint. Keep selective
+restore as one end-to-end implementation PR, using reviewable commits for the
+phases below; do not land an unused projection API or a partial early-paging
+step. `historyPageSize` cannot bound pre-materialization I/O without the consumer
+projection, and the writer-lease path's post-acquisition read remains
+authoritative.
 
 After selective restore:
 
