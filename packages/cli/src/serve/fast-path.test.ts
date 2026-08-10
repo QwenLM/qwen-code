@@ -691,6 +691,7 @@ describe('serve fast path argument parsing', () => {
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
+      ['local-control', ['--local-control']],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
@@ -703,6 +704,7 @@ describe('serve fast path argument parsing', () => {
       ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
       ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
       ['initialize-timeout-ms', ['--initialize-timeout-ms', '30000']],
+      ['session-restore-timeout-ms', ['--session-restore-timeout-ms', '60000']],
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
       [
@@ -734,6 +736,7 @@ describe('serve fast path argument parsing', () => {
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
       'help',
+      'local-control',
       'version',
     ]);
 
