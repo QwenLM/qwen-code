@@ -19,6 +19,24 @@ const skillPath = resolve(
   'SKILL.md',
 );
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+// Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
+// (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
+// container entry and then sat silent for the whole absolute budget,
+// burning 2 hours per round for zero work. Legitimate runs are never that
+// quiet: the longest silence the fleet tolerates elsewhere is the review
+// pipeline's 10-minute stream-idle window for thinking phases on ~1M-token
+// contexts, so twice that is the default. Distinct from QWEN_TIMEOUT_MS so
+// the failure comment says which limit fired; a leg whose absolute budget is
+// shorter than this window (the review workflow's 18-minute repair pass)
+// always reaches the absolute timer first.
+const parsedIdleTimeoutMs = Number(process.env.QWEN_IDLE_TIMEOUT_MS);
+// Reject negative/0/NaN: Number('-1') is truthy, so a bare `|| default`
+// guard would arm a sub-second window and kill every agent at the first
+// idle tick.
+const QWEN_IDLE_TIMEOUT_MS =
+  Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
+    ? parsedIdleTimeoutMs
+    : 20 * 60 * 1000;
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -176,8 +194,17 @@ function runQwen(options, prompt) {
   let loopDetected = false;
   let settled = false;
   let timedOut = false;
+  let idleTimedOut = false;
+  let lastOutputAt = Date.now();
+  // The sandbox launcher prints the container name before the container
+  // starts (packages/cli/src/utils/sandbox.ts), so the FIRST match is this
+  // run's own container — the kill-path reap below relies on that ownership.
+  let sandboxName = '';
+  let lineCarry = '';
   let timer;
   let killTimer;
+  let idleTimer;
+  let sandboxRemoval = null;
 
   return new Promise((resolve) => {
     const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
@@ -190,15 +217,18 @@ function runQwen(options, prompt) {
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
+      clearInterval(idleTimer);
       const apiErrorInfo = recoverableApiError(outputTail);
       const payload = {
         ...result,
         timedOut,
+        idleTimedOut,
         loopDetected: loopDetected || isLoopGuardOutput(outputTail),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
         apiErrorKind: apiErrorInfo.kind,
+        sandboxRemoval,
       };
       if (log.destroyed) {
         resolve(payload);
@@ -208,7 +238,24 @@ function runQwen(options, prompt) {
     };
 
     const record = (chunk, stream) => {
+      lastOutputAt = Date.now();
       const text = chunk.toString('utf8');
+      if (!sandboxName) {
+        lineCarry += text;
+        const lastNewline = lineCarry.lastIndexOf('\n');
+        if (lastNewline === -1) {
+          lineCarry = lineCarry.slice(-256);
+        } else {
+          const complete = lineCarry.slice(0, lastNewline + 1);
+          lineCarry = lineCarry.slice(lastNewline + 1).slice(-256);
+          const name = complete.match(
+            /^ContainerName(?: \(regular\))?: (\S+)$/m,
+          )?.[1];
+          if (name && /^qwen-code-[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+            sandboxName = name;
+          }
+        }
+      }
       outputTail = (outputTail + text).slice(-20_000);
       if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
       log.write(chunk);
@@ -222,13 +269,66 @@ function runQwen(options, prompt) {
       finish({ error: null, status, signal }),
     );
 
-    timer = setTimeout(() => {
-      timedOut = true;
+    // Killing the host-side docker client leaves the sandbox container
+    // RUNNING on this persistent runner, and the startup reaper may not
+    // touch running containers (one can belong to a concurrent job on
+    // another registration of the same host). Remove it HERE, where
+    // ownership is unambiguous: the name was captured from this run's own
+    // launcher line. Best-effort — a daemon blip must not mask the kill.
+    const escalateKill = () => {
       killQwen(child, 'SIGTERM');
       killTimer = setTimeout(() => {
         if (!settled) killQwen(child, 'SIGKILL');
       }, 10_000);
+      if (sandboxName) {
+        // Async, not spawnSync: a synchronous removal blocks the event loop
+        // for up to the spawn timeout, holding up the SIGKILL backstop
+        // queued above and the child's close/finish/log-flush — in exactly
+        // the wedged-daemon scenario this kill path exists for. The main
+        // flow awaits sandboxRemoval, so the leak warning and the kill-path
+        // reap stay deterministic without blocking the backstop.
+        const rm = spawn('docker', ['rm', '-f', '--', sandboxName], {
+          stdio: 'ignore',
+          timeout: 30_000,
+        });
+        sandboxRemoval = new Promise((resolveRemoval) => {
+          let warned = false;
+          const warnLeak = () => {
+            if (warned) return;
+            warned = true;
+            process.stderr.write(
+              `warning: leaked sandbox container ${sandboxName} could not be removed; it keeps running on this host\n`,
+            );
+          };
+          rm.on('error', warnLeak);
+          rm.on('close', (code) => {
+            if (code !== 0) warnLeak();
+            resolveRemoval();
+          });
+        });
+      }
+    };
+
+    timer = setTimeout(() => {
+      timedOut = true;
+      escalateKill();
     }, QWEN_TIMEOUT_MS);
+    // Poll rather than reset-a-timeout-per-chunk: chunks arrive far more
+    // often than the watchdog needs to look, and a busy stream would then
+    // spend its time re-arming timers. The tick shrinks with the window so
+    // tiny test values still fire promptly.
+    const idleTick = Math.max(
+      250,
+      Math.min(30_000, Math.floor(QWEN_IDLE_TIMEOUT_MS / 4)),
+    );
+    idleTimer = setInterval(() => {
+      if (settled || timedOut || idleTimedOut) return;
+      if (Date.now() - lastOutputAt >= QWEN_IDLE_TIMEOUT_MS) {
+        idleTimedOut = true;
+        timedOut = true;
+        escalateKill();
+      }
+    }, idleTick);
   });
 }
 
@@ -290,14 +390,20 @@ if (missingInputs.length > 0) {
 }
 
 const result = await runQwen(options, prompt);
+// Await the kill-path container removal (bounded by its own 30s spawn
+// timeout) so the leak warning and the removal itself settle before this
+// process exits and the next step inspects the host.
+if (result.sandboxRemoval) await result.sandboxRemoval;
 if (result.error || result.signal || result.status !== 0) {
   const detail = result.error
     ? result.error.message
-    : result.timedOut
-      ? `timeout (${QWEN_TIMEOUT_MS}ms)`
-      : result.signal
-        ? `signal ${result.signal}`
-        : `status ${String(result.status)}`;
+    : result.idleTimedOut
+      ? `idle-timeout (no output for ${QWEN_IDLE_TIMEOUT_MS}ms — the sandbox likely hung at startup)`
+      : result.timedOut
+        ? `timeout (${QWEN_TIMEOUT_MS}ms)`
+        : result.signal
+          ? `signal ${result.signal}`
+          : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
     if (result.loopDetected) {
       writeFailure(
