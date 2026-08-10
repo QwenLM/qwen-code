@@ -8,9 +8,9 @@ import ansiEscapes from 'ansi-escapes';
 
 const ESC = '\u001B[';
 export const ERASE_LINE = `${ESC}2K`;
-export const CURSOR_UP_ONE = `${ESC}1A`;
+const CURSOR_UP_ONE = `${ESC}1A`;
 const CURSOR_DOWN_ONE = `${ESC}1B`;
-export const CURSOR_LEFT = `${ESC}G`;
+const CURSOR_LEFT = `${ESC}G`;
 
 export function createEraseLinesPattern(flags?: string): RegExp {
   return new RegExp(
@@ -23,7 +23,7 @@ export function createEraseLinesPattern(flags?: string): RegExp {
 
 const MULTILINE_ERASE_LINES_PATTERN = createEraseLinesPattern('g');
 
-export function escapeRegExp(value: string): string {
+function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
