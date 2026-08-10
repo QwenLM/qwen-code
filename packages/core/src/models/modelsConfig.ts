@@ -14,6 +14,7 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getModelReasoningControls } from '../core/model-reasoning-controls.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -380,6 +381,7 @@ export class ModelsConfig {
     ) {
       this.strictModelProviderSelection = false;
       this.currentRegistryBaseUrl = undefined;
+      this.resetRegisteredModelReasoning(this._generationConfig.model);
       this._generationConfig.model = newModel;
       this.generationConfigSources['model'] = {
         kind: 'programmatic',
@@ -411,6 +413,7 @@ export class ModelsConfig {
     try {
       this.strictModelProviderSelection = false;
       this.currentRegistryBaseUrl = undefined;
+      this.resetRegisteredModelReasoning(this._generationConfig.model);
       this._generationConfig.model = newModel;
       this.generationConfigSources['model'] = {
         kind: 'programmatic',
@@ -449,6 +452,25 @@ export class ModelsConfig {
         detail: 'auto-detected from model',
       };
     }
+  }
+
+  private resetModelGenerationConfigFields(): void {
+    for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      delete (this._generationConfig as Record<string, unknown>)[field];
+      delete this.generationConfigSources[field];
+    }
+  }
+
+  private resetRegisteredModelReasoning(modelId: string | undefined): void {
+    if (
+      this.activeRuntimeModelSnapshotId ||
+      !modelId ||
+      !getModelReasoningControls(modelId)
+    ) {
+      return;
+    }
+    delete this._generationConfig.reasoning;
+    delete this.generationConfigSources['reasoning'];
   }
 
   private shouldUpdateModelDerivedDefault(
@@ -1337,10 +1359,7 @@ export class ModelsConfig {
       // generation field first so state the previous model left in the shared
       // rebuild source (e.g. a registered model's `reasoning: false`) cannot
       // leak into a snapshot that does not define the field.
-      for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
-        delete (this._generationConfig as Record<string, unknown>)[field];
-        delete this.generationConfigSources[field];
-      }
+      this.resetModelGenerationConfigFields();
 
       // Apply generation config
       if (runtimeModelSnapshot.generationConfig) {
@@ -1348,6 +1367,15 @@ export class ModelsConfig {
           this._generationConfig,
           runtimeModelSnapshot.generationConfig,
         );
+        for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+          if (
+            Object.hasOwn(runtimeModelSnapshot.generationConfig, field) &&
+            runtimeModelSnapshot.sources[field]
+          ) {
+            this.generationConfigSources[field] =
+              runtimeModelSnapshot.sources[field];
+          }
+        }
       }
 
       const requiresRefresh = isAuthTypeChange;

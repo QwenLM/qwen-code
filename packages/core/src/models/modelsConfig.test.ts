@@ -1511,6 +1511,49 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getGenerationConfig().model).toBe('custom-model');
   });
 
+  it('clears registered reasoning when switching to a raw model id', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'qwen3.8-max',
+        reasoning: { effort: 'xhigh' },
+      },
+      generationConfigSources: {
+        reasoning: { kind: 'modelProviders', detail: 'registered model' },
+      },
+    });
+
+    await modelsConfig.setModel('custom-model');
+
+    expect(modelsConfig.getGenerationConfig().reasoning).toBeUndefined();
+    expect(
+      modelsConfig.getGenerationConfigSources()['reasoning'],
+    ).toBeUndefined();
+  });
+
+  it('preserves global reasoning when switching between raw model ids', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'custom-model-a',
+        reasoning: { effort: 'high' },
+      },
+      generationConfigSources: {
+        reasoning: { kind: 'settings', detail: 'global preference' },
+      },
+    });
+
+    await modelsConfig.setModel('custom-model-b');
+
+    expect(modelsConfig.getGenerationConfig().reasoning).toEqual({
+      effort: 'high',
+    });
+    expect(modelsConfig.getGenerationConfigSources()['reasoning']).toEqual({
+      kind: 'settings',
+      detail: 'global preference',
+    });
+  });
+
   it('recomputes raw model modalities instead of carrying provider multimodal defaults', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
@@ -2134,6 +2177,57 @@ describe('ModelsConfig', () => {
       expect(gc.apiKey).toBe('sk-bare');
       expect(gc.baseUrl).toBe('https://bare.example/v1');
       expect(gc.reasoning).toBeUndefined();
+    });
+
+    it('restores generation config sources from a runtime snapshot', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'previous-model',
+          reasoning: { effort: 'low' },
+        },
+        generationConfigSources: {
+          reasoning: { kind: 'settings', detail: 'previous' },
+        },
+      });
+      modelsConfig['runtimeModelSnapshots'].set(
+        '$runtime|openai|runtime-model',
+        {
+          id: '$runtime|openai|runtime-model',
+          authType: AuthType.USE_OPENAI,
+          modelId: 'runtime-model',
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+          generationConfig: {
+            contextWindowSize: 777_777,
+            reasoning: { effort: 'medium' },
+          },
+          sources: {
+            contextWindowSize: { kind: 'settings', detail: 'runtime config' },
+            reasoning: { kind: 'cli', detail: '--reasoning-effort' },
+          },
+          createdAt: Date.now(),
+        },
+      );
+
+      await modelsConfig.switchToRuntimeModel('$runtime|openai|runtime-model');
+
+      expect(modelsConfig.getGenerationConfig().reasoning).toEqual({
+        effort: 'medium',
+      });
+      expect(modelsConfig.getGenerationConfigSources()['reasoning']).toEqual({
+        kind: 'cli',
+        detail: '--reasoning-effort',
+      });
+
+      await modelsConfig.setModel('custom-model');
+
+      expect(modelsConfig.getGenerationConfig().contextWindowSize).toBe(
+        777_777,
+      );
+      expect(
+        modelsConfig.getGenerationConfigSources()['contextWindowSize'],
+      ).toEqual({ kind: 'settings', detail: 'runtime config' });
     });
 
     it('should return runtime option first in getAllConfiguredModels', () => {

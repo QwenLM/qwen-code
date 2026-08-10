@@ -3048,6 +3048,28 @@ describe('Session', () => {
       );
     });
 
+    it('persists reasoning preferences to the scope owning model settings', async () => {
+      currentModel = 'qwen3.8-max';
+      (mockSettings as unknown as { isTrusted: boolean }).isTrusted = true;
+      mockSettings.workspace.settings = {
+        model: { reasoningPreferences: {} },
+      };
+
+      await session.setThinking('off');
+      await session.setEffort('medium');
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.reasoningPreferences',
+        expect.any(Object),
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningPreferences',
+        expect.any(Object),
+      );
+    });
+
     it('retains the live preset effort when turning thinking off', async () => {
       currentModel = 'qwen3.8-max';
       // Live effort comes from a provider preset (no stored preference) and
@@ -3121,6 +3143,34 @@ describe('Session', () => {
         'Effort controls are not available for qwen3.8-max',
       );
       expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
+    it('does not apply stored registry preferences to a runtime snapshot', () => {
+      currentModel = 'qwen3.8-max';
+      (
+        mockConfig as unknown as {
+          getActiveRuntimeModelSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).getActiveRuntimeModelSnapshot = vi
+        .fn()
+        .mockReturnValue({ id: 'snap', modelId: 'qwen3.8-max' });
+      const storedSettings = {
+        ...mockSettings,
+        merged: {
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' },
+            },
+          },
+        },
+      } as unknown as LoadedSettings;
+      vi.mocked(mockConfig.setThinkingEnabled).mockClear();
+      vi.mocked(mockConfig.setReasoningEffort).mockClear();
+
+      new Session('runtime-session', mockConfig, mockClient, storedSettings);
+
+      expect(mockConfig.setThinkingEnabled).not.toHaveBeenCalled();
+      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
     });
 
     it('accepts only the three stable effort tiers', async () => {

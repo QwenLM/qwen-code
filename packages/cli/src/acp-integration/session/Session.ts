@@ -279,7 +279,10 @@ import {
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -7286,7 +7289,9 @@ export class Session implements SessionContext {
         : {}),
     });
     this.config.setThinkingEnabled(value === 'on', resolved?.effort);
-    const scope = getPersistScopeForModelSelection(this.settings);
+    const scope =
+      getOwnKeyScope(this.settings, 'model') ??
+      getPersistScopeForModelSelection(this.settings);
     this.settings.setValue(
       scope,
       'model.reasoningPreferences',
@@ -7309,7 +7314,9 @@ export class Session implements SessionContext {
    */
   syncReasoningSettingsForCurrentModel(settingsOverride?: Settings): void {
     const model = this.config.getModel();
-    const registration = getModelReasoningControls(model);
+    const registration = this.config.getActiveRuntimeModelSnapshot?.()
+      ? undefined
+      : getModelReasoningControls(model);
     if (!registration) return;
     const rawPreference = getModelReasoningPreference(
       settingsOverride ?? this.settings.merged,
@@ -7363,7 +7370,9 @@ export class Session implements SessionContext {
     }
     const effort = value as (typeof registration.effort.supported)[number];
     this.config.setReasoningEffort(effort);
-    const scope = getPersistScopeForModelSelection(this.settings);
+    const scope =
+      getOwnKeyScope(this.settings, 'model') ??
+      getPersistScopeForModelSelection(this.settings);
     this.settings.setValue(
       scope,
       'model.reasoningPreferences',

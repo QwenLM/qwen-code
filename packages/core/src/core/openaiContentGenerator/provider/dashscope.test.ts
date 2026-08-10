@@ -650,6 +650,24 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         expect(result['enable_thinking']).toBeUndefined();
         expect(result['reasoning']).toBeUndefined();
       });
+
+      it('preserves an explicit none effort from runtime configuration', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model: 'qwen3.8-max',
+            reasoning: { effort: 'none' },
+          } as unknown as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          { ...baseRequest, model: 'qwen3.8-max' },
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe('none');
+      });
     });
 
     it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(

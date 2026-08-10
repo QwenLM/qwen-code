@@ -683,6 +683,30 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('ignores a config-option response after the active session changes', async () => {
+    const session = createMockSession('session-a');
+    const deferred = createDeferred<{ configOptions: unknown[] }>();
+    session.setConfigOption.mockReturnValueOnce(deferred.promise);
+    const { actions, getConnection, sessionRef } = createActionsHarness({
+      session,
+      connection: { status: 'connected', currentModel: 'model-b' },
+    });
+
+    const update = actions.setConfigOption('thinking', 'off');
+    sessionRef.current = createMockSession(
+      'session-b',
+    ) as unknown as DaemonSessionClient;
+    deferred.resolve({
+      configOptions: [{ id: 'thinking', currentValue: 'off' }],
+    });
+    await update;
+
+    expect(getConnection()).toEqual({
+      status: 'connected',
+      currentModel: 'model-b',
+    });
+  });
+
   it('clears the previous model reasoning state after a model switch', async () => {
     const session = createMockSession('session-a');
     session.setModel.mockResolvedValueOnce({ modelId: 'next-model' });
@@ -702,6 +726,28 @@ describe('createDaemonSessionActions', () => {
 
     expect(getConnection()).toMatchObject({ currentModel: 'next-model' });
     expect(getConnection().reasoning).toBeUndefined();
+  });
+
+  it('ignores a model response after the active session changes', async () => {
+    const session = createMockSession('session-a');
+    const deferred = createDeferred<{ modelId: string }>();
+    session.setModel.mockReturnValueOnce(deferred.promise);
+    const { actions, getConnection, sessionRef } = createActionsHarness({
+      session,
+      connection: { status: 'connected', currentModel: 'model-b' },
+    });
+
+    const update = actions.setModel('stale-model');
+    sessionRef.current = createMockSession(
+      'session-b',
+    ) as unknown as DaemonSessionClient;
+    deferred.resolve({ modelId: 'stale-model' });
+    await update;
+
+    expect(getConnection()).toEqual({
+      status: 'connected',
+      currentModel: 'model-b',
+    });
   });
 
   it('preserves target reasoning state received before the model response', async () => {

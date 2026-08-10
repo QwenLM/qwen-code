@@ -46,7 +46,9 @@ export const useEffortCommand = (
         }
         // Apply at runtime (next turn) and persist for future sessions; provider
         // adapters clamp the tier to what the active model supports.
-        const registration = getModelReasoningControls(config.getModel());
+        const registration = config.getActiveRuntimeModelSnapshot?.()
+          ? undefined
+          : getModelReasoningControls(config.getModel());
         const effectiveEffort = registration?.effort
           ? normalizeModelReasoningEffort(registration, effort)!
           : effort;

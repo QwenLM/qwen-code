@@ -4398,6 +4398,101 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('does not replay reasoning effort when auth refresh changes the model', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'xhigh' },
+        },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'unregistered-target',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      const setReasoningEffort = vi.spyOn(config, 'setReasoningEffort');
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('does not apply registered defaults to a same-id runtime snapshot', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.8-max',
+        generationConfig: {
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'runtime' },
+          apiKey: { kind: 'programmatic', detail: 'runtime' },
+          baseUrl: { kind: 'programmatic', detail: 'runtime' },
+        },
+      });
+      config.getModelsConfig().detectAndCaptureRuntimeModel();
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+          model: 'qwen3.8-max',
+          authType: AuthType.USE_OPENAI,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      expect(config.getActiveRuntimeModelSnapshot()).toBeDefined();
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+    });
+
+    it('treats a same-id runtime snapshot effort as a global preference', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.8-max',
+        generationConfig: {
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'runtime' },
+          apiKey: { kind: 'programmatic', detail: 'runtime' },
+          baseUrl: { kind: 'programmatic', detail: 'runtime' },
+        },
+      });
+      config.getModelsConfig().detectAndCaptureRuntimeModel();
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+          model: 'qwen3.8-max',
+          authType: AuthType.USE_OPENAI,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.USE_OPENAI);
+
+      config.setReasoningEffort('high');
+
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBe('high');
+    });
+
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
       // Regression for the model-switch path: switchModel() runs
       // applyResolvedModelDefaults() (which overwrites modelsConfig's

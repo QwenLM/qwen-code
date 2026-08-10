@@ -166,7 +166,15 @@ import {
 } from './json-rpc.js';
 
 function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  if (err instanceof Error) return err.message;
+  if (
+    err &&
+    typeof err === 'object' &&
+    typeof (err as { message?: unknown }).message === 'string'
+  ) {
+    return (err as { message: string }).message;
+  }
+  return String(err);
 }
 
 const SESSION_WRITER_RPC_ERRORS = {

@@ -142,6 +142,32 @@ describe('useEffortCommand', () => {
     expect(item.text).toContain('normalized from high');
   });
 
+  it('does not apply registry tiers to an active runtime snapshot', () => {
+    config = {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getActiveRuntimeModelSnapshot: vi
+        .fn()
+        .mockReturnValue({ id: '$runtime|openai|qwen3.8-max' }),
+      setReasoningEffort,
+      getReasoningEffort: vi.fn().mockReturnValue('high'),
+    } as unknown as Config;
+    const { result } = renderHook(() => useEffortCommand(settings, config));
+
+    act(() => result.current.handleEffortSelect('high'));
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'high',
+    );
+    expect(setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningPreferences',
+      expect.anything(),
+    );
+  });
+
   it('persists registered-model preferences to the scope owning the model key', () => {
     config = {
       getModel: vi.fn().mockReturnValue('qwen3.8-max'),

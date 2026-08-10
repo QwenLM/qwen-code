@@ -586,6 +586,9 @@ export function createDaemonSessionActions({
           session.setModel(modelId),
           'Set model timed out',
         );
+        if (sessionRef.current?.sessionId !== session.sessionId) {
+          return result;
+        }
         setConnection((current) => ({
           ...current,
           currentModel: modelId,
@@ -618,6 +621,9 @@ export function createDaemonSessionActions({
           session.setConfigOption(configId, value),
           'Update session option timed out',
         );
+        if (sessionRef.current?.sessionId !== session.sessionId) {
+          return;
+        }
         const reasoning = mapReasoningConfigOptions(result.configOptions);
         setConnection((current) => ({ ...current, reasoning }));
       } catch (error) {

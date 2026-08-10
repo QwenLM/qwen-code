@@ -115,6 +115,36 @@ describe('effortCommand', () => {
     expect((res as { content: string }).content).toContain('normalized');
   });
 
+  it('does not apply registry tiers to an active runtime snapshot', async () => {
+    const runtimeContext = createMockCommandContext({
+      services: {
+        config: {
+          getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+          getActiveRuntimeModelSnapshot: vi
+            .fn()
+            .mockReturnValue({ id: '$runtime|openai|qwen3.8-max' }),
+          getReasoningEffort,
+          setReasoningEffort,
+        } as unknown as Config,
+        settings: context.services.settings,
+      },
+    });
+
+    await effortCommand.action!(runtimeContext, 'high');
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'high',
+    );
+    expect(setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningPreferences',
+      expect.anything(),
+    );
+  });
+
   it('persists registered-model preferences to the scope owning the model key', async () => {
     // Workspace owns `model` (reasoningPreferences) but no `modelProviders`;
     // the modelProviders-ownership fallback would pick the user scope and the

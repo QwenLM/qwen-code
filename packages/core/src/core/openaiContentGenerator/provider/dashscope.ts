@@ -345,6 +345,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const rawWireModel = model ?? this.contentGeneratorConfig.model ?? '';
     const reasoningControls = getModelReasoningControls(rawWireModel);
     if (reasoningControls?.effort) {
+      if ((reasoning.effort as unknown) === 'none') {
+        return { reasoning_effort: 'none' };
+      }
       return {
         reasoning_effort: normalizeModelReasoningEffort(
           reasoningControls,

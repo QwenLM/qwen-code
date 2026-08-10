@@ -3670,6 +3670,10 @@ export class Config {
     // (`reasoning === false`) carries no effort to capture, so preserve it
     // separately below only when the refresh keeps the same model.
     const modelId = this.modelsConfig.getModel();
+    const priorModelHasReasoningControls = Boolean(
+      !this.modelsConfig.getActiveRuntimeModelSnapshot() &&
+        getModelReasoningControls(modelId),
+    );
     const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
@@ -3705,7 +3709,11 @@ export class Config {
     this.publishModelEnv();
 
     // Re-apply the user's reasoning effort that the provider sync above wiped.
-    if (priorReasoningEffort) {
+    if (
+      priorReasoningEffort &&
+      (!priorModelHasReasoningControls ||
+        newContentGeneratorConfig.model === modelId)
+    ) {
       this.setReasoningEffort(priorReasoningEffort);
     }
     this.applyRegisteredModelReasoning({
@@ -4286,7 +4294,10 @@ export class Config {
   setReasoningEffort(effort: ReasoningEffort | undefined): void {
     if (effort) {
       this.reasoningEffortPreference = effort;
-      if (!getModelReasoningControls(this.contentGeneratorConfig.model)) {
+      if (
+        this.getActiveRuntimeModelSnapshot() ||
+        !getModelReasoningControls(this.contentGeneratorConfig.model)
+      ) {
         this.globalReasoningEffortPreference = effort;
       }
     }
@@ -4333,9 +4344,9 @@ export class Config {
   private applyRegisteredModelReasoning(options?: {
     priorThinkingDisabled?: boolean;
   }): void {
-    const reasoningControls = getModelReasoningControls(
-      this.contentGeneratorConfig.model,
-    );
+    const reasoningControls = this.getActiveRuntimeModelSnapshot()
+      ? undefined
+      : getModelReasoningControls(this.contentGeneratorConfig.model);
     if (!reasoningControls) {
       return;
     }

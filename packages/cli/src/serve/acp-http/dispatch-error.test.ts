@@ -45,6 +45,15 @@ describe('toRpcError', () => {
     });
   });
 
+  it('preserves the message on plain JSON-RPC error objects', () => {
+    expect(
+      toRpcError({ code: RPC.INVALID_PARAMS, message: 'semantic rejection' }),
+    ).toEqual({
+      code: RPC.INVALID_PARAMS,
+      message: 'semantic rejection',
+    });
+  });
+
   it('does not pass through non-JSON-RPC numeric codes', () => {
     const err = new Error('rate limited');
     (err as Error & { code?: number }).code = 429;
