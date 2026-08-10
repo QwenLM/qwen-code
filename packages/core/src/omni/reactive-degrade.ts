@@ -52,7 +52,7 @@ import {
 import { runFixedPolicies } from './policy/orchestrator.js';
 import type { NormalizedFixedPolicy } from './policy/types.js';
 import { formatDisclosureText } from './disclosure.js';
-import { isOmniDeliveryActive } from './index.js';
+import { isOmniDeliveryActive } from './delivery-gate.js';
 
 const debugLogger = createDebugLogger('omni:reactive-degrade');
 

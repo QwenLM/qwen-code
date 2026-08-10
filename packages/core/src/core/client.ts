@@ -66,6 +66,7 @@ import {
   getPlanModeSystemReminder,
   resolveInteractionMode,
 } from './prompts.js';
+import { buildOmniMediaGuidanceSection } from '../omni/media-guidance.js';
 import {
   CompressionStatus,
   GeminiEventType,
@@ -967,6 +968,11 @@ export class GeminiClient {
         );
     const stableLayers = {
       base,
+      // Progressive media understanding contract: WHY deliveries carry
+      // 【媒体降质】/【媒体省略】/【媒体转写】 markers and how to fetch
+      // fuller evidence. Stable — omni config/provider don't change
+      // in-session — so it belongs inside the cached static prefix.
+      mediaGuidance: buildOmniMediaGuidanceSection(this.config),
       contextFiles: this.config.getUserMemory(),
       appendPrompt: this.config.getAppendSystemPrompt(),
     };
