@@ -219,15 +219,25 @@ describe('isCommandAllowed', () => {
       expect(detectCommandSubstitution('echo "${b["x]y"]}"')).toBe(false);
       expect(detectCommandSubstitution('echo "${a["x]}"')).toBe(false);
       expect(detectCommandSubstitution("echo '${a[}]@P}'")).toBe(false);
+      // `!` indirection prefix — bash prompt-expands the indirectly
+      // referenced value (§R5-1).
+      expect(detectCommandSubstitution('echo "${!ref@P}"')).toBe(true);
+      // ANSI-C quoting ($'...') — an escaped quote inside does not end
+      // the quoting region (§R5-9).
+      expect(detectCommandSubstitution("echo $'x\\'y' \"${b@P}\"")).toBe(true);
+      // Quote-state desync inside inner-quoted ${...} — the scanner
+      // must not toggle word-level quote state from quotes inside an
+      // expansion (§R7-1).
+      expect(detectCommandSubstitution('echo "${a:-"\'${b@P}\'"}"')).toBe(true);
     });
 
     it('does not overflow on adversarially nested expansions', () => {
       // Deep nesting is capped and fails closed instead of throwing.
-      const deep = `echo "${'${a['.repeat(200)}${'}]'.repeat(200)}@\\
+      const deep = `echo "${'${a['.repeat(20000)}${'}]'.repeat(20000)}@\\
 P}"`;
       expect(() => detectCommandSubstitution(deep)).not.toThrow();
       expect(detectCommandSubstitution(deep)).toBe(true);
-      const deepWithoutAtP = `"${'${a['.repeat(200)}0${'}]'.repeat(200)}"`;
+      const deepWithoutAtP = `"${'${a['.repeat(20000)}0${'}]'.repeat(20000)}"`;
       expect(() => detectCommandSubstitution(deepWithoutAtP)).not.toThrow();
       expect(detectCommandSubstitution(deepWithoutAtP)).toBe(false);
     });
@@ -347,6 +357,14 @@ P}"`;
 
         const result = await isCommandAllowed(cmd, config);
         expect(result.allowed).toBe(true);
+      });
+
+      it('should detect ${parameter@P} split by continuation in an unquoted heredoc body (§R2-1)', async () => {
+        const cmd = ['cat <<EOF', '${va\\', 'lue@P}', 'EOF'].join('\n');
+
+        const result = await isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
       });
     });
 
@@ -1381,6 +1399,14 @@ describe('checkArgumentSafety', () => {
     it('should accept arguments with spaces (quoted)', async () => {
       const result = checkArgumentSafety('hello world');
       expect(result.isSafe).toBe(true);
+    });
+
+    it('should detect ${parameter@P} prompt expansion (§R7-3)', async () => {
+      const result = checkArgumentSafety('${foo@P}');
+      expect(result.isSafe).toBe(false);
+      expect(result.dangerousPatterns).toContain(
+        '${parameter@P} prompt expansion',
+      );
     });
   });
 

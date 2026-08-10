@@ -145,10 +145,10 @@ commands without backgrounding instead.
   instructions.
 - **Permissions:** `monitor` has its own permission boundary and permission
   rules, such as `Monitor(git status)`. Read-only commands are automatically
-  allowed; commands that modify state require user approval; commands containing
-  command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
-  `${parameter@P}`) always require user approval, and the confirmation dialog
-  shows a warning flagging the substitution. The `tools.core` and
+  allowed; commands that modify state require user approval; commands for which the
+  classifier detects command substitution (`$(...)`, backticks, `<(...)`,
+  `>(...)`, or `${parameter@P}`) require user approval, and the confirmation
+  dialog shows a warning flagging the substitution. The `tools.core` and
   `tools.exclude` settings for `run_shell_command` do not apply to `monitor`.
 - **Workspace restriction:** The optional `directory` must be an absolute path
   that resolves inside a registered workspace directory and outside the

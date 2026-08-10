@@ -1710,6 +1710,8 @@ export function detectCommandSubstitution(command: string): boolean {
         i++;
         skipLineContinuations();
       } while (/^[0-9]/.test(text[i] ?? ''));
+    } else if (first === '!') {
+      return text.slice(i).replace(/\\\n/g, '').includes('@P}');
     } else if ('-?@$*'.includes(first)) {
       i++;
       skipLineContinuations();
@@ -1949,11 +1951,81 @@ export function detectCommandSubstitution(command: string): boolean {
         }
 
         if (!heredoc.isQuotedDelimiter) {
-          if (pendingDollarLineContinuation && effectiveLine.startsWith('(')) {
+          // Join continuation lines (bash strips \<newline> in unquoted
+          // heredoc bodies before parsing, so a substitution split across
+          // continuation lines is rejoined and executed).
+          let logicalLine = effectiveLine;
+          let joinedI = lineEnd + newlineLength;
+
+          let isContinuation = rawLine.endsWith('\\') && newlineLength > 0;
+          if (isContinuation) {
+            let trailingBS = 0;
+            for (
+              let j = rawLine.length - 1;
+              j >= 0 && rawLine[j] === '\\';
+              j--
+            ) {
+              trailingBS++;
+            }
+            isContinuation = trailingBS % 2 === 1;
+          }
+
+          while (isContinuation && joinedI < command.length) {
+            let peekEnd = joinedI;
+            while (
+              peekEnd < command.length &&
+              command[peekEnd] !== '\n' &&
+              command[peekEnd] !== '\r'
+            ) {
+              peekEnd++;
+            }
+            const nextRaw = command.slice(joinedI, peekEnd);
+            const nextEffective = heredoc.stripLeadingTabs
+              ? nextRaw.replace(/^\t+/, '')
+              : nextRaw;
+
+            if (nextEffective === heredoc.delimiter) break;
+
+            // Strip the continuation backslash before joining.
+            logicalLine = logicalLine.slice(0, -1) + nextEffective;
+
+            let nlLen = 0;
+            if (
+              peekEnd < command.length &&
+              command[peekEnd] === '\r' &&
+              command[peekEnd + 1] === '\n'
+            ) {
+              nlLen = 2;
+            } else if (
+              peekEnd < command.length &&
+              (command[peekEnd] === '\n' || command[peekEnd] === '\r')
+            ) {
+              nlLen = 1;
+            }
+            joinedI = peekEnd + nlLen;
+
+            isContinuation = nextRaw.endsWith('\\') && nlLen > 0;
+            if (isContinuation) {
+              let trailingBS = 0;
+              for (
+                let j = nextRaw.length - 1;
+                j >= 0 && nextRaw[j] === '\\';
+                j--
+              ) {
+                trailingBS++;
+              }
+              isContinuation = trailingBS % 2 === 1;
+            }
+          }
+
+          // Skip the joined lines in the outer loop.
+          i = joinedI;
+
+          if (pendingDollarLineContinuation && logicalLine.startsWith('(')) {
             return { nextIndex: i, hasSubstitution: true };
           }
 
-          if (lineHasCommandSubstitution(effectiveLine)) {
+          if (lineHasCommandSubstitution(logicalLine)) {
             return { nextIndex: i, hasSubstitution: true };
           }
 
@@ -1975,10 +2047,13 @@ export function detectCommandSubstitution(command: string): boolean {
             const isEscapedDollar = backslashCount % 2 === 1;
             pendingDollarLineContinuation = !isEscapedDollar;
           }
+        } else {
+          // Advance to the next line (or end).  When the heredoc is
+          // unquoted the continuation-joining block above already
+          // advanced past the joined lines.
+          i = lineEnd + newlineLength;
         }
 
-        // Advance to the next line (or end).
-        i = lineEnd + newlineLength;
         if (newlineLength === 0) {
           break;
         }
@@ -1991,6 +2066,8 @@ export function detectCommandSubstitution(command: string): boolean {
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
   let inBackticks = false;
+  let inAnsiCQuote = false;
+  let expansionBraceDepth = 0;
   let inComment = false;
   const pendingHeredocs: PendingHeredoc[] = [];
   let i = 0;
@@ -2061,10 +2138,33 @@ export function detectCommandSubstitution(command: string): boolean {
       continue;
     }
 
+    // ANSI-C quoting ($'...'): backslash escapes the next character,
+    // including the closing quote.
+    if (inAnsiCQuote && char === '\\') {
+      i += 2;
+      continue;
+    }
+
     // Handle quote state changes
-    if (char === "'" && !inDoubleQuotes && !inBackticks) {
-      inSingleQuotes = !inSingleQuotes;
-    } else if (char === '"' && !inSingleQuotes && !inBackticks) {
+    if (
+      char === "'" &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      expansionBraceDepth === 0
+    ) {
+      if (inSingleQuotes) {
+        inSingleQuotes = false;
+        inAnsiCQuote = false;
+      } else {
+        inSingleQuotes = true;
+        inAnsiCQuote = i > 0 && command[i - 1] === '$';
+      }
+    } else if (
+      char === '"' &&
+      !inSingleQuotes &&
+      !inBackticks &&
+      expansionBraceDepth === 0
+    ) {
       inDoubleQuotes = !inDoubleQuotes;
     } else if (char === '`' && !inSingleQuotes) {
       // Backticks work outside single quotes (including in double quotes)
@@ -2085,6 +2185,16 @@ export function detectCommandSubstitution(command: string): boolean {
         i = parsed.nextIndex;
         continue;
       }
+    }
+
+    // Track ${...} expansion brace depth so inner quotes inside
+    // expansions (e.g. "${a:-\"${b@P}\"}") do not toggle the scanner's
+    // word-level quote state.
+    if (char === '$' && nextChar === '{') {
+      expansionBraceDepth++;
+    }
+    if (char === '}' && expansionBraceDepth > 0) {
+      expansionBraceDepth--;
     }
 
     // Check for command substitution patterns that would be executed.
@@ -2589,6 +2699,8 @@ export function checkArgumentSafety(args: string): {
     dangerousPatterns.push('backtick command substitution');
   if (args.includes('<(')) dangerousPatterns.push('<() process substitution');
   if (args.includes('>(')) dangerousPatterns.push('>() process substitution');
+  if (/\$\{[^}]*@[PQE]}/.test(args))
+    dangerousPatterns.push('${parameter@P} prompt expansion');
 
   // Command separators (outside of quotes)
   if (args.includes(';')) dangerousPatterns.push('; command separator');
