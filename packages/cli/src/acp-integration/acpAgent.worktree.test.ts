@@ -443,6 +443,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,
+        worktreeCwd: null as string | null,
       };
       lastSessionMock = mock;
       return mock as unknown as InstanceType<typeof Session>;
@@ -557,6 +558,67 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     expect((lastSessionMock as Record<string, unknown>)?.['worktreeCwd']).toBe(
       worktreePath,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('MUST-1/R2-17: resume restores worktreeCwd from restored sidecar session', async () => {
+    const worktreePath = '/repo/.qwen/worktrees/my-feature';
+    mockRestoreWorktreeContext.mockResolvedValueOnce({
+      contextMessage: null,
+      session: {
+        slug: 'my-feature',
+        worktreePath,
+        worktreeBranch: 'worktree-my-feature',
+        originalCwd: '/repo',
+        originalBranch: 'main',
+        originalHeadCommit: 'abc1234',
+      },
+    });
+
+    const innerConfig = makeInnerConfig();
+    (innerConfig as Record<string, unknown>)['setActiveWorktree'] = vi.fn();
+
+    const { agent, agentPromise } = await bootAgentWithLoadSession(innerConfig);
+
+    await agent.loadSession({
+      sessionId: SESSION_ID,
+      cwd: '/fake/project',
+      mcpServers: [],
+    });
+
+    expect(mockRestoreWorktreeContext).toHaveBeenCalledWith(SIDECAR_PATH);
+    expect((lastSessionMock as Record<string, unknown>)?.['worktreeCwd']).toBe(
+      worktreePath,
+    );
+    expect(
+      (innerConfig as Record<string, unknown>)['setActiveWorktree'],
+    ).toHaveBeenCalledWith(worktreePath);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('MUST-1/R2-17: resume without worktree sidecar leaves state untouched', async () => {
+    // mockRestoreWorktreeContext defaults to { contextMessage: null, session: null }
+    const innerConfig = makeInnerConfig();
+    (innerConfig as Record<string, unknown>)['setActiveWorktree'] = vi.fn();
+
+    const { agent, agentPromise } = await bootAgentWithLoadSession(innerConfig);
+
+    await agent.loadSession({
+      sessionId: SESSION_ID,
+      cwd: '/fake/project',
+      mcpServers: [],
+    });
+
+    expect((lastSessionMock as Record<string, unknown>)?.['worktreeCwd']).toBe(
+      null,
+    );
+    expect(
+      (innerConfig as Record<string, unknown>)['setActiveWorktree'],
+    ).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

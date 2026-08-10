@@ -5263,6 +5263,10 @@ class QwenAgent implements Agent {
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
+      if (restored.session?.worktreePath) {
+        session.worktreeCwd = restored.session.worktreePath;
+        config.setActiveWorktree?.(restored.session.worktreePath);
+      }
     } catch (error) {
       debugLogger.warn(`ACP worktree restore failed: ${error}`);
     }
