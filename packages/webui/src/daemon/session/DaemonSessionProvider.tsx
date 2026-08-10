@@ -474,7 +474,7 @@ const TERMINAL_SESSION_HTTP_STATUSES = new Set([
 ]);
 
 interface HeartbeatFailureState {
-  sessionId?: string;
+  session?: DaemonSessionClient;
   consecutiveFailures: number;
   lastHttpError?: { status: number; message: string };
 }
@@ -608,9 +608,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     consecutiveFailures: 0,
   });
   const manualSessionClearRef = useRef(false);
-  const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
-    undefined,
-  );
+  const skipNextCleanupDetachSessionRef = useRef<
+    DaemonSessionClient | undefined
+  >(undefined);
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
@@ -717,7 +717,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreMode === 'load' &&
       restoreSessionId !== undefined &&
       restoreSessionId === sessionRef.current?.sessionId &&
-      restoreSessionId === skipNextCleanupDetachSessionIdRef.current;
+      sessionRef.current === skipNextCleanupDetachSessionRef.current;
+    let runnerSession = sessionRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
     // The live SSE loop dispatches transcript events through this batcher
@@ -736,9 +737,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // streaming stays at ~one dispatch per network chunk.
     let pendingTranscriptEvents: DaemonUiEvent[] = [];
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
-    const runTranscriptFlush = () => {
+    const runTranscriptFlush = (force = false) => {
       transcriptFlushTimer = undefined;
       if (pendingTranscriptEvents.length === 0) return;
+      if (
+        !force &&
+        runnerSession !== undefined &&
+        sessionRef.current !== runnerSession
+      ) {
+        pendingTranscriptEvents = [];
+        return;
+      }
       const batch = pendingTranscriptEvents;
       pendingTranscriptEvents = [];
       // Swallow a reducer throw (log it) so it cannot escape as an uncaught
@@ -770,7 +779,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // buffered content stays correctly ordered ahead of it.
     const flushTranscriptSync = () => {
       cancelTranscriptFlush();
-      runTranscriptFlush();
+      runTranscriptFlush(true);
     };
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
@@ -1198,11 +1207,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   new DOMException('Session load cancelled', 'AbortError'),
                 );
               }
-              if (
-                skipNextCleanupDetachSessionIdRef.current ===
-                nextSession.sessionId
-              ) {
-                skipNextCleanupDetachSessionIdRef.current = undefined;
+              if (skipNextCleanupDetachSessionRef.current === previousSession) {
+                skipNextCleanupDetachSessionRef.current = undefined;
               }
               loadingRequestedSession = false;
               if (previousSession?.sessionId === nextSession.sessionId) {
@@ -1255,10 +1261,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   );
                 }
                 if (
-                  skipNextCleanupDetachSessionIdRef.current ===
-                  nextSession.sessionId
+                  skipNextCleanupDetachSessionRef.current === previousSession
                 ) {
-                  skipNextCleanupDetachSessionIdRef.current = undefined;
+                  skipNextCleanupDetachSessionRef.current = undefined;
                 }
                 if (previousSession?.sessionId === nextSession.sessionId) {
                   session = previousSession;
@@ -1327,6 +1332,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
 
           const activeSession = session;
+          runnerSession = activeSession;
           // Prompt activity is session state returned by /load. Surface it
           // immediately so a refreshed page shows the running state without
           // waiting for auxiliary data such as providers, commands, or context.
@@ -1722,11 +1728,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (pendingLoadToResolve.timeout !== undefined) {
               clearTimeout(pendingLoadToResolve.timeout);
             }
-            if (
-              skipNextCleanupDetachSessionIdRef.current ===
-              activeSession.sessionId
-            ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
+            if (skipNextCleanupDetachSessionRef.current === activeSession) {
+              skipNextCleanupDetachSessionRef.current = undefined;
             }
             pendingLoadToResolve.resolve();
           }
@@ -1756,6 +1759,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : activeSession.context(),
               gitPromise,
             ]);
+          if (
+            disposed ||
+            abort.signal.aborted ||
+            sessionRef.current !== activeSession
+          ) {
+            return;
+          }
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -1808,7 +1818,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             getCurrentMode(context) ?? providerModelStatus.currentMode;
 
           setConnection((current) => {
-            if (current.sessionId !== activeSession.sessionId) return current;
+            if (
+              sessionRef.current !== activeSession ||
+              current.sessionId !== activeSession.sessionId
+            ) {
+              return current;
+            }
             return {
               ...current,
               status: 'connected',
@@ -1944,7 +1959,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             maxQueued,
             ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
-            if (sessionRef.current?.sessionId !== activeSession.sessionId) {
+            if (sessionRef.current !== activeSession) {
               break;
             }
             if (!sawEvent) {
@@ -1973,9 +1988,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+                if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
                 publishPendingPromptEvent(event);
+                if (sessionRef.current !== activeSession) break;
                 if (event.type === 'pending_prompt_started') {
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   setPromptStatus('waiting');
@@ -2249,6 +2266,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 break;
               }
             } catch (error) {
+              if (sessionRef.current !== activeSession) break;
               const message =
                 error instanceof Error ? error.message : String(error);
               addNotice({
@@ -2265,6 +2283,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error,
               );
             }
+          }
+          if (
+            sessionRef.current !== activeSession &&
+            !resyncRequested &&
+            !userDeletedSession
+          ) {
+            clearPendingTranscriptEvents();
+            clearEventStream();
+            return;
           }
           // The stream ended or broke: apply any buffered transcript events now
           // so post-loop handling (and consumers reading the snapshot) see a
@@ -2311,7 +2338,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
-            if (sessionRef.current?.sessionId === activeSession.sessionId) {
+            if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
               if (!hasSessionActivePrompt()) {
                 // A transport close is only a safe "done" signal for passive
@@ -2340,6 +2367,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         } catch (error) {
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
+          if (session && sessionRef.current !== session) {
+            clearPendingTranscriptEvents();
+            return;
+          }
           if (restartRequested && !disposed && !abort.signal.aborted) {
             flushTranscriptSync();
             nextSseConnectReason = 'prompt_restart';
@@ -2381,10 +2412,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               pendingLoad.sessionId === reconnectSessionId)
           ) {
             if (
-              skipNextCleanupDetachSessionIdRef.current ===
+              skipNextCleanupDetachSessionRef.current?.sessionId ===
               pendingLoad.sessionId
             ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
+              skipNextCleanupDetachSessionRef.current = undefined;
             }
             pendingSessionLoadRef.current = undefined;
             if (pendingLoad.timeout !== undefined) {
@@ -2529,26 +2560,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
     void run();
     return () => {
-      const session = sessionRef.current;
+      const session = runnerSession;
       disposed = true;
       abort.abort();
-      // Apply buffered transcript events before tearing down (do NOT drop them).
-      // The SSE client advances lastSeenEventId as each event is *yielded* —
-      // before our batched dispatch runs — so dropping here would make a
-      // same-session incremental resume (the keepSessionForNextEffect path)
-      // skip them permanently. Flushing is free and safe: the store notifies
-      // via queueMicrotask, so there is no synchronous setState; on unmount it
-      // is an orphaned dispatch and on a session switch the next run resets the
-      // store anyway.
-      flushTranscriptSync();
-      hasCurrentSessionActivePromptRef.current = () => false;
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const ownsCurrentSession =
+        session !== undefined && sessionRef.current === session;
+      const ownsEmptyState =
+        session === undefined && sessionRef.current === undefined;
       const keepSessionForNextEffect =
-        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
+        ownsCurrentSession &&
+        session === skipNextCleanupDetachSessionRef.current;
       const isUnmounting = !mountedRef.current;
+      if (ownsCurrentSession || ownsEmptyState) {
+        // A same-attachment effect restart must flush events already yielded by
+        // the SSE client, because its resume cursor has advanced past them.
+        flushTranscriptSync();
+      } else {
+        // A replacement attachment owns the store now. Never let the old
+        // runner's pending macrotask append its buffered events to that owner.
+        clearPendingTranscriptEvents();
+      }
+      if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
+        hasCurrentSessionActivePromptRef.current = () => false;
+        setPromptStatus('idle');
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      }
       if (
         pendingSessionLoadRef.current &&
+        (ownsCurrentSession || ownsEmptyState) &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
         if (pendingSessionLoadRef.current.timeout !== undefined) {
@@ -2559,7 +2598,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if ((!keepSessionForNextEffect || isUnmounting) && session?.clientId) {
+      if (
+        ownsCurrentSession &&
+        (!keepSessionForNextEffect || isUnmounting) &&
+        session.clientId
+      ) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -2569,7 +2612,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           console.warn('[DaemonSessionProvider] detach failed:', err),
         );
       }
-      if (!keepSessionForNextEffect || isUnmounting) {
+      if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
       }
     };
@@ -2607,21 +2650,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return undefined;
     }
-    if (heartbeatFailureStateRef.current.sessionId !== connection.sessionId) {
-      heartbeatFailureStateRef.current = {
-        sessionId: connection.sessionId,
-        consecutiveFailures: 0,
-      };
-    }
-    const heartbeatFailureState = heartbeatFailureStateRef.current;
     let disposed = false;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
+      if (heartbeatFailureStateRef.current.session !== session) {
+        heartbeatFailureStateRef.current = {
+          session,
+          consecutiveFailures: 0,
+        };
+      }
+      const heartbeatFailureState = heartbeatFailureStateRef.current;
       session
         .heartbeat()
         .then(() => {
-          if (disposed) return;
+          if (
+            disposed ||
+            sessionRef.current !== session ||
+            heartbeatFailureStateRef.current !== heartbeatFailureState
+          ) {
+            return;
+          }
           if (
             heartbeatFailureState.consecutiveFailures >=
             heartbeatFailureThreshold
@@ -2641,7 +2690,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           heartbeatFailureState.lastHttpError = undefined;
         })
         .catch((error: unknown) => {
-          if (disposed) return;
+          if (
+            disposed ||
+            sessionRef.current !== session ||
+            heartbeatFailureStateRef.current !== heartbeatFailureState
+          ) {
+            return;
+          }
           heartbeatFailureState.consecutiveFailures += 1;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
@@ -2690,7 +2745,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.delete(deadSessionId);
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
-            if (sessionRef.current?.sessionId === deadSessionId) {
+            if (sessionRef.current === session) {
               if (missingSession) {
                 manualSessionClearRef.current = true;
               }
@@ -2742,7 +2797,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         manualSessionClearRef,
-        skipNextCleanupDetachSessionIdRef,
+        skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),

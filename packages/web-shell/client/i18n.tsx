@@ -980,6 +980,12 @@ const EN: Messages = {
   'history.retry': 'Retry',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
+  'editor.imagesSkipped': (v) =>
+    `${v?.count ?? 0} unsupported image file(s) were skipped.`,
+  'editor.imagesReadFailed': (v) =>
+    `${v?.count ?? 0} image file(s) could not be read.`,
+  'editor.imagesTooLarge': (v) =>
+    `${v?.count ?? 0} image file(s) exceeded the attachment size limit.`,
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1351,6 +1357,18 @@ const EN: Messages = {
   'queue.editing': 'Editing...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
+  'queue.summaryEditDisabled':
+    'This restored queue summary cannot recover its original attachments.',
+  'queue.admissionUnknown':
+    'Delivery is uncertain. Check the session before trying again.',
+  'queue.mayCorrespond':
+    'The uncertain local copy and server queue entry may be the same prompt.',
+  'queue.restoreUnknown': 'Restore local copy',
+  'queue.discardUnknown': 'Discard local copy',
+  'queue.continueEditing': 'Continue editing',
+  'queue.continueEditingConfirm':
+    'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
+  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
@@ -3758,6 +3776,10 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的图片文件。`,
+  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个图片文件读取失败。`,
+  'editor.imagesTooLarge': (v) =>
+    `${v?.count ?? 0} 个图片文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -4112,6 +4134,16 @@ const ZH: Messages = {
   'queue.editing': '编辑中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
+  'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
+  'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
+  'queue.mayCorrespond':
+    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
+  'queue.restoreUnknown': '恢复本地副本',
+  'queue.discardUnknown': '丢弃本地副本',
+  'queue.continueEditing': '继续编辑',
+  'queue.continueEditingConfirm':
+    '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
+  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>

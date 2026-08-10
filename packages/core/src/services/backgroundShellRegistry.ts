@@ -24,7 +24,10 @@ import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
-import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+import {
+  isBidiControlChar,
+  stripDisplayControlChars,
+} from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
@@ -42,6 +45,9 @@ function stripOutputControlChars(text: string): string {
     }
     if (code < 0x20) continue;
     if (code >= 0x80 && code <= 0x9f) continue;
+    // Same bidi set as the shared display helper, in its own loop only
+    // because the tail must keep \n and \r, which that helper strips.
+    if (isBidiControlChar(code)) continue;
     out += text[i];
   }
   return out;

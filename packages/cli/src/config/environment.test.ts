@@ -17,6 +17,7 @@ import {
 } from './environment.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from './shared-env-keys.js';
 import type { Settings } from './settingsSchema.js';
+import { TrustLevel } from './trustedFolders.js';
 
 const TRACKED_ENV = [
   'CLOUD_SHELL',
@@ -50,6 +51,7 @@ const TRACKED_ENV = [
   'QWEN_HOME',
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
+  'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
@@ -217,6 +219,34 @@ describe('buildRuntimeEnvironment', () => {
       }),
     ]);
     expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBeUndefined();
+  });
+
+  it('does not load a distrusted parent .env for a trusted child workspace', () => {
+    const parent = makeWorkspace();
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    fs.writeFileSync(
+      path.join(parent, '.env'),
+      'QWEN_SERVER_TOKEN=from-distrusted-parent-env\n',
+    );
+    const trustedFoldersPath = path.join(parent, 'trustedFolders.json');
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({
+        [parent]: TrustLevel.DO_NOT_TRUST,
+        [child]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+
+    const snapshot = buildRuntimeEnvironment(
+      testSettings({ security: { folderTrust: { enabled: true } } }),
+      child,
+      {},
+    );
+
+    expect(snapshot.envFilePaths).not.toContain(path.join(parent, '.env'));
+    expect(snapshot.effectiveEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 });
 
