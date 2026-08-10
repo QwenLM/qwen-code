@@ -811,7 +811,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         | Awaited<ReturnType<DaemonClient['capabilities']>>
         | undefined;
       let reconnectSessionId = restoreSessionId;
-      let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
+      let shouldCreateFreshSession =
+        !manualSessionClearRef.current &&
+        !restoreSessionId &&
+        newSessionNonce > 0;
       let reconnectAttempt = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
