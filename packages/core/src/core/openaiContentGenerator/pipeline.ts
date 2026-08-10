@@ -963,6 +963,9 @@ export class ContentGenerationPipeline {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
+      ...(request.config?.responseMimeType === 'application/json'
+        ? { response_format: { type: 'json_object' } }
+        : {}),
     };
 
     if (isStreaming) {

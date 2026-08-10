@@ -68,7 +68,11 @@ describe('advisorCommand', () => {
   let mockContext: CommandContext;
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({}),
+    getGeminiClient: () => ({
+      getHistoryForForkWindow: () => [
+        { role: 'user', parts: [{ text: 'hello' }] },
+      ],
+    }),
     getModel: () => 'test-model',
     getSessionId: () => 'test-session-id',
     getApprovalMode: () => 'default',
@@ -327,12 +331,15 @@ describe('advisorCommand', () => {
       expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
     });
 
-    it('should error when conversation history is empty', async () => {
-      mockBuildBtwCacheSafeParams.mockReturnValue({
-        generationConfig: {},
-        history: [],
-        model: 'test-model',
-        version: 0,
+    it('should ignore startup-only history', async () => {
+      mockContext = createMockCommandContext({
+        services: {
+          config: createConfig({
+            getGeminiClient: () => ({
+              getHistoryForForkWindow: () => [],
+            }),
+          }),
+        },
       });
 
       await advisorCommand.action!(mockContext, '');

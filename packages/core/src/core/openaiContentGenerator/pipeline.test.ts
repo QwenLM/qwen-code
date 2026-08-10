@@ -4302,11 +4302,12 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should allow provider to enhance request', async () => {
+    it('should map JSON mode before provider enhancement', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { responseMimeType: 'application/json' },
       };
       const userPromptId = 'test-prompt-id';
       const mockMessages = [
@@ -4341,6 +4342,7 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           model: 'test-model',
           messages: mockMessages,
+          response_format: { type: 'json_object' },
         }),
         userPromptId,
       );
