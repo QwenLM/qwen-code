@@ -2209,24 +2209,27 @@ describe('coverage is recomputed, never accepted', () => {
   it('keeps long agent labels distinct when their first word matches', () => {
     transcript(
       'p1',
-      `Angle-A: packages/core/src/services/session-lifecycle-manager.ts\n${DIFF}`,
+      `Verify the daemon marker rename does not break macos-build behavior\n${DIFF}`,
     );
     transcript(
       'p2',
-      `Angle-A: packages/core/src/services/session-lifecycle-reaper.ts\n${DIFF}`,
+      `Verify the daemon marker rename does not break linux-build behavior\n${DIFF}`,
     );
     const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
 
-    expect(r.body).toContain('session-lifecycle-manag…');
-    expect(r.body).toContain('session-lifecycle-reape…');
+    expect(r.body).toContain('macos-build…');
+    expect(r.body).toContain('linux-build…');
   });
 
   it('renders prompt-derived labels as inert Markdown', () => {
-    transcript('p1', `Fix @owner from #123 in </details> handling\n${DIFF}`);
+    transcript(
+      'p1',
+      `Fix the "daemon marker" regression for @owner from #123\n${DIFF}`,
+    );
     const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
 
     expect(r.body).toContain(
-      'Not reviewed: `"Fix @owner from #123 in </details> handling"`',
+      'Not reviewed: `"Fix the \\"daemon marker\\" regression for @owner from #123"`',
     );
   });
 
@@ -4131,6 +4134,8 @@ describe('composeReview — the findings file tag check', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
     expect(r.body).toContain('findings file could not be read at compose time');
+    expect(r.body).toContain('Review incomplete — findings unavailable.');
+    expect(r.body).not.toContain('unverified findings disclosed');
     expect(r.remediation.join(' ')).toContain('findingsPath');
   });
 

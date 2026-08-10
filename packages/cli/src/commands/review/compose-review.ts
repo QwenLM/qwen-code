@@ -30,6 +30,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { compressSummary } from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
   ROUND_CAP_PHRASE,
@@ -1440,12 +1441,17 @@ function composeReviewBody(
                 en: 'Partially reviewed — gaps disclosed.',
                 zh: '仅完成部分审查，审查缺口已披露。',
               }
-            : findingsUnverifiedAtCompose
+            : findingsFileUnreadable
               ? {
-                  en: 'Review incomplete — unverified findings disclosed.',
-                  zh: '审查未完成——未验证的发现已披露。',
+                  en: 'Review incomplete — findings unavailable.',
+                  zh: '审查未完成——发现不可用。',
                 }
-              : { en: 'Reviewed.', zh: '已审查。' },
+              : findingsUnverifiedAtCompose
+                ? {
+                    en: 'Review incomplete — unverified findings disclosed.',
+                    zh: '审查未完成——未验证的发现已披露。',
+                  }
+                : { en: 'Reviewed.', zh: '已审查。' },
     );
   }
 
@@ -1526,7 +1532,9 @@ function composeReviewBody(
  * unquoted label: the dedup and certification checks key on it.
  */
 function publicAgentSubject(label: string): string | undefined {
-  return /^chunk \d+$/.test(label) ? undefined : mdField(`"${label}"`);
+  return /^chunk \d+$/.test(label)
+    ? undefined
+    : mdField(JSON.stringify(compressSummary(label)));
 }
 
 /**

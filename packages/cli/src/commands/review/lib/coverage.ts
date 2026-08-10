@@ -75,7 +75,6 @@ import { chunkIdsProblem } from './diff-plan.js';
 import { readBudgetStop } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
-import { compressSummary } from '../findings.js';
 
 export interface CoverageFromTranscripts {
   /** True only when every chunk was reviewed by an agent that could and did. */
@@ -360,7 +359,7 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
   const first = rec.launchPrompt.split('\n')[0]?.trim() ?? '';
-  if (first) return compressSummary(first);
+  if (first) return first.replace(/\s+/g, ' ');
   return rec.agentName || rec.agentId;
 }
 
