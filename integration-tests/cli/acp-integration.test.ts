@@ -779,9 +779,6 @@ function setupAcpTest(
         });
         expect(promptResult).toBeDefined();
       } catch (e) {
-        if (stderr.length) {
-          console.error('Agent stderr:', stderr.join(''));
-        }
         // Only timeouts are acceptable — LLM behavior is non-deterministic.
         // JSON-RPC errors indicate a real problem and must be surfaced.
         if (!(e instanceof Error) || !e.message.includes('timed out')) {
@@ -789,8 +786,20 @@ function setupAcpTest(
         }
       }
 
-      // Give time for all notifications to be processed
-      await delay(1000);
+      // Poll for mode_update notification after switch_mode, bounded at 5 s.
+      // A fixed delay races the slow-LLM path: switch_mode can arrive just
+      // after the timeout, and mode_update may land after the wait window.
+      for (let i = 0; i < 20; i++) {
+        await delay(250);
+        const hasSwitchMode = permissionRequests.some(
+          (req) => req.toolCall?.kind === 'switch_mode',
+        );
+        if (!hasSwitchMode) continue;
+        const hasModeUpdate = sessionUpdates.some(
+          (update) => update.update?.sessionUpdate === 'current_mode_update',
+        );
+        if (hasModeUpdate) break;
+      }
 
       // Verify: If exit_plan_mode was called, we should have received:
       // 1. A permission request with kind: "switch_mode"
