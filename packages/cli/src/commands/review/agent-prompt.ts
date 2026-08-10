@@ -49,6 +49,8 @@ import {
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
   stampRound,
+  verifyBudgetExhausted,
+  verifyBudgetMessage,
   writeBudgetStop,
 } from './lib/deadline.js';
 import {
@@ -2359,6 +2361,26 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     return;
   }
 
+  // The verify gate: the deterministic backstop that keeps the terminal
+  // round's verification from consuming the time compose-review and
+  // submission need. It fires only once the reverse-audit reserve has been
+  // spent down into the compose floor — a healthy run never reaches it,
+  // because the reverse-audit gate keeps the whole reserve (compose floor
+  // included) ahead of the last round. When it fires, no verify shard is
+  // built, the findings keep their `— [unverified]` tag, and the
+  // orchestrator composes on that (compose-review caps the verdict on the
+  // tag). Measured: PR #8687 stopped the audit correctly with ~110 minutes
+  // left, then spent all of it on a re-verification battery and was killed
+  // before compose ran — ~20 confirmed Critical bypasses never posted.
+  if (args.role === 'verify') {
+    const spent = verifyBudgetExhausted(process.env);
+    if (spent !== null) {
+      writeStderrLine(verifyBudgetMessage(spent));
+      process.exitCode = 4;
+      return;
+    }
+  }
+
   // The reverse-audit gate for a --chunk build, placed after the plan read
   // because its convergence half reads the plan's chunk list. A round
   // holding an admission stamp is being REPAIRED — a truncated delivery,
@@ -2503,9 +2525,11 @@ export const agentPromptCommand: CommandModule = {
   describe:
     "Build a review agent's launch prompt from the plan (the diff path, its line " +
     "ranges and the agent's own brief are welded in, not left to the caller to " +
-    'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
-    'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
-    'on stderr); 5 the reverse audit CONVERGED — every chunk holds two ' +
+    'remember). Exit codes: 0 built; 4 a build was refused — the review time ' +
+    'budget refused another reverse-audit round (BUDGET line on stderr), or ' +
+    'the compose floor refused a verifier so compose/submit still fit ' +
+    '(VERIFY BUDGET line) — both termination rules, not errors: stop and ' +
+    'compose, do not retry; 5 the reverse audit CONVERGED — every chunk holds two ' +
     'consecutive substantive dry audits and none is due a cold check, so stop ' +
     'the loop and proceed to Step 6 (also a termination rule, and a clean one: ' +
     'no disclosure is owed); anything else is a bad call or a broken plan.',
