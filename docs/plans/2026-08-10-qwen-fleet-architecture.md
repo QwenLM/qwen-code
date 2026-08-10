@@ -748,3 +748,313 @@ Escalate only if one of these turns out to change user-visible behavior or contr
   missing. Consider landing only the seven MVP ops rather than the full stack.
 - **Arena tmux split panes** — orthogonal. Stands alone as a fix to a documented-but-absent
   feature; becomes an `AgentSurface` in PR 3. Not a step toward this architecture.
+
+## 11. Execution, issues, and handoff
+
+This section is the contract between implementation agents. An agent should be able to start
+from its GitHub issue plus the previous stage's handoff, without any chat history.
+
+### 11.1 Issue structure
+
+**One umbrella, four implementation issues. Nothing finer.**
+
+| Issue                                                    | Role               | PR    | Depends on |
+| -------------------------------------------------------- | ------------------ | ----- | ---------- |
+| **#8718** (existing)                                     | Umbrella / roadmap | —     | —          |
+| `feat(core): fleet contracts and in-process semantics`   | Stage 1A           | PR 1A | —          |
+| `feat(cli): supervised teammate runtime (fleet MVP)`     | Stage 1B           | PR 1B | 1A         |
+| `feat(cli): fleet persistence, recovery, and hardening`  | Stage 2            | PR 2  | 1B         |
+| `feat(cli): teammate terminal attach and legacy cleanup` | Stage 3            | PR 3  | 2          |
+
+Rationale for this shape:
+
+- **#8718 is reused, not replaced.** It is already open, already carries `roadmap/multi-agent`,
+  and its title — "Native coordination for independent Qwen sessions" — still describes the work.
+  A second umbrella would fragment the roadmap.
+- **One issue per PR, 1:1.** An issue spanning two PRs cannot be cleanly closed, and an agent
+  picking up work needs exactly one place to read the goal and one place to leave the handoff.
+- **1A and 1B stay separate** even though together they are "the MVP". They will be picked up by
+  different agents, and each needs its own acceptance criteria and handoff.
+- **Stage 3 is created thin and labelled `status/blocked`.** Its real scope depends on what
+  Stage 2 leaves behind (whether hibernation is justified, what the recovery model settled on).
+  Writing detailed acceptance criteria now would be speculation. It exists so the dependency
+  graph is visible; it gets specified when Stage 2 lands.
+
+**Avoid duplicating specs.** The full stage specification lives in §11.3 of this document, which
+is in the repository the agent is already working in. Issue bodies carry only what is needed to
+_start_: objective, non-goals, prerequisites with a link to the prior handoff, acceptance
+checklist, and verification commands. This keeps one source of truth and prevents the issue body
+and the design doc from drifting apart.
+
+Labels: `roadmap/multi-agent`, `category/core` (1A) or `category/cli` (1B, 2, 3),
+`type/feature-request`, `priority/P2`. Add `status/in-progress` when an agent picks it up,
+`status/in-review` when its PR opens, `status/blocked` while prerequisites are unmet.
+
+### 11.2 Handoff protocol
+
+**Where it lives.** The handoff packet is posted as a **final comment on the implementation
+issue**, immediately before closing it. Not in the issue body — the body is the spec and must
+stay readable as the entry point. Not in the PR description — that is bot-gated against
+`.github/pull_request_template.md` and cannot absorb extra headings. The PR description instead
+links to the handoff comment.
+
+The next stage's issue links directly to the previous handoff comment URL under
+**Prerequisites**. That link is the only thing the next agent needs beyond its own issue.
+
+**Single source of truth.** Handoffs are not mirrored into the repository. If an implementation
+agent has no network access, paste the handoff into its task prompt rather than committing a
+copy — two locations drift.
+
+**When to close.** An issue closes when its PR **merges**, and only after the handoff comment is
+posted. Never close on PR open, and never on "code complete". If a stage lands only partially,
+do not close: post a partial handoff, keep `status/in-progress`, and state precisely what is
+missing.
+
+**The handoff packet template.** Every implementation agent must post this verbatim structure:
+
+```markdown
+## Handoff — Stage <1A|1B|2|3>
+
+**Base commit:** <sha> (`main` at branch point)
+**Final head commit:** <sha>
+**PR:** #<n> (merged <date>)
+
+### Scope actually implemented
+
+<what was built, in one paragraph, against the stage objective>
+
+### Files and interfaces changed
+
+| File | Change | Interface impact |
+| ---- | ------ | ---------------- |
+
+<one row per meaningful file; name every exported type added or changed>
+
+### Behaviour now guaranteed
+
+<numbered list of behaviours a later stage may rely on>
+
+### Tests run and results
+
+| Command | Result |
+| ------- | ------ |
+
+<exact commands, copy-pasteable, with pass/fail counts>
+
+### Architecture deviations
+
+<anything that differs from docs/plans/2026-08-10-qwen-fleet-architecture.md, and why.
+"None" is a valid answer and should be stated explicitly.>
+
+### Known limitations
+
+<behaviour that is incomplete or degraded, with the condition that triggers it>
+
+### Unresolved review comments
+
+<links, or "none">
+
+### Compatibility adapters still present
+
+<every temporary shim, where it lives, and what removes it>
+
+### Deferred work
+
+<what was consciously not done, and which stage owns it>
+
+### Security invariants upheld
+
+<which invariants from §11.3 this stage is responsible for, and how they are tested>
+
+### Prerequisites for the next stage
+
+<exact, checkable statements the next agent may rely on>
+
+### The next agent must NOT assume
+
+<explicit negative list>
+```
+
+### 11.3 Stage specifications
+
+Common to all stages — **invariants that may never be violated**:
+
+- `TeamManager` never imports from `packages/cli`, never sees a surface, a PTY, or a socket.
+- The nonce envelope and identity wrap in `flushNextMessage` stay leader-side, whatever the
+  transport.
+- No second task database, roster, or permission bus is introduced.
+- Approval closures never cross a process boundary; only `{callId, outcome}` does.
+- Existing in-process teams keep working unchanged at every stage.
+
+---
+
+#### Stage 1A — Fleet contracts and in-process semantics
+
+**Objective.** Establish the three contracts and prove them in-process, delivering correlated
+turns, call-ID approval routing, and runtime-enforced read-only teammates.
+
+**Scope.** `fleet/` contracts (`session.ts`, `runtime.ts`, `view.ts`, `approvals.ts`);
+serializable confirmation details for all six variants; `turnId` threading through
+`AgentInteractive`; `InProcessBackend` split into `InProcessRuntime` + `InProcessSession` with
+`createPerAgentConfig` (`InProcessBackend.ts:487`) extracted to a shared module; `TeamManager`
+retargeted across its 19 call sites; `AgentSessionView` extraction in the tab UI; #8804's
+`read_only` enforcement corrected to a four-tool inspection base.
+
+**Non-goals.** No subprocess. No socket. No supervisor. No `Backend` deletion. No Arena change.
+No new UI component.
+
+**Prerequisites.** None — starts from `main`.
+
+**Expected files.** New: `packages/core/src/agents/fleet/*`. Changed: `TeamManager.ts`,
+`InProcessBackend.ts`, `agent-interactive.ts`, `leaderPermissionBridge.ts`,
+`subagent-plan-tool-policy.ts`, `AgentViewContext.tsx`, `useTeamInProcess.ts`,
+`AgentChatView.tsx`, `fake-backend.ts`, `coordination-harness.ts`, `team-create.ts`.
+
+**Expected behaviour.** Teammates spawn through `AgentRuntime`; every turn carries a `turnId`
+that correlates its status transitions and final text; teammate approvals reach the leader
+carrying a real `callId` and cannot be answered twice; a `read_only` teammate has no shell, write,
+memory, schedule, or agent-spawn tool at either the declaration or execution layer.
+
+**Acceptance criteria.**
+
+1. `TeamManager` has zero references to `Backend` or `getAgent`.
+2. `coordination-harness.test.ts` passes with only mechanical edits to the fakes.
+3. A test proves a second `answer` for the same `callId` is a no-op.
+4. A test proves a `read_only` teammate's tool list excludes `run_shell_command`, `save_memory`
+   and `create_sub_session` at both layers.
+5. A test proves `turnId` on a status transition matches the `turnId` returned by `send()`.
+6. The six no-op display methods are deleted from the runtime, not ported.
+
+**Required tests.** Extend `coordination-harness.test.ts`; new `fleet/approvals.test.ts`,
+`fleet/serializable-confirmation.test.ts`; update `agent.test.ts` for `read_only`.
+
+**Security invariants.** Read-only enforcement holds at the execution layer even if the model is
+prompted otherwise. The four-tool base must not silently inherit the plan-mode pre-approval list.
+
+**Known risks.** `TeamManager` is touched in ~19 places; the regression net is the existing
+751-LOC harness. Medium review risk, low implementation risk.
+
+**Deferrable.** `TaskNotifier` seam, `identity.ts` env resolution, `send_message` mailbox route —
+all dormant until 1B, and may land in either stage.
+
+**Next agent may assume.** The three contracts exist and are stable; an `AgentRuntime`
+implementation is injectable via `Config`; approvals are serializable and one-shot.
+
+**Next agent must NOT assume.** Any subprocess exists; any socket op is implemented; the tab UI
+can render a non-in-process session end to end; `Backend` is gone.
+
+---
+
+#### Stage 1B — Supervised teammate runtime (the fleet MVP)
+
+**Objective.** Deliver the first genuinely useful fleet experience: real Qwen subprocess
+teammates coordinated by a leader.
+
+**Scope.** Six supervisor handler ops (`dispatch`, `send`, `answer`, `stop`, `list`, plus a
+`subscribe` broadcast) against the existing store; the supervisor process entrypoint for
+`--internal-agent-view-supervisor`; a teammate subprocess entrypoint reusing the extracted agent
+construction; the teammate sideband client; `SupervisedRuntime` + `RemoteSession`;
+`session-projection.ts`; the `experimental.fleet` gate; teammate status surfaced through the
+existing `AgentTabBar`.
+
+**Non-goals.** No PTY attach, resize, scrollback, or `peek`. No hibernation or respawn. No
+reattach. No single-leader lock. No socket fan-out — polling stays. No new roster component.
+
+**Prerequisites.** Stage 1A merged. Read its handoff.
+
+**Expected files.** New: `packages/cli/src/agent-view/SupervisedRuntime.ts`, `RemoteSession.ts`,
+`session-projection.ts`, `teammate-entry.ts`, sideband client; supervisor handler ops in
+`supervisor-process.ts`. Changed: `gemini.tsx` (two early dispatches), `identity.ts`,
+`send-message.ts`, `settingsSchema.ts`, `AgentTabBar.tsx`.
+
+**Expected behaviour — the acceptance demo.** One leader plus two or more real Qwen subprocess
+teammates; tasks assigned through the existing shared task list; messages delivered reliably in
+both directions; turns correlated; approvals explicit and routable; live status visible; each
+teammate's transcript inspectable in a tab. No PTY attach anywhere.
+
+**Acceptance criteria.**
+
+1. A recorded end-to-end run demonstrates the paragraph above with no manual intervention.
+2. Teammates are separate OS processes — verifiable by PID.
+3. Killing the leader cleanly stops every teammate.
+4. A teammate cannot create a team (`team_create` rejected under teammate identity).
+5. No `QWEN_AGENT_VIEW_*` credential is visible in a teammate's shell child.
+6. Disabling `experimental.fleet` restores exactly today's in-process behaviour.
+
+**Required tests.** Supervisor op tests in the style of `supervisor-server.test.ts`; a
+`RemoteSession` contract test asserting parity with `InProcessSession`; an end-to-end test
+spawning real subprocesses; env-sanitisation and nested-denial tests.
+
+**Security invariants — none of these may be deferred to Stage 2.**
+
+1. Supervisor-driven teammate shutdown on clean leader exit.
+2. Nested fan-out denial under teammate identity.
+3. Token sanitisation through `sanitize-child-env.ts` for every spawn.
+
+**Known risks.** Highest of the four stages. Two new process entrypoints, one inside the
+1,426-line `gemini.tsx` — dispatch as early as possible, keep logic in separate modules, target
+~20 added lines there. First cross-process semantic transport.
+
+**Deferrable.** Everything in the non-goals list, plus `kill`.
+
+**Next agent may assume.** Subprocess teammates run, are coordinated, and are inspectable; the
+supervisor persists session state files; the semantic transport is proven.
+
+**Next agent must NOT assume.** Any teammate survives a leader crash; any session can be
+reattached; worker generations rotate; the supervisor recovers its projection after restart;
+polling has been replaced.
+
+---
+
+#### Stage 2 — Persistence, recovery, and hardening
+
+**Objective.** Turn the working MVP into something robust enough for broader use.
+
+**Scope.** Leader crash → teammate survival; leader restart → `reattach`; worker generation and
+stale-event rejection; single-leader lock with stale reclaim (§0.1); subprocess crash handling;
+worktree ownership recovery; socket fan-out replacing polling; Windows lifecycle validation;
+resource cleanup; failure-mode tests.
+
+**Non-goals.** No PTY attach. No Arena migration. No `Backend` deletion.
+
+**Prerequisites.** Stage 1B merged. Read its handoff.
+
+**Acceptance criteria.**
+
+1. `SIGKILL` on the leader leaves teammates running; the next launch reattaches them.
+2. A late event from a superseded worker generation is rejected, not applied.
+3. A second leader in the same project sees the roster read-only.
+4. A supervisor restart rebuilds its projection; unconfirmable state becomes `failed` with a
+   reason and is **never** guessed as `completed`.
+5. Fault injection at each crash window either preserves or safely reclaims the worktree, and
+   never deletes a dirty one.
+
+**Security invariants.** Stale generation rejection; single-leader lock cannot be stolen inside
+its stale window; recovery never fabricates success.
+
+**Known risks.** Recovery correctness is the hard part. Windows is under-validated across the
+whole design.
+
+**Next agent must NOT assume.** Any terminal/PTY capability exists.
+
+---
+
+#### Stage 3 — Terminal attach and legacy cleanup
+
+**Objective.** Complete the herdr-like session experience and retire the legacy abstraction.
+
+**Scope (provisional — specify when Stage 2 lands).** Raw PTY attach via the existing
+`terminal-bridge.ts`; enter and detach a teammate session; resize and terminal lifecycle;
+hibernation and respawn _if Stage 2's evidence justifies them_; optional surface adapters
+including tmux; Arena migration to `AgentRuntime` + `AgentSurface`; deletion of `Backend` once
+every consumer has moved.
+
+**Non-goals.** Heterogeneous CLI hosting. Remote/SSH transport. Anything that would make this
+stage a dumping ground — overflow becomes independent follow-ups.
+
+**Prerequisites.** Stage 2 merged. **This stage is not ready for pickup until its scope is
+rewritten against Stage 2's handoff.**
+
+**Note on parallelism.** Arena migration plus `Backend` deletion depends only on Stage 1A, not on
+1B or 2. If wall-clock time matters more than a serial queue, it can be split into its own issue
+and run in parallel from 1A onward. Default is to keep it here.
