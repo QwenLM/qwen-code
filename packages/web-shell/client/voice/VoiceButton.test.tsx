@@ -136,12 +136,16 @@ const pointer = (
   type: 'pointerdown' | 'pointerup' | 'pointercancel',
   pointerId = 1,
   mouseButton = 0,
+  timeStamp?: number,
 ) => {
   const event = new MouseEvent(type, {
     bubbles: true,
     button: mouseButton,
   });
   Object.defineProperty(event, 'pointerId', { value: pointerId });
+  if (timeStamp !== undefined) {
+    Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+  }
   act(() => {
     button.dispatchEvent(event);
   });
@@ -637,7 +641,7 @@ describe('VoiceButton', () => {
     if (!button) throw new Error('VoiceButton did not render');
     const heldButton = button;
 
-    pointer(button, 'pointerdown');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
     expect(mocks.capture.start).toHaveBeenCalledOnce();
 
     mocks.capture.status = 'recording';
@@ -656,20 +660,34 @@ describe('VoiceButton', () => {
     // capture set on pointerdown survives the status change and the release
     // still lands on this element.
     expect(button).toBe(heldButton);
-    pointer(button, 'pointerup');
+    pointer(button, 'pointerup', 1, 0, 1_500);
     click(button);
 
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
-  it('stops a hold released before the connecting render commits', async () => {
-    const { container } = mount(false);
+  it('keeps a quick hold active as a tap', async () => {
+    const { root, container } = mount(false);
     await flush();
     const button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
     pointer(button, 'pointerdown');
     pointer(button, 'pointerup');
+    click(button);
 
+    expect(mocks.capture.stop).not.toHaveBeenCalled();
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    click(container.querySelector('button')!);
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
