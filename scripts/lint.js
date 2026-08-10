@@ -72,8 +72,6 @@ function getPlatformArch() {
   throw new Error(`Unsupported platform/architecture: ${platform}/${arch}`);
 }
 
-const platformArch = getPlatformArch();
-
 /**
  * @typedef {{
  *   check: string;
@@ -82,18 +80,23 @@ const platformArch = getPlatformArch();
  * }}
  */
 
-/**
- * @type {{[linterName: string]: Linter}}
- */
-const LINTERS = {
-  actionlint: {
-    check: 'command -v actionlint',
-    installer: `
+let lintersCache;
+
+// Built lazily: getPlatformArch() throws on platforms where the POSIX-only
+// linters cannot run (e.g. Windows test hosts importing getLinterTempDir).
+/** @returns {{[linterName: string]: Linter}} */
+function getLinters() {
+  if (!lintersCache) {
+    const platformArch = getPlatformArch();
+    lintersCache = {
+      actionlint: {
+        check: 'command -v actionlint',
+        installer: `
       mkdir -p "${TEMP_DIR}/actionlint"
       curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
       tar -xzf "${TEMP_DIR}/.actionlint.tgz" -C "${TEMP_DIR}/actionlint"
     `,
-    run: `
+        run: `
       actionlint \
         -color \
         -pyflakes= \
@@ -104,15 +107,15 @@ const LINTERS = {
         -ignore 'unexpected key "deployment" for "environment" section' \
         -ignore 'label ".+" is unknown'
     `,
-  },
-  shellcheck: {
-    check: 'command -v shellcheck',
-    installer: `
+      },
+      shellcheck: {
+        check: 'command -v shellcheck',
+        installer: `
       mkdir -p "${TEMP_DIR}/shellcheck"
       curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
       tar -xf "${TEMP_DIR}/.shellcheck.txz" -C "${TEMP_DIR}/shellcheck" --strip-components=1
     `,
-    run: `
+        run: `
       git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
         | grep "text/x-shellscript" | awk '{ print substr($1, 1, length($1)-1) }' \
         | xargs shellcheck \
@@ -123,13 +126,16 @@ const LINTERS = {
           --format=gcc \
           --color=never | sed -e 's/note:/warning:/g' -e 's/style:/warning:/g'
     `,
-  },
-  yamllint: {
-    check: 'command -v yamllint',
-    installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
-    run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
-  },
-};
+      },
+      yamllint: {
+        check: 'command -v yamllint',
+        installer: `pip3 install --user "yamllint==${YAMLLINT_VERSION}"`,
+        run: "git ls-files | grep -E '\\.(yaml|yml)' | xargs yamllint --format github",
+      },
+    };
+  }
+  return lintersCache;
+}
 
 function runCommand(command, stdio = 'inherit') {
   try {
@@ -153,8 +159,9 @@ export function setupLinters() {
   rmSync(TEMP_DIR, { recursive: true, force: true });
   mkdirSync(TEMP_DIR, { recursive: true });
 
-  for (const linter in LINTERS) {
-    const { check, installer } = LINTERS[linter];
+  const linters = getLinters();
+  for (const linter in linters) {
+    const { check, installer } = linters[linter];
     if (!runCommand(check, 'ignore')) {
       console.log(`Installing ${linter}...`);
       if (!runCommand(installer)) {
@@ -177,21 +184,21 @@ export function runESLint() {
 
 export function runActionlint() {
   console.log('\nRunning actionlint...');
-  if (!runCommand(LINTERS.actionlint.run)) {
+  if (!runCommand(getLinters().actionlint.run)) {
     process.exit(1);
   }
 }
 
 export function runShellcheck() {
   console.log('\nRunning shellcheck...');
-  if (!runCommand(LINTERS.shellcheck.run)) {
+  if (!runCommand(getLinters().shellcheck.run)) {
     process.exit(1);
   }
 }
 
 export function runYamllint() {
   console.log('\nRunning yamllint...');
-  if (!runCommand(LINTERS.yamllint.run)) {
+  if (!runCommand(getLinters().yamllint.run)) {
     process.exit(1);
   }
 }

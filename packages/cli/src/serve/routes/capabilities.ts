@@ -29,6 +29,7 @@ interface RegisterCapabilitiesRoutesDeps {
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
+  sessionRestoreTimeoutMs: number;
   languageCodes: string[];
 }
 
@@ -68,6 +69,7 @@ export function registerCapabilitiesRoutes(
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
+        sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
         ...(multiWorkspace
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(
@@ -92,6 +94,9 @@ export function registerCapabilitiesRoutes(
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
         ...(runtimeRemoval ? { removable: entry.removable } : {}),
+        ...(entry.current?.runtime.provenance === 'live-conversation'
+          ? { kind: 'live' as const }
+          : {}),
       })),
       supportedLanguages: deps.languageCodes,
     };

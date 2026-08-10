@@ -23,6 +23,7 @@ describe('useBranchCommand', () => {
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
+  let clearPendingState: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
@@ -44,6 +45,7 @@ describe('useBranchCommand', () => {
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -54,6 +56,7 @@ describe('useBranchCommand', () => {
     settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
+    clearPendingState,
     setSessionName,
     remount,
   });
@@ -92,6 +95,7 @@ describe('useBranchCommand', () => {
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
+    clearPendingState = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
     setSessionName = vi.fn();
@@ -112,6 +116,7 @@ describe('useBranchCommand', () => {
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
       reset: vi.fn(),
+      abortAll: vi.fn(),
     };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
@@ -164,6 +169,10 @@ describe('useBranchCommand', () => {
     expect(monitorRegistry.reset).toHaveBeenCalledOnce();
     expect(backgroundShellRegistry.reset).toHaveBeenCalledOnce();
     expect(workflowRunRegistry.reset).toHaveBeenCalledOnce();
+    expect(clearPendingState).toHaveBeenCalledOnce();
+    expect(clearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+      loadHistory.mock.invocationCallOrder[0]!,
+    );
     expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
       backgroundTaskRegistry.reset.mock.invocationCallOrder[0]!,
     );

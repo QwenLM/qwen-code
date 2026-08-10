@@ -166,6 +166,7 @@ import {
   type GoalRuntime,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
@@ -672,7 +673,7 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   };
 }
 
-export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini' | 'Qoder';
 export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
@@ -680,6 +681,8 @@ export interface ExtensionInstallMetadata {
   type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
+  gitCommit?: string; // Commit recorded when the installation source was cloned.
+  externalContent?: boolean; // Installed content came from a source nested outside the recorded source.
   registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
@@ -1802,6 +1805,7 @@ export class Config {
   private readonly question: string | undefined;
   private readonly systemPrompt: string | undefined;
   private readonly appendSystemPrompt: string | undefined;
+  private liveAppendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
@@ -5045,7 +5049,14 @@ export class Config {
   }
 
   getAppendSystemPrompt(): string | undefined {
-    return this.appendSystemPrompt;
+    const parts = [this.appendSystemPrompt, this.liveAppendSystemPrompt].filter(
+      (part): part is string => Boolean(part?.trim()),
+    );
+    return parts.length > 0 ? parts.join('\n\n') : undefined;
+  }
+
+  setLiveAppendSystemPrompt(prompt: string | undefined): void {
+    this.liveAppendSystemPrompt = prompt;
   }
 
   /** @deprecated Use getPermissionsAllow() instead. */
@@ -7418,6 +7429,7 @@ export class Config {
       journal: this.chatRecordingService,
       evidenceSource: this.chatRecordingService,
       verifier: createGoalVerifier(this),
+      checkpointVerifier: createGoalCheckpointVerifier(this),
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {

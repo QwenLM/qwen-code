@@ -19,8 +19,10 @@ import {
   BUDGET_STOP_PHRASE,
   DEADLINE_ENV,
   RESERVE_ENV,
+  COMPOSE_FLOOR_ENV,
   DEFAULT_RESERVE_SECONDS,
   DEFAULT_ROUND_SECONDS,
+  DEFAULT_COMPOSE_FLOOR_SECONDS,
   budgetStopEntry,
   budgetStopEntryZh,
   expectedRoundSeconds,
@@ -28,7 +30,14 @@ import {
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
+  ROUND_CAP_PHRASE,
+  roundCapStopDisclosure,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
+  writeRoundCapStop,
   stampRound,
+  verifyBudgetExhausted,
+  verifyBudgetMessage,
   writeBudgetStop,
 } from './deadline.js';
 
@@ -112,7 +121,7 @@ describe('reverseAuditBudgetExhausted — the round must fit, and its tail', () 
   it('honours the reserve-0 escape hatch — only the round itself must fit', () => {
     // `r >= 0` (not `> 0`) is the documented escape hatch: reserve 0 keeps
     // only the refusal of a round that cannot finish before the deadline.
-    // An edit to `> 0` would silently fall back to the 3600s default and
+    // An edit to `> 0` would silently fall back to the 4800s default and
     // refuse the next round a full hour before the operator's deadline.
     const env = {
       [DEADLINE_ENV]: String(NOW_S + DEFAULT_ROUND_SECONDS + 60),
@@ -190,13 +199,26 @@ describe('the round-cost estimate — measured when it can be', () => {
     expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(2400);
   });
 
-  it('measures the NEWEST previous round when several are on file', () => {
+  it('prices from the COSTLIEST measured round, not the newest', () => {
     const p = plan();
     stampRound(p, 1, NOW_MS - 3_000_000); // round 1 admitted 50 min ago
     stampRound(p, 2, NOW_MS - 1_200_000); // round 2 admitted 20 min ago
-    // Scanning oldest-first would report 3000; the loop's cost trend is the
-    // newest admission's.
-    expect(expectedRoundSeconds(p, 3, NOW_MS)).toBe(1200);
+    // Round 1's span (admission to admission) is 30 minutes; round 2's
+    // still-open span is 20. The reserve is the terminal round's only
+    // cover, so the gate holds the worst case the run has proved — a
+    // repair relaunch makes one round the expensive one, and a newest-only
+    // estimate nets it away the round after it lands.
+    expect(expectedRoundSeconds(p, 3, NOW_MS)).toBe(1800);
+  });
+
+  it('the costliest span can be a MIDDLE round', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 4_000_000);
+    stampRound(p, 2, NOW_MS - 2_000_000); // round 1's span: 33 min
+    stampRound(p, 3, NOW_MS - 1_500_000); // round 2's span: 8 min
+    // Round 3's open span is 25 min; the max is round 1's 33-minute span —
+    // neither the first nor the newest span measured from `now` alone.
+    expect(expectedRoundSeconds(p, 4, NOW_MS)).toBe(2000);
   });
 
   it('ignores a stamp of the SAME round — a rebuild is not a round', () => {
@@ -377,7 +399,7 @@ describe('the CI wiring contract', () => {
     expect(workflow).toContain(
       `${DEADLINE_ENV}="$(( $(date +%s) + attempt_timeout ))"`,
     );
-    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 4 ))"`);
+    expect(workflow).toContain(`${RESERVE_ENV}="$(( attempt_timeout / 3 ))"`);
     // The workflow's reserve cap documents itself as mirroring
     // DEFAULT_RESERVE_SECONDS ("keep the two in sync") — enforce the mirror,
     // so a one-sided bump diverges a test instead of the CI tail.
@@ -403,6 +425,12 @@ describe('reverseAuditBudgetMessage', () => {
     expect(msg).toContain('budget-stop marker');
     expect(msg).toContain('proceed to Step 6');
     expect(msg).toContain('do not relaunch auditors');
+    // The load-bearing tail rules — a reword that drops any of these
+    // silently loosens the termination contract, so pin each.
+    expect(msg).toContain('agent-prompt --role verify');
+    expect(msg).toContain('never a hand-rolled agent');
+    expect(msg).toContain('compose floor');
+    expect(msg).toContain('Do NOT re-verify findings already');
   });
 
   it('says "the next round" when no round number was passed', () => {
@@ -416,5 +444,204 @@ describe('reverseAuditBudgetMessage', () => {
     );
     expect(msg).toContain('0 minute(s) remain');
     expect(msg).toContain('stopped before the next round');
+  });
+});
+
+describe('writeRoundCapStop — the round-cap marker', () => {
+  it('round-trips through readBudgetStop with cause and cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
+      expect(stop?.entry).toBe(roundCapStopEntry(3));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('disclosure names the cap in both languages', () => {
+    expect(roundCapStopDisclosure(3).reason).toContain(ROUND_CAP_PHRASE);
+    expect(roundCapStopDisclosure(3).reason).toContain('of 3');
+    expect(roundCapStopEntryZh(3)).toContain('3');
+  });
+
+  it('writes round as an explicit null when the caller passes undefined', () => {
+    // The chunkless call site (agent-prompt.ts) passes `round: undefined`; the
+    // `?? null` fallback must keep the key PRESENT with a null value, not let
+    // JSON.stringify drop it — a consumer that distinguishes null from an
+    // absent key would otherwise misread the marker.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, undefined, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop).not.toBeNull();
+      expect(stop && 'round' in stop).toBe(true);
+      expect(stop?.round).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('verifyBudgetExhausted — the compose floor the verifier answers to', () => {
+  it('fails OPEN on a missing or malformed deadline — every local run', () => {
+    expect(verifyBudgetExhausted({}, NOW_MS)).toBeNull();
+    expect(verifyBudgetExhausted({ [DEADLINE_ENV]: '' }, NOW_MS)).toBeNull();
+    // A malformed/non-positive deadline must leave the gate inert, not
+    // refuse every verify build — the sibling RA gate pins the same branch.
+    for (const bad of ['soon', 'NaN', '-5', '0']) {
+      expect(verifyBudgetExhausted({ [DEADLINE_ENV]: bad }, NOW_MS)).toBeNull();
+    }
+  });
+
+  it('reports a past deadline as negative remaining under the default floor', () => {
+    const spent = verifyBudgetExhausted(
+      { [DEADLINE_ENV]: String(NOW_S - 120) },
+      NOW_MS,
+    );
+    expect(spent).not.toBeNull();
+    expect(spent?.remainingSeconds).toBe(-120);
+  });
+
+  it('a negative floor override falls back to the default, never a silent zero', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS - 60),
+      [COMPOSE_FLOOR_ENV]: '-100',
+    };
+    const spent = verifyBudgetExhausted(env, NOW_MS);
+    expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+  });
+
+  it('a blank or whitespace floor override falls back — only explicit 0 disables', () => {
+    // If the missing/blank guard weakens, Number('') === 0 silently trips the
+    // documented disable hatch instead of using the fallback. Pin that a
+    // blank/whitespace value falls back to the default (gate active), while
+    // an explicit '0' still disables.
+    const under = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS - 60),
+    };
+    for (const blank of ['', '   ']) {
+      const spent = verifyBudgetExhausted(
+        { ...under, [COMPOSE_FLOOR_ENV]: blank },
+        NOW_MS,
+      );
+      expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+    }
+    expect(
+      verifyBudgetExhausted({ ...under, [COMPOSE_FLOOR_ENV]: '0' }, NOW_MS),
+    ).toBeNull();
+  });
+
+  it('admits a verify build while the compose floor still fits', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS + 60),
+    };
+    expect(verifyBudgetExhausted(env, NOW_MS)).toBeNull();
+  });
+
+  it('REFUSES at exact cover — the floor is compose-only, with nothing to spare', () => {
+    // Unlike the reverse-audit reserve (which admits at exact cover, carrying
+    // its own margin), the compose floor is the bare time compose+submit
+    // need: at exactly the floor, admitting a verifier and letting it do any
+    // work crosses below it. Equality must refuse.
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS),
+    };
+    const spent = verifyBudgetExhausted(env, NOW_MS);
+    expect(spent).not.toBeNull();
+    expect(spent?.remainingSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+  });
+
+  it('admits one second above the floor', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS + 1),
+    };
+    expect(verifyBudgetExhausted(env, NOW_MS)).toBeNull();
+  });
+
+  it('refuses once remaining drops below the compose floor', () => {
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_COMPOSE_FLOOR_SECONDS - 60),
+    };
+    const spent = verifyBudgetExhausted(env, NOW_MS);
+    expect(spent).not.toBeNull();
+    expect(spent?.composeFloorSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS);
+    expect(spent?.remainingSeconds).toBe(DEFAULT_COMPOSE_FLOOR_SECONDS - 60);
+  });
+
+  it('honors the env override, including 0 as the disable hatch', () => {
+    const near = { [DEADLINE_ENV]: String(NOW_S + 300) };
+    // Floor lowered to 60s: 300s remaining now clears it.
+    expect(
+      verifyBudgetExhausted({ ...near, [COMPOSE_FLOOR_ENV]: '60' }, NOW_MS),
+    ).toBeNull();
+    // Floor 0 disables the gate entirely — the escape hatch.
+    expect(
+      verifyBudgetExhausted({ ...near, [COMPOSE_FLOOR_ENV]: '0' }, NOW_MS),
+    ).toBeNull();
+    // And it disables it PAST the deadline too: remainingSeconds is negative
+    // there, and a comparison-only check (negative >= 0 is false) would fire
+    // the supposedly-disabled gate. Zero must mean off unconditionally.
+    const pastDeadline = { [DEADLINE_ENV]: String(NOW_S - 300) };
+    expect(
+      verifyBudgetExhausted(
+        { ...pastDeadline, [COMPOSE_FLOOR_ENV]: '0' },
+        NOW_MS,
+      ),
+    ).toBeNull();
+    // A garbled override falls back to the default, which 300s fails.
+    expect(
+      verifyBudgetExhausted(
+        { ...near, [COMPOSE_FLOOR_ENV]: 'nonsense' },
+        NOW_MS,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('the floor is strictly below the reserve — the verifier stops after the RA gate', () => {
+    // The reserve covers verification PLUS compose; the floor is compose
+    // alone. If the floor ever met or exceeded the reserve, the verify gate
+    // would fire before the reverse-audit gate and starve the very
+    // verification the reserve exists to protect.
+    expect(DEFAULT_COMPOSE_FLOOR_SECONDS).toBeLessThan(DEFAULT_RESERVE_SECONDS);
+  });
+
+  it('the refusal message says compose now and keeps unverified findings', () => {
+    const spent = verifyBudgetExhausted(
+      { [DEADLINE_ENV]: String(NOW_S + 300) },
+      NOW_MS,
+    );
+    const msg = verifyBudgetMessage(spent!);
+    expect(msg).toContain('VERIFY BUDGET:');
+    expect(msg).toContain('compose');
+    expect(msg).toContain('[unverified]');
+    expect(msg).toContain('5 minute(s) remain');
+    // Pin the FLOOR rendering, not just the remaining time: a field swap of
+    // composeFloorSeconds→remainingSeconds would misstate the protected
+    // floor to the orchestrator that decides whether to stop.
+    expect(msg).toContain('20-minute floor');
+    // The publication contract, stated as the invariant both readings agree
+    // on (not the pre-existing posted-vs-terminal question this PR does not
+    // relitigate): an unverified finding is never a confirmed blocker.
+    expect(msg).toContain('never treats an unverified finding as a confirmed');
+  });
+
+  it('clamps a negative remaining to zero — a post-deadline verify call', () => {
+    // Reachable: verifyBudgetExhausted returns non-null with negative
+    // remaining past the deadline. Without the Math.max(0, …) clamp the line
+    // would read "-2 minute(s) remain"; the sibling RA message pins the same.
+    const msg = verifyBudgetMessage({
+      remainingSeconds: -120,
+      composeFloorSeconds: DEFAULT_COMPOSE_FLOOR_SECONDS,
+    });
+    expect(msg).toContain('0 minute(s) remain');
   });
 });

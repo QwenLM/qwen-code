@@ -28,16 +28,20 @@ export interface ChannelEditorDraft {
 
 export type ChannelEditorValidationCode =
   | 'required'
+  | 'credential'
   | 'duplicate'
   | 'invalid'
   | 'invalidOption'
   | 'number'
+  | 'outOfRange'
   | 'policy';
 
 export type ChannelEditorValidationErrors = Record<
   string,
   ChannelEditorValidationCode
 >;
+
+const UNSAFE_OBJECT_KEYS = ['__proto__', 'constructor', 'prototype'];
 
 export function hasDescriptorSenderPolicy(
   descriptor: DaemonChannelTypeDescriptor,
@@ -83,6 +87,7 @@ export function createChannelEditorDraft(
   const values: Record<string, string | boolean> = {};
   const secrets: Record<string, ChannelSecretDraft> = {};
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.kind === 'secret') {
       secrets[field.key] = instance?.secrets[field.key]?.present
         ? { operation: 'preserve' }
@@ -142,29 +147,34 @@ export function validateChannelEditorDraft(
   const name = draft.name.trim();
   if (!name) {
     errors['name'] = 'required';
-  } else if (
-    name === 'all' ||
-    ['__proto__', 'constructor', 'prototype'].includes(name)
-  ) {
+  } else if (name === 'all' || UNSAFE_OBJECT_KEYS.includes(name)) {
     errors['name'] = 'invalid';
   } else if (existingNames.includes(name)) {
     errors['name'] = 'duplicate';
   }
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
+    const draftValue = draft.values[field.key];
     if (field.required && isMissingField(field, draft)) {
       errors[field.key] = 'required';
     } else if (
       field.kind === 'number' &&
-      typeof draft.values[field.key] === 'string' &&
-      draft.values[field.key] !== '' &&
-      !Number.isFinite(Number(draft.values[field.key]))
+      typeof draftValue === 'string' &&
+      draftValue.trim() !== ''
     ) {
-      errors[field.key] = 'number';
+      const parsed = Number(draftValue);
+      if (!Number.isFinite(parsed)) {
+        errors[field.key] = 'number';
+      } else if (
+        field.exclusiveMinimum !== undefined &&
+        parsed <= field.exclusiveMinimum
+      ) {
+        errors[field.key] = 'outOfRange';
+      }
     } else if (field.kind === 'string-list' && field.options) {
-      const rawValue = draft.values[field.key];
-      if (typeof rawValue === 'string') {
+      if (typeof draftValue === 'string') {
         const allowed = new Set(field.options.map((option) => option.value));
-        const invalid = rawValue
+        const invalid = draftValue
           .split(',')
           .map((token) => token.trim().toLowerCase())
           .filter((token) => token.length > 0)
@@ -173,6 +183,13 @@ export function validateChannelEditorDraft(
           errors[field.key] = 'invalidOption';
         }
       }
+    }
+  }
+  if (descriptor.type === 'github') {
+    const tokenField = descriptor.fields.find((f) => f.key === 'token');
+    const hasToken = tokenField ? !isMissingField(tokenField, draft) : false;
+    if (!hasToken && draft.values['useLocalGh'] !== true) {
+      errors['token'] = 'credential';
     }
   }
   if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
@@ -239,11 +256,14 @@ export function buildChannelUpsertRequest(
   };
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
         secret.operation === 'replace'
-          ? { operation: 'replace', value: secret.value ?? '' }
+          ? !field.required && !secret.value?.trim()
+            ? { operation: 'clear' }
+            : { operation: 'replace', value: secret.value ?? '' }
           : { operation: secret.operation };
       continue;
     }

@@ -199,6 +199,97 @@ describe('Turn', () => {
       ]);
     });
 
+    it('should preserve ordered image parts in content events', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { text: 'before' },
+                    {
+                      inlineData: {
+                        data: 'aW1hZ2U=',
+                        mimeType: 'image/png',
+                        displayName: 'chart.png',
+                      },
+                    },
+                    { thought: true, text: 'hidden' },
+                    { text: 'after' },
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      inlineData: {
+                        data: 'c2Vjb25k',
+                        mimeType: 'image/webp',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: '', description: 'hidden' },
+        },
+        {
+          type: GeminiEventType.Content,
+          value: 'beforeafter',
+          parts: [
+            { text: 'before' },
+            {
+              inlineData: {
+                data: 'aW1hZ2U=',
+                mimeType: 'image/png',
+                displayName: 'chart.png',
+              },
+            },
+            { text: 'after' },
+          ],
+        },
+        {
+          type: GeminiEventType.Content,
+          value: '',
+          parts: [
+            {
+              inlineData: {
+                data: 'c2Vjb25k',
+                mimeType: 'image/webp',
+              },
+            },
+          ],
+        },
+      ]);
+    });
+
     it('should emit Thought events when a thought part is present', async () => {
       const mockResponseStream = (async function* () {
         yield {

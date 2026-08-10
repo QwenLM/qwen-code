@@ -50,10 +50,12 @@ import {
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
 import {
+  type LiveSpeakToUserHandler,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
   type ExternalToolGuardHandler,
 } from './bridgeOptions.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type {
   BridgePendingInteraction,
@@ -65,7 +67,6 @@ import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
-import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -112,9 +113,132 @@ function makeClient(
     undefined,
     undefined,
     () => false,
+    undefined,
+    undefined,
+    undefined,
     managedGuard?.handler,
   );
 }
+
+function makeLiveSpeakClient(
+  handler: LiveSpeakToUserHandler,
+  ownsSession: (sessionId: string) => boolean = () => true,
+): BridgeClient {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+  return new BridgeClient(
+    (() => undefined) as never,
+    (() => undefined) as never,
+    { request: noPermissionFlow } as never,
+    0,
+    Infinity,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    ownsSession,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => handler,
+  );
+}
+
+describe('BridgeClient — Live speak-to-user channel', () => {
+  it('routes exact speech only for a session owned by the connection', async () => {
+    const handler = vi.fn(async () => undefined);
+    const client = makeLiveSpeakClient(
+      handler,
+      (sessionId) => sessionId === 'live-session',
+    );
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'live-session',
+        message: '原样说出这句话。',
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(handler).toHaveBeenCalledWith({
+      callerSessionId: 'live-session',
+      message: '原样说出这句话。',
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.liveSpeakToUser, {
+        callerSessionId: 'other-session',
+        message: '不应发送',
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+  });
+});
+
+describe('BridgeClient — background notification turn boundary', () => {
+  it('publishes the child end-turn signal for the owned live session', async () => {
+    const sessionId = 'session-background';
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: 'background_notification_turn_complete',
+      data: { sessionId, reason: 'end_turn' },
+    });
+  });
+
+  it('drops malformed or foreign end-turn signals', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'owned', events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === 'owned' ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (id) => id === 'owned',
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId: 'owned',
+      reason: 'end_turn',
+      source: 'forged',
+    });
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId: 'foreign',
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
 
 describe('BridgeClient — managed external tool guard', () => {
   it('uses runtime-owned session/prompt identity before calling the host', async () => {
@@ -1316,6 +1440,88 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   });
 });
 
+describe('BridgeClient — Live screen-context extMethod dispatch', () => {
+  function makeLiveClient(
+    handler:
+      | (() => Promise<{
+          appName: string;
+          accessibilityText: string;
+          screenshotPath: string;
+        }>)
+      | undefined,
+  ): BridgeClient {
+    const noFlow = () => {
+      throw new Error('test: unexpected flow');
+    };
+    return new BridgeClient(
+      (() => undefined) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sessionId) => sessionId === 'live-coordinator',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+      () =>
+        handler
+          ? async ({ callerSessionId }) => {
+              expect(callerSessionId).toBe('live-coordinator');
+              return handler();
+            }
+          : undefined,
+    );
+  }
+
+  it('authenticates and forwards the argument-free Live capture', async () => {
+    const handler = vi.fn(async () => ({
+      appName: 'Safari',
+      accessibilityText: 'AXWindow',
+      screenshotPath: '/private/tmp/shot.png',
+    }));
+    const client = makeLiveClient(handler);
+
+    await expect(
+      client.extMethod('qwen/control/live/capture-screen-context', {
+        callerSessionId: 'live-coordinator',
+      }),
+    ).resolves.toEqual({
+      appName: 'Safari',
+      accessibilityText: 'AXWindow',
+      screenshotPath: '/private/tmp/shot.png',
+    });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('rejects unowned sessions and a missing daemon handler', async () => {
+    const handler = vi.fn(async () => ({
+      appName: 'Safari',
+      accessibilityText: '',
+      screenshotPath: '/private/tmp/shot.png',
+    }));
+    await expect(
+      makeLiveClient(handler).extMethod(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'worker-or-forged' },
+      ),
+    ).rejects.toThrow(/callerSessionId/u);
+    expect(handler).not.toHaveBeenCalled();
+    await expect(
+      makeLiveClient(undefined).extMethod(
+        'qwen/control/live/capture-screen-context',
+        { callerSessionId: 'live-coordinator' },
+      ),
+    ).rejects.toThrow();
+  });
+});
+
 describe('BridgeClient — channel-delivery extMethod dispatch', () => {
   const METHOD = 'qwen/control/channel-delivery';
 
@@ -2108,6 +2314,69 @@ describe('BridgeClient — artifact ingress', () => {
       );
     } finally {
       client.clearRestoreInFlight(sessionId);
+    }
+  });
+
+  it('keeps abandoned restore notifications fenced beyond the tombstone TTL', async () => {
+    const sessionId = 'sess:abandoned-restore';
+    const publish = vi.fn().mockReturnValue(true);
+    const onGenerationEvent = vi.fn();
+    const client = new BridgeClient(
+      (() => ({ events: { publish } })) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      onGenerationEvent,
+    );
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValueOnce(1_000);
+      client.markRestoreAbandoned(sessionId);
+      now.mockReturnValue(61_001);
+
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'late' },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+      await client.extNotification('qwen/notify/session/generation/event', {
+        v: 1,
+        sessionId,
+        requestId: 'late-generation',
+        event: { type: 'started', model: 'qwen', modelSource: 'main' },
+      });
+
+      expect(publish).not.toHaveBeenCalled();
+      expect(onGenerationEvent).not.toHaveBeenCalled();
+      client.markRestoreInFlight(sessionId);
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'settled' },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+      await client.extNotification('qwen/notify/session/generation/event', {
+        v: 1,
+        sessionId,
+        requestId: 'settled-generation',
+        event: { type: 'started', model: 'qwen', modelSource: 'main' },
+      });
+      expect(publish).toHaveBeenCalledOnce();
+      expect(onGenerationEvent).toHaveBeenCalledOnce();
+      client.clearRestoreInFlight(sessionId);
+    } finally {
+      now.mockRestore();
     }
   });
 

@@ -10,11 +10,13 @@
 
 import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
+import { matchRemoteCommand } from './review/match-remote.js';
 import { composeReviewCommand } from './review/compose-review.js';
 import { findingsCommand } from './review/findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
+import { repoContextCommand } from './review/repo-context.js';
 import { prContextCommand } from './review/pr-context.js';
 import { commentStatusCommand } from './review/comment-status.js';
 import { loadRulesCommand } from './review/load-rules.js';
@@ -46,9 +48,11 @@ export const reviewCommand: CommandModule = {
     yargs
       .command(runCommand)
       .command(parseArgsCommand)
+      .command(matchRemoteCommand)
       .command(fetchPrCommand)
       .command(captureLocalCommand)
       .command(planDiffCommand)
+      .command(repoContextCommand)
       .command(prContextCommand)
       .command(commentStatusCommand)
       .command(loadRulesCommand)
@@ -74,7 +78,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

@@ -541,6 +541,33 @@ export class SessionService {
     return undefined;
   }
 
+  /**
+   * Finds a persisted session whose UUID filename differs only by case.
+   * Legacy CLI sessions may have been written with `uuidgen`'s uppercase
+   * spelling, while daemon-facing caller IDs are canonicalized to lowercase.
+   */
+  async findSessionIdIgnoringCase(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+    for (const state of ['active', 'archived'] as const) {
+      let fileNames: string[];
+      try {
+        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      for (const fileName of fileNames) {
+        if (fileName.toLowerCase() !== expectedFileName) continue;
+        const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
+        const location = await this.getSessionLocation(candidateSessionId);
+        if (location !== undefined) return candidateSessionId;
+      }
+    }
+    return undefined;
+  }
+
   private removeFileIfExists(filePath: string): void {
     try {
       fs.unlinkSync(filePath);
@@ -2169,7 +2196,7 @@ function copyContentForApiHistory(content: Content): Content {
 }
 
 function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
-  if (!record.message) return;
+  if (!record.message || record.subtype === 'realtime_message') return;
 
   const message = copyContentForApiHistory(record.message as Content);
   if (record.subtype === 'mid_turn_user_message') {
@@ -2462,6 +2489,7 @@ export function replayUiTelemetryFromConversation(
 export interface ResumeTokenCounts {
   promptTokenCount: number;
   outputTokenCount: number;
+  isEstimated: boolean;
 }
 
 /**
@@ -2495,6 +2523,7 @@ export function getResumeTokenCounts(
         return {
           promptTokenCount: candidate,
           outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
+          isEstimated: false,
         };
       }
     }
@@ -2507,6 +2536,10 @@ export function getResumeTokenCounts(
         return {
           promptTokenCount: payload.info.newTokenCount,
           outputTokenCount: 0,
+          // Checkpoints created before provenance was persisted are safest to
+          // treat as estimates: this keeps the output clamp's overhead pad on
+          // and prevents an optimistic resume from overflowing the window.
+          isEstimated: payload.info.newTokenCountIsEstimated ?? true,
         };
       }
     }

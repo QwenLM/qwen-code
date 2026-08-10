@@ -48,6 +48,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  BUN_VERSION: '1.3.9'
   NODE_VERSION: '22.20.0'
   DESKTOP_FEED_TAG: 'desktop-latest'
 
@@ -346,7 +347,7 @@ jobs:
             find "$rg_dir" -type f -name 'rg' -path '*-darwin/*' -exec \
               codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
               --options runtime --timestamp \
-              --entitlements src-tauri/Entitlements.plist {} +
+              {} +
           else
             echo "::warning::Ripgrep vendor directory not found at $rg_dir; no ripgrep binaries signed."
           fi
@@ -355,7 +356,7 @@ jobs:
           if [ -f "$node_bin" ]; then
             codesign --force --sign "$APPLE_SIGNING_IDENTITY" \
               --options runtime --timestamp \
-              --entitlements src-tauri/Entitlements.plist "$node_bin"
+              --entitlements src-tauri/NodeEntitlements.plist "$node_bin"
           else
             echo "::warning::Node.js runtime binary not found at $node_bin; no Node.js binary signed."
           fi
@@ -386,6 +387,10 @@ jobs:
           app="$(find packages/desktop-shell/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=2 "$app"
+          entitlements="$(mktemp)"
+          trap 'rm -f "$entitlements"' EXIT
+          codesign -d --entitlements - --xml "$app" > "$entitlements" 2>/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$entitlements")" = true
 
       - name: 'Verify Windows signature'
         if: "runner.os == 'Windows' && inputs.dry_run == false"
@@ -426,6 +431,8 @@ jobs:
         run: |
           set -euo pipefail
           executable="$(find src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos -path '*.app/Contents/MacOS/*' -type f -perm -111 -print -quit)"
+          info_plist="$(dirname "$(dirname "$executable")")/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$info_plist" >/dev/null
           npm run smoke:packaged -- "$executable"
 
       - name: 'Smoke packaged application'

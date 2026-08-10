@@ -12,7 +12,6 @@ import {
 } from '../../constants/sessions';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
@@ -41,10 +40,10 @@ interface SideTaskPanelProps {
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
 }
 
 const FIRST_PROMPT_RENAME_ATTEMPTS = 3;
@@ -64,6 +63,7 @@ export function SideTaskPanel({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  onImageIngestionNotice,
 }: SideTaskPanelProps) {
   if (!sessionId) {
     return (
@@ -101,6 +101,7 @@ export function SideTaskPanel({
         onArtifactsChange={onArtifactsChange}
         onError={onError}
         sessionWorkflowEnabled={sessionWorkflowEnabled}
+        onImageIngestionNotice={onImageIngestionNotice}
       />
     </DaemonSessionProvider>
   );
@@ -193,6 +194,7 @@ function SideTaskSession({
   onArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  onImageIngestionNotice,
 }: Omit<
   SideTaskPanelProps,
   'sessionId' | 'parentSessionId' | 'createSession' | 'onCreated'
@@ -202,7 +204,13 @@ function SideTaskSession({
   const actions = useActions();
   const blocks = useTranscriptBlocks();
   const transcriptHistory = useTranscriptHistory();
-  const hasUserPrompt = blocks.some((block) => block.kind === 'user');
+  const hasTextualUserPrompt = blocks.some(
+    (block) =>
+      block.kind === 'user' &&
+      (typeof block.text === 'string'
+        ? block.text.trim().length > 0
+        : !block.images?.length),
+  );
   const restoredEmptySession =
     connection.status === 'connected' &&
     !connection.loadingTranscript &&
@@ -211,9 +219,10 @@ function SideTaskSession({
     !transcriptHistory.hasMore &&
     !transcriptHistory.capacityReached &&
     !transcriptHistory.paginationError &&
-    !hasUserPrompt;
+    !hasTextualUserPrompt;
   const canNameFromFirstPrompt =
-    !hasUserPrompt && (shouldNameFromFirstPrompt || restoredEmptySession);
+    !hasTextualUserPrompt &&
+    (shouldNameFromFirstPrompt || restoredEmptySession);
   useEffect(() => {
     const displayName = connection.displayName?.trim();
     if (displayName) onTitleChange(tabId, displayName);
@@ -278,6 +287,7 @@ function SideTaskSession({
       title={connection.displayName?.trim() || title}
       workspaceCwd={workspaceCwd}
       onError={onError}
+      onImageIngestionNotice={onImageIngestionNotice}
       embedded
       onFirstPromptAdmitted={
         canNameFromFirstPrompt ? nameFromFirstPrompt : undefined

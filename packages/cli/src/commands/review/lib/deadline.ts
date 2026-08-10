@@ -9,7 +9,8 @@
 // The iterative reverse audit (Step 5) is the one stage of a review whose cost
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
-// two consecutive dry rounds or the 5-round cap. On a PR where every round
+// two consecutive dry rounds or the plan's round cap (5, or 3 for a huge
+// diff). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -53,26 +54,71 @@ export const RESERVE_ENV = 'QWEN_REVIEW_DEADLINE_RESERVE_SECONDS';
  * verification of that round's findings, compose-review, anchor resolution
  * and the submission itself.
  *
- * The measured round estimate ALSO contains one verification pass — a round
- * is admitted only after the previous round's findings were verified and
- * merged (SKILL.md Step 5), so an admission-to-admission span includes the
- * verification between them — which means the gate holds back roughly one
- * verification more than the terminal round strictly needs. That overlap is
- * deliberate margin, not double-entry bookkeeping that slipped: round costs
- * trend UP (each round re-reads the diff against a longer findings list, and
- * repair relaunches land mid-loop), so the previous round's measurement
- * under-predicts the next in exactly the runs that end near the boundary —
- * and the two error directions are not symmetric. Over-reserving ends the
- * loop at most one round early, disclosed as a budget stop; under-reserving
- * is #8368 — killed mid-verification, holding every confirmed finding.
+ * Under the pipelined loop (SKILL.md Step 5), a round's verification
+ * launches WITH the next round's auditors instead of sitting between
+ * admissions — so the admission-to-admission span the gate measures
+ * contains no verification pass, and the terminal round's verification has
+ * exactly one cover: this reserve. That makes the reserve's sizing the
+ * whole margin, not a top-up on an overlap the measurement already
+ * carried — so the estimate refuses to be optimistic too: it prices the
+ * round from the COSTLIEST span the run has measured (see
+ * `expectedRoundSeconds`), because round costs do not climb smoothly —
+ * each round re-reads the diff against a longer findings list, and a
+ * repair relaunch lands mid-loop and makes one round the expensive one —
+ * and the newest span alone under-predicts the next in exactly the runs
+ * that end near the boundary. Over-reserving ends the loop at most one
+ * round early, disclosed as a budget stop; under-reserving is #8368 —
+ * killed mid-verification, holding every confirmed finding.
+ *
+ * Sized from the only tail measurement the record holds (#8368, +1699
+ * lines): the loop ended with half an hour left and the outer kill found
+ * round 5's verification STILL RUNNING — the tail had consumed more than 30
+ * minutes and was nowhere through (compose, anchor resolution and
+ * submission never started). No upper bound was ever measured, so the size
+ * is insurance, not arithmetic: pipelining made this reserve the terminal
+ * round's ONLY cover, and until pipelined runs measure their tails, the
+ * reserve buys the unknown, not the known. Over-reserving ends the loop at
+ * most one round early, disclosed as a budget stop; under-reserving is
+ * #8368.
  *
  * This is only the fallback: the budget itself is
  * chosen outside the CLI (a repository variable, a workflow input, a
  * `/review --timeout=N` comment), so the review workflow passes a reserve
  * scaled to the budget it resolved rather than trusting this constant to fit
- * an arbitrary one. A local run has no deadline and no reserve at all.
+ * an arbitrary one. The workflow caps that scaled reserve at this same
+ * number (`.github/workflows/qwen-code-pr-review.yml`) — keep the two in
+ * sync. A local run has no deadline and no reserve at all.
  */
-export const DEFAULT_RESERVE_SECONDS = 3600;
+export const DEFAULT_RESERVE_SECONDS = 4800;
+
+/**
+ * The slice of the tail that composing and submitting a review need on
+ * their own, with no verification in it. The reserve above covers the
+ * terminal round's verification PLUS this; a review that stops verifying at
+ * this boundary still composes and posts everything it has proved.
+ *
+ * A distinct, smaller floor exists because the two costs fail differently.
+ * A round's verification scales with its finding count and — on a security
+ * PR whose findings are shell/git bypasses re-checked with real filesystem
+ * E2E — with the per-finding cost, without bound; compose-review is one CLI
+ * call and the submission a handful of `gh` calls, both bounded. So the
+ * verification is what a wall runs into, and the fix is to gate the
+ * VERIFIER on this floor: below it, no verify shard is built, the
+ * findings in hand keep their `— [unverified]` tag (compose-review caps the
+ * verdict on it), and compose still runs. Measured: PR #8687, a 4 269-line
+ * cross-worktree git guard, ran the audit to a correct budget stop with
+ * ~110 minutes left, then a single hand-rolled re-verification agent
+ * re-running a 15-family bypass battery with real bash+git consumed all of
+ * it — the wall hit mid-verification, compose never ran, and ~20
+ * E2E-confirmed Critical bypasses were never posted. Twenty minutes is
+ * insurance sized like the reserve, not arithmetic: compose + anchor
+ * resolution + submit has no measured upper bound, and over-reserving only
+ * ends verification a shard early, disclosed as an unverified tag.
+ */
+export const DEFAULT_COMPOSE_FLOOR_SECONDS = 1200;
+
+/** Override for the compose floor, in seconds. */
+export const COMPOSE_FLOOR_ENV = 'QWEN_REVIEW_DEADLINE_COMPOSE_FLOOR_SECONDS';
 
 /**
  * The admission estimate for a round nothing has measured yet — round 1, or
@@ -176,27 +222,37 @@ export function stampRound(
 
 /**
  * What the round about to be admitted is expected to cost, in seconds: the
- * observed cost of the previous round (admission-to-admission — its agents,
- * their verification, the orchestration between) when a stamp exists, else
- * the conservative constant. The span deliberately overlaps the tail
- * reserve by one verification pass — see `DEFAULT_RESERVE_SECONDS` for why
- * that margin is kept rather than netted out. A stamp of the SAME round is
- * ignored — that is a rebuild, and measuring it would report a round as
- * cheap because its prompts were built twice quickly.
+ * COSTLIEST round the run has measured (admission-to-admission — its audit
+ * fan-out and the orchestration around it; under the pipelined loop a
+ * round's verification overlaps the NEXT round instead of sitting between
+ * admissions, so it is not in this measure, and the terminal round's
+ * verification is exactly what the deadline's reserve covers) when a stamp
+ * exists, else the conservative constant. The costliest, not the newest:
+ * the reserve is the terminal round's only cover, and the run's own worst
+ * span is the evidence of what a round can cost — a newest-only estimate
+ * nets a mid-loop repair relaunch away the round after it lands, in
+ * exactly the runs that end near the boundary. A stamp of the SAME round
+ * is ignored — that is a rebuild, and measuring it would report a round
+ * as cheap because its prompts were built twice quickly.
  */
 export function expectedRoundSeconds(
   planPath: string,
   round: number | undefined,
   nowMs: number = Date.now(),
 ): number {
-  const stamps = readRoundStamps(planPath);
-  for (let i = stamps.length - 1; i >= 0; i--) {
-    const s = stamps[i];
-    if (round !== undefined && s.round === round) continue;
-    const observed = Math.round((nowMs - s.atMs) / 1000);
-    return Math.max(MIN_OBSERVED_ROUND_SECONDS, observed);
+  const stamps = readRoundStamps(planPath).filter(
+    (s) => round === undefined || s.round !== round,
+  );
+  if (stamps.length === 0) return DEFAULT_ROUND_SECONDS;
+  let maxSeconds = 0;
+  for (let i = 0; i < stamps.length; i++) {
+    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : nowMs;
+    maxSeconds = Math.max(
+      maxSeconds,
+      Math.round((end - stamps[i].atMs) / 1000),
+    );
   }
-  return DEFAULT_ROUND_SECONDS;
+  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
 }
 
 export interface BudgetExhausted {
@@ -206,6 +262,38 @@ export interface BudgetExhausted {
   reserveSeconds: number;
   /** The admission estimate for the refused round itself. */
   expectedRoundSeconds: number;
+}
+
+/**
+ * The deadline epoch both gates read, or null when unset/malformed — the
+ * fail-open contract in one place so the two gates cannot drift on it. A
+ * missing, empty, non-finite or non-positive `QWEN_REVIEW_DEADLINE_EPOCH`
+ * leaves the review ungated (the outer timeout still bounds it).
+ */
+function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
+  const raw = env[DEADLINE_ENV];
+  if (raw === undefined || raw.trim() === '') return null;
+  const deadline = Number(raw);
+  if (!Number.isFinite(deadline) || deadline <= 0) return null;
+  return deadline;
+}
+
+/**
+ * A non-negative seconds override from `env[key]`, or `fallback`. `>= 0`
+ * (not `> 0`) is deliberate: 0 is a documented escape hatch on both gates.
+ * A missing or malformed value falls back — never a silent zero.
+ */
+function readNonNegativeSeconds(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+): number {
+  const raw = env[key];
+  if (raw !== undefined && raw.trim() !== '') {
+    const v = Number(raw);
+    if (Number.isFinite(v) && v >= 0) return v;
+  }
+  return fallback;
 }
 
 /**
@@ -219,20 +307,15 @@ export function reverseAuditBudgetExhausted(
   roundCostSeconds: number,
   nowMs: number = Date.now(),
 ): BudgetExhausted | null {
-  const raw = env[DEADLINE_ENV];
-  if (raw === undefined || raw.trim() === '') return null;
-  const deadline = Number(raw);
-  if (!Number.isFinite(deadline) || deadline <= 0) return null;
-
-  let reserve = DEFAULT_RESERVE_SECONDS;
-  const reserveRaw = env[RESERVE_ENV];
-  if (reserveRaw !== undefined && reserveRaw.trim() !== '') {
-    const r = Number(reserveRaw);
-    // `r >= 0` (not `> 0`) is deliberate: 0 is the escape hatch that shrinks
-    // the requirement to the round estimate alone, keeping only the refusal
-    // of a round that cannot finish before the deadline itself.
-    if (Number.isFinite(r) && r >= 0) reserve = r;
-  }
+  const deadline = readDeadlineSeconds(env);
+  if (deadline === null) return null;
+  // 0 is the escape hatch that shrinks the requirement to the round estimate
+  // alone, keeping only the refusal of a round that cannot finish at all.
+  const reserve = readNonNegativeSeconds(
+    env,
+    RESERVE_ENV,
+    DEFAULT_RESERVE_SECONDS,
+  );
 
   const remainingSeconds = Math.floor(deadline - nowMs / 1000);
   if (remainingSeconds >= reserve + roundCostSeconds) return null;
@@ -243,7 +326,88 @@ export function reverseAuditBudgetExhausted(
   };
 }
 
+export interface ComposeFloorExhausted {
+  /** Whole seconds until the deadline; can be negative when already past. */
+  remainingSeconds: number;
+  /** The compose floor the remaining time failed to clear. */
+  composeFloorSeconds: number;
+}
+
+/**
+ * Decide whether a verification shard still fits before the compose floor:
+ * the deterministic backstop that keeps the terminal round's verification
+ * from consuming the time compose-review and submission need. Returns
+ * `null` when a verify build may proceed — or when no deadline is set (a
+ * local run), so the gate is inert exactly where the reverse-audit gate is.
+ *
+ * This fires only when the reserve has already been spent down into the
+ * compose floor — the reverse-audit gate keeps `reserve` (which includes
+ * this floor) ahead of the last round, so a healthy run never reaches it.
+ * It is the cover for the one span the reserve cannot bound: a terminal
+ * verification whose cost the finding set made larger than the reserve
+ * planned for.
+ */
+export function verifyBudgetExhausted(
+  env: NodeJS.ProcessEnv,
+  nowMs: number = Date.now(),
+): ComposeFloorExhausted | null {
+  const deadline = readDeadlineSeconds(env);
+  if (deadline === null) return null;
+  const floor = readNonNegativeSeconds(
+    env,
+    COMPOSE_FLOOR_ENV,
+    DEFAULT_COMPOSE_FLOOR_SECONDS,
+  );
+
+  // A zero floor disables the gate ENTIRELY — the documented escape hatch.
+  // Return before the comparison below: past the deadline `remainingSeconds`
+  // is negative, and a comparison-only check would fire the "disabled" gate
+  // exactly when it was asked to stand down.
+  if (floor <= 0) return null;
+
+  const remainingSeconds = Math.floor(deadline - nowMs / 1000);
+  // STRICTLY greater: the floor is the bare time compose and submit need,
+  // with nothing to spare. At exactly the floor, admitting a verifier and
+  // letting it do any work crosses below it — so equality refuses, unlike
+  // the reverse-audit reserve (which carries its own margin and admits at
+  // exact cover).
+  if (remainingSeconds > floor) return null;
+  return { remainingSeconds, composeFloorSeconds: floor };
+}
+
+/**
+ * The stderr line the verify gate prints on refusal — a termination rule
+ * for the verification pass, not an error, spelled so the orchestrator
+ * composes now rather than re-attempting the build.
+ */
+export function verifyBudgetMessage(spent: ComposeFloorExhausted): string {
+  const minutesLeft = Math.max(0, Math.floor(spent.remainingSeconds / 60));
+  const floorMinutes = Math.round(spent.composeFloorSeconds / 60);
+  return (
+    `VERIFY BUDGET: ${minutesLeft} minute(s) remain before this review's ` +
+    `deadline — at or below the ${floorMinutes}-minute floor compose-review and ` +
+    `submission need, so no verification shard will be built. This is a ` +
+    `termination rule, not an error: do not rebuild the verifier. Proceed ` +
+    `to Step 6 NOW and compose. Findings still carrying \`— [unverified]\` ` +
+    `keep that tag: compose-review caps the verdict on it and never treats ` +
+    `an unverified finding as a confirmed blocker — everything earlier ` +
+    `rounds confirmed still posts. A review that stops verifying here ` +
+    `reports what it proved; one that keeps verifying past this floor is ` +
+    `killed before it posts anything.`
+  );
+}
+
 export interface BudgetStop {
+  /**
+   * Which termination wrote this marker: the time budget (the reverse-audit
+   * loop ran out of clock) or the round cap (it ran its full allotted
+   * rounds without converging). `compose-review` picks the disclosure text
+   * by this; an absent value reads as `time-budget` for back-compat.
+   */
+  cause?: 'time-budget' | 'round-cap';
+  /** The round cap, when `cause` is `round-cap` — what `compose-review`
+   * re-derives the disclosure from, the way it uses `round` for a time stop. */
+  cap?: number;
   /** The exact `unreviewedDimensions` entry, composed here so the text that
    * caps the verdict is this module's in both channels. */
   entry: string;
@@ -294,6 +458,77 @@ export function budgetStopEntry(round: number | undefined): string {
 export function budgetStopEntryZh(round: number | undefined): string {
   const d = budgetStopDisclosure(round);
   return `${d.subjectZh}——${d.reasonZh}`;
+}
+
+/**
+ * The phrase identifying a ROUND-CAP disclosure wherever it is relayed —
+ * the cap analogue of `BUDGET_STOP_PHRASE`, so `compose-review` dedups the
+ * orchestrator's relayed copy against the marker's by shared text.
+ */
+export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+
+/**
+ * The round-cap disclosure as structural parts, both languages — the
+ * analogue of `budgetStopDisclosure` for a loop that ran its full allotted
+ * rounds without converging.
+ */
+export function roundCapStopDisclosure(cap: number): {
+  subject: string;
+  reason: string;
+  subjectZh: string;
+  reasonZh: string;
+} {
+  return {
+    subject: 'reverse audit',
+    reason: `did not converge within the ${ROUND_CAP_PHRASE} of ${cap}`,
+    subjectZh: '反向审计',
+    reasonZh: `在 ${cap} 轮的反审轮数上限内未收敛`,
+  };
+}
+
+/** The round-cap entry, spelled once for the marker AND the stderr message. */
+export function roundCapStopEntry(cap: number): string {
+  const d = roundCapStopDisclosure(cap);
+  return `${d.subject} — ${d.reason}`;
+}
+
+/** The Chinese pair of `roundCapStopEntry`. */
+export function roundCapStopEntryZh(cap: number): string {
+  const d = roundCapStopDisclosure(cap);
+  return `${d.subjectZh}——${d.reasonZh}`;
+}
+
+/**
+ * Persist a round-cap refusal beside the prompt records, so
+ * `compose-review` caps the verdict on a loop that ran its full rounds
+ * without converging — without depending on the orchestrator to relay the
+ * entry. Same marker file and same swallow-on-write-error discipline as
+ * `writeBudgetStop`; only one stop fires per run, whichever refusal comes
+ * first.
+ */
+export function writeRoundCapStop(
+  planPath: string,
+  cap: number,
+  round: number | undefined,
+  nowMs: number = Date.now(),
+): void {
+  try {
+    const dir = promptRecordDir(planPath);
+    mkdirSync(dir, { recursive: true });
+    const stop: BudgetStop = {
+      cause: 'round-cap',
+      cap,
+      entry: roundCapStopEntry(cap),
+      entryZh: roundCapStopEntryZh(cap),
+      round: round ?? null,
+      remainingSeconds: 0,
+      reserveSeconds: 0,
+      atMs: nowMs,
+    };
+    writeFileSync(join(dir, STOP_FILE), JSON.stringify(stop, null, 2));
+  } catch {
+    // Refusing is the load-bearing half; the stderr entry still carries it.
+  }
 }
 
 /**
@@ -381,9 +616,13 @@ export function reverseAuditBudgetMessage(
     `itself; also add exactly this entry to unreviewedDimensions so the ` +
     `terminal report says it too — ` +
     `\`${budgetStopEntry(round)}\` — ` +
-    `and proceed to Step 6 with the findings already confirmed. Spend what ` +
-    `time remains only on verifying findings already in hand, composing, and ` +
-    `submitting. A review that stops here still reports everything it ` +
-    `proved; a review that runs past its deadline is killed holding all of it.`
+    `and proceed to Step 6. Verify the last round's findings ONLY through ` +
+    `\`agent-prompt --role verify\` (never a hand-rolled agent) — it is gated ` +
+    `on the compose floor and will refuse once too little time remains, ` +
+    `leaving any still-\`[unverified]\` findings tagged for compose-review to ` +
+    `cap — then compose and submit. Do NOT re-verify findings already ` +
+    `confirmed in earlier rounds. A review that stops here still reports ` +
+    `everything it proved; a review that runs past its deadline is killed ` +
+    `holding all of it.`
   );
 }
