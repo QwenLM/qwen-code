@@ -3670,7 +3670,52 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .map((c) => c[0])
       .join('\n');
     expect(msg).toContain('CONVERGED');
+    // The marker channel is closed AND the relay channel is recalled: the
+    // refusal instructed the orchestrator to add the stop entry to
+    // unreviewedDimensions, and nothing but this sentence removes it once
+    // the marker (and with it compose-review's dedup splice) is gone.
+    expect(msg).toContain('remove it now — this convergence supersedes');
     expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
+  });
+
+  it('huge cap: a CONVERGED exit clears a stale same-run time-budget marker too', () => {
+    // The clear is cause-blind, but both sibling clear tests produce their
+    // marker via the round-cap gate — a cause-conditional clear
+    // (`if (readBudgetStop(p)?.cause === 'round-cap') clearBudgetStop(p)`)
+    // passes them both and leaves a time-budget marker capping a verdict
+    // the audit legitimately converged. Cap 5 so even round 4 reaches the
+    // TIME gate instead of the cap gate: cold checks due → not converged →
+    // admitted at the cap, refused at the near deadline. Round 5 then
+    // converges and must clear the time-budget marker the same way.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 5 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    runRound(4); // even → not converged → 4 <= cap 5 → refused at the time gate
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+
+    process.exitCode = undefined;
+    const out = runRound(5); // odd → all skipped → converged, before any gate
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale time-budget marker is cleared
   });
 
   it('huge cap: a converged --chunk retry clears the stale cap marker too', () => {

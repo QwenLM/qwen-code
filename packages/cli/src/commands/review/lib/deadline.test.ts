@@ -475,6 +475,11 @@ describe('reverseAuditBudgetMessage', () => {
     expect(msg).toContain('never a hand-rolled agent');
     expect(msg).toContain('compose floor');
     expect(msg).toContain('Do NOT re-verify findings already');
+    // The wait-bound and no-fresh-pass clauses the round-cap refusal's
+    // tail carries (and SKILL.md's budget-stop bullet documents) — the
+    // two refusals share one bounded-tail protocol, so both pin both.
+    expect(msg).toContain('stop waiting on any verifier batch still out');
+    expect(msg).toContain('invent a fresh re-verification pass');
   });
 
   it('says "the next round" when no round number was passed', () => {
@@ -503,6 +508,30 @@ describe('writeRoundCapStop — the round-cap marker', () => {
       expect(stop?.cause).toBe('round-cap');
       expect(stop?.cap).toBe(3);
       expect(stop?.entry).toBe(roundCapStopEntry(3));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a cap marker from before the plan capture is a previous run — the guard still writes', () => {
+    // Mirror of the budget-stop fence test for the round-cap writer: run 1
+    // stops at the cap and is killed before cleanup; run 2 re-captures the
+    // plan and runs past the cap again. The first-refusal-wins guard must
+    // read through the stale file via the run-epoch fence — a raw
+    // existsSync check would make run 2's writeRoundCapStop a no-op, and
+    // compose-review would neither cap the verdict nor print the stop
+    // disclosure for an audit that stopped at the cap.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, PLAN_CAPTURED_MS - 28_800_000); // 8h before capture
+      expect(readBudgetStop(plan)).toBeNull(); // fenced out as a previous run
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

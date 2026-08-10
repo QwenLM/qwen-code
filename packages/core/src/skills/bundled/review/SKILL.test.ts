@@ -90,6 +90,16 @@ describe('bundled review skill', () => {
     expect(body).toContain('no fresh re-verification pass');
   });
 
+  it('pins the relay-entry removal on the CONVERGED bullet', () => {
+    // The CONVERGED clear removes the marker on disk, but the entry an
+    // earlier stop refusal told the orchestrator to relay is orchestrator
+    // state — compose-review's dedup splice stops running once the marker
+    // is gone, so only this instruction recalls it. A revert of the
+    // sentence must fail a test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('remove it now — this convergence supersedes');
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either

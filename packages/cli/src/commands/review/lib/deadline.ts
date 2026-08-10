@@ -651,9 +651,11 @@ export function reverseAuditBudgetMessage(
     `\`agent-prompt --role verify\` (never a hand-rolled agent) — it is gated ` +
     `on the compose floor and will refuse once too little time remains, ` +
     `leaving any still-\`[unverified]\` findings tagged for compose-review to ` +
-    `cap — then compose and submit. Do NOT re-verify findings already ` +
-    `confirmed in earlier rounds. A review that stops here still reports ` +
-    `everything it proved; a review that runs past its deadline is killed ` +
-    `holding all of it.`
+    `cap; when the deadline is within that floor, stop waiting on any ` +
+    `verifier batch still out and compose with the tags in hand. Do NOT ` +
+    `re-verify findings already confirmed in earlier rounds, and do NOT ` +
+    `invent a fresh re-verification pass. Then compose and submit — a ` +
+    `review that stops here still reports everything it proved; a review ` +
+    `that runs past its deadline is killed holding all of it.`
   );
 }

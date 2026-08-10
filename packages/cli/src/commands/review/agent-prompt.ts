@@ -1921,7 +1921,11 @@ function admitReverseAuditRound(
  * over-cap round the gate already refused (round 4 refused under cap 3,
  * then round 5's schedule is converged — the convergence check runs before
  * the cap gate), and that stale round-cap marker would otherwise cap a
- * verdict the audit legitimately converged.
+ * verdict the audit legitimately converged. The message also recalls the
+ * relay channel: the earlier refusal told the orchestrator to add its stop
+ * entry to unreviewedDimensions, and once the marker is gone the
+ * compose-review splice that dedups it no longer runs — only this
+ * instruction removes it.
  */
 function refuseConverged(planPath: string): void {
   clearBudgetStop(planPath);
@@ -1929,7 +1933,10 @@ function refuseConverged(planPath: string): void {
     'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
-      'unreviewedDimensions entry is owed.',
+      'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
+      'budget refusal told you to add its stop entry to ' +
+      'unreviewedDimensions, remove it now — this convergence supersedes ' +
+      'it.',
   );
   process.exitCode = 5;
 }
