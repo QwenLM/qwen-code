@@ -239,14 +239,16 @@ function isLikelyPortProseMisparse(
     return false; // no whitespace => no prose separator
   }
   const portCandidate = afterColon.slice(0, wsInAfter);
-  // Digit port, optionally followed by one non-alphanumeric char (`,;.` em-dash
-  // etc.). An empty candidate (`ollama.local: please ...`) is also a prose
-  // shape where the ':' is the prose separator, not a port. #8136 R1-7/R6-1.
-  return portCandidate === '' || /^\d+[^A-Za-z0-9]?$/.test(portCandidate);
+  // Digit port, optionally followed by non-alphanumeric punctuation (one or
+  // more chars, e.g. `8443,.` `8443;` em-dash). An empty candidate
+  // (`ollama.local: please ...`) is also a prose shape where the ':' is the
+  // prose separator, not a port. #8136 R1-7/R6-1/R7-3.
+  return portCandidate === '' || /^\d+[^A-Za-z0-9]*$/.test(portCandidate);
 }
 
-/** A clean hostname (with optional numeric port) to the end of the authority. */
-const CLEAN_HOST_AFTER = /^[A-Za-z0-9._-]+(:\d+)?$/;
+/** A clean hostname (with optional numeric port) to the end of the authority.
+ *  Accepts Unicode host labels (IDN) in addition to ASCII. #8136 R7-10. */
+const CLEAN_HOST_AFTER = /^[A-Za-z0-9._\p{L}\p{N}\p{M}]+(:\d+)?$/u;
 
 /**
  * Locate the userinfo terminator '@' to strip, or -1 when stripping would be
@@ -280,9 +282,14 @@ function findUserInfoStripPoint(
   if (firstAt === -1) {
     // No '@' in the authority. A password containing / ? # pushes the '@' past
     // authorityEnd (new URL() throws). Fall back to the full-string last '@'
-    // only when the authority has a ':' that is a real userinfo delimiter
-    // (not an all-digit port, e.g. `host:99999/path@domain`) and the run
-    // between the last '/' and the candidate has no whitespace (prose guard).
+    // when the authority has a ':' that is a real userinfo delimiter (not an
+    // all-digit port, e.g. `host:99999/path@domain`) and no whitespace in the
+    // run between the last '/' and the candidate (prose guard). #8136.
+    //
+    // KNOWN RESIDUAL: an '@' in the path (e.g. npm scoped
+    // `/node_modules/@qwen/pkg`) with a host:port-shaped authority before it
+    // is also stripped by this fallback — base has the same behavior (the
+    // between-run has no whitespace). #8136 R7-5.
     const fullAt = baseUrl.lastIndexOf('@');
     if (fullAt >= authorityStart) {
       // Locate the userinfo colon, skipping IPv6 bracket literals so `[::1]`'s

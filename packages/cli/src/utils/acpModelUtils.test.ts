@@ -358,6 +358,25 @@ describe('acpModelUtils', () => {
       'https://api.example:8443; contact admin@example.com',
       'https://api.example:8443; contact admin@example.com',
     ],
+    // #8136 R7-3: a port followed by multiple punctuation chars + prose email.
+    [
+      'https://api.example:8443,. contact admin@example.com',
+      'https://api.example:8443,. contact admin@example.com',
+    ],
+    // #8136 R7-10: a Unicode (IDN) host is a clean hostname — strip the credential.
+    ['https://user:pass@例子.测试/v1', 'https://例子.测试/v1'],
+    // #8136 R7-5 KNOWN RESIDUAL: an '@' in the path (npm scoped) with a
+    // host:port-shaped authority before it is stripped by the no-'@' fallback
+    // (base has the same behavior — the between-run has no whitespace). Same
+    // tradeoff class, pending maintainer sign-off.
+    [
+      'https://registry.example: check /node_modules/@qwen/pkg',
+      'https://qwen/pkg',
+    ],
+    // #8136 R7-1 KNOWN RESIDUAL: a colonless username containing whitespace
+    // (`user @host`) is indistinguishable from a prose `host @host` shape;
+    // the prose veto fires and it leaks. Pending maintainer sign-off.
+    ['https://user @host.example/v1', 'https://user @host.example/v1'],
     // #8136 R5-12: a backslash-free authority with a later prose `a:b@c` is NOT
     // misread as a Windows credential by findAuthorityEnd (R5-12 fixed the
     // windowsCred scan bound). The remaining leak is the R5-1 residual class.
