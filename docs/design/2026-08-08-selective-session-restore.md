@@ -2,8 +2,8 @@
 
 - Status: Draft for review
 - Tracks: #8678
-- Prerequisite status on 2026-08-10: #8691 merged; transactional WebUI session
-  switching in #8824 remains an open Draft
+- Prerequisite status on 2026-08-11: #8691 and attachment-identity hardening in
+  #8833 are merged; transactional cross-session switching in #8882 remains open
 
 ## Scope and ordering
 
@@ -13,16 +13,24 @@ durable checkpoint. This document uses selective runtime projection to implement
 the bounded-hydration slice without leaving full runtime materialization in
 place.
 
-PR #8691 has merged and, as of 2026-08-10, #8824 remains in progress. The design
-document may land before #8824, but the selective-restore implementation must
-rebase onto and land after it, and before checkpoint work. The boundaries are
-distinct: #8691 fences timeouts and late results; #8824 keeps the current UI
-session attached until a fully staged target wins its final
-identity/generation/deadline check and commits; selective restore removes the
-leased mode's duplicate full read and reduces reconstruction, materialization,
-and replay cost but does not replace transactional commit semantics or make a
-slow restore responsive by itself. The lease-off path still scans the frozen
-transcript once.
+PR #8691 has merged. The original transactional prototype in #8824 was closed
+and split: attachment-identity hardening in #8833 has merged, while ordinary and
+controlled cross-session transactions continue in #8882. The design document may
+land before #8882, but the selective-restore implementation must start from
+`main` after #8882's final merge and before checkpoint work. The boundaries are
+distinct: #8691 fences timeouts and late results; #8833 fences stale attachment
+work; on the modern `client_identity` path, #8882 keeps the current UI session
+attached until a fully staged target wins its final
+identity/environment/lifecycle/deadline checks and commits; selective restore
+removes the leased mode's duplicate full read and reduces reconstruction,
+materialization, and replay cost but does not replace transactional commit
+semantics or make a slow restore responsive by itself. The lease-off path still
+scans the frozen transcript once.
+
+#8883 repairs retry after the existing watchdog expires on the legacy switching
+path. It is related but is not an implementation prerequisite for selective
+restore. Same-logical-session resync/repair and branch adoption remain separate
+PR3c/PR3d ownership work and are also outside this slice.
 
 This design PR changes no runtime behavior and does not close #8678.
 
@@ -90,14 +98,20 @@ index machinery.
   the transcript once and remains O(file bytes).
 - Making restore proportional only to the JSONL tail. That is the checkpoint
   follow-up.
-- Implementing transactional WebUI session switching. #8824 owns that
-  prepare/stage/CAS/commit boundary and must land first; this design does not
-  change attach, detach, or WebUI commit ownership.
+- Implementing transactional WebUI session switching. #8833 owns attachment
+  identity and #8882 owns the restore/stage/guarded-commit boundary; #8882 must
+  land first. This design does not change attach, detach, or WebUI commit
+  ownership, including its legacy detach-first fallback when `client_identity`
+  is explicitly unavailable.
 - Changing TUI `--resume`, `--continue`, session export, archive reads, fork, or
   branch behavior.
 - Changing the standalone legacy `qwen/session/loadUpdates` extension or the
   post-rewind artifact refresh. They are not on the `session/load` or
   `session/resume` incident path and remain follow-up migrations.
+- Changing daemon features that independently request complete persisted content,
+  including live-task read/wait/startup lookup and realtime startup-context
+  construction. They are not downstream consumers of the ACP restore result;
+  replacing their full-content reads needs a separate consumer contract.
 - Changing the public `ResumedSessionData` contract used by non-daemon callers.
 - Adding new REST or TypeScript SDK response fields.
 - Guaranteeing a machine-independent latency threshold for an 80 MiB fixture.
@@ -140,7 +154,11 @@ Add a daemon-oriented projection API to `SessionTranscriptReader`, wrapped by
 centralized:
 
 - `SessionService.readRestoreProjection(sessionId, options)` performs a cold,
-  request-local fresh scan and is the only selective cold entry point.
+  request-local fresh scan and is the only selective cold entry point. It
+  returns `undefined` only when the frozen file has no parseable active record,
+  preserving the current empty-session result without manufacturing resume
+  state. Project-membership or snapshot-validation failures remain errors, not
+  empty-session fallbacks.
 - `SessionService.readLiveRestoreProjection(sessionId, operation)` may reuse the
   existing index cache and returns only the replay/artifact state needed by a
   live load or resume.
@@ -174,7 +192,10 @@ Cold restore has two acquisition modes but only one projection and one reducer:
 
 ```ts
 type SessionRestoreProjectionSource =
-  | { kind: 'preloaded'; projection: SessionRestoreProjection }
+  | {
+      kind: 'preloaded';
+      projection: SessionRestoreProjection | undefined;
+    }
   | {
       kind: 'after_writer_lease';
       options: SelectiveSessionRestoreOptions;
@@ -541,14 +562,17 @@ otherwise unused field. The REST route already returns
 meaningful invalid values from a direct bridge caller receive the bridge's local
 input-validation error. Use the normalized shape for live lookup too, so a field
 that is ignored for a cold request cannot become recent merely because the
-Session is resident.
+Session is resident. Correct the stale `BridgeRestoreSessionRequest.historyReplay`
+API comment at the same time: the implementation defaults an omitted value to
+streamed load, not bulk response. A regression test must lock that omitted-field
+default so the documented shape and bridge behavior cannot diverge again.
 
 Classify every production restore caller by whether it consumes replay. Do not
 use compatibility-mode `all` merely to make a runtime resident:
 
 | Caller                                                                                        | Required restore shape                                                                                                                                   |
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WebUI REST load after #8824                                                                   | `recent(100)` or the explicit requested limit                                                                                                            |
+| WebUI REST load after #8882                                                                   | `recent(100)` or the explicit requested limit                                                                                                            |
 | Generic REST/ACP HTTP/WS `session/load` with no page size                                     | `all`, preserving public compatibility                                                                                                                   |
 | Branch/side-task load that returns inherited/branched history                                 | `all` or its explicit recent request                                                                                                                     |
 | Scheduled-task startup rehydration and keepalive revival                                      | `none`; use bridge `resumeSession()` because the result ignores replay                                                                                   |
@@ -690,18 +714,21 @@ sequenceDiagram
   B-->>D: "restored session"
 ```
 
-The target construction shown above runs inside #8824's transactional prepare
-phase. The outer switch keeps the previous WebUI session attached until the
-target is ready and commits only after a successful return and final
-generation/deadline/target check. Its committed identity is the session-id and
-workspace-cwd tuple, so same-id cross-workspace navigation is still a real
-switch. Target-side 409, 413, timeout/504, cancellation, or staging failure must
-leave that committed source tuple attached and usable; selective restore does
-not own an attach or detach transition. Transactional staging temporarily holds
-the source transcript and candidate replay together in the WebUI. End-to-end
-memory evidence must therefore report that WebUI overlap separately from ACP
-child index/projection memory instead of adding measurements from different
-processes into one ambiguous peak.
+The target construction shown above supplies the restore result consumed by
+#8882's transactional target-staging path. On its modern `client_identity` path,
+the outer switch keeps the previous WebUI session attached until the target is
+ready and commits only after a successful return and final
+identity/environment/lifecycle/deadline checks. Its committed identity is the
+session-id and workspace-cwd tuple, so same-id cross-workspace navigation is
+still a real switch. Target-side 409, 413, timeout/504, cancellation, or staging
+failure must leave that committed source tuple attached and usable; selective
+restore does not own an attach or detach transition. A daemon explicitly lacking
+`client_identity` keeps #8882's legacy destructive fallback and is not given a
+new transaction by this slice. Transactional staging temporarily holds the
+source transcript and candidate replay together in the WebUI. End-to-end memory
+evidence must therefore report that WebUI overlap separately from ACP child
+index/projection memory instead of adding measurements from different processes
+into one ambiguous peak.
 
 ACP `newSessionConfig()` passes an internal projection source, including the
 `SelectiveSessionRestoreOptions`, through `loadCliConfig()`'s named host-options
@@ -725,13 +752,22 @@ leased mode, after acquiring the lease it requests one
 stores the reduced runtime state, and activates `ChatRecordingService` from the
 recorder projection. Goal runtime is then restored from the normalized
 `goalRecords`. This mode must skip the constructor's ordinary transcript restore
-and initialize or replace the runtime only after recorder activation; it must not
-start from an empty or stale transcript and be left that way.
+and initialize or replace the runtime only after recorder activation. When a
+projection exists, it must not start from an empty or stale transcript and be
+left that way.
 
 In preloaded mode, `Config`, the legacy active recorder, and Goal runtime are
 constructed directly from the already-complete reduced projection. They must
 not wait for `activateChatRecording()`, because that method intentionally
 returns immediately when the writer protocol is disabled.
+
+When the frozen file contains no parseable active record, either acquisition
+mode yields no projection. Preserve today's empty-resume behavior: construct the
+requested Session with no resumed runtime state, let the recorder start with a
+`null` parent, and return the normal empty load/resume response. A non-empty
+system/metadata-only active chain is not this case; its final record UUID remains
+the recorder parent exactly as it is today. Never reinterpret a project mismatch,
+changed snapshot, malformed selected record, or reader limit as empty.
 
 `Config` exposes the resolved projection through a one-shot ACP handoff. A
 successful consume, initialization failure, shutdown, or `startNewSession()`
@@ -805,14 +841,14 @@ published but before the parent bridge/WebUI has accepted the result, Goal,
 file-history validation, restored background work, cron, or command producers
 may be activated. If the parent has already timed out, those producers may
 briefly write or emit before #8691 recognizes the late result and closes the
-abandoned child Session. #8824 preserves the old visible source but does not add
-a parent-to-child adoption acknowledgement. This is an existing child-lifecycle
-residual rather than a new selective-restore prerequisite; reopen that protocol
-question only if implementation evidence shows this slice expands the window or
-creates work outside current teardown ownership. Goal activation remains owned by
-`GoalRuntime` disposal. FileHistory validation retains its existing service and
-recording-callback lifetime; this slice does not add a detached owner or a new
-in-flight cancellation protocol.
+abandoned child Session. #8882 preserves the old visible source on its modern
+path but does not add a parent-to-child adoption acknowledgement. This is an
+existing child-lifecycle residual rather than a new selective-restore
+prerequisite; reopen that protocol question only if implementation evidence
+shows this slice expands the window or creates work outside current teardown
+ownership. Goal activation remains owned by `GoalRuntime` disposal. FileHistory
+validation retains its existing service and recording-callback lifetime; this
+slice does not add a detached owner or a new in-flight cancellation protocol.
 The projection reader has already reduced transcript file-history records into
 snapshots, but it has not hydrated `FileHistoryService`.
 `Config.getFileHistoryService()` remains the single lazy owner of that runtime
@@ -895,8 +931,9 @@ finalizer after it); otherwise a later restore failure could occur after
 process-global attribution or autonomous work had been activated.
 
 Here child publication still means addressability in the ACP child, not
-acknowledgement of #8824's WebUI commit. #8691 owns late-result fencing and
-cleanup, and #8824 owns the old WebUI attachment. The existing late-abandoned
+acknowledgement of #8882's WebUI commit. #8691 owns late-result fencing and
+cleanup, #8833 owns attachment-identity fencing, and #8882 owns the old WebUI
+attachment. The existing late-abandoned
 autonomous-work window remains, but this slice adds no second client-commit
 protocol and no general callback-capture framework.
 
@@ -938,6 +975,7 @@ without replacing or closing the live Session.
 - Session list, title lookup, and preview counts.
 - Legacy `qwen/session/loadUpdates`.
 - Post-rewind artifact refresh.
+- Live-task read/wait/startup lookup and realtime startup-context construction.
 
 These paths continue to use complete `ResumedSessionData` until a separate
 design proves that changing them is safe.
@@ -975,8 +1013,8 @@ selective path rejects the largest input.
 
 ## Downstream consumer migration
 
-Every current consumer of full `ResumedSessionData` on the daemon path must have
-an explicit replacement:
+Every current consumer of full `ResumedSessionData` inside the ACP
+`session/load` and `session/resume` pipeline must have an explicit replacement:
 
 | Consumer                          | Current dependency                                                       | Replacement                                                                                                                   |
 | --------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -1038,7 +1076,10 @@ current full loader plus its existing reducers:
 - pending Goal checkpoints, including parity of the bounded evidence window;
 - duplicate file-history prompt ids and the 100-snapshot cap;
 - artifact snapshots/events on active, side, and abandoned branches;
-- custom titles, parent/source metadata, initial turn, and background task ids.
+- custom titles, parent/source metadata, initial turn, and background task ids;
+- empty or all-unparseable files produce no projection and no manufactured
+  recorder parent, while a non-empty system/metadata-only active chain preserves
+  its final record UUID.
 
 Title parity must use the bounded tail-then-head production picker, including a
 legacy title outside both windows that intentionally remains invisible. File
@@ -1185,10 +1226,12 @@ behavior rather than inventing a new fallback.
   work is suppressed by Goal disposal; FileHistory validation retains its
   existing service/callback cleanup semantics and does not gain a detached owner.
 - #8691 timeout and late-result fencing tests continue to pass.
-- #8824 integration tests prove that selective-restore 409, 413, timeout/504,
-  cancellation, and staging failures preserve the committed session-id and
-  workspace-cwd source tuple and that successful adoption changes transcript,
-  connection, metadata, and ownership atomically.
+- #8882 integration tests prove that, on the modern `client_identity` path,
+  selective-restore 409, 413, timeout/504, cancellation, and staging failures
+  preserve the committed session-id and workspace-cwd source tuple and that
+  successful adoption changes transcript, connection, metadata, and ownership
+  atomically. Its explicitly unsupported-capability fallback retains the legacy
+  detach-first behavior.
 
 ### E2E and benchmark
 
@@ -1397,13 +1440,14 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 ## Rollout and follow-ups
 
 The design document may land before its remaining implementation prerequisite.
-#8691 is merged; the selective-restore implementation lands after #8824's
-transactional switching, followed by the durable checkpoint. Keep selective
-restore as one end-to-end implementation PR, using reviewable commits for the
-phases below; do not land an unused projection API or a partial early-paging
-step. `historyPageSize` cannot bound pre-materialization I/O without the consumer
-projection, and the writer-lease path's post-acquisition read remains
-authoritative.
+#8691 and #8833 are merged; the selective-restore implementation lands after
+#8882's transactional switching, followed by the durable checkpoint. #8883 and
+the later PR3c/PR3d ownership slices are not prerequisites for this bounded
+hydration path. Keep selective restore as one end-to-end implementation PR,
+using reviewable commits for the phases below; do not land an unused projection
+API or a partial early-paging step. `historyPageSize` cannot bound
+pre-materialization I/O without the consumer projection, and the writer-lease
+path's post-acquisition read remains authoritative.
 
 After selective restore:
 

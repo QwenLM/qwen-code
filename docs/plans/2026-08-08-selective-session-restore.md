@@ -1,14 +1,18 @@
 # Selective session restore implementation plan
 
-- Status: Proposed; as of 2026-08-10, #8691 is merged and #8824 remains open;
-  the design may land independently, but implementation must land after #8824
+- Status: Proposed; as of 2026-08-11, #8691 and #8833 are merged and #8882
+  remains open; the design may land independently, but implementation must land
+  after #8882
 - Design: `docs/design/2026-08-08-selective-session-restore.md`
 - Tracks: #8678
 
 ## Delivery rule
 
-The delivery order is merged #8691, transactional WebUI session switching in
-#8824, this selective-restore implementation, and then the durable checkpoint.
+The delivery order is merged #8691 and #8833, transactional cross-session
+switching in #8882, this selective-restore implementation, and then the durable
+checkpoint. #8824 was superseded by this split series. #8883's legacy watchdog
+retry fix and the later PR3c/PR3d resync/repair and branch-adoption slices are not
+prerequisites for this bounded-hydration implementation.
 
 Implement selective restore as one end-to-end daemon fix. Reviewable commits may
 follow the phases below, but do not merge an intermediate PR that only removes a
@@ -16,12 +20,15 @@ pre-lease load or moves `historyPageSize`: the post-lease read remains
 authoritative until the selective projection replaces it, and early I/O bounding
 is incomplete until every runtime consumer uses that projection. Do not merge an
 unused projection API, change TUI/export/fork loading, or add checkpoint
-persistence in this PR.
+persistence in this PR. Keep daemon live-task read/wait/startup lookup and
+realtime startup-context full-content reads outside this slice as well: they do
+not consume the ACP restore result and need a separate bounded-content contract
+before migration.
 
-The implementation is complete only when the cold daemon path no longer calls
-`SessionService.loadSession()`, constructs one fresh transcript index in the
-correct startup-frozen writer mode, restores every named runtime consumer, and
-returns the requested replay semantics.
+The implementation is complete only when the cold ACP daemon restore path no
+longer calls `SessionService.loadSession()`, constructs one fresh transcript
+index in the correct startup-frozen writer mode, restores every named runtime
+consumer, and returns the requested replay semantics.
 
 ## Phase 1: Shared selective projection
 
@@ -41,7 +48,9 @@ returns the requested replay semantics.
   delete a newer entry.
 - Add a single cold restore-projection read that selects and deduplicates runtime,
   replay, file-history, artifact, goal, telemetry, attribution, recorder, and ACP
-  state records.
+  state records. Return no projection only for an empty/all-unparseable active
+  file, preserving the current empty-resume behavior; project, snapshot, selected
+  record, and size failures remain typed errors rather than empty fallbacks.
 - Add a narrow live restore result backed by the same index/selected-read
   internals: replay plus artifacts for live load, artifacts only for live resume.
   Do not express this as optional flags on the complete cold runtime result.
@@ -152,7 +161,9 @@ returns the requested replay semantics.
   Restore turn parents, initial turn, background notification ids, goal
   runtime/hooks, and artifact state from their explicit projection fields; feed
   the normalized minimal Goal records through the existing recovery and
-  legacy-card helpers.
+  legacy-card helpers. With no projection, construct an empty requested runtime
+  whose recorder parent is `null`; a non-empty system/metadata-only chain keeps
+  its real final record UUID.
 - Remove daemon attempts to rebuild recorder boundaries or ACP state from the
   recent replay page.
 - Replay only the requested recent page for explicit `historyPageSize` clients.
@@ -177,7 +188,9 @@ returns the requested replay semantics.
   `400 invalid_transcript_limit` mapping, while a meaningful invalid direct value
   receives local bridge input validation. Apply the normalized shape before
   both warm and cold lookup so the ignored field cannot change meaning with
-  residency.
+  residency. Fix the stale bridge request type comment that says omitted
+  `historyReplay` defaults to bulk response; the current and retained default is
+  streamed load, and a regression test must cover that omitted-field behavior.
 - Audit every production restore caller. Change scheduled-task startup
   rehydration/keepalive and both direct and daemon-backed channel restoration to
   ACP/SDK resume because they ignore replay. Preserve all replay for generic
@@ -331,11 +344,13 @@ returns the requested replay semantics.
   receive post-resume updates, including available-command refresh. None may
   collect historical replay frames. Generic load and branch clients retain
   their explicit replay behavior.
-- Rebase onto #8824 and run its transactional integration coverage with
-  selective-restore 409, 413, timeout/504, cancellation, and staging failures.
-  Assert the committed session-id and workspace-cwd source tuple remains attached
-  and usable, and successful adoption changes transcript, connection, metadata,
-  and ownership atomically.
+- After #8882 merges, start from `main` containing its final implementation and
+  run its transactional integration coverage with selective-restore 409, 413,
+  timeout/504, cancellation, and staging failures on the modern
+  `client_identity` path. Assert the committed session-id and workspace-cwd
+  source tuple remains attached and usable, and successful adoption changes
+  transcript, connection, metadata, and ownership atomically. Preserve #8882's
+  legacy detach-first behavior when that capability is explicitly absent.
 - Run `npm run build && npm run typecheck` from the repository root.
 - Record a benchmark-only full-loader baseline and run the selective projection
   on 64 KiB, 1 MiB, and 4 MiB fixtures under the same runtime. Report absolute
@@ -349,7 +364,7 @@ returns the requested replay semantics.
   Use the results to tune the fixed cooperative byte/time budgets and report the
   largest indivisible-record interval, but do not convert either measurement
   into a machine-independent CI threshold.
-  Report #8824's overlapping source-plus-staged-target WebUI peak separately from
+  Report #8882's overlapping source-plus-staged-target WebUI peak separately from
   ACP child index/projection memory; do not add cross-process samples into one
   peak.
 - Read the complete diff and all untracked files in open-ended audit passes.
@@ -361,9 +376,10 @@ returns the requested replay semantics.
 ## Acceptance checklist
 
 - [x] #8691 has landed.
-- [ ] #8824 transactional WebUI session switching has landed with green CI and
-      maintainer approval, and the implementation branch is rebased onto its
-      final attach lifecycle.
+- [x] #8833 attachment-identity hardening has landed.
+- [ ] #8882 transactional WebUI session switching has landed with green CI and
+      maintainer approval, and the implementation branch starts from `main`
+      containing its final attach lifecycle.
 - [ ] Projection acquisition, runtime-consumer migration, and old-loader removal
       ship as one end-to-end implementation; no intermediate production PR leaves
       an unused projection or removes the post-lease authoritative read without
@@ -392,6 +408,10 @@ returns the requested replay semantics.
 - [ ] Compressed and uncompressed API histories match current behavior.
 - [ ] Rewind, fork, side-task, gap, fragment, artifact, file-history, goal,
       telemetry, attribution, and interruption fixtures pass parity tests.
+- [ ] Empty/all-unparseable files produce no projection and do not manufacture a
+      recorder parent. Non-empty system/metadata-only chains preserve their real
+      final record UUID, while project/snapshot/selected-record/limit failures
+      never degrade into the empty path.
 - [ ] A dead-branch side-task source cannot replace the source boundary derived
       from the active runtime chain; artifact adjacency/blocker selection and
       incremental accumulation match the existing batch reducer.
@@ -476,16 +496,20 @@ returns the requested replay semantics.
       validation failures are independently contained and do not replace the
       prebuilt response; no fallible/awaited setup follows the finalizer, and
       existing Session callback timing is unchanged.
-- [ ] #8824 integration proves selective-restore 409, 413, timeout/504,
-      cancellation, and staging failures preserve the committed session-id and
-      workspace-cwd source tuple, while a successful switch commits transcript,
-      connection, metadata, and ownership atomically.
+- [ ] #8882 integration proves that, on the modern `client_identity` path,
+      selective-restore 409, 413, timeout/504, cancellation, and staging failures
+      preserve the committed session-id and workspace-cwd source tuple, while a
+      successful switch commits transcript, connection, metadata, and ownership
+      atomically. Explicitly unsupported-capability fallback retains legacy
+      detach-first behavior.
 - [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
       limits, none, action, stream/response mode, and inherited-history policy;
       only identical shapes share a restore and its typed result.
 - [ ] Bridge ingress rejects invalid/non-finite/out-of-range page sizes before
       live lookup or coalescing when the field is meaningful. Streamed load and
-      resume ignore the field consistently for warm and cold Sessions.
+      resume ignore the field consistently for warm and cold Sessions. The
+      bridge request type documents, and a regression test proves, that omitted
+      `historyReplay` defaults to streamed load rather than bulk response.
 - [ ] Scheduled-task rehydration/keepalive and direct/daemon channel restoration
       use resume/none and collect no historical replay. Scheduled tasks retain
       cron/Goal recovery; channels retain prompt/live-update and
