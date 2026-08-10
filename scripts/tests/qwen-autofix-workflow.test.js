@@ -488,7 +488,11 @@ describe('qwen-autofix workflow', () => {
         const sel = seg.slice(0, 400);
         return (
           !/startswith\("review-address"\)/.test(sel) &&
-          !/!= "Qwen Autofix"/.test(sel)
+          !/!= "Qwen Autofix"/.test(sel) &&
+          // The review-in-flight gate (#8888) selects BY NAME for the LLM
+          // review check — a liveness probe, not a feedback selector, so it
+          // needs neither the review-address carve-out nor the workflow guard.
+          !/== "review-pr"/.test(sel)
         );
       });
     expect(guardlessSelectors).toEqual([]);
@@ -588,6 +592,88 @@ describe('qwen-autofix workflow', () => {
     expect(run([llm, build])).toBe('true');
     // Unchanged: the branch-mutating sibling in the same workflow still blocks.
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
+  });
+
+  it('holds a round while review-pr is in flight on the head (#8888)', () => {
+    // Every head mutation the scan can make (a stale-base update-branch, an
+    // address push) is a synchronize event that cancels the in-flight review
+    // via qwen-code-pr-review.yml's cancel-in-progress, discarding up to ~3h
+    // of review work — the self-reinforcing cancellation loop of PR #8830.
+    // The gate skips the PR entirely while review-pr is live on its head; the
+    // watermark is not advanced on the skip, so the feedback stays visible.
+    // It is deliberately separate from HAS_PENDING_CHECKS (no aging out, no
+    // NON_BLOCKING_CHECKS revert — that would re-block on the conclusion and
+    // reintroduce #7416's wait).
+    expect(reviewScanJob).toContain('REVIEW_PR_LIVE=');
+    expect(reviewScanJob).toContain(
+      'review-pr in flight on this head — holding this round',
+    );
+    expect(reviewScanJob).toContain('fleet_row "${PR}" \'review-in-flight\'');
+    // The gate must sit BEFORE the stale-base update (a merge-main is exactly
+    // the push that killed two reviews on #8830) and the feedback dispatch.
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('N_FAILED_CHECKS='),
+    );
+
+    // Replay the REAL extracted liveness filter over rollup fixtures.
+    const filter = reviewScanJob.match(
+      /REVIEW_PR_LIVE="\$\(jq -r[\s\S]*?<<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(filter).toBeTruthy();
+    const run = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CHECKS_JSON='${JSON.stringify(checks)}'\n${filter}\nprintf '%s' "$REVIEW_PR_LIVE"`,
+        ],
+        { env: { ...process.env }, encoding: 'utf8' },
+      );
+    const started = '2026-08-10T10:05:49Z';
+    // A live review-pr blocks — in every pending-ish status the rollup uses.
+    for (const status of [
+      'QUEUED',
+      'IN_PROGRESS',
+      'PENDING',
+      'WAITING',
+      'REQUESTED',
+    ]) {
+      expect(run([{ name: 'review-pr', status, startedAt: started }])).toBe(
+        'true',
+      );
+    }
+    // A concluded review does NOT block (that would reintroduce #7416's wait).
+    expect(
+      run([{ name: 'review-pr', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    ).toBe('false');
+    // Other checks in flight are this gate's business as usual — not live.
+    expect(
+      run([{ name: 'Test (ubuntu-latest, Node 22.x)', status: 'IN_PROGRESS' }]),
+    ).toBe('false');
+
+    // Delay-window fallback: during the review workflow's 10-minute delay the
+    // review-pr check-run does not exist yet, so the rollup alone misses it;
+    // the scan falls back to queued runs of the review workflow by head SHA.
+    expect(reviewScanJob).toContain('REVIEW_WF_ID=');
+    expect(reviewScanJob).toContain('actions/runs?head_sha=${PR_HEAD_OID}');
+    expect(reviewScanJob).toContain("grep -qE '^(queued|waiting|pending)$'");
+
+    // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
+    // visible acknowledgment per in-flight review run (marker keyed on the
+    // review-pr check's startedAt); the review bot's own findings never ack.
+    expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
+    expect(reviewScanJob).toContain('autofix-review-deferred');
+    expect(workflow).toContain(
+      "review_sender: '${{ github.event.review.user.login }}'",
+    );
+    // An empty startedAt must skip the ack, not arm an always-matching marker.
+    expect(reviewScanJob).toContain('select(. != "") ] | first // ""');
+    expect(reviewScanJob).toContain(
+      'has no startedAt yet (queued); a later scan acks once it starts',
+    );
   });
 
   it('auto-updates a PR red only from a stale base, gated on green-on-main', () => {
@@ -2678,14 +2764,16 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(14);
+    expect(workflow.split('--paginate').length - 1).toBe(15);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
     // so piping it through `jq -s 'add // []'` would wrap the id stream in an
-    // array and break the tail-1 consumer.
+    // array and break the tail-1 consumer. The #8888 deferred-review ack
+    // dedup is the same class: `--jq '.[].body'` feeds a grep, never a
+    // WORKDIR file, so it bumps the total pin but not the normalizer count.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —

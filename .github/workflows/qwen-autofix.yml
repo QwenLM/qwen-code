@@ -308,6 +308,7 @@ jobs:
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
+      review_sender: '${{ github.event.review.user.login }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -2003,6 +2004,7 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
+          REVIEW_SENDER: '${{ needs.route.outputs.review_sender }}'
           DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
           # Every lane that reaches this scan is supposed to hold the PAT:
@@ -2398,6 +2400,16 @@ jobs:
             fi
           fi
 
+          # Review-workflow id, resolved ONCE per scan for the review-in-flight
+          # gate below (#8888): during qwen-code-pr-review.yml's 10-minute
+          # delay-automatic-review wait the review-pr JOB (and thus its
+          # check-run in statusCheckRollup) does not exist yet, so the rollup
+          # alone misses a just-triggered review; the runs API sees the run
+          # by head SHA before its job starts. Empty on lookup failure — the
+          # gate then degrades to the rollup check only (fail-open, like
+          # BUSY_PRS).
+          REVIEW_WF_ID="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
+
           # PRs whose review-address is already RUNNING OR QUEUED in any live
           # autofix run must not be re-targeted. Schedule/dispatch runs execute
           # against main's SHA, so their matrix jobs never appear in the PR's
@@ -2605,6 +2617,84 @@ jobs:
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               fleet_row "${PR}" 'waiting' 'active checks in flight'
+              continue
+            fi
+            # Review-in-flight gate (#8888): NON_BLOCKING_CHECKS keeps an
+            # in-flight review-pr from blocking the FEEDBACK gate (its
+            # conclusion carries nothing the loop acts on — #7416), but every
+            # head mutation this scan can make (a stale-base update-branch
+            # below, an address push later) is a synchronize event that
+            # cancels the in-flight review via qwen-code-pr-review.yml's
+            # cancel-in-progress, discarding up to ~3h of review work — the
+            # self-reinforcing cancellation loop of #8830 (three killed runs
+            # in one PR, two by merge-main). Its findings are also the very
+            # feedback the next round should batch with, so deferring the
+            # WHOLE round until the review lands loses nothing: the watermark
+            # is not advanced on a skip, so the feedback stays visible. This
+            # is deliberately SEPARATE from HAS_PENDING_CHECKS rather than a
+            # NON_BLOCKING_CHECKS revert: that gate ages checks out after
+            # PENDING_STALE_MIN and would also re-block on the review's
+            # conclusion, reintroducing #7416's median-49-minute wait.
+            REVIEW_PR_LIVE="$(jq -r '
+              [ .[]
+                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr"))) ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
+            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
+              # Delay-window fallback: a review run parked BEFORE its job
+              # starts (the 10-minute environment wait) has no review-pr
+              # check-run yet, but a push now would still cancel it via
+              # synchronize. The runs API sees it by head SHA in every
+              # not-yet-running status GitHub reports (queued, waiting,
+              # pending — all three observed live on #8888). One read per
+              # candidate, and only when the rollup showed nothing live.
+              if gh api "repos/${REPO}/actions/runs?head_sha=${PR_HEAD_OID}&per_page=50" \
+                --jq ".workflow_runs[] | select(.workflow_id == ${REVIEW_WF_ID}) | .status" 2> /dev/null \
+                | grep -qE '^(queued|waiting|pending)$'; then
+                REVIEW_PR_LIVE="true"
+              fi
+            fi
+            if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
+              echo "🔍 #${PR}: review-pr in flight on this head — holding this round so the push cannot cancel it (#8888)"
+              fleet_row "${PR}" 'review-in-flight' 'review-pr live on head; round deferred'
+              # Ack-on-defer (#8888): a real-time human review routed this
+              # scan straight here, but the gate holds every mutation — from
+              # the human's seat the bot read their review and then did
+              # nothing. Say so once per in-flight review (the marker embeds
+              # the review-pr check's startedAt, so a NEW review re-arms the
+              # ack). The feedback itself needs no ack: the watermark is not
+              # advanced on this skip, so the next scan after the review
+              # lands still sees and addresses it. Cron scans stay silent —
+              # nothing arrived in them that a human is waiting on, and the
+              # fleet table already shows the deferral.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' && "${DRY_RUN}" != "true" && "${REVIEW_SENDER}" != "${REVIEW_BOT}" ]]; then
+                REVIEW_STARTED_AT="$(jq -r '
+                  [ .[]
+                    | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr")))
+                    | (.startedAt // "")
+                    | select(. != "") ] | first // ""' <<< "${CHECKS_JSON}")"
+                # An empty key (a queued check with no startedAt yet) would
+                # make the marker match EVERY future deferral — skip the ack
+                # this scan rather than arm a permanently-dead dedup.
+                if [[ -z "${REVIEW_STARTED_AT}" ]]; then
+                  echo "🕐 #${PR}: deferred-review ack skipped: live review-pr check has no startedAt yet (queued); a later scan acks once it starts"
+                else
+                  DEFER_ACKS="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate --jq '.[].body' 2> /dev/null || true)"
+                  if grep -qF "<!-- autofix-review-deferred ${REVIEW_STARTED_AT} -->" <<< "${DEFER_ACKS}"; then
+                    echo "🕐 #${PR}: deferred-review ack already posted for this review run"
+                  else
+                    if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                      SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                    fi
+                    if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                      echo "::warning::#${PR}: deferred-review ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                    else
+                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🕐 Review received — an automatic review of the current head is still running, so this round is held until it lands (a push now would cancel it and discard its work, #8888). Your feedback stays queued and is addressed in the next round.\n\n<details>\n<summary>中文说明</summary>\n\n🕐 已收到评审 —— 当前 head 上仍有一轮自动 review 在运行，本轮暂缓（现在推送会取消该 review 并丢弃其工作，#8888）。反馈保持排队，将在下一轮一并处理。\n\n</details>\n\n<!-- autofix-review-deferred %s -->' "${REVIEW_STARTED_AT}")" > /dev/null 2>&1 \
+                        || echo "::warning::#${PR}: deferred-review ack failed — the dedup marker is NOT posted (a later scan may ack again)"
+                    fi
+                  fi
+                fi
+              fi
               continue
             fi
             # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
