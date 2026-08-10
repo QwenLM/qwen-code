@@ -132,6 +132,41 @@ describe('settingsWriter', () => {
     expect(openaiModels.some((m) => m.id === 'user-model')).toBe(true);
   });
 
+  it('preserves CLI-recorded providerMetadata fields when re-syncing coding plan settings', () => {
+    // The CLI records builtinIds/baseUrl/ignoredVersion at install/update
+    // time; a VS Code settings sync (e.g. API key rotation) must refresh
+    // region/version without wiping those fields.
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        providerMetadata: {
+          'coding-plan': {
+            version: 'cli-recorded-version',
+            baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+            builtinIds: ['model-a', 'model-renamed-away'],
+            ignoredVersion: 'skipped-version',
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    writeCodingPlanConfig('china', 'coding-plan-key');
+
+    const settings = JSON.parse(
+      fs.readFileSync(settingsPath, 'utf-8'),
+    ) as Record<string, unknown>;
+    const metadata = (
+      settings.providerMetadata as Record<string, Record<string, unknown>>
+    )['coding-plan'];
+    expect(metadata.region).toBe('china');
+    expect(metadata.version).not.toBe('cli-recorded-version');
+    expect(metadata.baseUrl).toBe('https://coding.dashscope.aliyuncs.com/v1');
+    expect(metadata.builtinIds).toEqual(['model-a', 'model-renamed-away']);
+    expect(metadata.ignoredVersion).toBe('skipped-version');
+  });
+
   it('reads an api-key configuration after switching away from coding plan', () => {
     writeCodingPlanConfig('china', 'coding-plan-key');
 

@@ -21,6 +21,9 @@ import {
   findProviderByCredentials,
   findExistingProviderModels,
   getDefaultModelIds,
+  readRecordedBuiltinIds,
+  resolveMetadataKey,
+  PROVIDER_METADATA_NS,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -180,7 +183,20 @@ export function AuthDialog(): React.JSX.Element {
     );
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    // Same classification as the update flow: ids recorded as built-in at
+    // the last install but no longer current defaults are stale built-ins,
+    // not user customs — don't prefill what the update cleans up.
+    const recordedBuiltinIds = new Set(
+      readRecordedBuiltinIds(
+        resolveMetadataKey(providerConfig),
+        (settings.merged as Record<string, unknown>)[PROVIDER_METADATA_NS] as
+          | Record<string, unknown>
+          | undefined,
+      ),
+    );
+    return saved.models
+      .map((m) => m.id)
+      .filter((id) => !builtinIds.has(id) && !recordedBuiltinIds.has(id));
   };
 
   const handleProviderSelect = (providerId: string) => {

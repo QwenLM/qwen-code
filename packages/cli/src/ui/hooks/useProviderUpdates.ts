@@ -19,6 +19,7 @@ import {
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
+  readRecordedBuiltinIds,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
@@ -72,9 +73,13 @@ function getProviderMetadata(
     | undefined;
   if (!ns) return {};
   const metadata = ns[metadataKey];
-  return metadata && typeof metadata === 'object'
-    ? (metadata as ProviderMetadata)
-    : {};
+  const record =
+    metadata && typeof metadata === 'object'
+      ? (metadata as ProviderMetadata)
+      : {};
+  // Settings are hand-editable — validate builtinIds before any removal
+  // decision relies on it.
+  return { ...record, builtinIds: readRecordedBuiltinIds(metadataKey, ns) };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,11 +180,17 @@ function readInstalledOwnedIds(
 function getInstalledOwnedModelIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
+  previousBuiltinIds: string[],
 ): string[] {
   // Only compare built-in model IDs — user-added custom models should not
   // appear as "removed" in the diff since they were never part of the
-  // provider's built-in list.
-  const builtinIds = new Set(getDefaultModelIds(provider));
+  // provider's built-in list. Ids recorded as built-in at the last install
+  // stay in the comparison so stale built-ins the update drops show up as
+  // removals and the preview matches what confirm actually does.
+  const builtinIds = new Set([
+    ...getDefaultModelIds(provider),
+    ...previousBuiltinIds,
+  ]);
   return readInstalledOwnedIds(settings, provider).filter((id) =>
     builtinIds.has(id),
   );
@@ -204,7 +215,11 @@ function findAllPendingUpdates(
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
 
-    const existingModelIds = getInstalledOwnedModelIds(settings, provider);
+    const existingModelIds = getInstalledOwnedModelIds(
+      settings,
+      provider,
+      metadata.builtinIds ?? [],
+    );
     const newModelIds = provider.models!.map((s) => s.id);
     const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
 
@@ -247,14 +262,20 @@ export function useProviderUpdates(
         // "custom" only if it is not a current default AND was not part of the
         // built-in list at the last install (metadata.builtinIds). Stale
         // built-ins are dropped so they get cleaned up instead of persisting
-        // forever.
+        // forever. Installs predating builtinIds recording fall back to []
+        // and keep already-stale ids — they cannot be safely distinguished
+        // from user customs.
         const defaultIds = getDefaultModelIds(providerCfg);
         const metadataKey = resolveMetadataKey(providerCfg);
         const previousBuiltinIds = metadataKey
           ? (getProviderMetadata(settings, metadataKey).builtinIds ?? [])
           : [];
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
+        const ownedIds = readInstalledOwnedIds(settings, providerCfg);
+        const customIds = ownedIds.filter(
           (id) => !defaultIds.includes(id) && !previousBuiltinIds.includes(id),
+        );
+        const droppedStaleBuiltinIds = ownedIds.filter(
+          (id) => !defaultIds.includes(id) && previousBuiltinIds.includes(id),
         );
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
@@ -312,6 +333,18 @@ export function useProviderUpdates(
                 '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
                 { plan: displayName, model: activeModel },
               ),
+            },
+            Date.now(),
+          );
+        }
+
+        if (droppedStaleBuiltinIds.length > 0) {
+          addItem(
+            {
+              type: 'info',
+              text: t('Removed outdated built-in models: {{ids}}', {
+                ids: droppedStaleBuiltinIds.join(', '),
+              }),
             },
             Date.now(),
           );

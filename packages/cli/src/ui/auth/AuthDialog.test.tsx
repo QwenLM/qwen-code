@@ -1339,6 +1339,101 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   );
 
   itWhenTuiInputReliable(
+    'should not pre-fill stale built-in model IDs recorded in providerMetadata',
+    async () => {
+      // The saved model list holds a renamed-away built-in (recorded in
+      // providerMetadata.builtinIds but no longer a default) alongside a
+      // true custom model — only the custom one may be prefilled, or the
+      // wizard would reinstall what the update flow cleans up.
+      const savedSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          openai: [
+            {
+              id: 'renamed-away-model',
+              name: '[ModelStudio Token Plan] renamed-away-model',
+              baseUrl:
+                'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+              envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+            },
+            {
+              id: 'my-custom-token-model',
+              name: '[ModelStudio Token Plan] my-custom-token-model',
+              baseUrl:
+                'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+              envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+            },
+          ],
+        },
+        providerMetadata: {
+          'token-plan': {
+            version: 'old-version-hash',
+            baseUrl:
+              'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+            builtinIds: ['qwen3.7-plus', 'qwen3.7-max', 'renamed-away-model'],
+          },
+        },
+      } as unknown as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: savedSettings,
+          originalSettings: savedSettings,
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      stdin.write('\r');
+      await waitForSelectedOption(lastFrame, 'Coding Plan');
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
+      );
+
+      await typeText(stdin, 'sk-token-plan');
+
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 3/3 · Model IDs',
+      );
+
+      expect(lastFrame()).toContain('my-custom-token-model');
+      expect(lastFrame()).not.toContain('renamed-away-model');
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
     'should return from Token Plan API key input to Token Plan selection',
     async () => {
       const settings: LoadedSettings = new LoadedSettings(

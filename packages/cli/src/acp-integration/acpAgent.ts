@@ -27,6 +27,7 @@ import {
   QwenOAuth2Event,
   qwenOAuth2Events,
   resolveBaseUrl,
+  resolveMetadataKey,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   runForkedAgent,
@@ -44,11 +45,13 @@ import {
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
+  PROVIDER_METADATA_NS,
   INVOCATION_CONTEXT_META_KEY,
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   parseInvocationContext,
   findExistingProviderModels,
+  readRecordedBuiltinIds,
   ExtensionManager,
   ExtensionSettingScope,
   HookEventName,
@@ -2084,13 +2087,33 @@ function readExistingProviderConfig(
 
   const advancedConfig = readExistingAdvancedConfig(firstModel);
 
+  // Same classification as the update flow: ids recorded as built-in at the
+  // last install but no longer current defaults are stale built-ins — don't
+  // serialize them, or clients that echo modelIds back on connect would
+  // reinstall what the update cleans up.
+  const defaultIds = new Set(getDefaultModelIds(config));
+  const staleBuiltinIds = new Set(
+    readRecordedBuiltinIds(
+      resolveMetadataKey(config),
+      (settings.merged as Record<string, unknown>)[PROVIDER_METADATA_NS] as
+        | Record<string, unknown>
+        | undefined,
+    ).filter((id) => !defaultIds.has(id)),
+  );
+
   return {
     protocol,
     baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
-    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    ...(existing
+      ? {
+          modelIds: existing.models
+            .map((model) => model.id)
+            .filter((id) => !staleBuiltinIds.has(id)),
+        }
+      : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }

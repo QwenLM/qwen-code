@@ -342,9 +342,19 @@ export function writeCodingPlanConfig(
   providers[AuthType.USE_OPENAI] = [...planModels, ...nonCodingPlan];
 
   // Coding Plan metadata — write to the providerMetadata namespace that
-  // the CLI now reads from. Remove legacy top-level key if present.
+  // the CLI now reads from. Remove legacy top-level key if present. Merge
+  // over the existing entry: the CLI records fields this sync doesn't know
+  // about (builtinIds, baseUrl, ignoredVersion) and replacing the object
+  // would wipe them.
   const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
+  const existingMetadata =
+    providerMetadata['coding-plan'] &&
+    typeof providerMetadata['coding-plan'] === 'object' &&
+    !Array.isArray(providerMetadata['coding-plan'])
+      ? (providerMetadata['coding-plan'] as Record<string, unknown>)
+      : {};
   providerMetadata['coding-plan'] = {
+    ...existingMetadata,
     region: codingRegion,
     version: planConfig.version,
   };

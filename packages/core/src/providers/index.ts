@@ -28,6 +28,7 @@ export {
   getDefaultModelIds,
   providerMatchesCredentials,
   PROVIDER_METADATA_NS,
+  readRecordedBuiltinIds,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,

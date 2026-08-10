@@ -410,6 +410,26 @@ export function findExistingProviderModels(
   return undefined;
 }
 
+/**
+ * Read the built-in model ids recorded at the last install from the raw
+ * `providerMetadata` namespace. Returns [] when nothing was recorded (e.g.
+ * installs predating the recording) or the value is malformed.
+ */
+export function readRecordedBuiltinIds(
+  metadataKey: string | undefined,
+  providerMetadata: Record<string, unknown> | undefined,
+): string[] {
+  if (!metadataKey) return [];
+  const record = providerMetadata?.[metadataKey];
+  const builtinIds =
+    record && typeof record === 'object'
+      ? (record as Record<string, unknown>)['builtinIds']
+      : undefined;
+  return Array.isArray(builtinIds)
+    ? builtinIds.filter((id): id is string => typeof id === 'string')
+    : [];
+}
+
 // ---------------------------------------------------------------------------
 // Check if a step should be shown in the UI
 // ---------------------------------------------------------------------------

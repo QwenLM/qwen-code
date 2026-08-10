@@ -440,6 +440,40 @@ describe('findExistingProviderModels', () => {
   });
 });
 
+describe('readRecordedBuiltinIds (via source import)', () => {
+  it('returns the recorded builtinIds for a known metadata key', () => {
+    expect(
+      readRecordedBuiltinIdsSrc('coding-plan', {
+        'coding-plan': { version: 'v1', builtinIds: ['a', 'b'] },
+      }),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('returns [] when the key is missing or undefined', () => {
+    expect(readRecordedBuiltinIdsSrc(undefined, {})).toEqual([]);
+    expect(readRecordedBuiltinIdsSrc('coding-plan', { other: {} })).toEqual([]);
+    expect(readRecordedBuiltinIdsSrc('coding-plan', undefined)).toEqual([]);
+  });
+
+  it('returns [] for malformed builtinIds values', () => {
+    expect(
+      readRecordedBuiltinIdsSrc('coding-plan', {
+        'coding-plan': { builtinIds: 'not-an-array' },
+      }),
+    ).toEqual([]);
+    expect(
+      readRecordedBuiltinIdsSrc('coding-plan', {
+        'coding-plan': { builtinIds: ['a', 42, null, 'b'] },
+      }),
+    ).toEqual(['a', 'b']);
+    expect(
+      readRecordedBuiltinIdsSrc('coding-plan', {
+        'coding-plan': 'scalar-record',
+      }),
+    ).toEqual([]);
+  });
+});
+
 describe('shouldShowStep', () => {
   it('shows protocol step only when multiple options', () => {
     const single = makeConfig({
@@ -676,6 +710,7 @@ import {
 import {
   resolveBaseUrl as resolveBaseUrlSrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
+  readRecordedBuiltinIds as readRecordedBuiltinIdsSrc,
 } from '../provider-config.js';
 
 describe('resolveBaseUrl edge cases', () => {

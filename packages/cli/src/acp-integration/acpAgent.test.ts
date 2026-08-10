@@ -394,6 +394,26 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       return undefined;
     },
   ),
+  PROVIDER_METADATA_NS: 'providerMetadata',
+  resolveMetadataKey: vi.fn((provider: { id: string; models?: unknown[] }) =>
+    provider.models ? provider.id : undefined,
+  ),
+  readRecordedBuiltinIds: vi.fn(
+    (
+      metadataKey: string | undefined,
+      providerMetadata: Record<string, unknown> | undefined,
+    ) => {
+      if (!metadataKey) return [];
+      const record = providerMetadata?.[metadataKey];
+      const builtinIds =
+        record && typeof record === 'object'
+          ? (record as Record<string, unknown>)['builtinIds']
+          : undefined;
+      return Array.isArray(builtinIds)
+        ? builtinIds.filter((id): id is string => typeof id === 'string')
+        : [];
+    },
+  ),
   ExtensionManager: vi.fn().mockImplementation(() => ({
     refreshCache: mockExtensionManagerState.refreshCache,
     getLoadedExtensions: vi.fn(() => mockExtensionManagerState.extensions),
@@ -11138,6 +11158,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(JSON.stringify(providers)).not.toContain('sk-provider');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/list excludes stale built-ins from existing modelIds', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              baseUrl: 'https://api.deepseek.com/v1',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+            {
+              id: 'deepseek-renamed-away',
+              baseUrl: 'https://api.deepseek.com/v1',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+            {
+              id: 'my-custom-model',
+              baseUrl: 'https://api.deepseek.com/v1',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+          ],
+        },
+        providerMetadata: {
+          deepseek: {
+            version: 'old-version-hash',
+            baseUrl: 'https://api.deepseek.com',
+            builtinIds: ['deepseek-chat', 'deepseek-renamed-away'],
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const providers = await agent.extMethod('qwen/providers/list', {});
+    expect(providers).toEqual({
+      providers: [
+        expect.objectContaining({
+          id: 'deepseek',
+          existingConfig: expect.objectContaining({
+            // The recorded built-in that is no longer a default must not be
+            // serialized — echoing it back on connect would reinstall it.
+            modelIds: ['deepseek-chat', 'my-custom-model'],
+          }),
+        }),
+      ],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

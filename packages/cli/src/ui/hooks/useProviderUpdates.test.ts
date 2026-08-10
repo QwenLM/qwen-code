@@ -191,6 +191,46 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.currentModelAffected).toBe(false);
   });
 
+  it('shows stale built-in removals in the prompt diff before confirming', async () => {
+    const staleBuiltinId = 'renamed-away-model';
+    mockConfig.getModel.mockReturnValue(staleBuiltinId);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      builtinIds: [...chinaTemplate.map((m) => m.id), staleBuiltinId],
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...chinaTemplate,
+        {
+          id: staleBuiltinId,
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          envKey: CODING_PLAN_ENV_KEY,
+          name: `[Coding Plan] ${staleBuiltinId}`,
+        },
+      ],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    const entry = result.current.providerUpdateRequest?.entries[0];
+    expect(entry?.diff.removed).toContain(staleBuiltinId);
+    expect(entry?.diff.currentModelAffected).toBe(true);
+    expect(entry?.diff.fallbackModel).toBe(chinaTemplate[0]!.id);
+  });
+
   it('detects newly added built-in models when the template grows', async () => {
     // Simulate an older install that lacks the last built-in model.
     const olderTemplate = chinaTemplate.slice(0, -1);
@@ -318,6 +358,18 @@ describe('useProviderUpdates', () => {
     const ids = reloaded[AuthType.USE_OPENAI].map((m: { id: string }) => m.id);
     expect(ids).toContain('my-custom-model');
     expect(ids).not.toContain(staleBuiltinId);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining(staleBuiltinId),
+      }),
+      expect.anything(),
+    );
   });
 
   it('executes update when user confirms with "update"', async () => {
