@@ -7296,6 +7296,15 @@ describe('GeminiChat', async () => {
         expect(
           events.filter((event) => event.type === StreamEventType.RETRY),
         ).toHaveLength(2);
+        // The not-taken log must attribute the stop to budget exhaustion —
+        // no content was delivered here, so 'skipped_after_content' would
+        // be a misattribution of "gave up" as "unsafe to recover".
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry not taken',
+          expect.objectContaining({
+            retryDecision: 'exhausted',
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -7381,9 +7390,11 @@ describe('GeminiChat', async () => {
     it('retries a transport stream error after yielding only thinking chunks', async () => {
       // Thinking models stream thought parts within seconds, then can
       // spend minutes reasoning — exactly when gateways close long-lived
-      // SSE connections (#7832). Thought parts are ephemeral (never
-      // recorded as the assistant's response in history), so the replay
-      // cannot duplicate user-visible output and must be allowed.
+      // SSE connections (#7832). The replay is safe because the failed
+      // attempt's partial turn is discarded wholesale before the retry
+      // and thought parts are never user-visible content — the successful
+      // attempt's thoughts DO land in history — so the replay cannot
+      // duplicate anything the caller saw and must be allowed.
       vi.useFakeTimers();
       try {
         const transportError = Object.assign(new TypeError('terminated'), {
@@ -7542,6 +7553,25 @@ describe('GeminiChat', async () => {
       }
     });
 
+    // Shared transport-cut fixtures — used by the function-call cut test
+    // below and by the 'transport stream continuation' suite. A single
+    // producer for the error shape the transport retry gate classifies,
+    // so a change to the retryable-code handling has one place to update.
+    const socketCut = () =>
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      });
+
+    /** Stream that yields `chunks` and then dies from a socket cut. */
+    function cutAfter(chunks: GenerateContentResponse[]) {
+      return (async function* () {
+        for (const chunk of chunks) yield chunk;
+        throw socketCut();
+      })();
+    }
+
     it('attributes a blocked replay to delivered content when a function call was cut', async () => {
       // A cut after a functionCall part closes both recovery paths: the
       // delivered functionCall is non-thought output (a replay would
@@ -7549,15 +7579,9 @@ describe('GeminiChat', async () => {
       // excluded. The not-taken log must attribute the block to delivered
       // content rather than budget exhaustion — the diagnostic that
       // separates "unsafe to recover" from "gave up" in the debug log.
-      const transportError = Object.assign(new TypeError('terminated'), {
-        cause: Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        }),
-      });
-
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
+        cutAfter([
+          {
             candidates: [
               {
                 content: {
@@ -7565,8 +7589,8 @@ describe('GeminiChat', async () => {
                 },
               },
             ],
-          } as unknown as GenerateContentResponse;
-          yield {
+          } as unknown as GenerateContentResponse,
+          {
             candidates: [
               {
                 content: {
@@ -7574,9 +7598,8 @@ describe('GeminiChat', async () => {
                 },
               },
             ],
-          } as unknown as GenerateContentResponse;
-          throw transportError;
-        })(),
+          } as unknown as GenerateContentResponse,
+        ]),
       );
 
       const stream = await chat.sendMessageStream(
@@ -7655,19 +7678,22 @@ describe('GeminiChat', async () => {
         expect(
           events.filter((event) => event.type === StreamEventType.RETRY),
         ).toHaveLength(1);
+        // The preparation chunk has no candidate output at all, so the
+        // retry log must record that no non-content chunks flowed — the
+        // false side of the diagnostic the thinking-phase test pins true.
+        expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+          'Transport stream retry scheduled',
+          expect.objectContaining({
+            retryDecision: 'retry',
+            yieldedNonContentChunks: false,
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }
     });
 
     describe('transport stream continuation (#7832)', () => {
-      const socketCut = () =>
-        Object.assign(new TypeError('terminated'), {
-          cause: Object.assign(new Error('other side closed'), {
-            code: 'UND_ERR_SOCKET',
-          }),
-        });
-
       function textChunk(
         text: string,
         finishReason?: string,
@@ -7680,14 +7706,6 @@ describe('GeminiChat', async () => {
             },
           ],
         } as unknown as GenerateContentResponse;
-      }
-
-      /** Stream that yields `chunks` and then dies from a socket cut. */
-      function cutAfter(chunks: GenerateContentResponse[]) {
-        return (async function* () {
-          for (const chunk of chunks) yield chunk;
-          throw socketCut();
-        })();
       }
 
       function requestContentsOfCall(index: number): Content[] {
