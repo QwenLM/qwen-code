@@ -111,39 +111,45 @@ describe('ParallelAgentsGroup activity rendering', () => {
   });
 
   it('keeps task, current activity, and metrics in compact stable fields', () => {
-    const container = renderExpandedGroup([
-      agent({
-        callId: 'active',
-        status: 'in_progress',
-        startTime: Date.now() - 8_000,
-        args: {
-          description: 'Inspect the message list',
-          subagent_type: 'reviewer',
-        },
-        subTools: [
-          {
-            callId: 'read',
-            toolName: 'Read',
-            status: 'in_progress',
-            args: { file_path: 'src/MessageList.tsx' },
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:08Z'));
+      const container = renderExpandedGroup([
+        agent({
+          callId: 'active',
+          status: 'in_progress',
+          startTime: Date.now() - 8_000,
+          args: {
+            description: 'Inspect the message list',
+            subagent_type: 'reviewer',
           },
-        ],
-      }),
-    ]);
+          subTools: [
+            {
+              callId: 'read',
+              toolName: 'Read',
+              status: 'in_progress',
+              args: { file_path: 'src/MessageList.tsx' },
+            },
+          ],
+        }),
+      ]);
 
-    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
-      'Inspect the message list',
-    );
-    expect(container.querySelector('[class*="rowType"]')?.textContent).toBe(
-      'reviewer:',
-    );
-    expect(
-      container.querySelector('[class*="rowActivity"]')?.textContent,
-    ).toContain('MessageList.tsx');
-    expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
-      '8s',
-    );
-    expect(container.querySelector('[class*="rowAction"]')).not.toBeNull();
+      expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+        'Inspect the message list',
+      );
+      expect(container.querySelector('[class*="rowType"]')?.textContent).toBe(
+        'reviewer:',
+      );
+      expect(
+        container.querySelector('[class*="rowActivity"]')?.textContent,
+      ).toContain('MessageList.tsx');
+      expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+        '8s',
+      );
+      expect(container.querySelector('[class*="rowAction"]')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('omits the default agent type while keeping its task description', () => {
