@@ -6210,6 +6210,8 @@ export class Session implements SessionContext {
                     this.#stopCronAfterTokenLimit();
                   }
                 }
+                // Keep transcript replay aligned with model history: persist
+                // only if the prompt reached the model or was preserved in full.
                 if (
                   turnCount === 1 &&
                   (responseStream || preserveFullMessage)
