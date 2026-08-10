@@ -30,6 +30,11 @@ import {
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
+  ROUND_CAP_PHRASE,
+  roundCapStopDisclosure,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
+  writeRoundCapStop,
   stampRound,
   verifyBudgetExhausted,
   verifyBudgetMessage,
@@ -439,6 +444,50 @@ describe('reverseAuditBudgetMessage', () => {
     );
     expect(msg).toContain('0 minute(s) remain');
     expect(msg).toContain('stopped before the next round');
+  });
+});
+
+describe('writeRoundCapStop — the round-cap marker', () => {
+  it('round-trips through readBudgetStop with cause and cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
+      expect(stop?.entry).toBe(roundCapStopEntry(3));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('disclosure names the cap in both languages', () => {
+    expect(roundCapStopDisclosure(3).reason).toContain(ROUND_CAP_PHRASE);
+    expect(roundCapStopDisclosure(3).reason).toContain('of 3');
+    expect(roundCapStopEntryZh(3)).toContain('3');
+  });
+
+  it('writes round as an explicit null when the caller passes undefined', () => {
+    // The chunkless call site (agent-prompt.ts) passes `round: undefined`; the
+    // `?? null` fallback must keep the key PRESENT with a null value, not let
+    // JSON.stringify drop it — a consumer that distinguishes null from an
+    // absent key would otherwise misread the marker.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, undefined, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop).not.toBeNull();
+      expect(stop && 'round' in stop).toBe(true);
+      expect(stop?.round).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

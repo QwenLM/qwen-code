@@ -347,6 +347,70 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain(command);
     });
 
+    it('strips BIDI OVERRIDES from the OUTPUT TAIL — the biggest field', () => {
+      // The sibling test below asserts modelText-wide absence, which reads
+      // as whole-envelope coverage but is not: its fixture shell has no
+      // output file, so <output-tail> renders the canned unreadable form
+      // and is never exercised. The tail is the LARGEST
+      // attacker-controllable field — up to 8 KiB of a background shell's
+      // own output — and it renders through a different helper, which
+      // stripped C0/C1 but passed bidi overrides through verbatim
+      // (probe-verified). Newlines must survive the fix.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      // ALL NINE codepoints of both stripped ranges: pinning one per
+      // range let a one-character bound typo (0x202a→0x202b,
+      // 0x2066→0x2067) ship green (probe-verified).
+      const outputPath = makeOutputFile(
+        'line one\nharmless\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069 two\n',
+      );
+      reg.register(makeEntry({ shellId: 'tail-bidi', outputPath }));
+
+      reg.complete('tail-bidi', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<output-tail');
+      const bidi = '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069';
+      for (const ch of bidi) {
+        expect(modelText).not.toContain(ch);
+      }
+      // The tail keeps its line structure AND the text after the stripped
+      // characters survives — the strip must not eat \n or truncate at
+      // the first bidi marker.
+      expect(modelText).toContain('line one\nharmlessevil two</output-tail>');
+    });
+
+    it('strips BIDI OVERRIDES from the notification, not just C0/C1', () => {
+      // The shared helper this renders through removes U+202A-202E and
+      // U+2066-2069 as well as C0/C1 — the registry's own former copy did
+      // not. Those characters reorder how a path DISPLAYS without changing
+      // its bytes, so `/tmp/a<RLO>evil<PDI>/out.log` can render as
+      // something else entirely in a model-facing envelope. This pins the
+      // stronger behaviour that came with the shared helper.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      const outputPath = join(makeTempDir(), 'a\u202Eevil\u2069.log');
+      reg.register(
+        makeEntry({
+          shellId: 'bidi',
+          // command and cwd render through the same shared helper — pin
+          // them too, so a field-local bidi-blind sanitizer fails here.
+          command: 'cat \u202Efd\u2069.txt',
+          cwd: '/repo/\u202Efd\u2069',
+          outputPath,
+        }),
+      );
+
+      reg.complete('bidi', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
+    });
+
     it('escapes XML and strips display control characters on failure', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
@@ -361,7 +425,7 @@ describe('BackgroundShellRegistry', () => {
         }),
       );
 
-      reg.fail('a&b', 'bad <thing>\x1B[31m', 2000);
+      reg.fail('a&b', 'bad <thing>\x1B[31m \u202Eevil\u2069', 2000);
 
       const [displayText, modelText] = callback.mock.calls[0];
       expect(displayText).toBe('Background shell "echo "<script>"" failed.');
@@ -370,7 +434,13 @@ describe('BackgroundShellRegistry', () => {
         '<command>echo &quot;&lt;script&gt;&quot;</command>',
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
-      expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
+      expect(modelText).toContain(
+        '<result>bad &lt;thing&gt;[31m evil</result>',
+      );
+      // The bidi pair in the fixture pins the fourth render site: <result>
+      // is the failed shell's error string and renders only on this path.
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
       // Assert the whole element, not just the tail: the temp prefix is
       // random but the escaping is what this test is about.
       expect(modelText).toContain(expectedOutputFileElement(outputPath));
