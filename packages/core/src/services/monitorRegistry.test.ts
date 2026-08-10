@@ -663,6 +663,30 @@ describe('MonitorRegistry', () => {
     expect(modelText).not.toContain('\u0085');
   });
 
+  it('strips BIDI overrides from the streaming event <result>, not just the display line', () => {
+    // The display line is built from `safeEventLine`, but the model-facing
+    // <result> used to render from the raw event line — the one path that
+    // carries live untrusted process output (server logs, third-party
+    // stdout) to the model. Pin all nine codepoints of both stripped
+    // ranges so a one-character bound typo ships red.
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    registry.register(createEntry());
+
+    registry.emitEvent(
+      'mon-1',
+      '/tmp/a\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069/out.log',
+    );
+
+    const [displayText, modelText] = callback.mock.calls[0] as [string, string];
+    expect(modelText).toContain('<result>/tmp/aevil/out.log</result>');
+    const bidi = '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069';
+    for (const ch of bidi) {
+      expect(modelText).not.toContain(ch);
+      expect(displayText).not.toContain(ch);
+    }
+  });
+
   it('propagates toolUseId in notification XML and meta', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
