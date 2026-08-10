@@ -250,6 +250,7 @@ export function validateAgentViewLaunchConfig(
   validateOptionalString(value, 'sandbox', errors);
   validateOptionalString(value, 'settingsDigest', errors);
   validateOptionalString(value, 'mcpDigest', errors);
+  validateOptionalString(value, 'initialPrompt', errors);
   validateTerminal(value['terminal'], errors);
 
   if (errors.length > 0) {

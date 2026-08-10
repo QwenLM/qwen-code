@@ -286,6 +286,19 @@ describe('agent view supervisor store', () => {
     expect(states.map((state) => state.sessionId)).toEqual(['newer', 'older']);
   });
 
+  it('isolates an unreadable session entry instead of failing the list', async () => {
+    await writeAgentViewSessionState(sessionState('healthy'), {
+      globalDir: tempDir,
+    });
+    const unreadable = getAgentViewSessionPaths('unreadable', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(unreadable.statePath, { recursive: true });
+
+    const states = await listAgentViewSessionStates({ globalDir: tempDir });
+    expect(states.map((state) => state.sessionId)).toEqual(['healthy']);
+  });
+
   it('includes roster entries in session snapshots', async () => {
     await writeAgentViewSessionState(sessionState('session-1'), {
       globalDir: tempDir,

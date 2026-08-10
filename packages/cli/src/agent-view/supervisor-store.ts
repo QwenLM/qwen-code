@@ -579,7 +579,7 @@ function normalizeActivity(
   }) as AgentViewActivityFile;
 }
 
-function redactAgentViewWorker(
+export function redactAgentViewWorker(
   worker: AgentViewWorkerFile | undefined,
 ): AgentViewWorkerFile | undefined {
   if (!worker) return undefined;

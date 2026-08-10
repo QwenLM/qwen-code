@@ -330,7 +330,7 @@ function deriveSubtitle(
   const result = cleanText(activity?.lastResult);
   if (result) return result;
   if (taskState === 'stopped') return 'Stopped by user';
-  if (taskState === 'failed') return 'Worker exited unexpectedly';
+  if (taskState === 'failed') return 'Session failed';
   return '';
 }
 

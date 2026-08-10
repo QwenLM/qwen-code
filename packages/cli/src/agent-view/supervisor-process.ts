@@ -36,6 +36,7 @@ import {
   readAgentViewActivity,
   readAgentViewSessionState,
   readAgentViewWorker,
+  redactAgentViewWorker,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
   updateAgentViewRosterEntry,
@@ -394,15 +395,28 @@ class AgentViewSupervisorProcessHandler
       adoption.sessionId,
       store,
     );
-    if (
-      existingState?.ownership === 'managed' ||
-      existingState?.ownership === 'adopting'
-    ) {
+    if (existingState?.ownership === 'managed') {
       return {
         sessionId: adoption.sessionId,
         adopted: false,
         alreadyManaged: true,
       };
+    }
+    if (existingState?.ownership === 'adopting') {
+      const worker = await readAgentViewWorker(adoption.sessionId, store);
+      if (
+        this.workers.has(adoption.sessionId) ||
+        isPidRunning(worker?.hostPid) ||
+        isPidRunning(worker?.workerPid)
+      ) {
+        return {
+          sessionId: adoption.sessionId,
+          adopted: false,
+          alreadyManaged: true,
+        };
+      }
+      // Stale 'adopting' left by a supervisor crash mid-adopt: no live host
+      // or worker process remains, so allow the session to be re-adopted.
     }
     if (this.workers.has(adoption.sessionId)) {
       throw new Error(
@@ -730,7 +744,9 @@ class AgentViewSupervisorProcessHandler
       sessionId,
       state,
       activity,
-      worker: await readAgentViewWorker(sessionId, store),
+      worker: redactAgentViewWorker(
+        await readAgentViewWorker(sessionId, store),
+      ),
       live: this.workers.has(sessionId),
     };
   }
@@ -2218,9 +2234,7 @@ function getQueuedPromptActivityPatch(
   };
 }
 
-function getDequeuedPromptActivityPatch(
-  _activity: AgentViewActivityFile | undefined,
-): Partial<AgentViewActivityFile> {
+function getDequeuedPromptActivityPatch(): Partial<AgentViewActivityFile> {
   return {
     queuedPromptCount: undefined,
     queuedPromptPreview: undefined,
@@ -2483,7 +2497,7 @@ async function applyWorkerEvent(
             ? { lastResult: event.lastResult }
             : { lastResult: undefined }),
           ...(shouldClearPendingPrompt(event, state, existingActivity)
-            ? getDequeuedPromptActivityPatch(existingActivity)
+            ? getDequeuedPromptActivityPatch()
             : {}),
           capabilities:
             event.type === 'ready'
@@ -2638,7 +2652,7 @@ async function clearStalePendingPromptIfNeeded(
   }
   const nextActivity = {
     ...activity,
-    ...getDequeuedPromptActivityPatch(activity),
+    ...getDequeuedPromptActivityPatch(),
   };
   await writeAgentViewActivity(state.sessionId, nextActivity, store);
   return nextActivity;
@@ -2656,7 +2670,7 @@ async function clearPersistedPromptQueue(
     sessionId,
     {
       ...activity,
-      ...getDequeuedPromptActivityPatch(activity),
+      ...getDequeuedPromptActivityPatch(),
     },
     store,
   );
