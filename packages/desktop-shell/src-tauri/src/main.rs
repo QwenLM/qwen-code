@@ -717,9 +717,27 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn pending_fullscreen_hide_forces_reopen_restore() {
-        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Relaxed);
-        assert!(should_restore_main_window(true, false));
+    fn should_restore_main_window_truth_table() {
+        // has_visible, main_needs_restore, FULLSCREEN_PENDING → expected
+        let cases: &[(bool, bool, bool, bool)] = &[
+            (true,  false, false, false),
+            (true,  false, true,  true),
+            (true,  true,  false, true),
+            (true,  true,  true,  true),
+            (false, false, false, true),
+            (false, false, true,  true),
+            (false, true,  false, true),
+            (false, true,  true,  true),
+        ];
+        for (has_visible, needs_restore, pending, expected) in cases {
+            FULLSCREEN_HIDE_PENDING.store(*pending, Ordering::Relaxed);
+            assert_eq!(
+                should_restore_main_window(*has_visible, *needs_restore),
+                *expected,
+                "has_visible={}, needs_restore={}, pending={}",
+                has_visible, needs_restore, pending,
+            );
+        }
         FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
     }
 
