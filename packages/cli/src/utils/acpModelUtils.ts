@@ -180,26 +180,42 @@ export function sanitizeProviderBaseUrl(baseUrl: string): string {
 }
 
 /**
- * A URL whose authority has a dotted host + numeric port followed by prose
- * containing '@' (e.g. `https://api.example:8443 - contact admin@example.com`)
- * is misparsed by WHATWG as userinfo (username=`api.example`, password=
- * `8443 - contact admin`). The prose '@' would become the strip point and
- * corrupt the message. Veto when the segment between the first ':' and the
- * next whitespace is all digits (a port) AND the host before the colon is
- * dotted. #8136.
+ * A URL whose authority looks like `host:port <prose with @>` (e.g.
+ * `https://api.example:8443 - contact admin@example.com`) is misparsed by WHATWG
+ * as userinfo. The prose '@' would become the strip point and corrupt the
+ * message. Veto when the authority has a host-shape before a port colon, a
+ * digit port (optionally trailing punctuation), and a later '@' in prose.
  *
- * The dotted-host check is the discriminator that lets a real digit-prefix
- * password (`user:1234 secret@host`) through: its username is a single bare
- * label, not a dotted host. #8136 R1-2.
+ * The host check accepts dotted OR dotless host labels (covers `ollama` as well
+ * as `api.example`); IPv6 bracket literals skip past the `]` to find the port
+ * colon. #8136 R1-7/R5-1/R5-5/R6-1.
+ *
+ * KNOWN RESIDUAL: a dotted/dotless USERNAME + digit-prefix password + space
+ * (`user:1234 secret@host`, `foo.bar:1234 secret@host`) is locally
+ * indistinguishable from `host:port <prose>` here and is also vetoed, leaking
+ * the credential. These two classes cannot be separated at this veto without a
+ * parser oracle; the leak is a documented tradeoff pending maintainer sign-off.
+ * #8136 R1-2/R5-7.
  */
 function isLikelyPortProseMisparse(
   baseUrl: string,
   authorityStart: number,
   authorityEnd: number,
 ): boolean {
-  const colon = baseUrl.indexOf(':', authorityStart);
+  // Locate the port colon, skipping IPv6 bracket literals.
+  let colon = baseUrl.indexOf(':', authorityStart);
   if (colon === -1 || colon > authorityEnd) {
     return false;
+  }
+  if (baseUrl[authorityStart] === '[') {
+    const close = baseUrl.indexOf(']', authorityStart);
+    if (close === -1 || close >= authorityEnd) {
+      return false;
+    }
+    colon = baseUrl.indexOf(':', close + 1);
+    if (colon === -1 || colon > authorityEnd) {
+      return false;
+    }
   }
   // A real userinfo has its '@' before the colon (`user@host:99999`); an '@'
   // before the colon means userinfo, not a host:port prose shape.
@@ -208,18 +224,25 @@ function isLikelyPortProseMisparse(
     return false;
   }
   const beforeColon = baseUrl.slice(authorityStart, colon);
-  if (!/\./.test(beforeColon)) {
+  // Host-shape: dotted or a single dotless label (not '[' content, which the
+  // IPv6 branch already handled).
+  if (!/^[A-Za-z0-9._-]+$/.test(beforeColon)) {
     return false;
   }
   const afterColon = baseUrl.slice(colon + 1, authorityEnd);
+  // The prose must contain an '@' after the port+whitespace run.
+  if (!afterColon.includes('@')) {
+    return false;
+  }
   const wsInAfter = afterColon.search(/\s/);
-  const portCandidate =
-    wsInAfter === -1 ? afterColon : afterColon.slice(0, wsInAfter);
-  // Accept a digit run that ends at whitespace; the slicer already strips the
-  // trailing segment. All-digit is the port guard (e.g. `8443`); `8443,`/`8443.`
-  // are port-followed-by-punctuation, which slice to `8443` at the next
-  // whitespace boundary. #8136 R1-7.
-  return /^\d+$/.test(portCandidate);
+  if (wsInAfter === -1) {
+    return false; // no whitespace => no prose separator
+  }
+  const portCandidate = afterColon.slice(0, wsInAfter);
+  // Digit port, optionally followed by one non-alphanumeric char (`,;.` em-dash
+  // etc.). An empty candidate (`ollama.local: please ...`) is also a prose
+  // shape where the ':' is the prose separator, not a port. #8136 R1-7/R6-1.
+  return portCandidate === '' || /^\d+[^A-Za-z0-9]?$/.test(portCandidate);
 }
 
 /** A clean hostname (with optional numeric port) to the end of the authority. */
@@ -262,7 +285,15 @@ function findUserInfoStripPoint(
     // between the last '/' and the candidate has no whitespace (prose guard).
     const fullAt = baseUrl.lastIndexOf('@');
     if (fullAt >= authorityStart) {
-      const colon = baseUrl.indexOf(':', authorityStart);
+      // Locate the userinfo colon, skipping IPv6 bracket literals so `[::1]`'s
+      // inner colons are not mistaken for the delimiter. #8136 R6-2.
+      let colon = baseUrl.indexOf(':', authorityStart);
+      if (baseUrl[authorityStart] === '[') {
+        const close = baseUrl.indexOf(']', authorityStart);
+        if (close !== -1 && close < authorityEnd) {
+          colon = baseUrl.indexOf(':', close + 1);
+        }
+      }
       if (colon !== -1 && colon < authorityEnd) {
         const afterColon = baseUrl.slice(colon + 1, authorityEnd);
         const afterWs = afterColon.search(/\s/);
@@ -285,15 +316,35 @@ function findUserInfoStripPoint(
   }
 
   // Prose veto: a host + trailing email (`api.example - contact
-  // admin@example.com`) has its first '@' AFTER the first whitespace and no ':'
-  // before it (no userinfo). A real credential's '@' either precedes whitespace
-  // (`user@host`) or has a ':' before it (`user name:pass@host`). #8136 R3-6.
+  // admin@example.com`) has its first '@' AFTER the first whitespace and no
+  // ':' before it (no userinfo). A real credential's '@' either precedes whitespace
+  // (`user@host`), or has a ':' before it with no whitespace between the colon
+  // and '@' (`user:pass word@host` has the colon before the whitespace, so the
+  // slice to '@' has whitespace — but the colon still precedes '@', marking it
+  // userinfo-shaped). #8136 R3-6.
   const atBeforeWs = firstWs === -1 || firstAt < firstWs;
-  const colonBeforeAt = authority.slice(0, firstAt).includes(':');
+  // A colon before the first '@' marks userinfo only when it is a real
+  // userinfo delimiter, not an IPv6 bracket/port colon. For an IPv6 authority
+  // (`[::1]:8443`), the only colons before the first '@' are inside the brackets
+  // or the port colon after `]` — neither is userinfo. #8136 R1-7.
+  let colonBeforeAt = false;
+  if (baseUrl[authorityStart] === '[') {
+    const close = baseUrl.indexOf(']', authorityStart);
+    if (close === -1 || close >= authorityStart + firstAt) {
+      colonBeforeAt = false;
+    } else {
+      // A userinfo colon would have to be after the host:port AND before '@',
+      // but an IPv6 URL with userinfo is `[::1]`-only authority with no port
+      // prose shape — treat as no userinfo colon for the prose veto.
+      colonBeforeAt = false;
+    }
+  } else {
+    colonBeforeAt = authority.slice(0, firstAt).includes(':');
+  }
   if (!atBeforeWs && !colonBeforeAt) {
     return -1;
   }
-  // Prose veto: a dotted host + numeric port + prose email. #8136 R2-1.
+  // Prose veto: a host + numeric port + prose email. #8136 R2-1.
   if (isLikelyPortProseMisparse(baseUrl, authorityStart, authorityEnd)) {
     return -1;
   }
@@ -309,6 +360,12 @@ function findUserInfoStripPoint(
   if (firstHost !== null && firstHost[1]!.includes('.')) {
     return authorityStart + firstAt;
   }
+  // When the first '@' is before the first whitespace, a prose email's '@' may
+  // still sit after the whitespace (e.g. `user:pass@ollama - contact
+  // admin@example.com`). Without a parser oracle this is indistinguishable from
+  // a password containing '@' followed by a real terminator after whitespace
+  // (`user:p@ss word@host`), so the loop scans the whole authority and the
+  // prose-shape leak is a documented residual. #8136 R5-1/R6-3.
   for (
     let i = authority.lastIndexOf('@');
     i > firstAt;
@@ -341,11 +398,27 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
   const scheme = baseUrl.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//)?.[0] ?? '';
   if (/^(https?|wss?|ftp|file):\/\//i.test(scheme)) {
     const backslash = baseUrl.indexOf('\\', authorityStart);
-    if (backslash !== -1) {
+    if (backslash !== -1 && backslash < end) {
+      // A Windows `domain\user:pass@` credential is a single userinfo run with
+      // NO whitespace between the backslash and the '@'. Bound the scan so a
+      // later prose `a:b@c` is not mistaken for credentials. #8136 R5-12.
+      const separators = [' ', '/', '?', '#'];
+      let scanLimit = end;
+      for (const sep of separators) {
+        const idx = baseUrl.indexOf(sep, backslash + 1);
+        if (idx !== -1 && idx < scanLimit) {
+          scanLimit = idx;
+        }
+      }
       const colonAfter = baseUrl.indexOf(':', backslash + 1);
       const atAfter = baseUrl.indexOf('@', backslash + 1);
       const windowsCred =
-        colonAfter !== -1 && atAfter !== -1 && colonAfter < atAfter;
+        colonAfter !== -1 &&
+        atAfter !== -1 &&
+        colonAfter < atAfter &&
+        colonAfter < scanLimit &&
+        atAfter < scanLimit &&
+        !/\s/.test(baseUrl.slice(backslash + 1, atAfter));
       if (!windowsCred) {
         end = Math.min(end, backslash);
       }

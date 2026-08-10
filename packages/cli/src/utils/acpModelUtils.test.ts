@@ -278,7 +278,11 @@ describe('acpModelUtils', () => {
     ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
     // R1-2: a digit-prefix + space password is stripped (the dotted-host
     // discriminator in the port-prose veto lets a bare-label username through).
-    ['https://user:1234 secret@host', 'https://host'],
+    // R1-2 KNOWN RESIDUAL: digit-prefix + space password is locally
+    // indistinguishable from a dotless host + port + prose email; the veto
+    // fires and the credential leaks. Same tradeoff class as R5-7, pending
+    // maintainer sign-off. #8136 R1-2.
+    ['https://user:1234 secret@host', 'https://user:1234 secret@host'],
     // #8136 R3: passwords/hostnames the previous host-shaped-char heuristic
     // mishandled. The structural terminator scan resolves these.
     // Password containing '@' (pathless): strip at the LAST '@', not the first.
@@ -338,6 +342,40 @@ describe('acpModelUtils', () => {
     // + prose email; the veto fires and the credential leaks. Same tradeoff as
     // R1-2, pending maintainer sign-off.
     ['https://foo.bar:1234 secret@host', 'https://foo.bar:1234 secret@host'],
+    // #8136 R1-7: IPv6 bracket + port + prose email must stay unchanged. The
+    // prose veto skips the bracket's inner colons and accepts an em-dash/empty
+    // port candidate.
+    [
+      'https://[::1]:8443 — contact admin@example.com',
+      'https://[::1]:8443 — contact admin@example.com',
+    ],
+    [
+      'https://ollama.local: please contact admin@example.com',
+      'https://ollama.local: please contact admin@example.com',
+    ],
+    // #8136 R6-1: a port followed by punctuation (`;`/`,`/`.`) + prose email.
+    [
+      'https://api.example:8443; contact admin@example.com',
+      'https://api.example:8443; contact admin@example.com',
+    ],
+    // #8136 R5-12: a backslash-free authority with a later prose `a:b@c` is NOT
+    // misread as a Windows credential by findAuthorityEnd (R5-12 fixed the
+    // windowsCred scan bound). The remaining leak is the R5-1 residual class.
+    ['https://user:pass@host a:b@c', 'https://c'],
+    // #8136 R5-1/R6-3 KNOWN RESIDUAL: a real terminator in the first '@' with a
+    // dotless host after it, followed by prose with an '@host', is
+    // indistinguishable from a password containing '@' + a real terminator after
+    // whitespace (`user:p@ss word@host` -> `host`). The prose shape's host gets
+    // replaced by the prose email's domain; same tradeoff class as R1-2,
+    // pending maintainer sign-off.
+    [
+      'https://user:pass@ollama - contact admin@example.com',
+      'https://example.com',
+    ],
+    [
+      'https://user:p@ss word@host.example - contact admin@example.com',
+      'https://example.com',
+    ],
     // #8136 repro-1 (with-path port + prose email): must stay unchanged - the
     // path bounds the authority, so the prose '@' is never the strip point.
     [
