@@ -3142,6 +3142,20 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
+      // Re-pins the contract the deleted `/demo` CORS test carried: the
+      // pre-auth page surface sits behind the Origin wall, so a future
+      // mount-order regression that exposes the shell to cross-origin
+      // browsers fails here instead of silently shipping.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Origin', 'https://evil.example.com');
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
+    });
+
     it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
       // Express non-strict routing matches a raw `//` against `app.get('/')`
       // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.

@@ -16,7 +16,7 @@ qwen serve: bound to workspace "/your/cwd"
 qwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.
 ```
 
-Open `http://127.0.0.1:4170/` in a browser to get the Web Shell UI: chat, session list, and workspace inspection. `createServeApp()` mounts the bundled Web Shell assets (`packages/cli/src/serve/web-shell-static.ts`) **before** `bearerAuth`, so the shell itself loads without a token; its own API calls carry the bearer when one is configured. `--no-web` opts out and leaves the daemon API-only.
+Open `http://127.0.0.1:4170/` in a browser to get the Web Shell UI: chat, session list, and workspace inspection. `createServeApp()` mounts the bundled Web Shell assets (`packages/cli/src/serve/web-shell-static.ts`) **before** `bearerAuth`, so the shell itself loads without a token; its own API calls carry the bearer when one is configured — start the daemon with `--open` (which puts the token in the URL fragment, never sent to the server) or append `#token=…` manually when auth is enabled. `--no-web` opts out and leaves the daemon API-only.
 
 ## 2. Launch recipes
 
@@ -206,9 +206,9 @@ When bearer auth is enabled, add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"`
 
 ## 8. Is there a browser UI?
 
-**Yes — the Web Shell.** `resolveWebShellDir()` finds the built assets (bundled next to the CLI bundle in a release, `packages/web-shell/dist` in a checkout) and `mountWebShellAssets()` serves them at `/`, `/assets`, and `/session/:id`. When the assets are missing the daemon degrades to API-only instead of crashing; `--no-web` opts out explicitly.
+**Yes — the Web Shell.** `resolveWebShellDir()` finds the built assets (bundled next to the CLI bundle in a release, `packages/web-shell/dist` in a checkout) and `mountWebShellAssets()` serves them at `/`, `/assets`, and `/session/:id` document navigations (browser deep links — a plain `curl /session/<id>` gets the API's 401/404, not the shell). When the assets are missing the daemon degrades to API-only instead of crashing; `--no-web` opts out explicitly.
 
-The static shell is mounted **before** `bearerAuth` in every launch mode — a browser cannot attach an `Authorization` header to an address-bar navigation or a `<script src>` subresource, so gating it would just break the UI. Every API route it calls stays token-gated, and the front end attaches the bearer itself.
+The static shell is mounted **before** `bearerAuth` in every launch mode — a browser cannot attach an `Authorization` header to an address-bar navigation or a `<script src>` subresource, so gating it would just break the UI. Every API route it calls stays token-gated, and the front end attaches the bearer itself. On a non-loopback bind the shell is read-only unless `--allow-origin <origin>` is passed — same-origin POSTs carry an `Origin` header that the CORS wall rejects (403) — so pass `--allow-origin` for any bind beyond loopback.
 
 CSP is built by `buildWebShellCsp()` and is deliberately looser than a static page's (`'unsafe-inline'` for the inline `performance.measure` patch, `eval`/wasm/blob workers for shiki and mermaid, `data:` for katex fonts, `connect-src 'self'` for SSE). `frame-ancestors 'none'` plus `X-Frame-Options: DENY` block clickjacking, except when an extension origin is explicitly allowed via `--allow-origin` so the UI can be hosted in a Chrome side panel (#5626).
 
@@ -253,7 +253,7 @@ serve/run-qwen-serve.ts              const app = createServeApp(opts, () => actu
    v
 serve/server.ts                    createServeApp() - builds Express app (**does not listen**)
    |  |- middleware chain (Host allowlist / CORS / bearerAuth / mutation gate / rate limit)
-   |  |- route mounting (health / demo / capabilities / workspace / session / SSE / ACP HTTP)
+   |  |- route mounting (health / web-shell static / capabilities / workspace / session / SSE / ACP HTTP)
    |  `- return app
    |
    v
