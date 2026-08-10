@@ -7,13 +7,17 @@
 /**
  * Restricted `when` condition DSL for fixed policies (policy design §8.3).
  *
- * Conditions are recursive compositions of `all` / `any` over comparisons;
- * comparisons support `gt|gte|lt|lte|eq` with fields or literals on either
- * side. No arbitrary code, no JSONPath. Evaluation is three-valued: a
- * comparison over a field that cannot be resolved yields `unavailable`,
- * which must NEVER be silently treated as false — the caller applies the
- * policy's `onConditionUnavailable` behavior (default: skip) and the run
- * record names the missing fields.
+ * Conditions are Mapbox-style expression arrays: `[operator, ...operands]`.
+ * A comparison takes exactly two operands, each either a
+ * `["field", "<namespace.name>"]` reference or a bare literal —
+ * `[">", ["field", "resource.width"], 3000]`. Combinators nest recursively:
+ * `["all", <expr>, ...]`, `["any", <expr>, ...]`, `["!", <expr>]`. No
+ * arbitrary code, no JSONPath, no value-producing sub-expressions inside
+ * operands. Evaluation is three-valued: a comparison over a field that
+ * cannot be resolved yields `unavailable`, which must NEVER be silently
+ * treated as false — the caller applies the policy's
+ * `onConditionUnavailable` behavior (default: skip) and the run record
+ * names the missing fields.
  */
 
 /** Readable fields, grouped in their three natural namespaces. */
@@ -49,22 +53,25 @@ export type FixedPolicyField =
   | `request.${RequestConditionField}`
   | `session.${SessionConditionField}`;
 
+/** Operand of a comparison: a field reference or a bare literal. */
 export type ConditionOperand =
-  | { field: FixedPolicyField }
-  | { value: number | string | boolean };
+  | ['field', FixedPolicyField]
+  | number
+  | string
+  | boolean;
 
-export type ComparisonOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq';
+export type ComparisonOperator = '>' | '>=' | '<' | '<=' | '==' | '!=';
 
-export interface ComparisonCondition {
-  left: ConditionOperand;
-  operator: ComparisonOperator;
-  right: ConditionOperand;
-}
+export type ComparisonCondition = [
+  ComparisonOperator,
+  ConditionOperand,
+  ConditionOperand,
+];
 
 export type FixedPolicyCondition =
   | ComparisonCondition
-  | { all: FixedPolicyCondition[] }
-  | { any: FixedPolicyCondition[] };
+  | ['all' | 'any', ...FixedPolicyCondition[]]
+  | ['!', FixedPolicyCondition];
 
 /** Values feeding field resolution. All defined fields are numeric; an
  * absent entry means the field could not be obtained for this resource
@@ -96,13 +103,18 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-const OPERATORS: readonly ComparisonOperator[] = [
-  'gt',
-  'gte',
-  'lt',
-  'lte',
-  'eq',
+const COMPARISON_OPERATORS: readonly ComparisonOperator[] = [
+  '>',
+  '>=',
+  '<',
+  '<=',
+  '==',
+  '!=',
 ];
+
+function isComparisonOperator(v: unknown): v is ComparisonOperator {
+  return (COMPARISON_OPERATORS as readonly unknown[]).includes(v);
+}
 
 const KNOWN_FIELDS: ReadonlySet<string> = new Set([
   ...RESOURCE_CONDITION_FIELDS.map((f) => `resource.${f}`),
@@ -115,45 +127,62 @@ type ResolvedOperand =
   | { ok: false; missing: string };
 
 function resolveOperand(
-  operand: ConditionOperand,
+  operand: unknown,
   context: FixedPolicyConditionContext,
 ): ResolvedOperand {
-  if ('value' in operand) {
-    return { ok: true, value: operand.value, describe: 'value' };
+  if (Array.isArray(operand)) {
+    if (
+      operand.length !== 2 ||
+      operand[0] !== 'field' ||
+      typeof operand[1] !== 'string'
+    ) {
+      return { ok: false, missing: '<malformed operand>' };
+    }
+    const field = operand[1];
+    if (!KNOWN_FIELDS.has(field)) {
+      return { ok: false, missing: field };
+    }
+    const [namespace, name] = field.split('.') as [
+      'resource' | 'request' | 'session',
+      string,
+    ];
+    const value = (
+      context[namespace] as Record<string, number | undefined> | undefined
+    )?.[name];
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+      return { ok: false, missing: field };
+    }
+    return { ok: true, value, describe: field };
   }
-  const field = operand.field;
-  if (!KNOWN_FIELDS.has(field)) {
-    return { ok: false, missing: field };
+  if (
+    typeof operand === 'number' ||
+    typeof operand === 'string' ||
+    typeof operand === 'boolean'
+  ) {
+    return { ok: true, value: operand, describe: 'value' };
   }
-  const [namespace, name] = field.split('.') as [
-    'resource' | 'request' | 'session',
-    string,
-  ];
-  const value = (
-    context[namespace] as Record<string, number | undefined> | undefined
-  )?.[name];
-  if (typeof value !== 'number' || Number.isNaN(value)) {
-    return { ok: false, missing: field };
-  }
-  return { ok: true, value, describe: field };
+  return { ok: false, missing: '<malformed operand>' };
 }
 
 function evaluateComparison(
-  condition: ComparisonCondition,
+  operator: ComparisonOperator,
+  leftRaw: unknown,
+  rightRaw: unknown,
   context: FixedPolicyConditionContext,
 ): ConditionEvaluation {
-  const left = resolveOperand(condition.left, context);
-  const right = resolveOperand(condition.right, context);
+  const left = resolveOperand(leftRaw, context);
+  const right = resolveOperand(rightRaw, context);
   if (!left.ok || !right.ok) {
     const missing: string[] = [];
     if (!left.ok) missing.push(left.missing);
     if (!right.ok) missing.push(right.missing);
     return unavailable(missing);
   }
-  if (condition.operator === 'eq') {
-    // Strict equality: a type mismatch between two AVAILABLE values is a
-    // determinate not-equal, not an unavailability.
-    return left.value === right.value ? MATCH : NO_MATCH;
+  if (operator === '==' || operator === '!=') {
+    // Strict (in)equality: a type mismatch between two AVAILABLE values is
+    // a determinate not-equal, not an unavailability.
+    const equal = left.value === right.value;
+    return equal === (operator === '==') ? MATCH : NO_MATCH;
   }
   // Ordering requires two finite numbers; anything else cannot be ordered
   // and must not silently collapse to false.
@@ -172,17 +201,17 @@ function evaluateComparison(
     }
     return unavailable(missing);
   }
-  switch (condition.operator) {
-    case 'gt':
+  switch (operator) {
+    case '>':
       return left.value > right.value ? MATCH : NO_MATCH;
-    case 'gte':
+    case '>=':
       return left.value >= right.value ? MATCH : NO_MATCH;
-    case 'lt':
+    case '<':
       return left.value < right.value ? MATCH : NO_MATCH;
-    case 'lte':
+    case '<=':
       return left.value <= right.value ? MATCH : NO_MATCH;
     default: {
-      const exhaustive: never = condition.operator;
+      const exhaustive: never = operator;
       return unavailable([`unknown operator ${String(exhaustive)}`]);
     }
   }
@@ -196,30 +225,28 @@ function evaluateComparison(
  *
  * Combinators use strong Kleene logic so `unavailable` propagates only
  * when it is actually decisive: `all` with a false branch is false
- * regardless of an unavailable sibling; `any` with a true branch is true.
+ * regardless of an unavailable sibling; `any` with a true branch is true;
+ * `!` flips determinate outcomes and passes `unavailable` through.
  */
 export function evaluateFixedPolicyCondition(
   condition: FixedPolicyCondition,
   context: FixedPolicyConditionContext,
 ): ConditionEvaluation {
-  // Deliberately typed as a loose record: the type predicate would narrow
-  // `condition` itself into a `never` after the combinator checks, and this
-  // total function must handle malformed nodes anyway.
+  // Deliberately treated as unknown: this total function must handle
+  // malformed nodes anyway, and narrowing the tuple union member-by-member
+  // buys nothing here.
   const node: unknown = condition;
-  if (!isPlainObject(node)) {
+  if (!Array.isArray(node) || node.length === 0) {
     return unavailable(['<malformed condition>']);
   }
-  if ('all' in node || 'any' in node) {
-    const isAll = 'all' in node;
-    const children = isAll ? node['all'] : node['any'];
-    if (!Array.isArray(children)) {
-      return unavailable(['<malformed condition>']);
-    }
+  const head = node[0];
+  if (head === 'all' || head === 'any') {
+    const isAll = head === 'all';
     const missing: string[] = [];
     let sawUnavailable = false;
-    for (const child of children) {
+    for (let i = 1; i < node.length; i++) {
       const result = evaluateFixedPolicyCondition(
-        child as FixedPolicyCondition,
+        node[i] as FixedPolicyCondition,
         context,
       );
       if (result.outcome === 'unavailable') {
@@ -234,52 +261,51 @@ export function evaluateFixedPolicyCondition(
     if (sawUnavailable) return unavailable(missing);
     return isAll ? MATCH : NO_MATCH;
   }
-  if (
-    'left' in node &&
-    'operator' in node &&
-    'right' in node &&
-    isPlainObject(node['left']) &&
-    isPlainObject(node['right']) &&
-    OPERATORS.includes(node['operator'] as ComparisonOperator)
-  ) {
-    return evaluateComparison(node as unknown as ComparisonCondition, context);
+  if (head === '!') {
+    if (node.length !== 2) {
+      return unavailable(['<malformed condition>']);
+    }
+    const result = evaluateFixedPolicyCondition(
+      node[1] as FixedPolicyCondition,
+      context,
+    );
+    if (result.outcome === 'unavailable') return result;
+    return result.outcome === 'match' ? NO_MATCH : MATCH;
+  }
+  if (isComparisonOperator(head) && node.length === 3) {
+    return evaluateComparison(head, node[1], node[2], context);
   }
   return unavailable(['<malformed condition>']);
 }
 
 function validateOperand(
   raw: unknown,
-  operator: ComparisonOperator | undefined,
+  operator: ComparisonOperator,
   where: string,
   errors: string[],
 ): void {
-  if (!isPlainObject(raw)) {
-    errors.push(`${where}: operand must be an object`);
-    return;
-  }
-  const hasField = 'field' in raw;
-  const hasValue = 'value' in raw;
-  if (hasField === hasValue) {
-    errors.push(`${where}: operand must have exactly one of "field"/"value"`);
-    return;
-  }
-  if (hasField) {
-    if (typeof raw['field'] !== 'string' || !KNOWN_FIELDS.has(raw['field'])) {
-      errors.push(`${where}: unknown field ${JSON.stringify(raw['field'])}`);
+  if (Array.isArray(raw)) {
+    if (raw.length !== 2 || raw[0] !== 'field') {
+      errors.push(
+        `${where}: field reference must be ["field", "<namespace.field>"]`,
+      );
+      return;
+    }
+    if (typeof raw[1] !== 'string' || !KNOWN_FIELDS.has(raw[1])) {
+      errors.push(`${where}: unknown field ${JSON.stringify(raw[1])}`);
     }
     return;
   }
-  const value = raw['value'];
   if (
-    typeof value !== 'number' &&
-    typeof value !== 'string' &&
-    typeof value !== 'boolean'
+    typeof raw !== 'number' &&
+    typeof raw !== 'string' &&
+    typeof raw !== 'boolean'
   ) {
     errors.push(`${where}: literal must be a number, string, or boolean`);
     return;
   }
-  if (operator !== 'eq' && operator !== undefined) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
+  if (operator !== '==' && operator !== '!=') {
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) {
       errors.push(
         `${where}: operator "${operator}" requires a finite numeric literal`,
       );
@@ -297,49 +323,55 @@ export function validateFixedPolicyCondition(
   where = 'when',
 ): string[] {
   const errors: string[] = [];
-  if (!isPlainObject(raw)) {
-    errors.push(`${where}: condition must be an object`);
-    return errors;
-  }
-  const keys = ['all', 'any', 'left'].filter((k) => k in raw);
-  if (keys.length !== 1) {
+  if (isPlainObject(raw)) {
+    // Catch the pre-expression object form with a pointed migration hint
+    // instead of a generic type error.
     errors.push(
-      `${where}: condition must be exactly one of a comparison, "all", or "any"`,
+      `${where}: condition must be an expression array like ` +
+        `[">", ["field", "resource.width"], 3000] or ["all", <expr>, ...] ` +
+        `(the {left, operator, right} object form is no longer supported)`,
     );
     return errors;
   }
-  if ('all' in raw || 'any' in raw) {
-    const key = 'all' in raw ? 'all' : 'any';
-    const children = raw[key];
-    if (!Array.isArray(children) || children.length === 0) {
-      errors.push(`${where}.${key}: must be a non-empty array of conditions`);
+  if (!Array.isArray(raw) || raw.length === 0 || typeof raw[0] !== 'string') {
+    errors.push(
+      `${where}: condition must be an expression array [operator, ...operands]`,
+    );
+    return errors;
+  }
+  const head = raw[0];
+  if (head === 'all' || head === 'any') {
+    if (raw.length < 2) {
+      errors.push(
+        `${where}: "${head}" requires at least one operand condition`,
+      );
       return errors;
     }
-    children.forEach((child, i) => {
-      errors.push(
-        ...validateFixedPolicyCondition(child, `${where}.${key}[${i}]`),
-      );
-    });
+    for (let i = 1; i < raw.length; i++) {
+      errors.push(...validateFixedPolicyCondition(raw[i], `${where}[${i}]`));
+    }
     return errors;
   }
-  const operator = raw['operator'];
-  const knownOperator = OPERATORS.includes(operator as ComparisonOperator);
-  if (!knownOperator) {
-    errors.push(
-      `${where}.operator: must be one of ${OPERATORS.join(', ')} (got ${JSON.stringify(operator)})`,
-    );
+  if (head === '!') {
+    if (raw.length !== 2) {
+      errors.push(`${where}: "!" takes exactly one operand condition`);
+      return errors;
+    }
+    errors.push(...validateFixedPolicyCondition(raw[1], `${where}[1]`));
+    return errors;
   }
-  validateOperand(
-    raw['left'],
-    knownOperator ? (operator as ComparisonOperator) : undefined,
-    `${where}.left`,
-    errors,
-  );
-  validateOperand(
-    raw['right'],
-    knownOperator ? (operator as ComparisonOperator) : undefined,
-    `${where}.right`,
-    errors,
-  );
+  if (!isComparisonOperator(head)) {
+    errors.push(
+      `${where}[0]: unknown operator ${JSON.stringify(head)} (expected one ` +
+        `of ${COMPARISON_OPERATORS.join(', ')}, all, any, !)`,
+    );
+    return errors;
+  }
+  if (raw.length !== 3) {
+    errors.push(`${where}: comparison "${head}" takes exactly two operands`);
+    return errors;
+  }
+  validateOperand(raw[1], head, `${where}[1]`, errors);
+  validateOperand(raw[2], head, `${where}[2]`, errors);
   return errors;
 }

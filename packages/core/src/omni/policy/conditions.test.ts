@@ -30,29 +30,27 @@ const CONTEXT: FixedPolicyConditionContext = {
   },
 };
 
-const cmp = (
-  left: object,
-  operator: string,
-  right: object,
-): FixedPolicyCondition =>
-  ({ left, operator, right }) as unknown as FixedPolicyCondition;
+const expr = (...parts: unknown[]): FixedPolicyCondition =>
+  parts as unknown as FixedPolicyCondition;
 
 describe('evaluateFixedPolicyCondition — comparisons', () => {
   it.each([
     // [operator, right literal, expected outcome] against width=4096
-    ['gt', 4095, 'match'],
-    ['gt', 4096, 'no_match'],
-    ['gte', 4096, 'match'],
-    ['gte', 4097, 'no_match'],
-    ['lt', 4097, 'match'],
-    ['lt', 4096, 'no_match'],
-    ['lte', 4096, 'match'],
-    ['lte', 4095, 'no_match'],
-    ['eq', 4096, 'match'],
-    ['eq', 4095, 'no_match'],
+    ['>', 4095, 'match'],
+    ['>', 4096, 'no_match'],
+    ['>=', 4096, 'match'],
+    ['>=', 4097, 'no_match'],
+    ['<', 4097, 'match'],
+    ['<', 4096, 'no_match'],
+    ['<=', 4096, 'match'],
+    ['<=', 4095, 'no_match'],
+    ['==', 4096, 'match'],
+    ['==', 4095, 'no_match'],
+    ['!=', 4095, 'match'],
+    ['!=', 4096, 'no_match'],
   ] as const)('width %s %d → %s', (operator, right, outcome) => {
     const result = evaluateFixedPolicyCondition(
-      cmp({ field: 'resource.width' }, operator, { value: right }),
+      expr(operator, ['field', 'resource.width'], right),
       CONTEXT,
     );
     expect(result.outcome).toBe(outcome);
@@ -60,41 +58,38 @@ describe('evaluateFixedPolicyCondition — comparisons', () => {
 
   it('compares field to field (the §8.3 keyframe-extraction example)', () => {
     const result = evaluateFixedPolicyCondition(
-      cmp({ field: 'resource.estimatedTokenCount' }, 'gt', {
-        field: 'session.availableContextTokens',
-      }),
+      expr(
+        '>',
+        ['field', 'resource.estimatedTokenCount'],
+        ['field', 'session.availableContextTokens'],
+      ),
       CONTEXT,
     );
     expect(result).toEqual({ outcome: 'match' });
   });
 
   it('compares literal to literal', () => {
-    expect(
-      evaluateFixedPolicyCondition(
-        cmp({ value: 2 }, 'lt', { value: 3 }),
-        CONTEXT,
-      ).outcome,
-    ).toBe('match');
+    expect(evaluateFixedPolicyCondition(expr('<', 2, 3), CONTEXT).outcome).toBe(
+      'match',
+    );
   });
 
-  it('eq supports strict string/boolean equality; type mismatch is a determinate no_match', () => {
+  it('== supports strict string/boolean equality; type mismatch is a determinate no_match', () => {
     expect(
-      evaluateFixedPolicyCondition(
-        cmp({ value: 'aac' }, 'eq', { value: 'aac' }),
-        CONTEXT,
-      ).outcome,
+      evaluateFixedPolicyCondition(expr('==', 'aac', 'aac'), CONTEXT).outcome,
     ).toBe('match');
     expect(
-      evaluateFixedPolicyCondition(
-        cmp({ value: '3' }, 'eq', { value: 3 }),
-        CONTEXT,
-      ).outcome,
+      evaluateFixedPolicyCondition(expr('==', '3', 3), CONTEXT).outcome,
     ).toBe('no_match');
+    // ...and != is its exact complement, including across types.
+    expect(
+      evaluateFixedPolicyCondition(expr('!=', '3', 3), CONTEXT).outcome,
+    ).toBe('match');
   });
 
   it('an absent field is unavailable, never false', () => {
     const result = evaluateFixedPolicyCondition(
-      cmp({ field: 'resource.durationMs' }, 'gt', { value: 0 }),
+      expr('>', ['field', 'resource.durationMs'], 0),
       CONTEXT,
     );
     expect(result).toEqual({
@@ -105,7 +100,7 @@ describe('evaluateFixedPolicyCondition — comparisons', () => {
 
   it('an unknown field name is unavailable and named', () => {
     const result = evaluateFixedPolicyCondition(
-      cmp({ field: 'resource.doesNotExist' }, 'gt', { value: 0 }),
+      expr('>', ['field', 'resource.doesNotExist'], 0),
       CONTEXT,
     );
     expect(result).toMatchObject({
@@ -116,9 +111,11 @@ describe('evaluateFixedPolicyCondition — comparisons', () => {
 
   it('both operands missing → both fields recorded', () => {
     const result = evaluateFixedPolicyCondition(
-      cmp({ field: 'resource.bitRate' }, 'gt', {
-        field: 'resource.sampleRateHz',
-      }),
+      expr(
+        '>',
+        ['field', 'resource.bitRate'],
+        ['field', 'resource.sampleRateHz'],
+      ),
       CONTEXT,
     );
     expect(result).toEqual({
@@ -129,7 +126,7 @@ describe('evaluateFixedPolicyCondition — comparisons', () => {
 
   it('ordering over a non-numeric literal is unavailable, not false', () => {
     const result = evaluateFixedPolicyCondition(
-      cmp({ field: 'resource.width' }, 'gt', { value: 'wide' }),
+      expr('>', ['field', 'resource.width'], 'wide'),
       CONTEXT,
     );
     expect(result).toMatchObject({ outcome: 'unavailable' });
@@ -137,28 +134,26 @@ describe('evaluateFixedPolicyCondition — comparisons', () => {
 });
 
 describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
-  const TRUE = cmp({ value: 1 }, 'eq', { value: 1 });
-  const FALSE = cmp({ value: 1 }, 'eq', { value: 2 });
-  const UNAVAILABLE = cmp({ field: 'resource.durationMs' }, 'gt', {
-    value: 0,
-  });
+  const TRUE = expr('==', 1, 1);
+  const FALSE = expr('==', 1, 2);
+  const UNAVAILABLE = expr('>', ['field', 'resource.durationMs'], 0);
 
   it('all: every branch true → match', () => {
     expect(
-      evaluateFixedPolicyCondition({ all: [TRUE, TRUE] }, CONTEXT).outcome,
+      evaluateFixedPolicyCondition(expr('all', TRUE, TRUE), CONTEXT).outcome,
     ).toBe('match');
   });
 
   it('all: a false branch dominates an unavailable sibling', () => {
     expect(
-      evaluateFixedPolicyCondition({ all: [UNAVAILABLE, FALSE] }, CONTEXT)
+      evaluateFixedPolicyCondition(expr('all', UNAVAILABLE, FALSE), CONTEXT)
         .outcome,
     ).toBe('no_match');
   });
 
   it('all: true + unavailable → unavailable with the missing field', () => {
     expect(
-      evaluateFixedPolicyCondition({ all: [TRUE, UNAVAILABLE] }, CONTEXT),
+      evaluateFixedPolicyCondition(expr('all', TRUE, UNAVAILABLE), CONTEXT),
     ).toEqual({
       outcome: 'unavailable',
       missingFields: ['resource.durationMs'],
@@ -167,20 +162,38 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
 
   it('any: a true branch dominates an unavailable sibling', () => {
     expect(
-      evaluateFixedPolicyCondition({ any: [UNAVAILABLE, TRUE] }, CONTEXT)
+      evaluateFixedPolicyCondition(expr('any', UNAVAILABLE, TRUE), CONTEXT)
         .outcome,
     ).toBe('match');
   });
 
   it('any: every branch false → no_match', () => {
     expect(
-      evaluateFixedPolicyCondition({ any: [FALSE, FALSE] }, CONTEXT).outcome,
+      evaluateFixedPolicyCondition(expr('any', FALSE, FALSE), CONTEXT).outcome,
     ).toBe('no_match');
   });
 
   it('any: false + unavailable → unavailable', () => {
     expect(
-      evaluateFixedPolicyCondition({ any: [FALSE, UNAVAILABLE] }, CONTEXT),
+      evaluateFixedPolicyCondition(expr('any', FALSE, UNAVAILABLE), CONTEXT),
+    ).toEqual({
+      outcome: 'unavailable',
+      missingFields: ['resource.durationMs'],
+    });
+  });
+
+  it('!: flips determinate outcomes', () => {
+    expect(evaluateFixedPolicyCondition(expr('!', TRUE), CONTEXT).outcome).toBe(
+      'no_match',
+    );
+    expect(
+      evaluateFixedPolicyCondition(expr('!', FALSE), CONTEXT).outcome,
+    ).toBe('match');
+  });
+
+  it('!: unavailable passes through — negation must not launder unknowns', () => {
+    expect(
+      evaluateFixedPolicyCondition(expr('!', UNAVAILABLE), CONTEXT),
     ).toEqual({
       outcome: 'unavailable',
       missingFields: ['resource.durationMs'],
@@ -189,12 +202,11 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
 
   it('nests recursively and dedups missing fields', () => {
     const result = evaluateFixedPolicyCondition(
-      {
-        any: [
-          { all: [UNAVAILABLE, TRUE] },
-          cmp({ field: 'resource.durationMs' }, 'lt', { value: 100 }),
-        ],
-      },
+      expr(
+        'any',
+        expr('all', UNAVAILABLE, TRUE),
+        expr('<', ['field', 'resource.durationMs'], 100),
+      ),
       CONTEXT,
     );
     expect(result).toEqual({
@@ -203,11 +215,11 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
     });
   });
 
-  it('vacuous combinators: all [] → match, any [] → no_match', () => {
-    expect(evaluateFixedPolicyCondition({ all: [] }, CONTEXT).outcome).toBe(
+  it('vacuous combinators: ["all"] → match, ["any"] → no_match', () => {
+    expect(evaluateFixedPolicyCondition(expr('all'), CONTEXT).outcome).toBe(
       'match',
     );
-    expect(evaluateFixedPolicyCondition({ any: [] }, CONTEXT).outcome).toBe(
+    expect(evaluateFixedPolicyCondition(expr('any'), CONTEXT).outcome).toBe(
       'no_match',
     );
   });
@@ -218,9 +230,19 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
       42,
       'gt',
       {},
-      { all: 'not-an-array' },
-      { left: { field: 'resource.width' } }, // no operator/right
-      { left: {}, operator: 'between', right: {} },
+      [],
+      ['between', 1, 2],
+      ['>', 1], // wrong arity
+      ['>', 1, 2, 3], // wrong arity
+      ['!'], // missing operand
+      ['!', TRUE, FALSE], // extra operand
+      ['>', ['field'], 1], // malformed field reference
+      // The retired object form must degrade, not silently match.
+      {
+        left: { field: 'resource.width' },
+        operator: 'gt',
+        right: { value: 1 },
+      },
     ]) {
       const result = evaluateFixedPolicyCondition(
         bad as unknown as FixedPolicyCondition,
@@ -234,78 +256,65 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
 describe('validateFixedPolicyCondition', () => {
   it('accepts the §8.3 documentation example', () => {
     expect(
-      validateFixedPolicyCondition({
-        all: [
-          {
-            left: { field: 'resource.estimatedTokenCount' },
-            operator: 'gt',
-            right: { field: 'session.availableContextTokens' },
-          },
-          {
-            left: { field: 'session.contextWindowTokens' },
-            operator: 'gte',
-            right: { value: 131072 },
-          },
+      validateFixedPolicyCondition([
+        'all',
+        [
+          '>',
+          ['field', 'resource.estimatedTokenCount'],
+          ['field', 'session.availableContextTokens'],
         ],
-      }),
+        ['>=', ['field', 'session.contextWindowTokens'], 131072],
+      ]),
+    ).toEqual([]);
+  });
+
+  it('accepts negation and != comparisons', () => {
+    expect(
+      validateFixedPolicyCondition([
+        '!',
+        ['!=', ['field', 'resource.channels'], 2],
+      ]),
     ).toEqual([]);
   });
 
   it.each([
-    ['non-object root', 7, /must be an object/],
-    ['empty object', {}, /exactly one of/],
-    ['both all and any', { all: [], any: [] }, /exactly one of/],
-    ['empty all', { all: [] }, /non-empty array/],
-    ['non-array any', { any: {} }, /non-empty array/],
+    ['non-array root', 7, /must be an expression array/],
+    ['empty array', [], /must be an expression array/],
+    ['non-string head', [42, 1, 2], /must be an expression array/],
+    ['bare all', ['all'], /"all" requires at least one operand/],
+    ['bare any', ['any'], /"any" requires at least one operand/],
+    ['! with two operands', ['!', ['==', 1, 1], ['==', 2, 2]], /exactly one/],
+    ['unknown operator', ['between', 1, 2], /unknown operator "between"/],
+    ['comparison arity', ['>', 1], /takes exactly two operands/],
+    ['unknown field', ['>', ['field', 'resource.nope'], 1], /unknown field/],
     [
-      'unknown operator',
-      {
-        left: { value: 1 },
-        operator: 'between',
-        right: { value: 2 },
-      },
-      /operator/,
+      'malformed field reference',
+      ['>', ['field'], 1],
+      /field reference must be/,
     ],
     [
-      'unknown field',
-      {
-        left: { field: 'resource.nope' },
-        operator: 'gt',
-        right: { value: 1 },
-      },
-      /unknown field/,
-    ],
-    [
-      'operand with both field and value',
-      {
-        left: { field: 'resource.width', value: 1 },
-        operator: 'gt',
-        right: { value: 1 },
-      },
-      /exactly one of "field"\/"value"/,
-    ],
-    [
-      'operand with neither field nor value',
-      { left: {}, operator: 'gt', right: { value: 1 } },
-      /exactly one of "field"\/"value"/,
+      'array that is not a field reference',
+      ['>', ['resource.width'], 1],
+      /field reference must be/,
     ],
     [
       'ordering operator with a string literal',
-      {
-        left: { field: 'resource.width' },
-        operator: 'gt',
-        right: { value: 'wide' },
-      },
+      ['>', ['field', 'resource.width'], 'wide'],
       /requires a finite numeric literal/,
     ],
     [
       'non-primitive literal',
-      {
-        left: { value: { nested: true } },
-        operator: 'eq',
-        right: { value: 1 },
-      },
+      ['==', { nested: true }, 1],
       /number, string, or boolean/,
+    ],
+    [
+      'legacy object form gets a migration hint',
+      {
+        left: { field: 'resource.width' },
+        operator: 'gt',
+        right: { value: 3000 },
+      },
+      /no longer supported/,
     ],
   ])('rejects %s', (_label, raw, pattern) => {
     const errors = validateFixedPolicyCondition(raw);
@@ -313,24 +322,16 @@ describe('validateFixedPolicyCondition', () => {
     expect(errors.join('\n')).toMatch(pattern);
   });
 
-  it('eq allows string and boolean literals', () => {
-    expect(
-      validateFixedPolicyCondition({
-        left: { value: true },
-        operator: 'eq',
-        right: { value: 'x' },
-      }),
-    ).toEqual([]);
+  it('== and != allow string and boolean literals', () => {
+    expect(validateFixedPolicyCondition(['==', true, 'x'])).toEqual([]);
+    expect(validateFixedPolicyCondition(['!=', 'aac', 'opus'])).toEqual([]);
   });
 
-  it('reports nested paths for errors inside combinators', () => {
-    const errors = validateFixedPolicyCondition({
-      any: [
-        {
-          all: [{ left: { value: 1 }, operator: 'nope', right: { value: 2 } }],
-        },
-      ],
-    });
-    expect(errors.join('\n')).toContain('when.any[0].all[0].operator');
+  it('reports nested positional paths for errors inside combinators', () => {
+    const errors = validateFixedPolicyCondition([
+      'any',
+      ['all', ['nope', 1, 2]],
+    ]);
+    expect(errors.join('\n')).toContain('when[1][1][0]');
   });
 });

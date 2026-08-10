@@ -25,6 +25,7 @@ import {
   type PolicySourceResource,
 } from './orchestrator.js';
 import type {
+  FixedPolicyCondition,
   NormalizedFixedPolicy,
   NormalizedOmniProcessingLimits,
 } from './types.js';
@@ -522,11 +523,7 @@ describe('runFixedPolicies', () => {
       store,
       policies: [
         makePolicy({
-          when: {
-            left: { field: 'resource.width' },
-            operator: 'gt',
-            right: { value: 5000 },
-          },
+          when: ['>', ['field', 'resource.width'], 5000],
         }),
       ],
     });
@@ -540,11 +537,7 @@ describe('runFixedPolicies', () => {
       store,
       policies: [
         makePolicy({
-          when: {
-            left: { field: 'resource.durationMs' },
-            operator: 'gt',
-            right: { value: 1000 },
-          },
+          when: ['>', ['field', 'resource.durationMs'], 1000],
         }),
       ],
     });
@@ -567,11 +560,7 @@ describe('runFixedPolicies', () => {
       policies: [
         makePolicy({
           onConditionUnavailable: 'run',
-          when: {
-            left: { field: 'resource.durationMs' },
-            operator: 'gt',
-            right: { value: 1000 },
-          },
+          when: ['>', ['field', 'resource.durationMs'], 1000],
         }),
       ],
     });
@@ -582,17 +571,20 @@ describe('runFixedPolicies', () => {
   describe('condition namespaces (request./session., policy design §8.3)', () => {
     // The 4000×3000 root estimates to ceil(4000*3000/2048) = 5860 tokens;
     // the 1568×1176 derivative to ceil(1568*1176/2048) = 901.
-    const requestWhen = (operator: 'gt' | 'eq', value: number) => ({
-      left: { field: 'request.totalEstimatedMediaTokens' as const },
+    const requestWhen = (
+      operator: '>' | '==',
+      value: number,
+    ): FixedPolicyCondition => [
       operator,
-      right: { value },
-    });
+      ['field', 'request.totalEstimatedMediaTokens'],
+      value,
+    ];
 
     it('computes request.totalEstimatedMediaTokens from the pending delivery set', async () => {
       mockToolSuccess();
       const { records } = await runFixedPolicies(config, source, {
         store,
-        policies: [makePolicy({ when: requestWhen('gt', 5859) })],
+        policies: [makePolicy({ when: requestWhen('>', 5859) })],
       });
       expect(executeToolCallMock).toHaveBeenCalledTimes(1);
       expect(records[0]).toMatchObject({ outcome: 'succeeded' });
@@ -601,7 +593,7 @@ describe('runFixedPolicies', () => {
     it('does not match when the pending total is not above the threshold', async () => {
       const { records } = await runFixedPolicies(config, source, {
         store,
-        policies: [makePolicy({ when: requestWhen('gt', 5860) })],
+        policies: [makePolicy({ when: requestWhen('>', 5860) })],
       });
       expect(records).toEqual([]);
       expect(executeToolCallMock).not.toHaveBeenCalled();
@@ -610,7 +602,7 @@ describe('runFixedPolicies', () => {
     it('prefers a caller-supplied request namespace over the internal sum', async () => {
       const { records } = await runFixedPolicies(config, source, {
         store,
-        policies: [makePolicy({ when: requestWhen('gt', 5859) })],
+        policies: [makePolicy({ when: requestWhen('>', 5859) })],
         conditionContext: { request: { totalEstimatedMediaTokens: 1 } },
       });
       expect(records).toEqual([]);
@@ -621,7 +613,7 @@ describe('runFixedPolicies', () => {
       source = { ...source, recognized: recognizedImage({ metadata: {} }) };
       const { records } = await runFixedPolicies(config, source, {
         store,
-        policies: [makePolicy({ when: requestWhen('gt', 0) })],
+        policies: [makePolicy({ when: requestWhen('>', 0) })],
       });
       expect(records).toEqual([
         {
@@ -655,7 +647,7 @@ describe('runFixedPolicies', () => {
             id: 'b-on-derivative',
             origins: ['policy'],
             arguments: { maxDimension: 800 },
-            when: requestWhen('eq', 901),
+            when: requestWhen('==', 901),
           }),
         ],
       });
@@ -671,11 +663,11 @@ describe('runFixedPolicies', () => {
 
     it('evaluates session.* from the caller-supplied per-delivery snapshot', async () => {
       mockToolSuccess();
-      const sessionWhen = {
-        left: { field: 'session.availableContextTokens' as const },
-        operator: 'lte' as const,
-        right: { value: 700 },
-      };
+      const sessionWhen: FixedPolicyCondition = [
+        '<=',
+        ['field', 'session.availableContextTokens'],
+        700,
+      ];
       const { records } = await runFixedPolicies(config, source, {
         store,
         policies: [makePolicy({ when: sessionWhen })],
@@ -690,11 +682,7 @@ describe('runFixedPolicies', () => {
         store,
         policies: [
           makePolicy({
-            when: {
-              left: { field: 'session.availableContextTokens' },
-              operator: 'lte',
-              right: { value: 700 },
-            },
+            when: ['<=', ['field', 'session.availableContextTokens'], 700],
           }),
         ],
       });

@@ -469,11 +469,7 @@ describe('normalizeOmniProcessingConfig', () => {
             p: {
               mediaTypes: ['image'],
               toolName: 'omni_downsample_image',
-              when: {
-                left: { field: 'resource.nonexistent' },
-                operator: 'gt',
-                right: { value: 1 },
-              },
+              when: ['>', ['field', 'resource.nonexistent'], 1],
             },
           },
         }),
@@ -830,11 +826,7 @@ describe('normalizeOmniProcessingConfig', () => {
             'image-downsample': {
               mediaTypes: ['image'],
               toolName: 'omni_downsample_image',
-              when: {
-                left: { field: 'resource.width' },
-                operator: 'gt',
-                right: { value: 1 },
-              },
+              when: ['>', ['field', 'resource.width'], 1],
             },
           },
         }),
