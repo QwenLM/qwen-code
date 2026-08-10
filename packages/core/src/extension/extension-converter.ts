@@ -54,10 +54,12 @@ export function detectManifest(
   | { source: 'Qoder' }
   | null {
   let kind: 'standalone' | 'marketplace' | null = null;
+  let converterError: unknown;
   try {
     kind = isClaudePluginConfig(extensionDir, pluginName);
   } catch (error) {
     if (pluginName) throw error;
+    converterError = error;
     debugLogger.warn(
       `Claude detection failed: ${
         error instanceof Error ? error.message : String(error)
@@ -68,6 +70,7 @@ export function detectManifest(
   try {
     if (isGeminiExtensionConfig(extensionDir)) return { source: 'Gemini' };
   } catch (error) {
+    converterError ??= error;
     debugLogger.warn(
       `Gemini detection failed: ${
         error instanceof Error ? error.message : String(error)
@@ -77,6 +80,10 @@ export function detectManifest(
   if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
     return { source: 'Qoder' };
   }
+  // Native was checked before detection; reaching here with a recorded probe
+  // error means no manifest matched — surface the real defect instead of the
+  // install step's misleading "Configuration file not found".
+  if (converterError) throw converterError;
   return null;
 }
 

@@ -962,13 +962,18 @@ export function isClaudePluginConfig(
     if (
       m &&
       Array.isArray(m['plugins']) &&
-      m['plugins'].some((p) => (p as { name?: string }).name === pluginName)
+      m['plugins'].some(
+        (p) =>
+          typeof p === 'object' &&
+          p !== null &&
+          (p as { name?: string }).name === pluginName,
+      )
     ) {
       return 'marketplace';
     }
     reasons.push(
       m
-        ? `marketplace.json does not list "${pluginName}"`
+        ? `marketplace.json does not list "${sanitizeForError(pluginName)}"`
         : 'marketplace.json is absent',
     );
 
@@ -979,11 +984,15 @@ export function isClaudePluginConfig(
       if (actualName === pluginName) {
         return 'standalone';
       }
-      reasons.push(`standalone plugin.json is named "${actualName}"`);
+      reasons.push(
+        `standalone plugin.json is named "${sanitizeForError(actualName)}"`,
+      );
     } else {
       reasons.push('standalone plugin.json is absent');
     }
-    throw new Error(`Plugin "${pluginName}" not found: ${reasons.join('; ')}`);
+    throw new Error(
+      `Plugin "${sanitizeForError(pluginName)}" not found: ${reasons.join('; ')}`,
+    );
   }
   // No pluginName = probe a single-source standalone plugin.
   const p = readExtensionManifest(extensionDir, '.claude-plugin/plugin.json');

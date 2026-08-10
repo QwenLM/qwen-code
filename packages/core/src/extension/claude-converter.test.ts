@@ -251,10 +251,7 @@ describe('isClaudePluginConfig', () => {
 
   it('throws for unparseable manifests', () => {
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
-    fs.writeFileSync(
-      path.join(testDir, '.claude-plugin', 'plugin.json'),
-      '{',
-    );
+    fs.writeFileSync(path.join(testDir, '.claude-plugin', 'plugin.json'), '{');
     expect(() => isClaudePluginConfig(testDir)).toThrow(/Invalid/);
   });
 
@@ -265,7 +262,10 @@ describe('isClaudePluginConfig', () => {
     );
     fs.writeFileSync(outside, JSON.stringify({ name: 'evil' }), 'utf-8');
     fs.mkdirSync(path.join(testDir, '.claude-plugin'), { recursive: true });
-    fs.symlinkSync(outside, path.join(testDir, '.claude-plugin', 'plugin.json'));
+    fs.symlinkSync(
+      outside,
+      path.join(testDir, '.claude-plugin', 'plugin.json'),
+    );
 
     expect(() => isClaudePluginConfig(testDir)).toThrow(/symlink outside/);
     fs.rmSync(outside, { force: true });
@@ -370,7 +370,9 @@ describe('convertClaudePluginPackage', () => {
     expect(fs.existsSync(path.join(convertedSkillsDir, 'txt'))).toBe(false);
 
     // source "." resolves to the marketplace dir itself; no empty scratch dir is left behind
-    expect(fs.readdirSync(pluginSourceDir).filter((f) => f.startsWith('plugin'))).toEqual([]);
+    expect(
+      fs.readdirSync(pluginSourceDir).filter((f) => f.startsWith('plugin')),
+    ).toEqual([]);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -937,7 +939,9 @@ describe('convertClaudePluginPackage', () => {
     expect(result.config.hooks).toBe('./hooks/hooks.json');
     // The referenced hooks file must be copied into the converted directory so
     // the runtime loader can find it.
-    expect(fs.existsSync(path.join(result.convertedDir, 'hooks', 'hooks.json'))).toBe(true);
+    expect(
+      fs.existsSync(path.join(result.convertedDir, 'hooks', 'hooks.json')),
+    ).toBe(true);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -974,6 +978,54 @@ describe('convertClaudePluginPackage', () => {
     );
 
     // The escaping hooks path is confined away rather than persisted.
+    expect(result.config.hooks).toBeUndefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('drops a hooks string path whose file is removed by selective resource collection', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-removed');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    // A hooks file inside a skills/ folder that selective re-collection drops.
+    const packDir = path.join(pluginSourceDir, 'skills', 'pack');
+    fs.mkdirSync(packDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(packDir, 'hooks.json'),
+      JSON.stringify({ hooks: {} }),
+      'utf-8',
+    );
+    const keptDir = path.join(pluginSourceDir, 'skills', 'kept');
+    fs.mkdirSync(keptDir, { recursive: true });
+    fs.writeFileSync(path.join(keptDir, 'SKILL.md'), '# kept', 'utf-8');
+
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          skills: ['./skills/kept'],
+          hooks: './skills/pack/hooks.json',
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
+    // The hooks file was dropped with the excluded skills folder, so the
+    // converted config must not advertise a hooks path that can never load.
     expect(result.config.hooks).toBeUndefined();
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });

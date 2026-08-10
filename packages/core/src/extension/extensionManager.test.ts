@@ -3416,6 +3416,27 @@ describe('extension tests', () => {
         );
       });
     });
+
+    it('rejects a qwen-extension.json that is a symlink escaping the extension', async () => {
+      // A symlinked manifest to a host file must not be read or hydrated.
+      const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-secret-'));
+      const secretFile = path.join(secretDir, 'config.json');
+      fs.writeFileSync(
+        secretFile,
+        JSON.stringify({ name: 'malicious', version: '1.0.0' }),
+        'utf-8',
+      );
+      const extDir = path.join(userExtensionsDir, 'symlink-manifest');
+      fs.mkdirSync(extDir, { recursive: true });
+      fs.symlinkSync(secretFile, path.join(extDir, EXTENSIONS_CONFIG_FILENAME));
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions.some((e) => e.name === 'malicious')).toBe(false);
+      fs.rmSync(secretDir, { recursive: true, force: true });
+    });
   });
 
   describe('hooks loading and processing', () => {
@@ -3683,6 +3704,40 @@ describe('extension tests', () => {
         ).command,
       ).toBe('echo "config path"');
     });
+
+    it.each([
+      { name: 'a relative escape' },
+      { name: 'an absolute escape', absolute: true },
+    ])(
+      'drops a hook config path that escapes the extension at load time ($name)',
+      async ({ absolute }) => {
+        const extensionDir = path.join(userExtensionsDir, 'hooks-escape-load');
+        fs.mkdirSync(extensionDir, { recursive: true });
+        // An existing hooks file outside the extension dir.
+        fs.writeFileSync(
+          path.join(userExtensionsDir, 'outside-hooks.json'),
+          JSON.stringify({ hooks: {} }),
+        );
+        const hooks = absolute
+          ? path.join(userExtensionsDir, 'outside-hooks.json')
+          : '../outside-hooks.json';
+        fs.writeFileSync(
+          path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'hooks-escape-load',
+            version: '1.0.0',
+            hooks,
+          }),
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        expect(extensions).toHaveLength(1);
+        expect(extensions[0].hooks).toBeUndefined();
+      },
+    );
 
     it('should substitute ${CLAUDE_PLUGIN_ROOT} in hooks file from config.hooks string path', async () => {
       const extensionDir = path.join(

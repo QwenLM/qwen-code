@@ -1415,9 +1415,12 @@ export class ExtensionManager {
             : null;
 
         // A hooks path (string or absolute) must stay inside the extension;
-        // an escaping value would otherwise load an arbitrary host file.
+        // an escaping value would otherwise load an arbitrary host file. Only
+        // an existing path can escape via symlink — a missing file is dropped
+        // by the existsSync below, not an escape.
         if (
           configHooksPath &&
+          fs.existsSync(configHooksPath) &&
           !realPathWithin(configHooksPath, effectiveExtensionPath)
         ) {
           debugLogger.warn(

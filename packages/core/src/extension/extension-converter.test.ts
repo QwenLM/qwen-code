@@ -112,21 +112,21 @@ describe('detectManifest', () => {
       qoder: false,
       expected: null,
     },
-  ])(
-    'detects $name',
-    ({ claude, gemini, qoder, expected }) => {
-      mocks.isClaudePluginConfig.mockReturnValue(claude);
-      mocks.isGeminiExtensionConfig.mockReturnValue(gemini);
-      mocks.existsSync.mockImplementation((p: string) =>
-        qoder ? p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)) : false,
-      );
+  ])('detects $name', ({ claude, gemini, qoder, expected }) => {
+    mocks.isClaudePluginConfig.mockReturnValue(claude);
+    mocks.isGeminiExtensionConfig.mockReturnValue(gemini);
+    mocks.existsSync.mockImplementation((p: string) =>
+      qoder ? p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)) : false,
+    );
 
-      expect(detectManifest('/dir')).toEqual(expected);
-    },
-  );
+    expect(detectManifest('/dir')).toEqual(expected);
+  });
 
   it.each([
-    { kind: 'marketplace', expected: { source: 'Claude', kind: 'marketplace' } },
+    {
+      kind: 'marketplace',
+      expected: { source: 'Claude', kind: 'marketplace' },
+    },
     { kind: 'standalone', expected: { source: 'Claude', kind: 'standalone' } },
   ])(
     'returns Claude when a specified pluginName matches its $kind',
@@ -174,6 +174,30 @@ describe('detectManifest', () => {
       expect(detectManifest('/dir')).toEqual(expected);
     },
   );
+
+  it('falls through to Qoder when Gemini detection fails without pluginName', () => {
+    mocks.isClaudePluginConfig.mockReturnValue(null);
+    mocks.isGeminiExtensionConfig.mockImplementation(() => {
+      throw new Error('Invalid gemini extension');
+    });
+    mocks.existsSync.mockImplementation((p: string) =>
+      p.endsWith(path.join('', QODER_PLUGIN_MANIFEST)),
+    );
+
+    expect(detectManifest('/dir')).toEqual({ source: 'Qoder' });
+  });
+
+  it('throws the recorded detection error when no manifest matches', () => {
+    mocks.isClaudePluginConfig.mockImplementation(() => {
+      throw new Error('Invalid plugin manifest');
+    });
+    mocks.isGeminiExtensionConfig.mockImplementation(() => {
+      throw new Error('Invalid gemini extension');
+    });
+    mocks.existsSync.mockReturnValue(false);
+
+    expect(() => detectManifest('/dir')).toThrow('Invalid plugin manifest');
+  });
 });
 
 describe('convertCompatibleExtension', () => {
