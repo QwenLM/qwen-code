@@ -8114,14 +8114,14 @@ describe('DaemonSessionProvider', () => {
     vi.useFakeTimers();
     try {
       const loadPromise = requireActions(actions).loadSession('session-b');
-      const rejection = expect(loadPromise).rejects.toThrow(
-        'Session load timed out',
-      );
+      const rejection = loadPromise.catch((error: unknown) => error);
       await act(async () => {
         await flushPromises();
         await vi.advanceTimersByTimeAsync(75_000);
       });
-      await rejection;
+      const loadError = await rejection;
+      expect(loadError).toBeInstanceOf(Error);
+      expect((loadError as Error).message).toContain('Session load timed out');
       expect(connection).toMatchObject({ sessionId: undefined });
 
       lateLoad.resolve(lateSession);
