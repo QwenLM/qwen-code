@@ -9020,6 +9020,22 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('forwards an id-less push with messageId undefined', async () => {
+      // The web-shell legacy branch posts without a messageId; the route must
+      // forward `undefined` (not the raw body value) so the bridge mints an id.
+      const bridge = fakeBridge();
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: 'hi' },
+        'client-9',
+      );
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        { sessionId: 's-1', message: 'hi', context: { clientId: 'client-9' } },
+      ]);
+    });
+
     it.each([[''], [123], ['x'.repeat(129)]])(
       '400 when `messageId` is invalid: %j',
       async (messageId) => {

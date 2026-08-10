@@ -8459,20 +8459,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         originatorClientId,
       };
       entry.midTurnMessageQueue.push(queuedMessage);
-      try {
-        entry.events.publish({
-          type: 'pending_prompt_added',
-          promptId: messageId,
-          data: {
-            sessionId,
+      // UI enqueues only: an anonymous enqueue (live steering) is an internal
+      // delegation prompt — publishing it would surface its raw text in every
+      // attached client's queue view and reconciliation snapshot.
+      if (originatorClientId) {
+        try {
+          entry.events.publish({
+            type: 'pending_prompt_added',
             promptId: messageId,
-            text: trimmed,
-            queuedAt: Date.now(),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus may be closed during session teardown */
+            data: {
+              sessionId,
+              promptId: messageId,
+              text: trimmed,
+              queuedAt: Date.now(),
+            },
+            originatorClientId,
+          });
+        } catch {
+          /* bus may be closed during session teardown */
+        }
       }
       return { accepted: true, messageId };
     },
@@ -8565,10 +8570,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // mutate it.
       resolveTrustedClientId(entry, context?.clientId);
       return {
-        messages: entry.midTurnMessageQueue.map((message) => ({
-          messageId: message.messageId,
-          text: message.text,
-        })),
+        // Anonymous enqueues (live steering) stay off the shared surface:
+        // their delegation text is not a user message other attached clients
+        // should restore into their queue views.
+        messages: entry.midTurnMessageQueue
+          .filter((message) => message.originatorClientId !== undefined)
+          .map((message) => ({
+            messageId: message.messageId,
+            text: message.text,
+          })),
         settledMessageIds: [...entry.settledMidTurnMessageIds],
         promotedMessageIds: [...entry.promotedMidTurnMessageIds],
       };

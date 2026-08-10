@@ -21524,6 +21524,76 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await prompt;
     await bridge.shutdown();
   });
+
+  it('keeps anonymous enqueues off the shared queue surface', async () => {
+    // Live steering enqueues without a client id: its raw delegation prompt
+    // must not reach other attached clients through the added event or the
+    // reconciliation snapshot, while UI enqueues stay fully visible.
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const abort = new AbortController();
+    const events: BridgeEvent[] = [];
+    const collecting = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      })) {
+        events.push(event);
+      }
+    })();
+
+    const anonymous = bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      '<realtime_delegation>internal steering</realtime_delegation>',
+    );
+    expect(anonymous.accepted).toBe(true);
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'from the ui',
+        { clientId: session.clientId },
+        'ui-visible',
+      ),
+    ).toEqual({ accepted: true, messageId: 'ui-visible' });
+
+    await vi.waitFor(() =>
+      expect(
+        events.some(
+          (event) =>
+            event.type === 'pending_prompt_added' &&
+            event.promptId === 'ui-visible',
+        ),
+      ).toBe(true),
+    );
+    expect(
+      events.filter(
+        (event) =>
+          event.type === 'pending_prompt_added' &&
+          event.promptId === anonymous.messageId,
+      ),
+    ).toEqual([]);
+    expect(bridge.getMidTurnMessages(session.sessionId).messages).toEqual([
+      { messageId: 'ui-visible', text: 'from the ui' },
+    ]);
+
+    abort.abort();
+    await collecting;
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
 });
 
 describe('createAcpSessionBridge — child-resource refresh', () => {
