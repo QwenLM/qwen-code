@@ -654,8 +654,12 @@ export interface TurnResultRecordPayload {
   promptTextTruncated?: boolean;
   resultText?: string;
   resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
   originatorClientId?: string;
 }
+
+export const TURN_RESULT_CODE_TEXT_TRUNCATED = 'RESULT_TEXT_TRUNCATED' as const;
+export type TurnResultCode = typeof TURN_RESULT_CODE_TEXT_TRUNCATED;
 
 export function isTurnResultRecordPayload(
   value: unknown,
@@ -691,6 +695,9 @@ export function isTurnResultRecordPayload(
     !optionalBoolean('promptTextTruncated') ||
     !optionalStringWithin('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
     !optionalBoolean('resultTruncated') ||
+    (payload['resultCode'] !== undefined &&
+      (payload['resultCode'] !== TURN_RESULT_CODE_TEXT_TRUNCATED ||
+        payload['resultTruncated'] !== true)) ||
     !optionalStringWithin('originatorClientId')
   ) {
     return false;

@@ -220,6 +220,10 @@ export class MessageRewriteMiddleware {
     this.generationAbortController.abort();
     this.generationAbortController = new AbortController();
     this.generation++;
+    this.discardBufferedTurn();
+  }
+
+  discardBufferedTurn(): void {
     this.turnBuffer.discard();
     this.turnMeta = undefined;
     this.turnOwnerPromptId = undefined;

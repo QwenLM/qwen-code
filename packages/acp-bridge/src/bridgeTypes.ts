@@ -7,6 +7,7 @@
 import type {
   ApprovalMode,
   SessionGroupPresetColor,
+  TurnResultCode,
   TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -903,6 +904,7 @@ export interface BridgeTurnStatus {
   error?: TurnResultErrorPayload;
   resultText?: string;
   resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
   originatorClientId?: string;
 }
 

@@ -30,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   normalizeTurnResultError,
   TrustGateError,
@@ -1562,6 +1563,11 @@ function settledTurnStatus(
     ...(record.resultTruncated !== undefined
       ? { resultTruncated: record.resultTruncated }
       : {}),
+    ...(record.resultTruncated === true
+      ? {
+          resultCode: record.resultCode ?? TURN_RESULT_CODE_TEXT_TRUNCATED,
+        }
+      : {}),
     ...(record.originatorClientId !== undefined
       ? { originatorClientId: record.originatorClientId }
       : {}),
@@ -1589,6 +1595,9 @@ function enrichTerminalTurnStatus(
       : {}),
     ...(persisted.resultTruncated !== undefined
       ? { resultTruncated: persisted.resultTruncated }
+      : {}),
+    ...(persisted.resultCode !== undefined
+      ? { resultCode: persisted.resultCode }
       : {}),
     ...(terminal.originatorClientId === undefined &&
     persisted.originatorClientId !== undefined

@@ -43,7 +43,10 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
+import {
+  isPathWithinRoot,
+  TURN_RESULT_TEXT_MAX_CHARS,
+} from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 import {
@@ -336,6 +339,34 @@ beforeAll(async () => {
       };
     }
 
+    if (messages.includes('turn-final-answer-boundary-e2e')) {
+      const toolCallId = 'call_turn_final_answer_boundary';
+      if (!messages.includes(toolCallId)) {
+        return {
+          content: 'I will inspect the fixture first. ',
+          toolCalls: [
+            fakeToolCall(
+              'read_file',
+              {
+                file_path: path.join(
+                  workspaceDir,
+                  'turn-final-answer-boundary.txt',
+                ),
+              },
+              toolCallId,
+            ),
+          ],
+        };
+      }
+      return { content: 'The strict final answer is 42.' };
+    }
+
+    if (messages.includes('turn-result-truncation-e2e')) {
+      return {
+        content: 'z'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100),
+      };
+    }
+
     if (pendingWritePath && messages.includes('fan-out') && !hasToolResult) {
       return {
         toolCalls: [
@@ -393,6 +424,10 @@ beforeAll(async () => {
     JSON.stringify(defaultSettings),
   );
   workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
+  writeFileSync(
+    path.join(workspaceDir, 'turn-final-answer-boundary.txt'),
+    '42',
+  );
   await startDaemon();
 }, 30_000);
 
@@ -473,6 +508,88 @@ describePOSIX('qwen serve — turn result polling', () => {
           state: 'completed',
           resultText: 'fake response complete',
         });
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
+
+  it('returns only the final answer after the last tool boundary', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [
+            {
+              type: 'text',
+              text: 'turn-final-answer-boundary-e2e',
+            },
+          ],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          sessionId: session.sessionId,
+          promptId: accepted.promptId,
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'The strict final answer is 42.',
+        });
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
+
+  it('returns a stable code when the final answer exceeds the cap', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [
+            {
+              type: 'text',
+              text: 'turn-result-truncation-e2e',
+            },
+          ],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      let settled: Record<string, unknown> = {};
+      await expect
+        .poll(
+          async () => {
+            settled = await turnStatus(session.sessionId, accepted.promptId);
+            return settled['state'];
+          },
+          { timeout: 30_000 },
+        )
+        .toBe('completed');
+
+      expect(settled).toMatchObject({
+        sessionId: session.sessionId,
+        promptId: accepted.promptId,
+        stopReason: 'end_turn',
+        resultTruncated: true,
+        resultCode: 'RESULT_TEXT_TRUNCATED',
+      });
+      expect(settled['resultText']).toBe(
+        'z'.repeat(TURN_RESULT_TEXT_MAX_CHARS),
+      );
     } finally {
       await client.cancel(session.sessionId).catch(() => undefined);
       await client.closeSession(session.sessionId).catch(() => undefined);

@@ -240,6 +240,52 @@ describe('MessageRewriteMiddleware', () => {
     });
   });
 
+  it('discards only the current buffer without aborting prior rewrites', async () => {
+    const { middleware } = createMiddleware('message');
+    const { LlmRewriter } = await import('./LlmRewriter.js');
+    const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+      rewrite: ReturnType<typeof vi.fn>;
+    };
+    let resolvePriorRewrite!: (value: string) => void;
+    rewriter.rewrite.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolvePriorRewrite = resolve;
+        }),
+    );
+
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'prior tool block' },
+    } as unknown as SessionUpdate);
+    await middleware.flushTurn();
+    const priorRewriteSignal = rewriter.rewrite.mock.calls[0][1] as AbortSignal;
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'failed retry attempt' },
+    } as unknown as SessionUpdate);
+
+    middleware.discardBufferedTurn();
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'final answer' },
+    } as unknown as SessionUpdate);
+    await middleware.flushTurn();
+    resolvePriorRewrite('prior rewritten block');
+    await middleware.waitForPendingRewrites();
+
+    expect(priorRewriteSignal.aborted).toBe(false);
+    expect(rewriter.rewrite).toHaveBeenNthCalledWith(
+      2,
+      {
+        thoughts: [],
+        messages: ['final answer'],
+        hasToolCalls: false,
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
   it('does not deliver or commit a rewrite after its turn signal aborts', async () => {
     const { middleware, mockSendUpdate } = createMiddleware('message');
     const { LlmRewriter } = await import('./LlmRewriter.js');

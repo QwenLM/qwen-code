@@ -45,7 +45,9 @@ Shared errors: `404` unknown session (`SessionNotFoundError`), `400`
 
 Field presence: optional fields are omitted rather than defaulted. In
 particular `promptTextTruncated` / `resultTruncated` are only present when
-`true` — consumers must treat an absent flag as `false`.
+`true` — consumers must treat an absent flag as `false`. A truncated result
+also carries `resultCode: "RESULT_TEXT_TRUNCATED"` so consumers can reject an
+incomplete answer without interpreting free text.
 
 - `queued` / `running` mirror the bridge's live `pendingPromptList`
   (`queuedAt` at admission, `startedAt` at FIFO dispatch).
@@ -60,11 +62,14 @@ particular `promptTextTruncated` / `resultTruncated` are only present when
   top-level assistant answer visible to the user: subagent-owned chunks,
   discrete messages, and slash-command output are excluded; when message
   rewrite succeeds, rewritten text replaces the corresponding raw segment.
-  Tool, thought, background, and status output are also excluded. Rewrite
+  Tool, thought, background, and status output are also excluded. When a
+  response block calls a tool, its visible preamble is discarded; only the
+  final response block after the last tool boundary is retained. Rewrite
   failure or an empty rewrite falls back to the raw top-level segment. Both
   fields are capped at
   `TURN_RESULT_TEXT_MAX_CHARS` (32,768 UTF-16 code units) with the paired
-  `*Truncated` flag.
+  `*Truncated` flag. A truncated `resultText` also sets
+  `resultCode: "RESULT_TEXT_TRUNCATED"`.
   The result cap is applied after rewritten-versus-raw selection, so excluded
   or replaced text does not consume the visible-answer budget.
   In-flight raw/rewrite candidates are separately bounded to 65,536 UTF-16

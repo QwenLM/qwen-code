@@ -173,6 +173,7 @@ import {
   getFullTurnVisionModelSelector,
   splitImageParts,
   approxBase64Bytes,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   normalizeTurnResultError,
   runWithRuntimeContentGenerator,
@@ -3874,6 +3875,7 @@ export class Session implements SessionContext {
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                  this.#beginTurnResultResponseBlock();
                   const channelDeliveryCheckpoint =
                     channelDeliveryResponseBlock?.length ?? 0;
 
@@ -3896,7 +3898,7 @@ export class Session implements SessionContext {
                             continue;
                           }
 
-                          this.messageEmitter.emitMessage(
+                          await this.messageEmitter.emitMessage(
                             part.text,
                             'assistant',
                             part.thought,
@@ -3934,6 +3936,8 @@ export class Session implements SessionContext {
                             channelDeliveryResponseBlock.length =
                               channelDeliveryCheckpoint;
                           }
+                          this.#beginTurnResultResponseBlock();
+                          this.messageRewriter?.discardBufferedTurn();
                         }
                         await finalizeToolCallPreparations(
                           preparationTracker,
@@ -4031,6 +4035,7 @@ export class Session implements SessionContext {
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
+                this.#commitTurnResultResponseBlock(functionCalls.length > 0);
 
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
@@ -4843,6 +4848,7 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.channelDeliveryCapture,
         );
+        this.#beginTurnResultResponseBlock();
         const channelDeliveryCheckpoint =
           channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
@@ -4878,7 +4884,7 @@ export class Session implements SessionContext {
             const candidate = response.value.candidates[0];
             for (const part of candidate.content?.parts ?? []) {
               if (!part.text) continue;
-              this.messageEmitter.emitMessage(
+              await this.messageEmitter.emitMessage(
                 part.text,
                 'assistant',
                 part.thought,
@@ -4914,6 +4920,8 @@ export class Session implements SessionContext {
               if (channelDeliveryResponseBlock) {
                 channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
               }
+              this.#beginTurnResultResponseBlock();
+              this.messageRewriter?.discardBufferedTurn();
             }
             await finalizeToolCallPreparations(
               preparationTracker,
@@ -4993,6 +5001,7 @@ export class Session implements SessionContext {
         channelDeliveryResponseBlock,
         functionCalls.length > 0,
       );
+      this.#commitTurnResultResponseBlock(functionCalls.length > 0);
 
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata);
@@ -5280,6 +5289,9 @@ export class Session implements SessionContext {
       ? `rewrite:${rewriteContext.turnIndex}`
       : 'direct';
     let segment = recording.resultSegments.get(segmentKey);
+    if (rewriteContext?.rewritten && !segment) {
+      return;
+    }
     if (!segment) {
       if (recording.resultSegments.size >= TURN_RESULT_CAPTURE_MAX_SEGMENTS) {
         recording.resultSegmentsTruncated = true;
@@ -5308,6 +5320,20 @@ export class Session implements SessionContext {
     segment.rawText += content.text.slice(0, remaining);
     recording.resultCapturedChars += Math.min(content.text.length, remaining);
     if (content.text.length > remaining) segment.rawTruncated = true;
+  }
+
+  #beginTurnResultResponseBlock(): void {
+    const recording = this.#turnRecording;
+    if (!recording) return;
+    recording.resultSegments.clear();
+    recording.resultCapturedChars = 0;
+    recording.resultSegmentsTruncated = false;
+  }
+
+  #commitTurnResultResponseBlock(hasFunctionCalls: boolean): void {
+    if (hasFunctionCalls) {
+      this.#beginTurnResultResponseBlock();
+    }
   }
 
   /**
@@ -5340,6 +5366,10 @@ export class Session implements SessionContext {
     const selectedResult = truncateTurnText(
       selectedSegments.map(({ text }) => text).join(''),
     );
+    const resultTruncated =
+      selectedResult.truncated ||
+      selectedSegments.some(({ truncated }) => truncated) ||
+      recording.resultSegmentsTruncated;
     const payload: TurnResultRecordPayload = {
       promptId: recording.promptId,
       state,
@@ -5356,10 +5386,11 @@ export class Session implements SessionContext {
       ...(selectedResult.text.length > 0
         ? { resultText: selectedResult.text }
         : {}),
-      ...(selectedResult.truncated ||
-      selectedSegments.some(({ truncated }) => truncated) ||
-      recording.resultSegmentsTruncated
-        ? { resultTruncated: true }
+      ...(resultTruncated
+        ? {
+            resultTruncated: true,
+            resultCode: TURN_RESULT_CODE_TEXT_TRUNCATED,
+          }
         : {}),
       ...(recording.originatorClientId !== undefined
         ? { originatorClientId: recording.originatorClientId }

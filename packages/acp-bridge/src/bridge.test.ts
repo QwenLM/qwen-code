@@ -10581,6 +10581,47 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('projects the result truncation code from persistence', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return {
+              v: 1,
+              sessionId: 'ignored',
+              turnResult: {
+                promptId: 'prompt-truncated-result',
+                state: 'completed',
+                stopReason: 'end_turn',
+                endedAt: 2000,
+                resultText: 'bounded prefix',
+                resultTruncated: true,
+              },
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-truncated-result',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        stopReason: 'end_turn',
+        resultText: 'bounded prefix',
+        resultTruncated: true,
+        resultCode: 'RESULT_TEXT_TRUNCATED',
+      });
+      await bridge.shutdown();
+    });
+
     it('reports removed queued and running prompts as cancelled immediately', async () => {
       let rejectRunning: ((err: Error) => void) | undefined;
       const runningGate = new Promise<PromptResponse>((_resolve, reject) => {

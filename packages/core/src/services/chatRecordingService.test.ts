@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
+  isTurnResultRecordPayload,
   normalizeTurnResultError,
   TURN_RESULT_ERROR_CODE_MAX_CHARS,
   TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
@@ -850,6 +851,37 @@ describe('ChatRecordingService', () => {
           endedAt: 1500,
         }),
       ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    });
+  });
+
+  describe('isTurnResultRecordPayload', () => {
+    it('accepts only the stable result truncation code', () => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2000,
+          resultTruncated: true,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        }),
+      ).toBe(true);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2000,
+          resultTruncated: true,
+          resultCode: 'UNKNOWN_RESULT_CODE',
+        }),
+      ).toBe(false);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2000,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        }),
+      ).toBe(false);
     });
   });
 

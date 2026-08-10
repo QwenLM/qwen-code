@@ -4127,6 +4127,307 @@ describe('Session', () => {
         );
       });
 
+      it('records only the final answer after a tool-call boundary', async () => {
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I will check the file first. ' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'The final answer is 42.' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'completed',
+            stopReason: 'end_turn',
+            resultText: 'The final answer is 42.',
+          }),
+        );
+      });
+
+      it('ignores a delayed rewrite from the discarded tool-call block', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('');
+        const middleware = session.messageRewriter as unknown as {
+          rewriter: { rewrite: typeof rewrite };
+          sendUpdate: (
+            update: SessionUpdate,
+            context: {
+              ownerPromptId?: string;
+              turnIndex: number;
+              rewritten: boolean;
+              replacesMessageText: boolean;
+            },
+          ) => Promise<void>;
+        };
+        middleware.rewriter.rewrite = rewrite;
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        let releaseFinalResponse!: () => void;
+        const finalResponseGate = new Promise<void>((resolve) => {
+          releaseFinalResponse = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I will check the file first. ' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 1,
+                    candidatesTokenCount: 1,
+                    totalTokenCount: 2,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              await finalResponseGate;
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'The final answer is 42.' }],
+                      },
+                    },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 1,
+                    candidatesTokenCount: 1,
+                    totalTokenCount: 2,
+                  },
+                },
+              };
+            })(),
+          );
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+        );
+
+        await middleware.sendUpdate(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'rewritten tool preamble' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          {
+            ownerPromptId: trustedContext.promptId,
+            turnIndex: 1,
+            rewritten: true,
+            replacesMessageText: true,
+          },
+        );
+        releaseFinalResponse();
+        await prompt;
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            resultText: 'The final answer is 42.',
+          }),
+        );
+      });
+
+      it('discards text from a failed non-continuation retry attempt', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'discarded attempt' }] } },
+                ],
+              },
+            },
+            { type: core.StreamEventType.RETRY, value: {} },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'final answer' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'final answer' }),
+        );
+      });
+
+      it('waits for final answer delivery before recording it', async () => {
+        let releaseDelivery!: () => void;
+        const deliveryGate = new Promise<void>((resolve) => {
+          releaseDelivery = resolve;
+        });
+        let markDeliveryStarted!: () => void;
+        const deliveryStarted = new Promise<void>((resolve) => {
+          markDeliveryStarted = resolve;
+        });
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async ({ update }) => {
+            if (
+              update.sessionUpdate === 'agent_message_chunk' &&
+              update.content.type === 'text' &&
+              update.content.text === 'delayed final answer'
+            ) {
+              markDeliveryStarted();
+              await deliveryGate;
+            }
+          },
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'delayed final answer' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+        await deliveryStarted;
+        const releaseTimer = setTimeout(releaseDelivery, 20);
+
+        try {
+          await prompt;
+        } finally {
+          clearTimeout(releaseTimer);
+          releaseDelivery();
+        }
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'delayed final answer' }),
+        );
+      });
+
       it('records only top-level main-answer text', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           (async function* () {
@@ -4674,7 +4975,7 @@ describe('Session', () => {
         },
       );
 
-      it('caps resultText at TURN_RESULT_TEXT_MAX_CHARS and flags truncation', async () => {
+      it('returns a stable result code when resultText exceeds the cap', async () => {
         const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks([
@@ -4701,6 +5002,7 @@ describe('Session', () => {
           core.TURN_RESULT_TEXT_MAX_CHARS,
         );
         expect(payload.resultTruncated).toBe(true);
+        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
       });
 
       it('captures streamed chunks until the character cap', async () => {
