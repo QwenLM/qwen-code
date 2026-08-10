@@ -6,7 +6,6 @@
 
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
@@ -263,8 +262,8 @@ export interface AgentParams {
    * search tools resolve inside the worktree rather than the parent tree.
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
-   * worktree registered against this repository, and must live inside it —
-   * pinning rebinds the child's workspace boundary. If `isolation` is also
+   * worktree registered against this repository. Pinning rebinds the child's
+   * workspace boundary. If `isolation` is also
    * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
@@ -290,11 +289,9 @@ function getForkProfileModeError(config: Config): string | undefined {
  * `isolation:'worktree'`, the harness neither creates nor tears down this
  * directory — it only rebinds the child Config's cwd surfaces to it.
  *
- * Two checks stop a bad path from aiming the sub-agent somewhere it should not
- * be:
+ * Git's worktree registry stops a bad path from aiming the sub-agent somewhere
+ * it should not be:
  *
- * - It must resolve INSIDE the repository (canonical comparison), because
- *   pinning rebinds the child's `WorkspaceContext` wholesale.
  * - It must be a REGISTERED linked worktree of this repository, enforced by
  *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
  *   point back at it, and it must not be the primary working tree. That
@@ -342,25 +339,6 @@ async function resolveExternalWorktreeDir(
   const repoRoot = (await probe.getRepoTopLevel()) ?? parentCwd;
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
-
-  // Containment. A registered worktree may live anywhere on disk, but pinning
-  // rebinds the child's WorkspaceContext wholesale, so a model-supplied path
-  // must not silently move the file tools' boundary outside the repository.
-  // (`isolation: 'worktree'` has this property implicitly — it always
-  // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
-  // paths so a symlink cannot straddle the boundary.
-  const realRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
-  const realResolved = await fs
-    .realpath(resolvedPath)
-    .catch(() => resolvedPath);
-  const relToRepo = path.relative(realRepoRoot, realResolved);
-  if (relToRepo.startsWith('..') || path.isAbsolute(relToRepo)) {
-    return {
-      error:
-        `working_dir "${resolvedPath}" resolves outside this repository ` +
-        `(${realRepoRoot}). Pass a worktree that lives inside the repository.`,
-    };
-  }
 
   // The single authoritative gate: the path must be a REGISTERED linked
   // worktree of this repository — git's own registry entry for it points back
@@ -881,7 +859,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin a sub-agent or named teammate to an EXISTING, caller-owned git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up by Agent. Relative file, shell, and search operations resolve inside it. This is a cwd pin, not a filesystem sandbox: explicit absolute paths can still reach outside. The path must be a registered linked worktree inside this repository. If both working_dir and isolation are provided, isolation is ignored.",
+            "Pin a sub-agent or named teammate to an EXISTING, caller-owned git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up by Agent. Relative file, shell, and search operations resolve inside it. This is a cwd pin, not a filesystem sandbox: explicit absolute paths can still reach outside. The path must be a registered linked worktree of this repository. If both working_dir and isolation are provided, isolation is ignored.",
         },
       },
       required: ['description', 'prompt'],
@@ -2385,6 +2363,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return this.buildSpawnBlockedResult(
           'Error: "model" is not supported for a named teammate.',
           'model is incompatible with a named teammate',
+        );
+      } else if (this.params.isolation !== undefined) {
+        return this.buildSpawnBlockedResult(
+          'Error: "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".',
+          'isolation is incompatible with a named teammate',
         );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);

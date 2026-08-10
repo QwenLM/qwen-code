@@ -179,6 +179,38 @@ describe('TeamCoordinationHarness', () => {
       });
     });
 
+    it('does not forward text from an earlier round when the final round is empty', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('worker', {
+        onMessage: (_message, agent) => {
+          for (const [round, text] of [
+            [1, 'interim narration'],
+            [2, ''],
+          ] as const) {
+            agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+              subagentId: agent.agentId,
+              round,
+              text,
+              thoughtText: '',
+              timestamp: Date.now(),
+            });
+          }
+        },
+      });
+
+      await h.teamManager.sendMessage('worker', 'inspect', 'leader');
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            text: expect.stringContaining(
+              'completed a turn without a model-visible final answer',
+            ),
+          }),
+        ]);
+      });
+    });
+
     it('sends message from leader to teammate', async () => {
       const h = await createHarness();
       const worker = await h.spawnTeammate('worker');
@@ -374,6 +406,25 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
 
       expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('does not treat an automatic final report as a shutdown response', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      target.goIdle();
+
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_approved is handled by the coordinator.',
+        'target',
+        undefined,
+        true,
+      );
+
+      expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
     });
 
     it('shutdown_rejected clears the pending flag and disarms the abort', async () => {

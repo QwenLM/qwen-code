@@ -555,7 +555,7 @@ export class TeamManager {
         ? findMemberByName(this.teamFile.members, from)
         : undefined;
       const shutdownResponse =
-        sender && this._shutdownPending.has(sender.name)
+        sender && !automatic && this._shutdownPending.has(sender.name)
           ? classifyShutdownResponse(message)
           : undefined;
 
@@ -1547,6 +1547,7 @@ export class TeamManager {
     const onRoundText = (event: AgentRoundTextEvent) => {
       recordActivity();
       const text = event.text.trim();
+      this.pendingFinalReports.delete(agentId);
       if (text) {
         this.pendingFinalReports.set(agentId, text);
         this.explicitLeaderReports.delete(agentId);

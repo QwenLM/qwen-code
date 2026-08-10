@@ -1575,6 +1575,29 @@ describe('AgentTool', () => {
       expect(spawnTeammate).not.toHaveBeenCalled();
     });
 
+    it('blocks isolation if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Change files',
+        prompt: 'Implement the fix',
+        subagent_type: 'file-search',
+        name: 'writer',
+        isolation: 'worktree',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /isolation.*named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
     it('rejects plan_mode_required direct execution from a subagent context', async () => {
       const spawnTeammate = vi.fn().mockResolvedValue(undefined);
       vi.mocked(config.getTeamManager).mockReturnValue({
@@ -2527,6 +2550,54 @@ describe('AgentTool', () => {
         expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('accepts a registered sibling worktree of this repo', async () => {
+      vi.useRealTimers();
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-sibling-')),
+      );
+      const repo = path.join(root, 'repo');
+      const wt = path.join(root, 'review-pr-1');
+      try {
+        fs.mkdirSync(repo);
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['worktree', 'add', '-b', 'review-pr-1', wt], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+        });
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        expect((createCall[1] as Config).getProjectRoot()).toBe(wt);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
         vi.useFakeTimers();
       }
     }, 20000);
