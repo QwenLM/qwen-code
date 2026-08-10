@@ -9469,6 +9469,10 @@ describe('useGeminiStream', () => {
       const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
         | ((completedTools: TrackedToolCall[]) => Promise<void>)
         | undefined;
+      expect(
+        onComplete,
+        'useReactToolScheduler onComplete was never registered',
+      ).toBeDefined();
       await act(async () => {
         await onComplete?.([completedToolCall]);
       });
