@@ -738,6 +738,24 @@ describe('AskUserQuestion multiple questions', () => {
     expect(container!.textContent).toContain('Enter next · Esc stop editing');
   });
 
+  it('keeps the shortcut footer hidden while the dialog is collapsed', () => {
+    render();
+    const panel = container!.querySelector('[data-web-shell-ask-panel]')!;
+    const collapse = container!.querySelector<HTMLButtonElement>(
+      '[aria-label="Collapse"]',
+    )!;
+
+    act(() => collapse.click());
+
+    expect(panel.getAttribute('aria-labelledby')).toBeNull();
+    expect(container!.textContent).not.toContain('Enter submit');
+    const expand = container!.querySelector<HTMLButtonElement>(
+      '[aria-label="Expand"]',
+    )!;
+    act(() => expand.click());
+    expect(container!.textContent).toContain('Enter submit');
+  });
+
   it('does not advertise the global submit shortcut on the last question', () => {
     render(undefined, multipleQuestionsRequest);
     pressKey(optionButtons()[0]!, 'Enter');

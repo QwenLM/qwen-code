@@ -564,19 +564,17 @@ const EN: Messages = {
   'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit · Esc ignore',
   'askUser.shortcuts.optionsNext':
     '↑↓ select · Enter next · Esc ignore · ⌘/Ctrl+Enter submit',
-  'askUser.shortcuts.optionsFinal':
-    '↑↓ select · Enter submit · Esc ignore · ⌘/Ctrl+Enter submit',
+  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit · Esc ignore',
   'askUser.shortcuts.multiSingle':
     '↑↓ select · Space toggle · Enter submit · Esc ignore',
   'askUser.shortcuts.multiNext':
     '↑↓ select · Space toggle · Enter next · Esc ignore · ⌘/Ctrl+Enter submit',
   'askUser.shortcuts.multiFinal':
-    '↑↓ select · Space toggle · Enter submit · Esc ignore · ⌘/Ctrl+Enter submit',
+    '↑↓ select · Space toggle · Enter submit · Esc ignore',
   'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
   'askUser.shortcuts.inputNext':
     'Enter next · Esc stop editing · ⌘/Ctrl+Enter submit',
-  'askUser.shortcuts.inputFinal':
-    'Enter submit · Esc stop editing · ⌘/Ctrl+Enter submit',
+  'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
     'No matching inline LaTeX expression found in the last AI output.',
@@ -3399,19 +3397,17 @@ const ZH: Messages = {
   'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交 · Esc 忽略',
   'askUser.shortcuts.optionsNext':
     '↑↓ 选择 · Enter 下一题 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
-  'askUser.shortcuts.optionsFinal':
-    '↑↓ 选择 · Enter 提交 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
+  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交 · Esc 忽略',
   'askUser.shortcuts.multiSingle':
     '↑↓ 选择 · Space 切换 · Enter 提交 · Esc 忽略',
   'askUser.shortcuts.multiNext':
     '↑↓ 选择 · Space 切换 · Enter 下一题 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
   'askUser.shortcuts.multiFinal':
-    '↑↓ 选择 · Space 切换 · Enter 提交 · Esc 忽略 · ⌘/Ctrl+Enter 提交',
+    '↑↓ 选择 · Space 切换 · Enter 提交 · Esc 忽略',
   'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
   'askUser.shortcuts.inputNext':
     'Enter 下一题 · Esc 退出编辑 · ⌘/Ctrl+Enter 提交',
-  'askUser.shortcuts.inputFinal':
-    'Enter 提交 · Esc 退出编辑 · ⌘/Ctrl+Enter 提交',
+  'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
   'copy.latexMissing': '最后一条 AI 输出中没有匹配的 LaTeX 块。',

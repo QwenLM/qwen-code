@@ -776,8 +776,10 @@ export function AskUserQuestion({
               </div>
             </>
           ) : null}
-          <p className={styles.shortcuts}>{shortcutHint}</p>
           <div className={styles.actions}>
+            <p className={styles.shortcuts} title={shortcutHint}>
+              {shortcutHint}
+            </p>
             <button
               type="button"
               className={styles.ignoreButton}

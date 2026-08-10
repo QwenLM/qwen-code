@@ -330,10 +330,15 @@
 }
 
 .shortcuts {
-  margin: 12px 0 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0 auto 0 0;
+  overflow: hidden;
   color: var(--muted-foreground);
   font-size: 11px;
   line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .actions {
@@ -342,6 +347,10 @@
   align-items: center;
   gap: 16px;
   margin-top: 24px;
+}
+
+.actions > button {
+  flex: 0 0 auto;
 }
 
 .button {
