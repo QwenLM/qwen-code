@@ -780,9 +780,14 @@ function setupAcpTest(
         });
         expect(promptResult).toBeDefined();
       } catch (e) {
-        // Only timeouts are acceptable — LLM behavior is non-deterministic.
-        // JSON-RPC errors indicate a real problem and must be surfaced.
-        if (!(e instanceof Error) || !e.message.includes('timed out')) {
+        // Only the harness's own 60s request timeout is acceptable — LLM
+        // behavior is non-deterministic. JSON-RPC errors (errors with a
+        // `response` property) indicate a real problem and must be surfaced.
+        if (
+          !(e instanceof Error) ||
+          'response' in e ||
+          !/^Request \d+ \(session\/prompt\) timed out$/.test(e.message)
+        ) {
           throw e;
         }
         // A dead agent also manifests as a timeout. Surface the crash instead
@@ -790,6 +795,10 @@ function setupAcpTest(
         if (agent.exitCode !== null || agent.signalCode !== null) {
           throw e;
         }
+        console.error(
+          'session/prompt did not complete (continuing with partial verification):',
+          e,
+        );
       }
 
       // Poll for mode_update notification after switch_mode, bounded at 5 s.
