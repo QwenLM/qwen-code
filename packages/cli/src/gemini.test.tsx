@@ -45,6 +45,10 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
+const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
+  vi.fn(async () => {}),
+);
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const lspConfigWatcherMock = vi.hoisted(() => ({
@@ -193,6 +197,18 @@ vi.mock('./acp-integration/acpAgent.js', () => ({
   runAcpAgent: (...args: unknown[]) => mockRunAcpAgent(...args),
 }));
 
+vi.mock('./utils/housekeeping/scheduler.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./utils/housekeeping/scheduler.js')>();
+  return {
+    ...actual,
+    startNonInteractiveOpenAILogHousekeeping: (...args: unknown[]) =>
+      mockStartNonInteractiveOpenAILogHousekeeping(...args),
+    stopNonInteractiveOpenAILogHousekeeping: () =>
+      mockStopNonInteractiveOpenAILogHousekeeping(),
+  };
+});
+
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
 }));
@@ -261,6 +277,8 @@ describe('gemini.tsx main function', () => {
     [];
 
   beforeEach(() => {
+    mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
+    mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     lspConfigWatcherMock.instances.length = 0;
     mockUpdateBeforeRelaunch.mockResolvedValue(true);
     mockGetInstallationInfo.mockReturnValue({
@@ -308,12 +326,10 @@ describe('gemini.tsx main function', () => {
     }
 
     const currentListeners = process.listeners('unhandledRejection');
-    const addedListener = currentListeners.find(
-      (listener) => !initialUnhandledRejectionListeners.includes(listener),
-    );
-
-    if (addedListener) {
-      process.removeListener('unhandledRejection', addedListener);
+    for (const listener of currentListeners) {
+      if (!initialUnhandledRejectionListeners.includes(listener)) {
+        process.removeListener('unhandledRejection', listener);
+      }
     }
     vi.restoreAllMocks();
   });
@@ -1030,7 +1046,8 @@ describe('gemini.tsx main function', () => {
     );
 
     mockWriteStderrLine.mockClear();
-    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
       authError: null,
       themeError: null,
@@ -1042,7 +1059,9 @@ describe('gemini.tsx main function', () => {
       userStartupWarningsModule,
       'getUserStartupWarnings',
     ).mockResolvedValue([]);
-    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
 
     let initialized = false;
     const configStub = {
@@ -1120,6 +1139,43 @@ describe('gemini.tsx main function', () => {
       configStub,
       expect.any(Object),
       { deferIdeConnection: false },
+    );
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
+      configStub,
+      expect.any(Object),
+    );
+
+    const runFailure = new Error('headless run failed');
+    runNonInteractiveSpy.mockRejectedValueOnce(runFailure);
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    const secondProcessExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    try {
+      await expect(main()).rejects.toBe(runFailure);
+    } finally {
+      secondProcessExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(2);
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledTimes(
+      2,
     );
   });
 
@@ -1343,7 +1399,7 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
-  it('invokes runNonInteractiveStreamJson and performs cleanup in stream-json mode', async () => {
+  it('starts housekeeping and cleans up stream-json success and failure', async () => {
     const originalIsTTY = Object.getOwnPropertyDescriptor(
       process.stdin,
       'isTTY',
@@ -1494,7 +1550,48 @@ describe('gemini.tsx main function', () => {
       expect.any(Object),
       { deferIdeConnection: false },
     );
-    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
+      validatedConfig,
+      settingsArg,
+    );
+
+    const streamFailure = new Error('stream failed');
+    runStreamJsonSpy.mockRejectedValueOnce(streamFailure);
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    Object.defineProperty(process.stdin, 'isRaw', {
+      value: false,
+      configurable: true,
+    });
+    const secondProcessExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    process.env['SANDBOX'] = '1';
+    try {
+      await expect(main()).rejects.toBe(streamFailure);
+    } finally {
+      secondProcessExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalIsRaw) {
+        Object.defineProperty(process.stdin, 'isRaw', originalIsRaw);
+      } else {
+        delete (process.stdin as { isRaw?: unknown }).isRaw;
+      }
+      delete process.env['SANDBOX'];
+    }
+
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(2);
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledTimes(
+      2,
+    );
   });
 });
 
@@ -1932,6 +2029,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       './config/config.js'
     );
     const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
     const initializerModule = await import('./core/initializer.js');
     const initializeAppSpy = vi
       .spyOn(initializerModule, 'initializeApp')
@@ -2059,6 +2157,19 @@ describe('gemini.tsx main function kitty protocol', () => {
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),
     );
+
+    const acpFailure = new Error('ACP failed');
+    mockRunAcpAgent.mockRejectedValueOnce(acpFailure);
+    process.exit = ((code?: string | number | null | undefined) => {
+      throw new MockProcessExitError(code);
+    }) as unknown as typeof process.exit;
+    try {
+      await expect(main()).rejects.toBe(acpFailure);
+    } finally {
+      process.exit = originalExit;
+    }
+
+    expect(cleanupModule.runExitCleanup).toHaveBeenCalledTimes(2);
   });
 
   // Shared config/settings mocks for the interactive signal-handler tests.

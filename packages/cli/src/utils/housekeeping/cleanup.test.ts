@@ -295,7 +295,7 @@ describe('cleanupOldOpenAILogs', () => {
       logDir: path.join(logDir, 'nope'),
       cutoffDate: cutoff,
     });
-    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
   });
 
   it('removes logs whose filename date is older than the cutoff, even with a fresh mtime', async () => {
@@ -306,7 +306,7 @@ describe('cleanupOldOpenAILogs', () => {
       new Date(),
     );
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
-    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(r).toEqual({ removed: 1, errors: 0, completed: true });
     expect(fs.existsSync(old)).toBe(false);
     // The project-local log dir itself is never removed.
     expect(fs.existsSync(logDir)).toBe(true);
@@ -317,7 +317,7 @@ describe('cleanupOldOpenAILogs', () => {
     const name = openAILogName(recent, 'b2c3d4e5', 'side-query-session-title');
     const fresh = mkLog(name, recent);
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
-    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
     expect(fs.existsSync(fresh)).toBe(true);
   });
 
@@ -331,7 +331,7 @@ describe('cleanupOldOpenAILogs', () => {
       new Date(Date.now() - 30 * MS_PER_DAY),
     );
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
-    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
     expect(fs.existsSync(oldPrefixedFile)).toBe(true);
     expect(fs.existsSync(missingId)).toBe(true);
   });
@@ -349,7 +349,7 @@ describe('cleanupOldOpenAILogs', () => {
       logDir,
       cutoffDate: new Date(Date.now() + MS_PER_DAY),
     });
-    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(r).toEqual({ removed: 1, errors: 0, completed: true });
     expect(fs.existsSync(generated)).toBe(false);
   });
 
@@ -364,7 +364,7 @@ describe('cleanupOldOpenAILogs', () => {
       new Date(cutoff.getTime() + MS_PER_HOUR),
     );
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
-    expect(r).toEqual({ removed: 1, errors: 0 });
+    expect(r).toEqual({ removed: 1, errors: 0, completed: true });
     expect(fs.existsSync(olderThanCutoff)).toBe(false);
     expect(fs.existsSync(newerThanCutoff)).toBe(true);
   });
@@ -382,10 +382,51 @@ describe('cleanupOldOpenAILogs', () => {
     fs.mkdirSync(dirWithMatchingName);
 
     const r = await cleanupOldOpenAILogs({ logDir, cutoffDate: cutoff });
-    expect(r).toEqual({ removed: 0, errors: 0 });
+    expect(r).toEqual({ removed: 0, errors: 0, completed: true });
     expect(fs.existsSync(note)).toBe(true);
     expect(fs.existsSync(otherLog)).toBe(true);
     expect(fs.existsSync(dirWithMatchingName)).toBe(true);
+  });
+
+  it('returns incomplete without opening the directory when already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: cutoff,
+      signal: controller.signal,
+    });
+
+    expect(r).toEqual({ removed: 0, errors: 0, completed: false });
+  });
+
+  it('checks cancellation for every directory entry and settles a partial batch', async () => {
+    const old = new Date(Date.now() - 30 * MS_PER_DAY);
+    for (let i = 0; i < 10; i++) {
+      mkLog(`notes-${i}.txt`, old);
+    }
+    for (let i = 0; i < 10; i++) {
+      mkLog(openAILogName(old, i.toString(16).padStart(8, '0')), old);
+    }
+
+    let checks = 0;
+    const signal = {
+      get aborted() {
+        checks++;
+        return checks > 5;
+      },
+    } as AbortSignal;
+
+    const r = await cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: cutoff,
+      signal,
+    });
+
+    expect(r.completed).toBe(false);
+    expect(checks).toBeGreaterThan(5);
+    expect(r.removed).toBeLessThan(10);
   });
 
   it.skipIf(process.platform === 'win32')(
