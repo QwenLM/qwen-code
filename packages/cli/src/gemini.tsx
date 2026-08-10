@@ -854,6 +854,12 @@ export async function main() {
       undefined,
       settingsWatcher,
     );
+    if (config.isFleetEnabled?.()) {
+      const { createSupervisedRuntimeFactory } = await import(
+        './agent-view/supervised-runtime.js'
+      );
+      config.setAgentRuntimeFactory(createSupervisedRuntimeFactory());
+    }
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 

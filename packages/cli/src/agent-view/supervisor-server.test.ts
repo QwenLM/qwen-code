@@ -456,23 +456,27 @@ describe('Agent View supervisor server', () => {
       await expect(
         callAgentViewSupervisor(socketPath, 'send', {
           sessionId: 'session-1',
+          turnId: 'turn-1',
           text: 'next',
         }),
       ).resolves.toEqual({ sent: true });
       expect(handler.send).toHaveBeenCalledWith({
         sessionId: 'session-1',
+        turnId: 'turn-1',
         text: 'next',
       });
 
       await expect(
         callAgentViewSupervisor(socketPath, 'answer', {
           sessionId: 'session-1',
-          text: 'yes',
+          callId: 'call-1',
+          outcome: 'proceed_once',
         }),
       ).resolves.toEqual({ answered: true });
       expect(handler.answer).toHaveBeenCalledWith({
         sessionId: 'session-1',
-        text: 'yes',
+        callId: 'call-1',
+        outcome: 'proceed_once',
       });
     } finally {
       await server.close();
@@ -505,6 +509,7 @@ describe('Agent View supervisor server', () => {
       const subscription = subscribeAgentViewSupervisor(socketPath, (event) => {
         events.push(event);
       });
+      await subscription.ready;
       await waitFor(() => subscribers.size === 1);
       for (const socket of subscribers) {
         socket.write('not-json\n');

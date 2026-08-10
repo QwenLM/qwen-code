@@ -11,6 +11,21 @@ import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
+const { mockReadTeamFile, mockWriteMessage } = vi.hoisted(() => ({
+  mockReadTeamFile: vi.fn(),
+  mockWriteMessage: vi.fn(),
+}));
+
+vi.mock('../agents/team/mailbox.js', () => ({
+  writeMessage: mockWriteMessage,
+}));
+
+vi.mock('../agents/team/teamHelpers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../agents/team/teamHelpers.js')>();
+  return { ...actual, readTeamFile: mockReadTeamFile };
+});
+
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
 
@@ -30,6 +45,11 @@ function makeTeamConfig(opts?: {
 }
 
 describe('SendMessageTool — team mode', () => {
+  beforeEach(() => {
+    mockReadTeamFile.mockReset();
+    mockWriteMessage.mockReset();
+  });
+
   it('has the correct name', () => {
     const tool = new SendMessageTool(makeTeamConfig());
     expect(tool.name).toBe('send_message');
@@ -91,6 +111,142 @@ describe('SendMessageTool — team mode', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('No active team');
+  });
+
+  it('uses the shared mailbox when a teammate has no TeamManager', async () => {
+    mockReadTeamFile.mockResolvedValue({
+      name: 'team',
+      createdAt: 0,
+      leadAgentId: 'leader@team',
+      members: [
+        {
+          agentId: 'alice@team',
+          name: 'alice',
+          joinedAt: 0,
+          cwd: '/tmp',
+          tmuxPaneId: '',
+          subscriptions: [],
+        },
+      ],
+    });
+    mockWriteMessage.mockResolvedValue(undefined);
+    const invocation = new SendMessageTool(makeTeamConfig()).build({
+      to: 'alice',
+      message: 'hello from worker',
+      summary: 'worker says hello',
+    });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'worker@team',
+        agentName: 'worker',
+        teamName: 'team',
+        color: '#123456',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(mockWriteMessage).toHaveBeenCalledWith(
+      'team',
+      'alice',
+      expect.objectContaining({
+        from: 'worker',
+        text: 'hello from worker',
+        summary: 'worker says hello',
+        color: '#123456',
+        read: false,
+      }),
+    );
+  });
+
+  it('types shared-mailbox shutdown replies to the leader', async () => {
+    mockReadTeamFile.mockResolvedValue({
+      name: 'team',
+      createdAt: 0,
+      leadAgentId: 'leader@team',
+      members: [],
+    });
+    mockWriteMessage.mockResolvedValue(undefined);
+    const invocation = new SendMessageTool(makeTeamConfig()).build({
+      to: 'leader',
+      message: 'shutdown_approved, work finished',
+    });
+
+    await runWithTeammateIdentity(
+      {
+        agentId: 'worker@team',
+        agentName: 'worker',
+        teamName: 'team',
+        color: '#123456',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(mockWriteMessage).toHaveBeenCalledWith(
+      'team',
+      'leader',
+      expect.objectContaining({ type: 'shutdown_approved' }),
+    );
+  });
+
+  it('broadcasts through active shared mailboxes and excludes the sender', async () => {
+    mockReadTeamFile.mockResolvedValue({
+      name: 'team',
+      createdAt: 0,
+      leadAgentId: 'leader@team',
+      members: [
+        {
+          agentId: 'worker@team',
+          name: 'worker',
+          joinedAt: 0,
+          cwd: '/tmp',
+          tmuxPaneId: '',
+          subscriptions: [],
+        },
+        {
+          agentId: 'alice@team',
+          name: 'alice',
+          joinedAt: 0,
+          cwd: '/tmp',
+          tmuxPaneId: '',
+          subscriptions: [],
+        },
+        {
+          agentId: 'retired@team',
+          name: 'retired',
+          joinedAt: 0,
+          cwd: '/tmp',
+          tmuxPaneId: '',
+          subscriptions: [],
+          isActive: false,
+        },
+      ],
+    });
+    mockWriteMessage.mockResolvedValue(undefined);
+    const invocation = new SendMessageTool(makeTeamConfig()).build({
+      to: '*',
+      message: 'status?',
+    });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'worker@team',
+        agentName: 'worker',
+        teamName: 'team',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(mockWriteMessage).toHaveBeenCalledTimes(2);
+    expect(mockWriteMessage.mock.calls.map((call) => call[1])).toEqual([
+      'alice',
+      'leader',
+    ]);
   });
 
   it('routes shutdown_request via requestShutdown', async () => {

@@ -21,8 +21,18 @@ import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { getAgentName, isTeammate } from '../agents/team/identity.js';
+import {
+  getAgentName,
+  getTeammateContext,
+  isTeammate,
+} from '../agents/team/identity.js';
 import { LEADER_NAME } from '../agents/team/types.js';
+import { writeMessage } from '../agents/team/mailbox.js';
+import {
+  classifyShutdownResponse,
+  findMemberByName,
+  readTeamFile,
+} from '../agents/team/teamHelpers.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
   isPlanRequiredTeammateAwaitingApproval,
@@ -217,19 +227,6 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
-    // Route 2: teammate by name via TeamManager.
-    const teamManager = this.config.getTeamManager();
-    if (!teamManager) {
-      const msg =
-        'No active team and no task_id provided. ' +
-        'Either create a team first, or pass `task_id` to message a background task.';
-      return {
-        llmContent: msg,
-        returnDisplay: msg,
-        error: { message: msg },
-      };
-    }
-
     const to = this.params.to;
     if (!to) {
       const msg = 'Recipient "to" is required.';
@@ -241,6 +238,8 @@ class SendMessageInvocation extends BaseToolInvocation<
     }
 
     try {
+      const identity = getTeammateContext();
+
       // Structured control messages route through mailbox.
       if (this.params.type === 'shutdown_request') {
         // Only the leader can request shutdowns. A teammate
@@ -256,6 +255,37 @@ class SendMessageInvocation extends BaseToolInvocation<
             error: { message: msg },
           };
         }
+      }
+
+      // A subprocess teammate has no leader-owned TeamManager. Its mailbox is
+      // the shared cross-process transport for both direct and broadcast text.
+      const teamManager = this.config.getTeamManager();
+      if (!teamManager) {
+        if (!identity) {
+          const msg =
+            'No active team and no task_id provided. ' +
+            'Either create a team first, or pass `task_id` to message a background task.';
+          return {
+            llmContent: msg,
+            returnDisplay: msg,
+            error: { message: msg },
+          };
+        }
+
+        await sendViaSharedMailbox(
+          identity,
+          to,
+          this.params.message,
+          this.params.summary,
+        );
+        const msg =
+          to === '*'
+            ? 'Message broadcast to all teammates.'
+            : `Message sent to "${to}".`;
+        return { llmContent: msg, returnDisplay: msg };
+      }
+
+      if (this.params.type === 'shutdown_request') {
         await teamManager.requestShutdown(to);
         const msg = `Shutdown requested for "${to}".`;
         return { llmContent: msg, returnDisplay: msg };
@@ -285,6 +315,71 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
   }
+}
+
+async function sendViaSharedMailbox(
+  identity: NonNullable<ReturnType<typeof getTeammateContext>>,
+  to: string,
+  text: string,
+  summary?: string,
+): Promise<void> {
+  const team = await readTeamFile(identity.teamName);
+  if (!team) {
+    throw new Error(`Team "${identity.teamName}" not found.`);
+  }
+
+  const recipients =
+    to === '*'
+      ? [
+          ...team.members
+            .filter(
+              (member) =>
+                member.isActive !== false &&
+                member.name.toLowerCase() !== identity.agentName.toLowerCase(),
+            )
+            .map((member) => member.name),
+          ...(identity.agentName.toLowerCase() === LEADER_NAME
+            ? []
+            : [LEADER_NAME]),
+        ]
+      : [resolveMailboxRecipient(team, to)];
+
+  await Promise.all(
+    recipients.map((recipient) => {
+      const shutdownResponse =
+        recipient === LEADER_NAME ? classifyShutdownResponse(text) : undefined;
+      return writeMessage(identity.teamName, recipient, {
+        from: identity.agentName,
+        text,
+        summary,
+        color: identity.color,
+        timestamp: new Date().toISOString(),
+        read: false,
+        ...(shutdownResponse ? { type: shutdownResponse } : {}),
+      });
+    }),
+  );
+}
+
+function resolveMailboxRecipient(
+  team: NonNullable<Awaited<ReturnType<typeof readTeamFile>>>,
+  to: string,
+): string {
+  if (
+    to.toLowerCase() === LEADER_NAME ||
+    to.toLowerCase() === team.leadAgentId.toLowerCase()
+  ) {
+    return LEADER_NAME;
+  }
+
+  const member = findMemberByName(team.members, to);
+  if (!member) throw new Error(`Teammate "${to}" not found.`);
+  if (member.isActive === false) {
+    throw new Error(
+      `Teammate "${to}" is no longer active and cannot receive messages.`,
+    );
+  }
+  return member.name;
 }
 
 export class SendMessageTool extends BaseDeclarativeTool<

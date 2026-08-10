@@ -17,6 +17,7 @@ import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { StreamingState } from '../types.js';
 
 const dialogManagerMockState = vi.hoisted(() => ({ lineCount: 1 }));
+const terminalSizeMockState = vi.hoisted(() => ({ columns: 80 }));
 
 vi.mock('../components/MainContent.js', () => ({
   MainContent: () => <Text>MainContent</Text>,
@@ -64,11 +65,31 @@ vi.mock('../components/agent-view/AgentChatView.js', () => ({
 }));
 
 vi.mock('../components/agent-view/AgentComposer.js', () => ({
-  AgentComposer: () => <Text>AgentComposer</Text>,
+  AgentComposer: ({ agentId }: { agentId: string }) => (
+    <Text>{`AgentComposer:${agentId}`}</Text>
+  ),
 }));
 
+vi.mock('../components/agent-view/FleetGrid.js', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('../components/agent-view/FleetGrid.js')
+  >();
+  return {
+    ...actual,
+    FleetGrid: ({
+      activeView,
+      agents,
+    }: {
+      activeView: string;
+      agents: ReadonlyArray<readonly [string, unknown]>;
+    }) => (
+      <Text>{`FleetGrid:${activeView}:${agents.map(([id]) => id).join(',')}`}</Text>
+    ),
+  };
+});
+
 vi.mock('../hooks/useTerminalSize.js', () => ({
-  useTerminalSize: () => ({ columns: 80 }),
+  useTerminalSize: () => terminalSizeMockState,
 }));
 
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -88,6 +109,8 @@ const baseUIState: Partial<UIState> = {
   mainAreaWidth: 80,
   terminalWidth: 80,
   terminalHeight: 24,
+  availableTerminalHeight: 24,
+  useTerminalBuffer: false,
   staticExtraHeight: 0,
   constrainHeight: true,
   streamingState: StreamingState.Responding,
@@ -126,6 +149,81 @@ function frameHeight(frame: string): number {
 describe('DefaultAppLayout', () => {
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
+    terminalSizeMockState.columns = 80;
+  });
+
+  it('renders the Fleet grid with one composer for supervised teammates', () => {
+    terminalSizeMockState.columns = 120;
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'researcher',
+      agents: new Map([
+        ['researcher', { session: { kind: 'supervised' } }],
+        ['reviewer', { session: { kind: 'supervised' } }],
+      ]),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      terminalWidth: 120,
+      availableTerminalHeight: 24,
+      useTerminalBuffer: true,
+      stickyTodos: null,
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('FleetGrid:researcher:researcher,reviewer');
+    expect(output).toContain('AgentComposer:researcher');
+    expect(output).not.toContain('MainContent');
+    expect(output).not.toContain('AgentChatView');
+  });
+
+  it('falls back to the active tab when the terminal is too narrow', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'researcher',
+      agents: new Map([
+        ['researcher', { session: { kind: 'supervised' } }],
+        ['reviewer', { session: { kind: 'supervised' } }],
+      ]),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      availableTerminalHeight: 24,
+      useTerminalBuffer: true,
+      stickyTodos: null,
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).not.toContain('FleetGrid');
+    expect(output).toContain('AgentChatView');
+    expect(output).toContain('AgentComposer:researcher');
+  });
+
+  it.each([
+    ['native scrollback', false, false],
+    ['an open dialog', true, true],
+  ])('falls back to tabs with %s', (_, useTerminalBuffer, dialogsVisible) => {
+    terminalSizeMockState.columns = 120;
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'researcher',
+      agents: new Map([
+        ['researcher', { session: { kind: 'supervised' } }],
+        ['reviewer', { session: { kind: 'supervised' } }],
+      ]),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible,
+      terminalWidth: 120,
+      availableTerminalHeight: 24,
+      useTerminalBuffer,
+      stickyTodos: null,
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).not.toContain('FleetGrid');
+    expect(output).toContain('AgentChatView');
   });
 
   it('renders sticky todo list before the composer in the main view', () => {
@@ -279,7 +377,9 @@ describe('DefaultAppLayout', () => {
   it('does not render sticky todo list in an agent tab view', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'agent-1',
-      agents: new Map([['agent-1', {}]]),
+      agents: new Map([
+        ['agent-1', { session: { kind: 'in-process' } }],
+      ]),
     });
 
     const { lastFrame } = renderLayout(baseUIState);
@@ -293,7 +393,9 @@ describe('DefaultAppLayout', () => {
   it('renders update notifications in an agent tab view', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'agent-1',
-      agents: new Map([['agent-1', {}]]),
+      agents: new Map([
+        ['agent-1', { session: { kind: 'in-process' } }],
+      ]),
     });
 
     const { lastFrame } = renderLayout({

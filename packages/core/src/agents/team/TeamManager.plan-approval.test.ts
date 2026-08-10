@@ -83,6 +83,21 @@ describe('TeamManager plan approval requests', () => {
     ).rejects.toThrow('Teammate "runner" is not configured for plan approval.');
   });
 
+  it('rejects plan-required teammates on the supervised preview', async () => {
+    const h = await createHarness();
+    Object.defineProperty(h.teamManager.getRuntime(), 'kind', {
+      value: 'supervised',
+    });
+
+    await expect(
+      h.teamManager.spawnTeammate({
+        name: 'planner',
+        cwd: h.tmpDir,
+        planModeRequired: true,
+      }),
+    ).rejects.toThrow('not supported by the Fleet preview');
+  });
+
   it('delivers a leader approval request immediately and resolves by request id', async () => {
     const h = await createHarness();
     await h.teamManager.spawnTeammate({

@@ -7,6 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   teammateIdentityStore,
+  TEAMMATE_IDENTITY_ENV,
+  createTeammateIdentityEnv,
+  consumeTeammateIdentityFromEnv,
   getTeammateContext,
   isInProcessTeammate,
   getAgentName,
@@ -135,6 +138,37 @@ describe('identity', () => {
         expect(teammateIdentityStore.getStore()).toEqual(WORKER_IDENTITY);
       });
       expect(teammateIdentityStore.getStore()).toBeUndefined();
+    });
+  });
+
+  // Keep subprocess bootstrap tests last because a worker identity is
+  // intentionally process-wide once consumed.
+  describe('subprocess bootstrap identity', () => {
+    it('deletes an invalid payload before rejecting it', () => {
+      const env: NodeJS.ProcessEnv = {
+        [TEAMMATE_IDENTITY_ENV]: JSON.stringify({ agentName: 'incomplete' }),
+      };
+
+      expect(() => consumeTeammateIdentityFromEnv(env)).toThrow(
+        `Invalid ${TEAMMATE_IDENTITY_ENV} payload.`,
+      );
+      expect(env[TEAMMATE_IDENTITY_ENV]).toBeUndefined();
+    });
+
+    it('consumes a process identity while preserving ALS precedence', () => {
+      const env = createTeammateIdentityEnv(WORKER_IDENTITY);
+
+      expect(consumeTeammateIdentityFromEnv(env)).toEqual(WORKER_IDENTITY);
+      expect(env[TEAMMATE_IDENTITY_ENV]).toBeUndefined();
+      expect(getTeammateContext()).toEqual(WORKER_IDENTITY);
+      expect(isInProcessTeammate()).toBe(false);
+      expect(isTeammate()).toBe(true);
+
+      runWithTeammateIdentity(LEADER_IDENTITY, () => {
+        expect(getTeammateContext()).toEqual(LEADER_IDENTITY);
+        expect(isInProcessTeammate()).toBe(true);
+      });
+      expect(getTeammateContext()).toEqual(WORKER_IDENTITY);
     });
   });
 });

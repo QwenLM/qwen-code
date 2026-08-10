@@ -29,6 +29,10 @@ initCpuProfiler();
 
 type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
+const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
+  '--internal-agent-view-supervisor';
+const INTERNAL_FLEET_TEAMMATE_ARG = '--internal-fleet-teammate';
+
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
@@ -351,6 +355,22 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  if (rawArgv.length === 1 && rawArgv[0] === INTERNAL_AGENT_VIEW_SUPERVISOR_ARG) {
+    const { runAgentViewSupervisor } = await import(
+      './agent-view/supervisor-runner.js'
+    );
+    await runAgentViewSupervisor();
+    return;
+  }
+
+  if (rawArgv.length === 1 && rawArgv[0] === INTERNAL_FLEET_TEAMMATE_ARG) {
+    const { runFleetTeammate } = await import(
+      './agent-view/fleet-teammate.js'
+    );
+    await runFleetTeammate();
+    return;
+  }
+
   const managedUpdateVersion =
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
   if (managedUpdateVersion) {

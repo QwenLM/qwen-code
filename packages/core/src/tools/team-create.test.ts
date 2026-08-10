@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { TeamCreateTool } from './team-create.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/test';
@@ -106,6 +107,25 @@ describe('TeamCreateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('already active');
+  });
+
+  it('rejects nested team creation from a teammate identity', async () => {
+    const config = makeConfig();
+    const invocation = new TeamCreateTool(config).build({ team_name: 'nested' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'worker@parent',
+        agentName: 'worker',
+        teamName: 'parent',
+        isTeamLead: false,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('cannot create nested teams');
+    expect(config.setTeamManager).not.toHaveBeenCalled();
   });
 
   it('writes team file to disk', async () => {

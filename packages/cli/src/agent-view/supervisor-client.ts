@@ -8,8 +8,13 @@ import type { Readable, Writable } from 'node:stream';
 import * as net from 'node:net';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
+  AgentViewDispatchParams,
+  AgentViewDispatchResult,
   AgentViewSessionSnapshot,
-  AgentViewWorkerControlEvent,
+  AgentViewWorkerAnswerOutcome,
+  AgentViewWorkerAnswerPayload,
+  AgentViewWorkerControlRequest,
+  AgentViewWorkerControlResult,
   AgentViewWorkerEvent,
 } from './protocol.js';
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
@@ -28,6 +33,7 @@ export type AgentViewSupervisorOperation =
   | 'resize'
   | 'peek'
   | 'send'
+  | 'cancel'
   | 'answer'
   | 'logs'
   | 'stop'
@@ -88,15 +94,21 @@ export interface AgentViewSupervisorRequestMap {
   list: { cwd?: string } | undefined;
   subscribe: undefined;
   shutdown: { keepWorkers?: boolean } | undefined;
-  dispatch: { prompt: string; cwd: string };
+  dispatch: AgentViewDispatchParams;
   adopt: AgentViewSupervisorAdoptParams;
   workerEvent: AgentViewWorkerEvent & { token?: string };
-  workerControl: { sessionId: string; token?: string };
+  workerControl: AgentViewWorkerControlRequest;
   attachStream: { sessionId: string };
   resize: { sessionId: string; columns: number; rows: number };
   peek: { sessionId: string };
-  send: { sessionId: string; text: string };
-  answer: { sessionId: string; text: string };
+  send: { sessionId: string; turnId: string; text: string };
+  cancel: { sessionId: string };
+  answer: {
+    sessionId: string;
+    callId: string;
+    outcome: AgentViewWorkerAnswerOutcome;
+    payload?: AgentViewWorkerAnswerPayload;
+  };
   logs: { sessionId: string };
   stop: { sessionId: string };
   kill: { sessionId: string };
@@ -111,17 +123,15 @@ export interface AgentViewSupervisorResponseMap {
   list: AgentViewSessionSnapshot[];
   subscribe: { subscribed: true };
   shutdown: unknown;
-  dispatch: unknown;
+  dispatch: AgentViewDispatchResult;
   adopt: unknown;
   workerEvent: unknown;
-  workerControl: {
-    sessionId: string;
-    events: AgentViewWorkerControlEvent[];
-  };
+  workerControl: AgentViewWorkerControlResult;
   attachStream: unknown;
   resize: unknown;
   peek: unknown;
   send: unknown;
+  cancel: unknown;
   answer: unknown;
   logs: unknown;
   stop: unknown;
@@ -152,12 +162,15 @@ export interface AgentViewSupervisorAttachOptions {
 }
 
 export interface AgentViewSupervisorSubscription {
+  ready: Promise<void>;
   dispose(): void;
 }
 
 export interface AgentViewSupervisorEvent {
   type: 'changed';
   at: string;
+  sessionId?: string;
+  workerEvent?: AgentViewWorkerEvent;
 }
 
 export class AgentViewSupervisorClientError extends Error {
@@ -364,6 +377,13 @@ export function subscribeAgentViewSupervisor(
   let subscribed = false;
   let disposed = false;
   let errorNotified = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  void ready.catch(() => {});
   const request: AgentViewSupervisorRequest = {
     id: createRequestId(),
     protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
@@ -420,6 +440,7 @@ export function subscribeAgentViewSupervisor(
         }
         subscribed = true;
         clearTimeout(handshakeTimeout);
+        resolveReady();
         continue;
       }
 
@@ -450,7 +471,16 @@ export function subscribeAgentViewSupervisor(
   });
 
   return {
+    ready,
     dispose() {
+      if (!subscribed) {
+        rejectReady(
+          new AgentViewSupervisorClientError(
+            'Agent View supervisor subscription was disposed.',
+            'closed',
+          ),
+        );
+      }
       disposed = true;
       clearTimeout(handshakeTimeout);
       socket.destroy();
@@ -460,6 +490,7 @@ export function subscribeAgentViewSupervisor(
   function notifySubscriptionError(error: Error): void {
     if (disposed || errorNotified) return;
     errorNotified = true;
+    if (!subscribed) rejectReady(error);
     options.onError?.(error);
   }
 }
@@ -662,7 +693,16 @@ function parseSupervisorEvent(
   if (!isRecord(parsed) || parsed['type'] !== 'changed') return undefined;
   const at = typeof parsed['at'] === 'string' ? parsed['at'] : undefined;
   if (!at) return undefined;
-  return { type: 'changed', at };
+  return {
+    type: 'changed',
+    at,
+    ...(typeof parsed['sessionId'] === 'string'
+      ? { sessionId: parsed['sessionId'] }
+      : {}),
+    ...(isRecord(parsed['workerEvent'])
+      ? { workerEvent: parsed['workerEvent'] as AgentViewWorkerEvent }
+      : {}),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

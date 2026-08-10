@@ -202,7 +202,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     ) {
       const combined = messageQueue.join('\n');
       setMessageQueue([]);
-      void session?.send(combined);
+      void session?.send(combined).catch(() => {});
     }
   }, [streamingState, messageQueue, session, status]);
 
@@ -211,7 +211,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       const trimmed = text.trim();
       if (!trimmed || !session) return;
       if (streamingState === StreamingState.Idle) {
-        void session.send(trimmed);
+        void session.send(trimmed).catch(() => {});
       } else {
         setMessageQueue((prev) => [...prev, trimmed]);
       }

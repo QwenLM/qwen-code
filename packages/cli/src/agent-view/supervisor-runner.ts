@@ -8,13 +8,25 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
+import { sanitizeChildEnv } from '@qwen-code/qwen-code-core';
 import {
   attachAgentViewSupervisorTerminal,
   callAgentViewSupervisor,
   requestAgentViewSupervisor,
   subscribeAgentViewSupervisor,
 } from './supervisor-client.js';
-import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
+import {
+  AGENT_VIEW_PROTOCOL_VERSION,
+  QWEN_FLEET_SUPERVISOR_SOCKET_ENV,
+  QWEN_FLEET_WORKER_SPEC_PATH_ENV,
+  QWEN_FLEET_WORKER_TOKEN_ENV,
+} from './protocol.js';
+import type {
+  AgentViewDispatchParams,
+  AgentViewDispatchResult,
+  AgentViewWorkerAnswerOutcome,
+  AgentViewWorkerAnswerPayload,
+} from './protocol.js';
 import type {
   AgentViewSupervisorAdoptParams,
   AgentViewSupervisorEvent,
@@ -26,6 +38,7 @@ import {
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
 import type { AgentViewSupervisorHibernationPolicy } from './supervisor-process.js';
+import type { AgentViewWorkerSpawner } from './supervisor-process.js';
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
 import {
   getAgentViewStorePaths,
@@ -36,6 +49,7 @@ import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
+const INTERNAL_FLEET_TEAMMATE_ARG = '--internal-fleet-teammate';
 
 const SUPERVISOR_READY_RETRIES = 600;
 const SUPERVISOR_READY_DELAY_MS = 50;
@@ -51,12 +65,18 @@ export interface AgentViewSupervisorClientHandle {
     onEvent: (event: AgentViewSupervisorEvent) => void,
     onError?: (error: Error) => void,
   ): AgentViewSupervisorSubscription;
-  dispatch(prompt: string, cwd: string): Promise<unknown>;
+  dispatch(params: AgentViewDispatchParams): Promise<AgentViewDispatchResult>;
   adopt(params: AgentViewSupervisorAdoptParams): Promise<unknown>;
   attach(sessionId: string): Promise<unknown>;
   peek(sessionId: string): Promise<unknown>;
-  send(sessionId: string, text: string): Promise<unknown>;
-  answer(sessionId: string, text: string): Promise<unknown>;
+  send(sessionId: string, turnId: string, text: string): Promise<unknown>;
+  cancel(sessionId: string): Promise<unknown>;
+  answer(
+    sessionId: string,
+    callId: string,
+    outcome: AgentViewWorkerAnswerOutcome,
+    payload?: AgentViewWorkerAnswerPayload,
+  ): Promise<unknown>;
   logs(sessionId: string): Promise<unknown>;
   stop(sessionId: string): Promise<unknown>;
   kill(sessionId: string): Promise<unknown>;
@@ -76,6 +96,7 @@ export interface RunAgentViewSupervisorOptions {
   globalDir?: string;
   hibernationPolicy?: AgentViewSupervisorHibernationPolicy;
   maintenanceIntervalMs?: number;
+  spawnWorker?: AgentViewWorkerSpawner;
 }
 
 export async function ensureAgentViewSupervisor(
@@ -93,6 +114,7 @@ export async function ensureAgentViewSupervisor(
   }
 
   return withSupervisorStartLock(options, socketPath, async () => {
+    await retireIncompatibleSupervisor(options);
     if (await canReachSupervisor(socketPath, options)) {
       return createSupervisorHandle(
         socketPath,
@@ -111,6 +133,98 @@ export async function ensureAgentViewSupervisor(
       await readSupervisorAuthToken(options),
     );
   });
+}
+
+async function retireIncompatibleSupervisor(
+  options: EnsureAgentViewSupervisorOptions,
+): Promise<void> {
+  const supervisor = await readAgentViewSupervisor({
+    ...(options.globalDir ? { globalDir: options.globalDir } : {}),
+  });
+  if (
+    !supervisor ||
+    supervisor.protocolVersion === AGENT_VIEW_PROTOCOL_VERSION
+  ) {
+    return;
+  }
+
+  const statusResponse = await requestAgentViewSupervisor(
+    supervisor.socketPath,
+    {
+      id: randomUUID(),
+      op: 'status',
+      protocolVersion: supervisor.protocolVersion,
+      ...(supervisor.authToken ? { authToken: supervisor.authToken } : {}),
+    },
+    { timeoutMs: 1000 },
+  ).catch(() => undefined);
+  if (!statusResponse?.ok) {
+    if (isProcessRunning(supervisor.pid)) {
+      throw new Error(
+        'An incompatible Agent View supervisor is still running and could ' +
+          'not be authenticated for replacement.',
+      );
+    }
+    return;
+  }
+  if (supervisor.protocolVersion > AGENT_VIEW_PROTOCOL_VERSION) {
+    throw new Error(
+      `Agent View supervisor protocol ${supervisor.protocolVersion} ` +
+        'is newer than this CLI supports.',
+    );
+  }
+
+  const shutdownResponse = await requestAgentViewSupervisor(
+    supervisor.socketPath,
+    {
+      id: randomUUID(),
+      op: 'shutdown',
+      protocolVersion: supervisor.protocolVersion,
+      ...(supervisor.authToken ? { authToken: supervisor.authToken } : {}),
+    },
+    { timeoutMs: 1000 },
+  ).catch(() => undefined);
+  if (!shutdownResponse?.ok) {
+    throw new Error('The incompatible Agent View supervisor refused shutdown.');
+  }
+
+  if (await waitForProcessExit(supervisor.pid, 2000)) return;
+  if (supervisor.pid === process.pid) {
+    throw new Error('Cannot replace the current Agent View supervisor.');
+  }
+  try {
+    process.kill(supervisor.pid, 'SIGTERM');
+  } catch (error) {
+    if (!isMissingProcessError(error)) throw error;
+  }
+  if (!(await waitForProcessExit(supervisor.pid, 2000))) {
+    throw new Error('The incompatible Agent View supervisor did not stop.');
+  }
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessRunning(pid)) return true;
+    await delay(50);
+  }
+  return !isProcessRunning(pid);
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isMissingProcessError(error);
+  }
+}
+
+function isMissingProcessError(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ESRCH';
 }
 
 export async function connectExistingAgentViewSupervisor(
@@ -143,6 +257,7 @@ export async function runAgentViewSupervisor(
     ...(options.hibernationPolicy
       ? { hibernationPolicy: options.hibernationPolicy }
       : {}),
+    spawnWorker: options.spawnWorker ?? defaultSpawnWorker(socketPath),
     onShutdown: () => {
       closeRequested = true;
       setImmediate(() => {
@@ -153,6 +268,7 @@ export async function runAgentViewSupervisor(
   const server = createAgentViewSupervisorServer(handler, {
     socketPath,
     authToken,
+    authorizeSideband: handler.authorizeSideband,
   });
 
   await server.listen();
@@ -175,16 +291,20 @@ export async function runAgentViewSupervisor(
     const onSigterm = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void handler
+        .disposeWorkers()
+        .catch(() => {})
+        .then(() => server.close())
         .catch(() => {})
         .finally(resolve);
     };
     const onSigint = () => {
       clearInterval(maintenanceInterval);
       clearInterval(closeInterval);
-      void server
-        .close()
+      void handler
+        .disposeWorkers()
+        .catch(() => {})
+        .then(() => server.close())
         .catch(() => {})
         .finally(resolve);
     };
@@ -232,11 +352,11 @@ function createSupervisorHandle(
         ...authOptions,
         ...(onError ? { onError } : {}),
       }),
-    dispatch: (prompt: string, cwd: string) =>
+    dispatch: (params: AgentViewDispatchParams) =>
       callAgentViewSupervisor(
         socketPath,
         'dispatch',
-        { prompt, cwd },
+        params,
         {
           ...authOptions,
           timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
@@ -251,18 +371,35 @@ function createSupervisorHandle(
       attachAgentViewSupervisorTerminal(socketPath, sessionId, authOptions),
     peek: (sessionId: string) =>
       callAgentViewSupervisor(socketPath, 'peek', { sessionId }, authOptions),
-    send: (sessionId: string, text: string) =>
+    send: (sessionId: string, turnId: string, text: string) =>
       callAgentViewSupervisor(
         socketPath,
         'send',
-        { sessionId, text },
+        { sessionId, turnId, text },
         authOptions,
       ),
-    answer: (sessionId: string, text: string) =>
+    cancel: (sessionId: string) =>
+      callAgentViewSupervisor(
+        socketPath,
+        'cancel',
+        { sessionId },
+        authOptions,
+      ),
+    answer: (
+      sessionId: string,
+      callId: string,
+      outcome: AgentViewWorkerAnswerOutcome,
+      payload?: AgentViewWorkerAnswerPayload,
+    ) =>
       callAgentViewSupervisor(
         socketPath,
         'answer',
-        { sessionId, text },
+        {
+          sessionId,
+          callId,
+          outcome,
+          ...(payload ? { payload } : {}),
+        },
         authOptions,
       ),
     logs: (sessionId: string) =>
@@ -474,10 +611,89 @@ function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
     detached: true,
     stdio: 'ignore',
     env: {
-      ...process.env,
+      ...sanitizeChildEnv(process.env),
       QWEN_CODE_NO_RELAUNCH: '1',
     },
   });
+}
+
+function defaultSpawnWorker(socketPath: string): AgentViewWorkerSpawner {
+  return async ({ params, workerToken }) => {
+    const argv = buildCurrentQwenCliArgv([INTERNAL_FLEET_TEAMMATE_ARG]);
+    const child = spawn(argv[0]!, argv.slice(1), {
+      cwd: params.activeCwd,
+      stdio: 'ignore',
+      env: {
+        ...sanitizeChildEnv(process.env),
+        QWEN_CODE_NO_RELAUNCH: '1',
+        [QWEN_FLEET_SUPERVISOR_SOCKET_ENV]: socketPath,
+        [QWEN_FLEET_WORKER_TOKEN_ENV]: workerToken,
+        [QWEN_FLEET_WORKER_SPEC_PATH_ENV]: params.specPath,
+      },
+    });
+    await waitForChildSpawn(child);
+    return {
+      pid: child.pid,
+      stop: () => terminateWorker(child, false),
+      kill: () => terminateWorker(child, true),
+      onExit: (listener) => {
+        let reported = false;
+        const report = (code: number | null) => {
+          if (reported) return;
+          reported = true;
+          listener(code);
+        };
+        const onError = () => report(1);
+        child.on('exit', report);
+        child.on('error', onError);
+        if (child.exitCode !== null || child.signalCode !== null) {
+          queueMicrotask(() => report(child.exitCode ?? 1));
+        }
+        return () => {
+          child.off('exit', report);
+          child.off('error', onError);
+        };
+      },
+    };
+  };
+}
+
+function waitForChildSpawn(child: ChildProcess): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onSpawn = () => {
+      child.off('error', onError);
+      resolve();
+    };
+    const onError = (error: Error) => {
+      child.off('spawn', onSpawn);
+      reject(error);
+    };
+    child.once('spawn', onSpawn);
+    child.once('error', onError);
+  });
+}
+
+async function terminateWorker(
+  child: ChildProcess,
+  force: boolean,
+): Promise<void> {
+  if (child.exitCode !== null || child.pid === undefined) return;
+  if (process.platform !== 'win32') {
+    child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    return;
+  }
+  const systemRoot = process.env['SystemRoot'] ?? 'C:\\Windows';
+  const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
+  const killed = await new Promise<boolean>((resolve) => {
+    const killer = spawn(
+      taskkill,
+      ['/pid', String(child.pid), '/T', ...(force ? ['/F'] : [])],
+      { stdio: 'ignore', windowsHide: true },
+    );
+    killer.once('exit', (code) => resolve(code === 0));
+    killer.once('error', () => resolve(false));
+  });
+  if (!killed) child.kill(force ? 'SIGKILL' : 'SIGTERM');
 }
 
 async function delay(ms: number): Promise<void> {

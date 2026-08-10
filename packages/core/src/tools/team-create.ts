@@ -24,6 +24,7 @@ import { resetTaskList } from '../agents/team/tasks.js';
 import { clearAllInboxes } from '../agents/team/mailbox.js';
 import { TeamManager } from '../agents/team/TeamManager.js';
 import { InProcessRuntime } from '../agents/runtime/inproc/in-process-runtime.js';
+import { isTeammate } from '../agents/team/identity.js';
 import { isNodeError } from '../utils/errors.js';
 import type { TeamFile, TeamContext } from '../agents/team/types.js';
 import { LEADER_NAME, MAX_TEAMMATES } from '../agents/team/types.js';
@@ -49,6 +50,15 @@ class TeamCreateInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    if (isTeammate()) {
+      const msg = 'Teammates cannot create nested teams.';
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     const teamName = sanitizeName(this.params.team_name);
     if (!teamName) {
       const msg = 'Team name is required.';

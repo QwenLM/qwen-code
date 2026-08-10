@@ -8,8 +8,13 @@ import * as fs from 'node:fs/promises';
 import type { Socket } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AgentViewSessionStateFile } from './protocol.js';
+import type {
+  AgentViewSessionSnapshot,
+  AgentViewSessionStateFile,
+  AgentViewWorkerControlResult,
+} from './protocol.js';
 import {
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
@@ -179,6 +184,137 @@ describe('createAgentViewSupervisorHandler', () => {
     });
     expect(onClose).toBeTypeOf('function');
     expect(() => onClose?.()).not.toThrow();
+  });
+
+  it('dispatches an authenticated worker and delivers ordered controls', async () => {
+    const globalDir = await makeGlobalDir();
+    let workerExit: ((code: number | null) => void) | undefined;
+    let workerToken: string | undefined;
+    const spawnWorker = vi.fn().mockImplementation(async (launch) => {
+      workerToken = launch.workerToken;
+      return {
+        pid: 42,
+        onExit: (listener: (code: number | null) => void) => {
+          workerExit = listener;
+        },
+      };
+    });
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      spawnWorker,
+    });
+    const writes: string[] = [];
+    const socket = {
+      write: (chunk: string) => writes.push(chunk),
+      once: vi.fn(),
+      destroy: vi.fn(),
+    } as unknown as Socket;
+    handler.subscribe?.(undefined, socket, 'subscribe-1');
+
+    await handler.dispatch!({
+      sessionId: 'worker-1',
+      specPath: path.join(globalDir, 'spec.json'),
+      projectCwd: globalDir,
+      activeCwd: globalDir,
+    });
+    expect(spawnWorker).toHaveBeenCalledOnce();
+    expect(
+      await handler.authorizeSideband('workerEvent', {
+        sessionId: 'worker-1',
+        token: workerToken,
+      }),
+    ).toBe(true);
+
+    await handler.send!({
+      sessionId: 'worker-1',
+      turnId: 'turn-1',
+      text: 'first',
+    });
+    await handler.send!({
+      sessionId: 'worker-1',
+      turnId: 'turn-2',
+      text: 'second',
+    });
+    expect(
+      (handler.workerControl!({
+        sessionId: 'worker-1',
+        afterSequence: 0,
+      }) as AgentViewWorkerControlResult).events,
+    ).toMatchObject([
+      { sequence: 1, turnId: 'turn-1', text: 'first' },
+      { sequence: 2, turnId: 'turn-2', text: 'second' },
+    ]);
+
+    await handler.workerEvent!({
+      type: 'ready',
+      sessionId: 'worker-1',
+      cwd: globalDir,
+      token: workerToken,
+    });
+    await handler.workerEvent!({
+      type: 'sessionEvent',
+      sessionId: 'worker-1',
+      event: 'status',
+      payload: {
+        previous: AgentStatus.INITIALIZING,
+        next: AgentStatus.RUNNING,
+      },
+      token: workerToken,
+    });
+    expect(
+      ((await handler.list()) as AgentViewSessionSnapshot[])[0]?.state
+        .sessionState,
+    ).toBe('working');
+    expect(writes.join('')).not.toContain(workerToken ?? 'missing');
+
+    workerExit?.(1);
+    await vi.waitFor(async () => {
+      const [snapshot] = (await handler.list()) as AgentViewSessionSnapshot[];
+      expect(snapshot?.state.processState).toBe('exited');
+    });
+    expect(writes.join('')).toContain('"sessionState":"failed"');
+    expect(
+      await handler.authorizeSideband('workerEvent', {
+        sessionId: 'worker-1',
+        token: workerToken,
+      }),
+    ).toBe(false);
+    await handler.remove!({ sessionId: 'worker-1' });
+    expect(await handler.list()).toEqual([]);
+  });
+
+  it('records a worker that exits while dispatch is still finishing', async () => {
+    const globalDir = await makeGlobalDir();
+    let workerToken = '';
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      spawnWorker: async (launch) => {
+        workerToken = launch.workerToken;
+        return {
+          pid: 42,
+          onExit: (listener) => listener(1),
+        };
+      },
+    });
+
+    await handler.dispatch!({
+      sessionId: 'worker-early',
+      specPath: path.join(globalDir, 'spec.json'),
+      projectCwd: globalDir,
+      activeCwd: globalDir,
+    });
+
+    const [snapshot] = (await handler.list()) as AgentViewSessionSnapshot[];
+    expect(snapshot?.state).toMatchObject({
+      sessionState: 'failed',
+      processState: 'exited',
+    });
+    expect(
+      await handler.authorizeSideband('workerEvent', {
+        sessionId: 'worker-early',
+        token: workerToken,
+      }),
+    ).toBe(false);
   });
 
   it('does not request shutdown when there are no sessions', async () => {

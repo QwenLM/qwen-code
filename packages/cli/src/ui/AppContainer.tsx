@@ -2444,7 +2444,7 @@ export const AppContainer = (props: AppContainerProps) => {
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
         if (agent) {
-          void agent.session.send(submittedValue.trim());
+          void agent.session.send(submittedValue.trim()).catch(() => {});
           return;
         }
       }

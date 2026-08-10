@@ -11,7 +11,12 @@ import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
 import { createTask, listTasks } from '../tasks.js';
-import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
+import {
+  sendStructuredMessage,
+  readInbox,
+  getInboxPath,
+  writeMessage,
+} from '../mailbox.js';
 
 // Mock Storage so all file I/O uses the harness's temp dir.
 vi.mock('../../../config/storage.js', async (importOriginal) => {
@@ -260,6 +265,26 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
       await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
+
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('applies a typed shutdown reply from the shared mailbox', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      target.goIdle();
+      await h.teamManager.requestShutdown('target');
+      await writeMessage(h.teamName, 'leader', {
+        from: 'target',
+        text: 'shutdown_approved',
+        type: 'shutdown_approved',
+        timestamp: new Date().toISOString(),
+        read: false,
+      });
+
+      await h.teamManager.getLeaderMessages();
 
       expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
     });

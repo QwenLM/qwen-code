@@ -3662,7 +3662,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable the in-process Fleet preview and /coordinate workflow. Fleet coordinates bounded read-only teammates through shared tasks, messages, and existing Agent View tabs. Teammates remain in the leader process until the supervised runtime lands.',
+          'Enable the Fleet preview and /coordinate workflow. Fleet runs bounded teammates in supervised subprocesses and shows their live transcripts in the terminal workspace.',
         showInDialog: true,
       },
       artifact: {

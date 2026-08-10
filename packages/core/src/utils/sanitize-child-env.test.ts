@@ -15,11 +15,19 @@ describe('sanitizeChildEnv', () => {
     const result = sanitizeChildEnv({
       QWEN_SERVER_TOKEN: 'super-secret',
       QWEN_DAEMON_TOKEN: 'also-secret',
+      QWEN_FLEET_SUPERVISOR_TOKEN: 'supervisor-secret',
+      QWEN_FLEET_WORKER_TOKEN: 'worker-secret',
+      QWEN_FLEET_WORKER_SPEC_PATH: '/tmp/private-spec.json',
+      QWEN_FLEET_SUPERVISOR_SOCKET: '/tmp/private.sock',
       QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
       PATH: '/usr/bin',
     });
     expect(result['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(result['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(result['QWEN_FLEET_SUPERVISOR_TOKEN']).toBeUndefined();
+    expect(result['QWEN_FLEET_WORKER_TOKEN']).toBeUndefined();
+    expect(result['QWEN_FLEET_WORKER_SPEC_PATH']).toBeUndefined();
+    expect(result['QWEN_FLEET_SUPERVISOR_SOCKET']).toBeUndefined();
     expect(result['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
   });
 
@@ -69,6 +77,10 @@ describe('sanitizeChildEnv', () => {
     expect([...INTERNAL_SECRET_ENV_VARS].sort()).toEqual([
       'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
       'QWEN_DAEMON_TOKEN',
+      'QWEN_FLEET_SUPERVISOR_SOCKET',
+      'QWEN_FLEET_SUPERVISOR_TOKEN',
+      'QWEN_FLEET_WORKER_SPEC_PATH',
+      'QWEN_FLEET_WORKER_TOKEN',
       'QWEN_SERVER_TOKEN',
     ]);
   });

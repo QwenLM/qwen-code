@@ -4,7 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const AGENT_VIEW_PROTOCOL_VERSION = 1;
+import type {
+  AgentMessage,
+  AgentSessionEvents,
+  ApprovalMode,
+  ToolConfirmationPayload,
+  ToolResultDisplay,
+} from '@qwen-code/qwen-code-core';
+
+export const AGENT_VIEW_PROTOCOL_VERSION = 2;
+export const QWEN_FLEET_WORKER_TOKEN_ENV = 'QWEN_FLEET_WORKER_TOKEN';
+export const QWEN_FLEET_WORKER_SPEC_PATH_ENV =
+  'QWEN_FLEET_WORKER_SPEC_PATH';
+export const QWEN_FLEET_SUPERVISOR_SOCKET_ENV =
+  'QWEN_FLEET_SUPERVISOR_SOCKET';
 
 export type AgentViewOwnership =
   | 'unmanaged'
@@ -143,6 +156,41 @@ export interface AgentViewSessionSnapshot {
   activity?: AgentViewActivityFile;
   worker?: AgentViewWorkerFile;
   rosterEntry?: AgentViewRosterEntry;
+  viewSnapshot?: AgentViewWorkerViewSnapshot;
+}
+
+export interface AgentViewDispatchParams {
+  sessionId: string;
+  specPath: string;
+  projectCwd: string;
+  activeCwd: string;
+  displayName?: string;
+}
+
+export interface AgentViewDispatchResult {
+  sessionId: string;
+}
+
+export type AgentViewSerializableSessionEvent = {
+  [Event in keyof AgentSessionEvents]: {
+    event: Event;
+    payload: AgentSessionEvents[Event];
+  };
+}[keyof AgentSessionEvents];
+
+export interface AgentViewWorkerViewSnapshot {
+  messages: AgentMessage[];
+  pendingApprovals: Array<
+    [string, AgentSessionEvents['approvalRequest']['details']]
+  >;
+  liveOutputs: Array<[string, ToolResultDisplay]>;
+  shellPids: Array<[string, number]>;
+  executionStartTimes: Array<[string, number]>;
+  workingDir: string;
+  modelId: string;
+  lastPromptTokenCount?: number;
+  lastRoundError?: string;
+  approvalMode?: ApprovalMode;
 }
 
 export type AgentViewWorkerEvent =
@@ -173,6 +221,17 @@ export type AgentViewWorkerEvent =
       waitingFor?: string;
       lastResult?: string;
       at?: string;
+    }
+  | ({
+      type: 'sessionEvent';
+      sessionId: string;
+      at?: string;
+    } & AgentViewSerializableSessionEvent)
+  | {
+      type: 'viewSnapshot';
+      sessionId: string;
+      snapshot: AgentViewWorkerViewSnapshot;
+      at?: string;
     };
 
 export type AgentViewWorkerControlEvent =
@@ -184,24 +243,52 @@ export type AgentViewWorkerControlEvent =
   | {
       type: 'prompt';
       sequence: number;
+      turnId: string;
       text: string;
+      at: string;
+    }
+  | {
+      type: 'cancel';
+      sequence: number;
+      at: string;
+    }
+  | {
+      type: 'stop';
+      sequence: number;
       at: string;
     }
   | {
       type: 'answer';
       sequence: number;
       at: string;
-      text?: string;
-      callId?: string;
-      outcome?: AgentViewWorkerAnswerOutcome;
-      payload?: Record<string, unknown>;
+      callId: string;
+      outcome: AgentViewWorkerAnswerOutcome;
+      payload?: AgentViewWorkerAnswerPayload;
     };
 
 export type AgentViewWorkerAnswerOutcome =
   | 'proceed_once'
+  | 'proceed_once_and_switch_to_default'
   | 'proceed_always'
+  | 'proceed_always_server'
+  | 'proceed_always_tool'
   | 'proceed_always_project'
   | 'proceed_always_user'
   | 'modify_with_editor'
   | 'restore_previous'
   | 'cancel';
+
+export type AgentViewWorkerAnswerPayload = ToolConfirmationPayload;
+
+export interface AgentViewWorkerControlRequest {
+  sessionId: string;
+  token?: string;
+  afterSequence?: number;
+  acknowledgeThrough?: number;
+}
+
+export interface AgentViewWorkerControlResult {
+  sessionId: string;
+  events: AgentViewWorkerControlEvent[];
+  nextSequence: number;
+}

@@ -265,7 +265,8 @@ export function AgentViewProvider({
     (agentId: string, mode: ApprovalMode) => {
       // Update the agent's runtime config so tool scheduling picks it up
       const agent = agents.get(agentId);
-      agent?.view.setApprovalMode?.(mode);
+      if (!agent?.view.setApprovalMode) return;
+      agent.view.setApprovalMode(mode);
       // Update UI state
       setAgentApprovalModes((prev) => {
         const next = new Map(prev);

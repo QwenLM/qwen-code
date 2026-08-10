@@ -14,7 +14,8 @@ import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
  * to arbitrary agent-run commands is a credential-exposure gap (issue #6601).
  *
  * `QWEN_SERVER_TOKEN` is the serve-daemon bearer token, `QWEN_DAEMON_TOKEN`
- * is the channel-daemon worker token, and
+ * is the channel-daemon worker token, the Fleet variables authenticate or
+ * route supervised teammate workers, and
  * `QWEN_CODE_PRIVATE_ACP_CAPABILITY` authenticates the daemon-spawned ACP
  * child. Their direct consumers already scrub them from `process.env` after
  * reading them.
@@ -29,6 +30,10 @@ import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
 export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   'QWEN_SERVER_TOKEN',
   'QWEN_DAEMON_TOKEN',
+  'QWEN_FLEET_SUPERVISOR_TOKEN',
+  'QWEN_FLEET_WORKER_TOKEN',
+  'QWEN_FLEET_WORKER_SPEC_PATH',
+  'QWEN_FLEET_SUPERVISOR_SOCKET',
   PRIVATE_ACP_CAPABILITY_ENV,
 ];
 

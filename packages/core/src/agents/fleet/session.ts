@@ -21,7 +21,7 @@ export interface AgentSession {
 
   getStatus(): AgentStatus;
   getError(): string | undefined;
-  send(message: string): Promise<TurnId>;
+  send(message: string, turnId?: TurnId): Promise<TurnId>;
   cancelTurn(): void;
   abort(): void;
   on<E extends keyof AgentSessionEvents>(

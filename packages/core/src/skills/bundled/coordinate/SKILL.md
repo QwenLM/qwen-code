@@ -1,6 +1,6 @@
 ---
 name: coordinate
-description: Coordinate up to three in-process Qwen Code teammates with enforced read-only tools, shared tasks, peer messages, and existing Agent View tabs. Invoke explicitly with /coordinate.
+description: Coordinate up to three supervised Qwen Code teammate processes with enforced read-only tools, shared tasks, peer messages, and live terminal views. Invoke explicitly with /coordinate.
 argument-hint: '<goal>'
 disable-model-invocation: true
 ---
@@ -19,6 +19,6 @@ Read-only teammates have a positive execution allowlist. They can inspect the ch
 
 Keep the run bounded: use one teammate for a narrow task and no more than three for this preview. Give every task an objective, scope, completion condition, and required evidence. If changes are needed, the leader makes them after accepting the investigation results.
 
-The existing Agent View tabs show teammate conversations, messages, status, and approvals. Do not create another roster or session UI. These teammates run inside the leader process; do not describe them as independent processes, persistent sessions, PTY workers, or heterogeneous CLIs.
+On wide terminals the Fleet workspace shows the leader and teammate transcripts together; narrow and accessibility layouts use the existing Agent View tabs. Teammates are independent supervised Qwen Code processes. They are not persistent sessions or raw PTY panes, and crash reattachment is not available in this preview.
 
 Return the outcome, material evidence or disagreements, changes made by the leader, verification, and remaining risks.

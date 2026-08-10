@@ -69,8 +69,8 @@ export class InProcessSession implements AgentSession, AgentSessionView {
     return this.interactive.getError();
   }
 
-  async send(message: string): Promise<TurnId> {
-    return this.interactive.enqueueMessage(message);
+  async send(message: string, turnId?: TurnId): Promise<TurnId> {
+    return this.interactive.enqueueMessage(message, turnId);
   }
 
   cancelTurn(): void {

@@ -40,6 +40,7 @@ export interface AgentViewSupervisorHandler {
   resize?: AgentViewSupervisorHandlerMethod<'resize'>;
   peek?: AgentViewSupervisorHandlerMethod<'peek'>;
   send?: AgentViewSupervisorHandlerMethod<'send'>;
+  cancel?: AgentViewSupervisorHandlerMethod<'cancel'>;
   answer?: AgentViewSupervisorHandlerMethod<'answer'>;
   logs?: AgentViewSupervisorHandlerMethod<'logs'>;
   stop?: AgentViewSupervisorHandlerMethod<'stop'>;
@@ -205,7 +206,10 @@ export async function handleAgentViewSupervisorRequest(
           params: Record<string, unknown> | undefined,
         ) => Promise<unknown> | unknown)
       | undefined;
-    const result = await method?.call(handler, params);
+    const result = await method?.call(
+      handler,
+      params as Record<string, unknown> | undefined,
+    );
     return {
       id: request['id'],
       ok: true,
@@ -419,6 +423,7 @@ function isSupervisorOperation(
     value === 'resize' ||
     value === 'peek' ||
     value === 'send' ||
+    value === 'cancel' ||
     value === 'answer' ||
     value === 'logs' ||
     value === 'stop' ||

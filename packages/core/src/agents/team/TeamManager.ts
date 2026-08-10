@@ -266,6 +266,11 @@ export class TeamManager {
         `Maximum number of teammates (${this.maxTeammates}) reached.`,
       );
     }
+    if (config.planModeRequired && this.runtime.kind === 'supervised') {
+      throw new Error(
+        'Plan-required teammates are not supported by the Fleet preview yet.',
+      );
+    }
 
     const name = generateUniqueTeammateName(config.name, this.teamFile.members);
     const agentId = formatAgentId(name, this.teamFile.name);
@@ -704,7 +709,9 @@ export class TeamManager {
       return [];
     }
     try {
-      return await consumeUnread(this.teamFile.name, LEADER_NAME);
+      const messages = await consumeUnread(this.teamFile.name, LEADER_NAME);
+      this.applySharedShutdownResponses(messages);
+      return messages;
     } catch (err) {
       // The lockless snapshot above parsed cleanly, and writers commit
       // via atomic tmp+rename — so a failure here is lock contention or
@@ -715,6 +722,23 @@ export class TeamManager {
         `Leader inbox consume failed (transient), will retry: ${getErrorMessage(err)}`,
       );
       return [];
+    }
+  }
+
+  private applySharedShutdownResponses(messages: MailboxMessage[]): void {
+    for (const message of messages) {
+      if (
+        message.type !== 'shutdown_approved' &&
+        message.type !== 'shutdown_rejected'
+      ) {
+        continue;
+      }
+      const sender = findMemberByName(this.teamFile.members, message.from);
+      if (!sender || !this._shutdownPending.has(sender.name)) continue;
+      this._shutdownPending.delete(sender.name);
+      if (message.type === 'shutdown_approved') {
+        this.sessions.get(sender.agentId)?.abort();
+      }
     }
   }
 

@@ -220,11 +220,18 @@ describe('Agent View supervisor runner', () => {
     subscription.dispose();
 
     await expect(
-      handle.dispatch('write tests', '/workspace/project'),
+      handle.dispatch({
+        sessionId: 'session-2',
+        specPath: '/workspace/project/spec.json',
+        projectCwd: '/workspace/project',
+        activeCwd: '/workspace/project',
+      }),
     ).resolves.toEqual({ sessionId: 'session-2' });
     expect(handler.dispatch).toHaveBeenCalledWith({
-      prompt: 'write tests',
-      cwd: '/workspace/project',
+      sessionId: 'session-2',
+      specPath: '/workspace/project/spec.json',
+      projectCwd: '/workspace/project',
+      activeCwd: '/workspace/project',
     });
 
     await expect(
@@ -249,20 +256,22 @@ describe('Agent View supervisor runner', () => {
     });
     expect(handler.peek).toHaveBeenCalledWith({ sessionId: 'session-3' });
 
-    await expect(handle.send('session-3', 'next')).resolves.toEqual({
+    await expect(handle.send('session-3', 'turn-1', 'next')).resolves.toEqual({
       sent: true,
     });
     expect(handler.send).toHaveBeenCalledWith({
       sessionId: 'session-3',
+      turnId: 'turn-1',
       text: 'next',
     });
 
-    await expect(handle.answer('session-3', 'yes')).resolves.toEqual({
-      answered: true,
-    });
+    await expect(
+      handle.answer('session-3', 'call-1', 'proceed_once'),
+    ).resolves.toEqual({ answered: true });
     expect(handler.answer).toHaveBeenCalledWith({
       sessionId: 'session-3',
-      text: 'yes',
+      callId: 'call-1',
+      outcome: 'proceed_once',
     });
 
     await expect(handle.logs('session-3')).resolves.toEqual({
@@ -338,7 +347,7 @@ describe('Agent View supervisor runner', () => {
         pid: process.pid,
         socketPath,
         authToken: expect.any(String),
-        protocolVersion: 1,
+        protocolVersion: 2,
       },
     );
     const authToken = await readAuthToken(globalDir);

@@ -17,6 +17,11 @@ import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
+import {
+  canShowFleetGrid,
+  FleetGrid,
+  MAX_FLEET_GRID_TEAMMATES,
+} from '../components/agent-view/FleetGrid.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
 import { getLiveAgentPanelVpMaxRows } from '../components/background-view/liveAgentPanelVisibility.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -34,6 +39,26 @@ export const DefaultAppLayout: React.FC = () => {
   const { columns: terminalWidth } = useTerminalSize();
   const hasAgents = agents.size > 0;
   const isAgentTab = activeView !== 'main' && agents.has(activeView);
+  const supervisedAgents = [...agents.entries()].filter(
+    ([, agent]) => agent.session.kind === 'supervised',
+  );
+  const visibleSupervisedAgents = supervisedAgents.slice(
+    0,
+    MAX_FLEET_GRID_TEAMMATES,
+  );
+  const activeViewIsInFleet =
+    activeView === 'main' ||
+    visibleSupervisedAgents.some(([agentId]) => agentId === activeView);
+  const fleetGridHeight = uiState.availableTerminalHeight ?? 0;
+  const showFleetGrid =
+    !uiState.dialogsVisible &&
+    uiState.useTerminalBuffer &&
+    activeViewIsInFleet &&
+    canShowFleetGrid(
+      terminalWidth,
+      fleetGridHeight,
+      visibleSupervisedAgents.length,
+    );
   const stickyTodoWidth = Math.min(uiState.mainAreaWidth, 64);
   const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
     uiState.terminalHeight,
@@ -64,10 +89,21 @@ export const DefaultAppLayout: React.FC = () => {
 
   return (
     <Box flexDirection="column" width={terminalWidth}>
+      {showFleetGrid ? (
+        <FleetGrid
+          activeView={activeView}
+          agents={visibleSupervisedAgents}
+          width={terminalWidth}
+          height={fleetGridHeight}
+        />
+      ) : isAgentTab ? (
+        <AgentChatView agentId={activeView} />
+      ) : (
+        <MainContent />
+      )}
+
       {isAgentTab ? (
         <>
-          {/* Agent view: chat history + agent-specific composer */}
-          <AgentChatView agentId={activeView} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
@@ -78,8 +114,6 @@ export const DefaultAppLayout: React.FC = () => {
         </>
       ) : (
         <>
-          {/* Main view: conversation history + main composer / dialogs */}
-          <MainContent />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
             {!uiState.dialogsVisible && uiState.updateInfo && (
               <UpdateNotification message={uiState.updateInfo.message} />
