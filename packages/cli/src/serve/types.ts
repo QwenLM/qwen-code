@@ -127,15 +127,17 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
-   * to 10 000. Must be a positive safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal.
+   * Compatible text/thought chunks share bounded entries. Threaded into
+   * `BridgeOptions.maxJournalEvents`. Defaults to 10 000. Must be a positive
+   * safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. Threaded into
-   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
-   * safe integer.
+   * Per-session source-event byte cap on the in-flight live journal.
+   * Truncation drops whole entries, so the retained tail can be much smaller
+   * than the cap. Threaded into `BridgeOptions.maxJournalBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
   /**
@@ -320,6 +322,12 @@ export interface ServeOptions {
    */
   initializeTimeoutMs?: number;
   /**
+   * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
+   * to an explicitly set initialize timeout when that value is larger. An
+   * explicit value here wins outright, including below the default.
+   */
+  sessionRestoreTimeoutMs?: number;
+  /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
    * (wait forever). Default: 300000 (5 min).
@@ -453,6 +461,7 @@ export interface CapabilitiesEnvelope {
     maxPendingPromptsPerSession?: number | null;
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
+    sessionRestoreTimeoutMs?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
