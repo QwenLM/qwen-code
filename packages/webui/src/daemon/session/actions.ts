@@ -250,6 +250,7 @@ export function createDaemonSessionActions({
                       ? {
                           ...current,
                           status: 'disconnected',
+                          sessionId: undefined,
                           loadingTranscript: undefined,
                           catchingUp: undefined,
                         }

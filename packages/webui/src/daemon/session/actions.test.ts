@@ -541,7 +541,7 @@ describe('createDaemonSessionActions', () => {
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
         status: 'disconnected',
-        sessionId: 'session-b',
+        sessionId: undefined,
         loadingTranscript: undefined,
         catchingUp: undefined,
       });
