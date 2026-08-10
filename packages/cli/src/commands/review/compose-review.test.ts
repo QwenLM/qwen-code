@@ -920,7 +920,12 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       base({ suggestionsInline: 1, unreviewedDimensions: ['security'] }),
     );
     expect(r.event).toBe('COMMENT');
-    expect(r.body).toContain('Reviewed. Suggestions are inline.');
+    // The gap disclosure follows, so the opener says so — a bare "Reviewed."
+    // two words above "Not reviewed:" read as the body contradicting itself
+    // (#8811).
+    expect(r.body).toContain(
+      'Reviewed, with gaps disclosed below. Suggestions are inline.',
+    );
     expect(r.body).not.toContain('no blockers');
   });
 });
@@ -1089,7 +1094,7 @@ describe('composeReview — stacked states compose, none erased', () => {
     // downgradeApprove did not fire (base event was COMMENT), so no sentence…
     expect(r.body).not.toContain('Downgraded');
     // …but every disclosure is present exactly once, and nothing certifies.
-    expect(r.body).toContain('Reviewed.');
+    expect(r.body).toContain('Reviewed, with gaps disclosed below.');
     expect(r.body).toContain('Suggestions are inline.');
     expect(r.body).toContain('1 Suggestion-level finding(s)');
     expect(r.body).toContain('Unresolved, please confirm:');
@@ -2089,16 +2094,18 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).not.toContain('Reviewed.');
   });
 
-  it('keeps the "Reviewed." opener while any chunk is certified', () => {
+  it('keeps a certifying opener while any chunk is certified — and names the gaps it carries', () => {
     // chunk 1 built and never launched; chunk 2 reviewed properly. A partial
-    // gap is a disclosure, not a zero-certification.
+    // gap is a disclosure, not a zero-certification — and the opener says the
+    // disclosures follow, so "Reviewed." never sits beside "Not reviewed:"
+    // (#8811).
     const p = plan();
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
-    expect(r.body).toContain('Reviewed.');
+    expect(r.body).toContain('Reviewed, with gaps disclosed below.');
     expect(r.body).not.toContain('could not certify');
   });
 
@@ -2155,6 +2162,32 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.remediation.join(' ')).toMatch(
       /idle agents: relaunch each with the same printed prompt/,
     );
+  });
+
+  it('quotes a prose agent label — it is the agent’s name, not a claim about the PR', () => {
+    // #8811: a whole-diff agent (no `chunk N of M` in its prompt) was
+    // disclosed by the truncated first line of its launch prompt, rendered
+    // bare — "Not reviewed: This PR narrows the daemon-marker check from a
+    // truthy tes..." read as a sentence about the whole PR, not the name of
+    // the one agent that failed. Quotes say which it is, and the truncation
+    // stops at a word boundary instead of mid-word.
+    transcript(
+      'p1',
+      'This PR narrows the daemon-marker check from a truthy test to an exact one\n' +
+        `read_file(file_path="${DIFF}")`,
+      { toolCalls: 0 },
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: plan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not reviewed: "This PR narrows the daemon-marker check from a truthy..."',
+    );
+    expect(r.body).not.toContain('truthy tes...');
   });
 
   it('names a blind launch as itself, not as a whiff', () => {
@@ -2934,6 +2967,9 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(r.body).toContain('未审查：全 diff 测试覆盖检查——');
     // The zh sentence carries the translated reason, not the English one.
     expect(r.body).toContain('没有记录表明它的 brief 到达过任何 agent');
+    // The gap opener, in both halves (#8811).
+    expect(r.body).toContain('Reviewed, with gaps disclosed below.');
+    expect(r.body).toContain('已审查，未覆盖部分见下方披露。');
   });
 
   it('quotes untranslatable caller text as-is in both halves', () => {

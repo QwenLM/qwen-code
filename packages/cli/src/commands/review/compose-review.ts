@@ -584,6 +584,7 @@ function composeReviewBody(
       for (const label of cov.idleAgents) {
         coverageEntries.push({
           subject: label,
+          ...quotedAgentSubject(label),
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
         });
@@ -605,6 +606,7 @@ function composeReviewBody(
       for (const label of cov.blindAgents) {
         coverageEntries.push({
           subject: label,
+          ...quotedAgentSubject(label),
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
@@ -626,6 +628,7 @@ function composeReviewBody(
       for (const label of cov.unopenedAgents) {
         coverageEntries.push({
           subject: label,
+          ...quotedAgentSubject(label),
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
@@ -1405,6 +1408,10 @@ function composeReviewBody(
       coverageEntries.some((e) => e.subject === 'coverage') ||
       (plannedChunks.length > 0 &&
         coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    // A bare "Reviewed." two words before "Not reviewed:" reads as the body
+    // contradicting itself — the shape that confused readers on #8811. When
+    // disclosures follow, the opener says so; the certifying and the
+    // zero-certified openers above keep their exact wording.
     clauses.push(
       nothingCertified
         ? {
@@ -1413,7 +1420,12 @@ function composeReviewBody(
           }
         : canCertify
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
-          : { en: 'Reviewed.', zh: '已审查。' },
+          : notReviewedParts.length > 0
+            ? {
+                en: 'Reviewed, with gaps disclosed below.',
+                zh: '已审查，未覆盖部分见下方披露。',
+              }
+            : { en: 'Reviewed.', zh: '已审查。' },
     );
   }
 
@@ -1481,6 +1493,20 @@ function composeReviewBody(
     remediation,
     lowSignal,
   };
+}
+
+/**
+ * The public subject for an agent-derived disclosure label. A `chunk N`
+ * label stays bare — the chunk collapse translates it into the author's
+ * units. Any other label is the truncated first line of a launch prompt:
+ * prose. Rendered bare it reads as a claim about the PR itself —
+ * #8811's posted body carried "Not reviewed: This PR narrows the
+ * daemon-marker check from a truthy tes..." — not as the name of the agent
+ * that failed. Quoted, it reads as a name. The INTERNAL subject stays the
+ * unquoted label: the dedup and certification checks key on it.
+ */
+function quotedAgentSubject(label: string): { publicSubject?: string } {
+  return /^chunk \d+$/.test(label) ? {} : { publicSubject: `"${label}"` };
 }
 
 /**
