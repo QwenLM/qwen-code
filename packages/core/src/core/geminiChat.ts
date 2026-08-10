@@ -149,11 +149,13 @@ function hasCandidateOutput(response: GenerateContentResponse): boolean {
  * any candidate part without the `thought` flag (text, functionCall,
  * inlineData, …). What makes a replay after thinking-only output safe
  * is NOT that thought parts stay out of history — the successful
- * attempt's thoughts are recorded there. It is that the failed
- * attempt's accumulated partial turn is discarded wholesale before the
- * retry (`popPendingPartialAssistantTurn`), so nothing the caller saw
- * from the failed attempt can appear twice. The transport stream retry
- * gate relies on this distinction (#7832).
+ * attempt's thoughts are recorded there. It is that a failed attempt
+ * that produced only thought parts persists nothing: error-path
+ * persistence requires a delivered functionCall, which the replay
+ * gate excludes. `popPendingPartialAssistantTurn()` before the retry
+ * is defense in depth — it has nothing to pop on this path today, but
+ * keeps the replay safe if that persistence policy ever widens. The
+ * transport stream retry gate relies on this distinction (#7832).
  */
 function hasNonThoughtCandidateParts(
   response: GenerateContentResponse,
@@ -2929,12 +2931,14 @@ export class GeminiChat {
 
             // Replay only curated socket-level failures before any
             // content (non-thought output) has reached callers.
-            // Thinking-only output does not block the replay: the
-            // failed attempt's partial turn is popped wholesale below,
-            // so nothing the caller saw from that attempt can appear
-            // twice — and thinking models can spend minutes in that
-            // phase, exactly when gateways close long-lived SSE
-            // connections (#7832).
+            // Thinking-only output does not block the replay: such an
+            // attempt persists nothing (error-path persistence
+            // requires a delivered functionCall, which this gate
+            // excludes), and the partial turn is popped wholesale
+            // below as defense in depth — so nothing the caller saw
+            // from that attempt can appear twice. Thinking models can
+            // spend minutes in that phase, exactly when gateways
+            // close long-lived SSE connections (#7832).
             const isRetryableStreamTransportError =
               classification.kind === 'transport' &&
               classification.transportCode !== undefined &&

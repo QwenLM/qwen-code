@@ -7414,10 +7414,11 @@ describe('GeminiChat', async () => {
       }
     });
 
-    // Shared transport-cut fixtures. `socketCut` is the single producer of
-    // the retryable socket-failure shape the transport retry gate
-    // classifies, so a classified-shape change has one place to update
-    // (non-retryable shapes are constructed inline on purpose).
+    // Shared transport-cut fixtures. `socketCut` is the shared producer of
+    // the canonical `UND_ERR_SOCKET` retryable shape. The per-code
+    // drift-guard test (`it.each` over the allow-list) constructs
+    // parameterized retryable shapes inline on purpose; non-retryable
+    // shapes stay inline on purpose too.
     const socketCut = () =>
       Object.assign(new TypeError('terminated'), {
         cause: Object.assign(new Error('other side closed'), {
@@ -7431,6 +7432,18 @@ describe('GeminiChat', async () => {
         for (const chunk of chunks) yield chunk;
         throw socketCut();
       })();
+    }
+
+    /** Collect all events from `stream`, catching the terminal error. */
+    async function drainCollecting(stream: AsyncGenerator<StreamEvent>) {
+      const events: StreamEvent[] = [];
+      let caughtError: unknown;
+      try {
+        for await (const event of stream) events.push(event);
+      } catch (error) {
+        caughtError = error;
+      }
+      return { events, caughtError };
     }
 
     it('retries retryable transport stream errors and succeeds on a later attempt', async () => {
@@ -7509,26 +7522,16 @@ describe('GeminiChat', async () => {
           { message: 'test' },
           'prompt-transport-retry-exhausted',
         );
-        const events: StreamEvent[] = [];
         // Collect in the background and capture the terminal error manually:
         // the rejection only settles after fake timers advance past both retry
         // delays, so a deferred `expect().rejects` here would either deadlock
         // (awaited before advancing) or trip `vitest/valid-expect` (not
         // awaited). Catch-and-assert sidesteps both.
-        let caughtError: unknown;
-        const collecting = (async () => {
-          try {
-            for await (const event of stream) {
-              events.push(event);
-            }
-          } catch (error) {
-            caughtError = error;
-          }
-        })();
+        const collecting = drainCollecting(stream);
 
         await vi.advanceTimersByTimeAsync(0);
         await vi.advanceTimersByTimeAsync(10_000);
-        await collecting;
+        const { events, caughtError } = await collecting;
 
         expect(caughtError).toBeInstanceOf(Error);
         expect((caughtError as Error).message).toContain('terminated');
@@ -7583,23 +7586,13 @@ describe('GeminiChat', async () => {
           { message: 'test' },
           'prompt-transport-retry-exhausted-after-thinking',
         );
-        const events: StreamEvent[] = [];
         // Same catch-and-assert drain as the zero-chunk exhaustion test:
         // the rejection settles only after both retry delays elapse.
-        let caughtError: unknown;
-        const collecting = (async () => {
-          try {
-            for await (const event of stream) {
-              events.push(event);
-            }
-          } catch (error) {
-            caughtError = error;
-          }
-        })();
+        const collecting = drainCollecting(stream);
 
         await vi.advanceTimersByTimeAsync(0);
         await vi.advanceTimersByTimeAsync(10_000);
-        await collecting;
+        const { events, caughtError } = await collecting;
 
         expect(caughtError).toBeInstanceOf(Error);
         expect((caughtError as Error).message).toContain('terminated');
@@ -8767,6 +8760,16 @@ describe('GeminiChat', async () => {
           expect(
             mockContentGenerator.generateContentStream,
           ).toHaveBeenCalledTimes(4);
+          // Plain-text cuts reach the not-taken branch with content delivered
+          // but no functionCall, which also pins the log's ternary key to
+          // `streamYieldedContentChunk`: re-keying it to
+          // `streamYieldedFunctionCall` would log 'exhausted' here.
+          expect(mockDebugLoggerWarn).toHaveBeenCalledWith(
+            'Transport stream retry not taken',
+            expect.objectContaining({
+              retryDecision: 'skipped_after_content',
+            }),
+          );
         } finally {
           vi.useRealTimers();
         }
