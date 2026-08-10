@@ -215,6 +215,19 @@ describe('Channel editor state', () => {
     ).toBe('chat_thread');
   });
 
+  it('fills safe policy defaults when editing a legacy instance', () => {
+    const instance = configuredInstance();
+    delete instance.config.senderPolicy;
+
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+
+    expect(draft.values.senderPolicy).toBe('pairing');
+    expect(draft.values.groupPolicy).toBe('disabled');
+    expect(validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, [])).toEqual(
+      {},
+    );
+  });
+
   it('changes group allowlist membership without losing wildcard or retained group settings', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       ...configuredInstance(),

@@ -93,9 +93,14 @@ function initialFieldValue(
       return 'chat_thread';
     }
     if (typeof value === 'string' && value) return value;
-    return instance && field.key !== 'sessionScope'
-      ? ''
-      : (field.default ?? field.options?.[0]?.value ?? '');
+    if (
+      instance &&
+      field.key !== 'sessionScope' &&
+      field.default === undefined
+    ) {
+      return '';
+    }
+    return field.default ?? field.options?.[0]?.value ?? '';
   }
   return typeof value === 'string' ? value : '';
 }
