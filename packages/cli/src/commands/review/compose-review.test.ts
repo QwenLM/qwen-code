@@ -862,6 +862,39 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
   });
 
+  it("a Step 4/5 gap entry does not shadow the caller's relay of the same role", () => {
+    // The third push site of `roleLabelEntries`: when the reverse audit
+    // never ran at all, the floor's gap entry carries the subject
+    // `reverse audit` with no idle or unopened entry sharing it — that
+    // entry alone can swallow the scoped relay the orchestrator spelled
+    // with its own reason. The gap explains the missing floor, the relay
+    // carries the scope; both must render. The idle/unopened tests above
+    // would each still pass if the verification-gap addition were removed
+    // (their own entries cover the shared subject); this one pins the site.
+    const p = coveredPlan(['verify']); // reverse audit absent: the floor fails
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would re-record the very step this case means to lack.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — no auditor was launched with a prompt ' +
+        'this skill builds',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+  });
+
   it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
     // The gate refused round 1, so no reverse-audit record exists. Without
     // the marker the floor would report the absence as a rogue/unlaunched
