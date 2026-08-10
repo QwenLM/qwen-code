@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { installTerminalResizeReflow } from './terminal-resize-reflow.js';
 
 const ESC = '\u001B[';
@@ -103,6 +103,84 @@ describe('installTerminalResizeReflow', () => {
       );
     } finally {
       restore();
+    }
+  });
+
+  it('a grow before the next erase resets a pending amplification', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.columns = 120;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10) + frame(60, 10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(10) + frame(60, 10));
+    } finally {
+      restore();
+    }
+  });
+
+  it('models the bare post-shrink redraw so consecutive shrinks amplify correctly', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10)); // clear, amplified 10 -> 20
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+      stdout.write(frame(30, 20)); // bare redraw re-models: 20 rows x 30
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(20));
+      expect(stdout.written.at(-1)).toBe(eraseLines(40));
+    } finally {
+      restore();
+    }
+  });
+
+  it('short erase-prefixed bursts do not clobber the frame model', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.write(eraseLines(3) + frame(60, 3));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20));
+    } finally {
+      restore();
+    }
+  });
+
+  it('the VP clear window expires', () => {
+    vi.useFakeTimers();
+    try {
+      const stdout = new FakeStdout();
+      const { restore } = installTerminalResizeReflow(
+        stdout as unknown as NodeJS.WriteStream,
+        { virtualViewport: true },
+      );
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.columns = 30;
+      stdout.emit('resize');
+      stdout.write(eraseLines(10) + frame(30, 20));
+      expect(stdout.written.at(-1)).toBe(`${ESC}2J${ESC}H` + frame(30, 20));
+      vi.advanceTimersByTime(601);
+      stdout.write(eraseLines(20) + frame(30, 20));
+      expect(stdout.written.at(-1)).toBe(eraseLines(20) + frame(30, 20));
+      restore();
+    } finally {
+      vi.useRealTimers();
     }
   });
 

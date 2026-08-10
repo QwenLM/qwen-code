@@ -4,17 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import ansiEscapes from 'ansi-escapes';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
 import stripAnsi from 'strip-ansi';
 
 const debugLogger = createDebugLogger('RESIZE_REFLOW');
 
-const ESC = '\u001B[';
-const ERASE_LINE = `${ESC}2K`;
-const CURSOR_UP_ONE = `${ESC}1A`;
-const CURSOR_LEFT = `${ESC}G`;
-const CLEAR_VIEWPORT = `${ESC}2J${ESC}H`;
+const ERASE_LINE = ansiEscapes.eraseLine;
+const CURSOR_UP_ONE = ansiEscapes.cursorUp();
+const CURSOR_LEFT = ansiEscapes.cursorLeft;
+const CLEAR_VIEWPORT = ansiEscapes.clearViewport;
 
 // How long after a shrink every VP redraw starts from a clean viewport.
 const CLEAR_WINDOW_MS = 600;
@@ -25,23 +25,12 @@ const ERASE_LINES_PATTERN = new RegExp(
   )}`,
 );
 
-// Live frames are >= 8 rows; shorter printable bursts (console output, Static
-// history appends) must not be mistaken for a redraw.
+// Live frames are >= 8 rows; shorter printable bursts (console output, small
+// redraws) must not be mistaken for a frame and clobber the model.
 const MIN_FRAME_LINES = 8;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function eraseLines(count: number): string {
-  let clear = '';
-  for (let i = 0; i < count; i++) {
-    clear += ERASE_LINE + (i < count - 1 ? CURSOR_UP_ONE : '');
-  }
-  if (count) {
-    clear += CURSOR_LEFT;
-  }
-  return clear;
 }
 
 function countEraseLines(sequence: string): number {
@@ -97,7 +86,9 @@ export interface TerminalResizeReflowHandle {
   /**
    * Clear the viewport and replay the last frame that reached the terminal.
    * Ink skips redraws whose output is unchanged, so a wake/SIGCONT repaint
-   * cannot rely on React alone after an external clear (review #8831).
+   * cannot rely on React alone after an external clear. Only the wake path
+   * may call this — ordinary refreshStatic callers must stay write-free in
+   * VP (replaying the pre-change frame would flash stale content).
    */
   repaint: () => void;
 }
@@ -110,10 +101,11 @@ export interface TerminalResizeReflowHandle {
  * physical rows at the new width, that erase under-erases and the frame top
  * (banner) is stranded as duplicate copies on every terminal.
  *
- * - VP (alternate screen): the whole viewport is ours, so the stale clear is
- *   replaced with a viewport-wide clear (2J+H) — exact row counts are
- *   uncomputable anyway (full-width wrap boundaries add rows no width model
- *   predicts), and over-erasing clamps harmlessly on the alt screen.
+ * - VP (alternate screen): the whole viewport is ours, so for a short window
+ *   after a shrink every redraw starts from a viewport-wide clear (2J+H) —
+ *   exact row counts are uncomputable anyway (full-width wrap boundaries add
+ *   rows no width model predicts), and over-erasing clamps harmlessly on the
+ *   alt screen.
  * - Static: the live region is amplified to the reflowed height of the last
  *   frame that actually reached the terminal; walking further up would eat
  *   committed scrollback, so the count stays conservative there.
@@ -129,13 +121,28 @@ export function installTerminalResizeReflow(
   let lastWidth = stdout.columns ?? 0;
   let lineWidths: number[] = [];
   let lastFrameContent = '';
+  let cacheColumns = 0;
   let pendingAmplify = 0;
+  // Ink's post-shrink redraw arrives bare (log.clear() resets its counter to
+  // 0), so the erase-prefixed model update never sees it; this flag hands
+  // the modeling over to the next write.
+  let expectFrame = false;
   // After a shrink, every redraw (not just Ink's clear) erases with a stale
   // row count against the reflowed on-screen frame, re-stranding the frame
   // top each time. For this window, start every VP redraw from a clean
   // viewport instead.
   let clearUntil = 0;
   debugLogger.debug('installed', { width: lastWidth, isVP });
+
+  const modelFrame = (content: string) => {
+    const widths = frameLineWidths(content);
+    if (widths) {
+      lineWidths = widths;
+      lastFrameContent = content;
+      cacheColumns = stdout.columns ?? lastWidth;
+    }
+    return widths;
+  };
 
   const onResize = () => {
     const width = stdout.columns ?? lastWidth;
@@ -158,6 +165,11 @@ export function installTerminalResizeReflow(
         clearUntil,
       });
       lineWidths = reflowWidths(lineWidths, width);
+    } else if (width > lastWidth) {
+      // A grow invalidates a pending shrink amplification: the stale count
+      // was computed for a narrower width and would over-erase past the live
+      // frame into committed scrollback.
+      pendingAmplify = 0;
     }
     lastWidth = width;
   };
@@ -175,11 +187,11 @@ export function installTerminalResizeReflow(
       const match = ERASE_LINES_PATTERN.exec(chunk);
       if (match) {
         const content = chunk.slice(match.index + match[0].length);
-        const widths = frameLineWidths(content);
-        debugLogger.debug('match', { modelLines: widths?.length ?? 0 });
-        if (widths) {
-          lineWidths = widths;
-          lastFrameContent = content;
+        modelFrame(content);
+        debugLogger.debug('match', { modelLines: lineWidths.length });
+        if (stripAnsi(content).trim() === '') {
+          // Clear-only write (Ink's log.clear): the redraw follows bare.
+          expectFrame = true;
         }
         if (isVP && Date.now() < clearUntil) {
           debugLogger.debug('clear-viewport');
@@ -195,10 +207,13 @@ export function installTerminalResizeReflow(
             debugLogger.debug('amplify', { original: count, target });
             chunk =
               chunk.slice(0, match.index) +
-              eraseLines(target) +
+              ansiEscapes.eraseLines(target) +
               chunk.slice(match.index + match[0].length);
           }
         }
+      } else if (expectFrame) {
+        expectFrame = false;
+        modelFrame(chunk);
       }
     }
     return originalWrite.call(
@@ -218,7 +233,13 @@ export function installTerminalResizeReflow(
       stdout.off('resize', onResize);
     },
     repaint: () => {
-      originalWrite.call(stdout, CLEAR_VIEWPORT + lastFrameContent);
+      const columns = stdout.columns ?? lastWidth;
+      originalWrite.call(
+        stdout,
+        cacheColumns === columns && lastFrameContent
+          ? CLEAR_VIEWPORT + lastFrameContent
+          : CLEAR_VIEWPORT,
+      );
     },
   };
 }

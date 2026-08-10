@@ -1301,14 +1301,14 @@ export const AppContainer = (props: AppContainerProps) => {
   // region via ink 7 native overflow clipping, and the remount-key bump is a
   // near-no-op for VP (nothing in the VP render path is keyed by
   // historyRemountKey; the startup-scoped VP decision is intentionally
-  // restart-only to match Ink's alternateScreen lifetime). Ordinary
-  // refreshStatic callers (Ctrl+O, model change, ...) get their visible
-  // refresh for free from the state change that triggered them. The wake /
-  // SIGCONT path is different: the terminal buffer may be stale or
-  // rearranged, and Ink both erases with a stale relative count and skips
-  // redraws whose output is unchanged — so VP repaints there by replaying
-  // the last frame over a clean viewport (repaintViewport), viewport-only
-  // because clearTerminal's 3J would destroy scrollback / Warp history.
+  // restart-only to match Ink's alternateScreen lifetime). refreshStatic must
+  // stay write-free in VP: ordinary callers (Ctrl+O, model change, /clear,
+  // ...) get their visible refresh for free from the state change that
+  // triggered them, and replaying the pre-change frame would flash stale
+  // content. Only the wake/SIGCONT path (wakeRepaint below) does a physical
+  // clear-and-replay, because there the terminal buffer may be stale or
+  // rearranged while Ink both erases with a stale relative count and skips
+  // redraws whose output is unchanged.
   const [useTerminalBuffer] = useState(
     () =>
       initialUseVirtualViewport ??
@@ -1322,11 +1322,26 @@ export const AppContainer = (props: AppContainerProps) => {
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
-    } else {
-      (repaintViewport ?? (() => stdout.write(ansiEscapes.clearViewport)))();
     }
+    // VP stays write-free for ordinary callers (/clear, model change, Ctrl+O,
+    // ...): replaying the pre-change frame would flash stale content. Their
+    // visible refresh comes from the state change that triggered them. The
+    // wake/SIGCONT path repaints separately via useWakeRepaint below.
     remountStaticHistory();
-  }, [useTerminalBuffer, remountStaticHistory, repaintViewport, stdout]);
+  }, [useTerminalBuffer, remountStaticHistory, stdout]);
+
+  // Wake/SIGCONT: the terminal buffer may be stale or rearranged, and Ink
+  // both erases with a stale relative count and skips redraws whose output
+  // is unchanged — so VP repaints by replaying the last frame over a clean
+  // viewport (viewport-only: clearTerminal's 3J would destroy scrollback /
+  // Warp history). Static mode uses the ordinary refreshStatic.
+  const wakeRepaint = useCallback(() => {
+    if (useTerminalBuffer) {
+      (repaintViewport ?? (() => stdout.write(ansiEscapes.clearViewport)))();
+    } else {
+      refreshStatic();
+    }
+  }, [useTerminalBuffer, repaintViewport, refreshStatic, stdout]);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -3417,7 +3432,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
   // Ink's frame-diff state still reflects the pre-sleep output, so the next
   // render strands border characters on screen.
-  useWakeRepaint(refreshStatic);
+  useWakeRepaint(wakeRepaint);
 
   useEffect(() => {
     if (ideNeedsRestart) {

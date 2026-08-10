@@ -954,7 +954,7 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('refreshStatic uses a viewport-only clear in VP mode (#4891, #8557)', () => {
+    it('refreshStatic stays write-free in VP mode for ordinary callers (#8557)', () => {
       const vpSettings = {
         merged: {
           hideTips: false,
@@ -980,15 +980,22 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.refreshStatic();
 
-      // After wake/SIGCONT the terminal buffer may be rearranged; without a
-      // clear, Ink's relative erase strands frame-top residue and flickers.
-      // The clear must be viewport-only: clearTerminal's 3J would destroy
-      // scrollback history.
-      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearViewport);
+      // Ordinary callers (/clear, model change, Ctrl+O, ...) must not
+      // trigger a physical clear-and-replay in VP: replaying the pre-change
+      // frame would flash stale content. Their refresh comes from the state
+      // change that triggered them; only the wake path repaints physically.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearViewport,
+      );
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
     });
+
+    // The wake/SIGCONT trigger itself is covered by use-wake-repaint.test.ts
+    // (SIGCONT/heartbeat-gap -> repaint callback); the VP/static selection in
+    // wakeRepaint is exercised manually because ink-testing-library does not
+    // flush AppContainer effects, so the listener never arms in this harness.
 
     it('defaults to VP mode when useTerminalBuffer is unset', () => {
       const defaultSettings = {

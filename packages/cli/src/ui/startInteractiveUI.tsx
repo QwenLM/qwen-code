@@ -324,8 +324,11 @@ export async function startInteractiveUI(
     if (useVP) {
       process.stdout.setMaxListeners(stdoutMaxListeners);
     }
-    restoreSynchronizedOutput();
+    // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
+    // installed last / outermost); the identity-guarded restores silently
+    // no-op and leak wrappers otherwise.
     resizeReflow.restore();
+    restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
     // If the ErrorBoundary caught a rendering error, echo it to stderr
     // now that we are back on the main screen buffer. In VP mode the
