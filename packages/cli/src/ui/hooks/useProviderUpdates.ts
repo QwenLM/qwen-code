@@ -251,13 +251,6 @@ export function useProviderUpdates(
         });
         delete installPlan.env;
         const previousModel = config.getModel();
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
-        );
-        if (previousModelStillAvailable) {
-          delete installPlan.modelSelection;
-        }
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
@@ -266,9 +259,26 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
+        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
+        const previousModelStillAvailable = newConfigs.some(
+          (cfg) => cfg.id === previousModel,
+        );
+        // Only the active provider may migrate model selection.
+        if (!updatesActiveProvider || previousModelStillAvailable) {
+          delete installPlan.modelSelection;
+        }
+        const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
-          settings: createLoadedSettingsAdapter(settings),
+          settings: {
+            ...settingsAdapter,
+            setValue: (key, value) => {
+              // Template updates never change the selected auth method.
+              if (key !== 'security.auth.selectedType') {
+                settingsAdapter.setValue(key, value);
+              }
+            },
+          },
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
             config
@@ -282,7 +292,7 @@ export function useProviderUpdates(
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
 
-        if (previousModelStillAvailable && activeModel === previousModel) {
+        if (activeModel === previousModel) {
           addItem(
             {
               type: 'info',
