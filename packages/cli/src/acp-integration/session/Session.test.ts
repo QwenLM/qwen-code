@@ -13275,20 +13275,37 @@ describe('Session', () => {
       });
 
       it('keeps replay records for other ACP slash-command messages', async () => {
+        let finish!: () => void;
+        const delayed = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'message',
-          messageType: 'info',
-          content: 'Side answer.',
+        ).mockImplementationOnce(async () => {
+          markStarted();
+          await delayed;
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'Side answer.',
+          };
         });
         mockChatRecordingService.recordUserMessage.mockClear();
         mockChatRecordingService.recordSlashCommand.mockClear();
 
-        await session.prompt({
+        const prompt = session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: '/btw question' }],
         });
+        await started;
+        await session.cancelPendingPrompt();
+        finish();
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
 
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           '/btw question',
@@ -13298,6 +13315,14 @@ describe('Session', () => {
         ).toHaveBeenCalledWith(
           expect.objectContaining({ rawCommand: '/btw question' }),
         );
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Side answer.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
       });
 
       it('returns cancelled when /advisor finishes after cancellation', async () => {

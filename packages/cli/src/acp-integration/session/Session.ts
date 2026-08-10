@@ -3355,6 +3355,7 @@ export class Session implements SessionContext {
               );
 
               if (
+                slashCommandName === 'advisor' &&
                 pendingSend.signal.aborted &&
                 slashCommandResult.type === 'message'
               ) {
