@@ -7,6 +7,7 @@
 import type {
   ApprovalMode,
   SessionGroupPresetColor,
+  TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
@@ -850,6 +851,8 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /** Durable write for a terminal published before child prompt dispatch. */
+  terminalPersistence?: Promise<void>;
   /** Cancellation handshake; duplicate callers await rather than resend it. */
   cancelForwardInitial?: Promise<void>;
   /** Full cancellation handshake, used to fence the next FIFO dispatch. */
@@ -897,7 +900,7 @@ export interface BridgeTurnStatus {
   startedAt?: number;
   endedAt?: number;
   stopReason?: string;
-  error?: { message: string; code?: string };
+  error?: TurnResultErrorPayload;
   resultText?: string;
   resultTruncated?: boolean;
   originatorClientId?: string;
@@ -1200,7 +1203,7 @@ export interface AcpSessionBridge {
     sessionId: string,
     promptId: string,
     context?: BridgeClientRequestContext,
-  ): { removed: boolean };
+  ): Promise<{ removed: boolean }>;
 
   /**
    * Cancel the in-flight prompt on the session. Throws

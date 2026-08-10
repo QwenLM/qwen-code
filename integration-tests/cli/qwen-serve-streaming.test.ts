@@ -157,10 +157,118 @@ let pendingWritePath = '';
 let pendingReadPath = '';
 let pendingReadMarker = '';
 let pendingReadSentinel = '';
+let blockedPromptMarker = '';
+let blockedPromptGate: Promise<void> | undefined;
+let releaseBlockedPrompt: (() => void) | undefined;
+let repeatedFailureMarker = '';
+let repeatedFailureRequestCount = 0;
+let rewritePromptMarker = '';
+let delayedRewriteMarker = '';
+let delayedRewriteGate: Promise<void> | undefined;
+let releaseDelayedRewrite: (() => void) | undefined;
+let providerErrorMarker = '';
+
+const defaultSettings = {
+  experimental: { todoStopGuard: true },
+  ui: { enableFollowupSuggestions: false },
+};
+
+function writeUserSettings(settings: Record<string, unknown>): void {
+  writeFileSync(
+    path.join(homeDir, '.qwen', 'settings.json'),
+    JSON.stringify(settings),
+  );
+}
+
+async function startDaemon(): Promise<void> {
+  daemon = spawn(
+    process.execPath,
+    [
+      CLI_BIN,
+      'serve',
+      '--port',
+      '0',
+      '--token',
+      TOKEN,
+      '--hostname',
+      '127.0.0.1',
+      // Pin a scratch workspace so the daemon and every child session share
+      // one hermetic settings/trust boundary across direct and CI runs.
+      '--workspace',
+      workspaceDir,
+    ],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([key]) => !/^(https?|all)_proxy$/i.test(key),
+          ),
+        ),
+        HOME: homeDir,
+        QWEN_HOME: path.join(homeDir, '.qwen'),
+        QWEN_ACP_LOCAL_READ_ROOTS: '',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD: repeatedFailureMarker
+          ? 'enforce'
+          : 'shadow',
+      },
+    },
+  );
+  port = await new Promise<number>((resolve, reject) => {
+    let buf = '';
+    // Clear the boot timeout on success so it cannot keep vitest alive.
+    const bootTimer = setTimeout(
+      () => reject(new Error('daemon boot timeout')),
+      10_000,
+    );
+    const onData = (chunk: Buffer) => {
+      buf += chunk.toString();
+      const m = buf.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/);
+      if (m) {
+        daemon.stdout?.off('data', onData);
+        clearTimeout(bootTimer);
+        resolve(Number(m[1]));
+      }
+    };
+    daemon.stdout!.on('data', onData);
+    daemon.once('exit', (c) => {
+      clearTimeout(bootTimer);
+      reject(new Error(`daemon exited with ${c}`));
+    });
+  });
+  base = `http://127.0.0.1:${port}`;
+  client = new DaemonClient({ baseUrl: base, token: TOKEN });
+}
+
+async function stopDaemon(): Promise<void> {
+  if (daemon && daemon.exitCode === null) {
+    daemon.kill('SIGTERM');
+    await new Promise((resolve) => daemon.once('exit', resolve));
+  }
+}
+
+async function turnStatus(
+  sessionId: string,
+  promptId: string,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `${base}/session/${sessionId}/turns/${promptId}`,
+    { headers: { Authorization: `Bearer ${TOKEN}` } },
+  );
+  return response.ok
+    ? ((await response.json()) as Record<string, unknown>)
+    : { status: response.status };
+}
 
 beforeAll(async () => {
   if (SKIP) return;
-  fakeServer = await startFakeOpenAIServer(({ body }) => {
+  fakeServer = await startFakeOpenAIServer(async ({ body }) => {
     const messages = JSON.stringify(body['messages'] ?? []);
     const hasToolResult =
       messages.includes('"role":"tool"') || messages.includes('"tool_call_id"');
@@ -184,6 +292,48 @@ beforeAll(async () => {
         };
       }
       return { content: 'The test Todo remains unfinished.' };
+    }
+
+    if (rewritePromptMarker && messages.includes(rewritePromptMarker)) {
+      if (delayedRewriteMarker) {
+        await delayedRewriteGate;
+        return { content: 'late rewritten text' };
+      }
+      return { content: 'rewritten framework diagnostic' };
+    }
+
+    if (delayedRewriteMarker && messages.includes(delayedRewriteMarker)) {
+      return { content: 'raw answer before cancellation' };
+    }
+
+    if (blockedPromptMarker && messages.includes(blockedPromptMarker)) {
+      await blockedPromptGate;
+      return { content: 'blocking turn complete' };
+    }
+
+    if (repeatedFailureMarker && messages.includes(repeatedFailureMarker)) {
+      repeatedFailureRequestCount += 1;
+      const callCount = repeatedFailureRequestCount < 3 ? 4 : 1;
+      return {
+        toolCalls: Array.from({ length: callCount }, (_, index) =>
+          fakeToolCall('read_file', {
+            file_path: path.join(
+              workspaceDir,
+              `missing-${repeatedFailureRequestCount}-${index}.txt`,
+            ),
+          }),
+        ),
+      };
+    }
+
+    if (providerErrorMarker && messages.includes(providerErrorMarker)) {
+      return {
+        httpError: {
+          status: 400,
+          message: 'simulated provider failure',
+          code: 'invalid_request',
+        },
+      };
     }
 
     if (pendingWritePath && messages.includes('fan-out') && !hasToolResult) {
@@ -240,92 +390,14 @@ beforeAll(async () => {
   mkdirSync(qwenHome, { recursive: true });
   writeFileSync(
     path.join(qwenHome, 'settings.json'),
-    JSON.stringify({
-      experimental: { todoStopGuard: true },
-      ui: { enableFollowupSuggestions: false },
-    }),
+    JSON.stringify(defaultSettings),
   );
   workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
-  daemon = spawn(
-    process.execPath,
-    [
-      CLI_BIN,
-      'serve',
-      '--port',
-      '0',
-      '--token',
-      TOKEN,
-      '--hostname',
-      '127.0.0.1',
-      // Per #3803 §02 (1 daemon = 1 workspace), pin the bound
-      // workspace so every `createOrAttachSession({ workspaceCwd })`
-      // below matches. Without this the daemon inherits the test
-      // runner's cwd (CI / IDE-launcher / direct vitest invocations
-      // all differ) and every session create returns 400
-      // workspace_mismatch — the SSE / permission / Last-Event-ID
-      // tests below would all silently 404. A scratch workspace (not
-      // the checkout) also keeps sessions hermetic: the daemon merges
-      // the workspace's `.qwen/settings.json` into every session, and
-      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or
-      // a `tools.core` allowlist missing `todo_write`) silently breaks
-      // the Stop Guard flow below.
-      '--workspace',
-      workspaceDir,
-    ],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([key]) => !/^(https?|all)_proxy$/i.test(key),
-          ),
-        ),
-        HOME: homeDir,
-        QWEN_HOME: path.join(homeDir, '.qwen'),
-        QWEN_ACP_LOCAL_READ_ROOTS: '',
-        NO_PROXY: '127.0.0.1,localhost',
-        no_proxy: '127.0.0.1,localhost',
-        OPENAI_API_KEY: 'fake-key',
-        OPENAI_BASE_URL: fakeServer.baseUrl,
-        OPENAI_MODEL: 'fake-model',
-        QWEN_MODEL: 'fake-model',
-      },
-    },
-  );
-  port = await new Promise<number>((resolve, reject) => {
-    let buf = '';
-    // Capture the timeout handle so we can clear it on success — an
-    // un-cleared 10s timer outlives the spawn promise and keeps the
-    // vitest event loop alive past the test, manifesting as
-    // intermittent flakes on slow CI.
-    const bootTimer = setTimeout(
-      () => reject(new Error('daemon boot timeout')),
-      10_000,
-    );
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString();
-      const m = buf.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m) {
-        daemon.stdout?.off('data', onData);
-        clearTimeout(bootTimer);
-        resolve(Number(m[1]));
-      }
-    };
-    daemon.stdout!.on('data', onData);
-    daemon.once('exit', (c) => {
-      clearTimeout(bootTimer);
-      reject(new Error(`daemon exited with ${c}`));
-    });
-  });
-  base = `http://127.0.0.1:${port}`;
-  client = new DaemonClient({ baseUrl: base, token: TOKEN });
+  await startDaemon();
 }, 30_000);
 
 afterAll(async () => {
-  if (!SKIP && daemon && daemon.exitCode === null) {
-    daemon.kill('SIGTERM');
-    await new Promise((r) => daemon.once('exit', r));
-  }
+  if (!SKIP) await stopDaemon();
   await fakeServer?.close();
   if (homeDir) {
     rmSync(homeDir, { recursive: true, force: true });
@@ -875,5 +947,295 @@ describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
     expect(JSON.stringify(guardUpdates)).not.toContain(
       'Keep this item unfinished for the guard test',
     );
+  }, 60_000);
+});
+
+describePOSIX('qwen serve — turn result blocker regressions', () => {
+  it('keeps exact queued cancellation and prior completion across daemon restart', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    blockedPromptMarker = `blocked-turn-${Date.now()}`;
+    blockedPromptGate = new Promise<void>((resolve) => {
+      releaseBlockedPrompt = resolve;
+    });
+
+    try {
+      const idleResponse = await fetch(
+        `${base}/session/${session.sessionId}/turns/current`,
+        { headers: { Authorization: `Bearer ${TOKEN}` } },
+      );
+      await expect(idleResponse.json()).resolves.toMatchObject({
+        sessionId: session.sessionId,
+        state: 'idle',
+      });
+
+      const unknownResponse = await fetch(
+        `${base}/session/${session.sessionId}/turns/not-a-prompt`,
+        { headers: { Authorization: `Bearer ${TOKEN}` } },
+      );
+      expect(unknownResponse.status).toBe(404);
+      await expect(unknownResponse.json()).resolves.toMatchObject({
+        code: 'prompt_not_found',
+        promptId: 'not-a-prompt',
+      });
+
+      const running = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: blockedPromptMarker }],
+        }),
+      );
+      expect(running).toBeDefined();
+      if (!running) return;
+      await expect
+        .poll(() => turnStatus(session.sessionId, running.promptId))
+        .toMatchObject({
+          promptId: running.promptId,
+          state: 'running',
+          startedAt: expect.any(Number),
+        });
+
+      const queued = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'cancel this queued prompt' }],
+        }),
+      );
+      expect(queued).toBeDefined();
+      if (!queued) return;
+      await expect
+        .poll(() => turnStatus(session.sessionId, queued.promptId))
+        .toMatchObject({
+          promptId: queued.promptId,
+          state: 'queued',
+        });
+      expect(
+        await turnStatus(session.sessionId, queued.promptId),
+      ).not.toHaveProperty('startedAt');
+
+      await expect(
+        client.removePendingPrompt(session.sessionId, queued.promptId),
+      ).resolves.toMatchObject({ removed: true });
+      await expect
+        .poll(() => turnStatus(session.sessionId, queued.promptId))
+        .toMatchObject({
+          promptId: queued.promptId,
+          state: 'cancelled',
+        });
+      expect(
+        await turnStatus(session.sessionId, queued.promptId),
+      ).not.toHaveProperty('startedAt');
+
+      releaseBlockedPrompt?.();
+      await expect
+        .poll(() => turnStatus(session.sessionId, running.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          promptId: running.promptId,
+          state: 'completed',
+          resultText: 'blocking turn complete',
+        });
+
+      await stopDaemon();
+      await startDaemon();
+      await client.resumeSession(session.sessionId, {
+        workspaceCwd: workspaceDir,
+      });
+      await expect(
+        turnStatus(session.sessionId, running.promptId),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        resultText: 'blocking turn complete',
+      });
+      await expect(
+        turnStatus(session.sessionId, queued.promptId),
+      ).resolves.toMatchObject({ state: 'cancelled' });
+      expect(
+        await turnStatus(session.sessionId, queued.promptId),
+      ).not.toHaveProperty('startedAt');
+    } finally {
+      releaseBlockedPrompt?.();
+      blockedPromptMarker = '';
+      blockedPromptGate = undefined;
+      releaseBlockedPrompt = undefined;
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 90_000);
+
+  it('rewrites repeated-tool diagnostics without recording them as the answer', async () => {
+    repeatedFailureMarker = `repeated-failure-${Date.now()}`;
+    repeatedFailureRequestCount = 0;
+    rewritePromptMarker = `rewrite-framework-diagnostic-${Date.now()}`;
+    writeUserSettings({
+      ...defaultSettings,
+      messageRewrite: {
+        enabled: true,
+        target: 'message',
+        prompt: rewritePromptMarker,
+        contextTurns: 0,
+      },
+    });
+    await stopDaemon();
+    await startDaemon();
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: repeatedFailureMarker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 60_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+        });
+      const status = await turnStatus(session.sessionId, accepted.promptId);
+      expect(status['resultText']).toBeUndefined();
+
+      const events: DaemonEvent[] = [];
+      const ac = new AbortController();
+      for await (const event of sseFrames(session.sessionId, {
+        lastEventId: accepted.lastEventId,
+        signal: ac.signal,
+      })) {
+        events.push(event);
+        if (event.type === 'turn_complete') break;
+      }
+      ac.abort();
+      expect(JSON.stringify(events)).toContain(
+        'rewritten framework diagnostic',
+      );
+    } finally {
+      repeatedFailureMarker = '';
+      repeatedFailureRequestCount = 0;
+      rewritePromptMarker = '';
+      writeUserSettings(defaultSettings);
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      await stopDaemon();
+      await startDaemon();
+    }
+  }, 90_000);
+
+  it('drops a rewrite that finishes after its turn is cancelled', async () => {
+    delayedRewriteMarker = `delayed-rewrite-${Date.now()}`;
+    rewritePromptMarker = `rewrite-cancelled-turn-${Date.now()}`;
+    delayedRewriteGate = new Promise<void>((resolve) => {
+      releaseDelayedRewrite = resolve;
+    });
+    writeUserSettings({
+      ...defaultSettings,
+      messageRewrite: {
+        enabled: true,
+        target: 'message',
+        prompt: rewritePromptMarker,
+        contextTurns: 0,
+        timeoutMs: 60_000,
+      },
+    });
+    await stopDaemon();
+    await startDaemon();
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: delayedRewriteMarker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(
+          () =>
+            fakeServer.requests.some((request) => {
+              const messages = JSON.stringify(request.body['messages'] ?? []);
+              return messages.includes(rewritePromptMarker);
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+      const cancellation = client.cancel(session.sessionId);
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({ state: 'cancelled' });
+      releaseDelayedRewrite?.();
+      await cancellation;
+
+      const status = await turnStatus(session.sessionId, accepted.promptId);
+      expect(JSON.stringify(status)).not.toContain('late rewritten text');
+
+      const events: DaemonEvent[] = [];
+      const ac = new AbortController();
+      for await (const event of sseFrames(session.sessionId, {
+        lastEventId: accepted.lastEventId,
+        signal: ac.signal,
+      })) {
+        events.push(event);
+        if (event.type === 'turn_complete') break;
+      }
+      ac.abort();
+      expect(JSON.stringify(events)).not.toContain('late rewritten text');
+    } finally {
+      releaseDelayedRewrite?.();
+      delayedRewriteMarker = '';
+      delayedRewriteGate = undefined;
+      releaseDelayedRewrite = undefined;
+      rewritePromptMarker = '';
+      writeUserSettings(defaultSettings);
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      await stopDaemon();
+      await startDaemon();
+    }
+  }, 90_000);
+
+  it('returns provider failures as pollable turn errors', async () => {
+    providerErrorMarker = `provider-error-${Date.now()}`;
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: providerErrorMarker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'error',
+          error: {
+            message: expect.any(String),
+            code: expect.any(String),
+          },
+        });
+    } finally {
+      providerErrorMarker = '';
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
   }, 60_000);
 });

@@ -181,7 +181,7 @@ export class MessageRewriteMiddleware {
             debugLogger.info(`Turn ${turnIdx}: no rewrite output`);
             return;
           }
-          if (generation !== this.generation) return;
+          if (generation !== this.generation || rewriteSignal.aborted) return;
 
           debugLogger.info(
             `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
@@ -205,7 +205,7 @@ export class MessageRewriteMiddleware {
               replacesMessageText: content.messages.length > 0,
             },
           );
-          if (generation !== this.generation) return;
+          if (generation !== this.generation || rewriteSignal.aborted) return;
           this.rewriter.commitOutput(rewritten);
         } catch (error) {
           debugLogger.warn(

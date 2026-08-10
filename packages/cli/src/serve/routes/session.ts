@@ -4649,7 +4649,7 @@ export function registerSessionRoutes(
     mutate(),
     withOwnerMutableSession(
       'DELETE /session/:id/pending-prompts/:promptId',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const promptId = req.params['promptId'];
@@ -4659,7 +4659,7 @@ export function registerSessionRoutes(
             .json({ error: '`promptId` route parameter is required' });
           return;
         }
-        const result = runtime.bridge.removePendingPrompt(
+        const result = await runtime.bridge.removePendingPrompt(
           sessionId,
           promptId,
           clientId !== undefined ? { clientId } : undefined,

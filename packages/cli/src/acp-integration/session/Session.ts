@@ -174,6 +174,7 @@ import {
   splitImageParts,
   approxBase64Bytes,
   TURN_RESULT_TEXT_MAX_CHARS,
+  normalizeTurnResultError,
   runWithRuntimeContentGenerator,
   getInvocationContext,
   runWithInvocationContext,
@@ -904,7 +905,7 @@ function extractTurnPromptText(content: ContentBlock[]): string {
 type InFlightTurnRecording = {
   promptId: string;
   originatorClientId?: string;
-  startedAt: number;
+  startedAt?: number;
   promptText: string;
   promptTextTruncated: boolean;
   resultSegments: Map<
@@ -933,24 +934,6 @@ function truncateTurnText(text: string): {
     return { text, truncated: false };
   }
   return { text: text.slice(0, TURN_RESULT_TEXT_MAX_CHARS), truncated: true };
-}
-
-function turnResultErrorPayload(error: unknown): {
-  message: string;
-  code?: string;
-} {
-  const message =
-    error instanceof Error && error.message.length > 0
-      ? error.message
-      : String(error);
-  const code = (error as { code?: unknown })?.code;
-  if (typeof code === 'string' && code.length > 0) {
-    return { message, code };
-  }
-  if (typeof code === 'number') {
-    return { message, code: String(code) };
-  }
-  return { message };
 }
 
 function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
@@ -3004,33 +2987,55 @@ export class Session implements SessionContext {
     admissionCancellation?: AbortSignal,
     modelPrompt?: string,
   ): Promise<PromptResponse> {
-    if (this.closing) {
-      throw RequestError.invalidParams(undefined, 'Session is closing');
-    }
-    if (modelPrompt !== undefined && invocationContext === undefined) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Model-only prompt requires trusted invocation context',
-      );
-    }
-    if (modelPrompt !== undefined && !isValidTrustedModelPrompt(modelPrompt)) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Invalid trusted model-only prompt',
-      );
-    }
-    await this.assertCanStartTurn();
     if (
-      this.liveScreenContextTool ||
-      this.liveTaskTools.length > 0 ||
-      this.liveSpeakToUserTool
+      invocationContext !== undefined &&
+      invocationContext.sessionId !== this.config.getSessionId()
     ) {
-      await this.#syncLiveToolDeclarations();
-    }
-    if (this.closing) {
-      throw RequestError.invalidParams(undefined, 'Session is closing');
+      throw RequestError.invalidParams(
+        undefined,
+        'Invocation context session does not match the active session',
+      );
     }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
+    try {
+      if (this.closing) {
+        throw RequestError.invalidParams(undefined, 'Session is closing');
+      }
+      if (modelPrompt !== undefined && invocationContext === undefined) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Model-only prompt requires trusted invocation context',
+        );
+      }
+      if (
+        modelPrompt !== undefined &&
+        !isValidTrustedModelPrompt(modelPrompt)
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid trusted model-only prompt',
+        );
+      }
+      await this.assertCanStartTurn();
+      if (
+        this.liveScreenContextTool ||
+        this.liveTaskTools.length > 0 ||
+        this.liveSpeakToUserTool
+      ) {
+        await this.#syncLiveToolDeclarations();
+      }
+      if (this.closing) {
+        throw RequestError.invalidParams(undefined, 'Session is closing');
+      }
+    } catch (error) {
+      this.#settleTurnRecording('error', turnRecording, undefined, error);
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
+    }
     if (admissionCancellation?.aborted) {
       this.#settleTurnRecording('cancelled', turnRecording);
       return { stopReason: 'cancelled' };
@@ -3143,6 +3148,18 @@ export class Session implements SessionContext {
     if (turnRecording) turnRecording.startedAt = Date.now();
     this.#turnRecording = turnRecording;
 
+    let settlement:
+      | {
+          state: 'completed' | 'cancelled' | 'error';
+          response?: PromptResponse;
+          error?: unknown;
+        }
+      | undefined;
+    let promptResult: PromptResponse | undefined;
+    let promptFailure: unknown;
+    let didPromptFail = false;
+    let finalizationError: unknown;
+    let didFinalizationFail = false;
     try {
       const result = await this.#executePrompt(
         params,
@@ -3151,11 +3168,11 @@ export class Session implements SessionContext {
         invocationContext,
         modelPrompt,
       );
-      this.#settleTurnRecording(
-        result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
-        turnRecording,
-        result,
-      );
+      settlement = {
+        state: result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
+        response: result,
+      };
+      promptResult = result;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -3173,7 +3190,6 @@ export class Session implements SessionContext {
           promptId: channelDelivery.deliveryId,
         });
       }
-      return result;
     } catch (error) {
       // A controlled prompt abort can surface as a non-AbortError (e.g. the
       // provider SDK's "Request was aborted."), so classify the recording
@@ -3181,18 +3197,18 @@ export class Session implements SessionContext {
       const controlledCancellation = isControlledPromptAbort(
         pendingSend.signal,
       );
-      this.#settleTurnRecording(
-        controlledCancellation ? 'cancelled' : 'error',
-        turnRecording,
-        undefined,
+      settlement = {
+        state: controlledCancellation ? 'cancelled' : 'error',
         error,
-      );
+      };
+      didPromptFail = true;
       if (error instanceof SessionWriterError) {
-        throw new RequestError(error.rpcCode, error.message, {
+        promptFailure = new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
         });
+      } else {
+        promptFailure = error;
       }
-      throw error;
     } finally {
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
@@ -3215,10 +3231,37 @@ export class Session implements SessionContext {
       // cron job) is actually pending — otherwise the loop dies silently on
       // any post-arm error.
       void this.#startCronSchedulerInRuntime();
+      try {
+        if (settlement?.state !== 'completed') {
+          this.messageRewriter?.discardTurn();
+        }
+        await this.messageRewriter?.waitForPendingRewrites();
+        await this.#consumeLiveEndInstruction();
+      } catch (error) {
+        finalizationError = error;
+        didFinalizationFail = true;
+        settlement = { state: 'error', error };
+        this.messageRewriter?.discardTurn();
+        try {
+          await this.messageRewriter?.waitForPendingRewrites();
+        } catch {
+          // The finalization error below remains authoritative.
+        }
+      }
+      if (settlement) {
+        this.#settleTurnRecording(
+          settlement.state,
+          turnRecording,
+          settlement.response,
+          settlement.error,
+        );
+      }
       resolveCompletion();
       this.pendingPromptCompletion = null;
-      await this.#consumeLiveEndInstruction();
     }
+    if (didFinalizationFail) throw finalizationError;
+    if (didPromptFail) throw promptFailure;
+    return promptResult as PromptResponse;
   }
 
   /**
@@ -5190,7 +5233,6 @@ export class Session implements SessionContext {
       ...(invocationContext.originatorClientId !== undefined
         ? { originatorClientId: invocationContext.originatorClientId }
         : {}),
-      startedAt: Date.now(),
       promptText: text,
       promptTextTruncated: truncated,
       resultSegments: new Map(),
@@ -5304,8 +5346,10 @@ export class Session implements SessionContext {
       ...(response?.stopReason !== undefined
         ? { stopReason: response.stopReason }
         : {}),
-      ...(state === 'error' ? { error: turnResultErrorPayload(error) } : {}),
-      startedAt: recording.startedAt,
+      ...(state === 'error' ? { error: normalizeTurnResultError(error) } : {}),
+      ...(recording.startedAt !== undefined
+        ? { startedAt: recording.startedAt }
+        : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),
@@ -5697,7 +5741,7 @@ export class Session implements SessionContext {
         { recordToQwenLogger: false },
       );
       try {
-        await this.messageEmitter.emitAgentMessage(
+        await this.#emitAgentDiagnosticMessage(
           REPEATED_TOOL_FAILURE_STOP_MESSAGE,
         );
       } catch (error) {
@@ -5817,14 +5861,18 @@ export class Session implements SessionContext {
   }
 
   async #emitAgentDiagnosticMessage(text: string): Promise<void> {
-    await this.#deliverUpdate(
-      {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text },
-      },
-      undefined,
-      false,
-    );
+    const update: SessionUpdate = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+      _meta: { source: 'diagnostic', qwenDiscreteMessage: true },
+    };
+    if (this.messageRewriter) {
+      const signal = this.pendingPrompt?.signal;
+      await this.messageRewriter.interceptUpdate(update, signal);
+      await this.messageRewriter.flushTurn(signal);
+      return;
+    }
+    await this.#deliverUpdate(update);
   }
 
   async #drainMidTurnUserMessages(

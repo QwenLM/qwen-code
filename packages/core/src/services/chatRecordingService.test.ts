@@ -12,6 +12,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
+  normalizeTurnResultError,
+  TURN_RESULT_ERROR_CODE_MAX_CHARS,
+  TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
   type ChatRecord,
   type AtCommandRecordPayload,
   type TurnResultRecordPayload,
@@ -836,6 +839,60 @@ describe('ChatRecordingService', () => {
         }),
       ).not.toThrow();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('fails a strict turn-result write when recording is inactive', async () => {
+      const inactive = new ChatRecordingService(mockConfig);
+      await expect(
+        inactive.recordTurnResultStrict({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          endedAt: 1500,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    });
+  });
+
+  describe('normalizeTurnResultError', () => {
+    it('falls back safely when getters and string conversion throw', () => {
+      const unsafe = Object.defineProperties(
+        {},
+        {
+          message: {
+            get: () => {
+              throw new Error('message getter failed');
+            },
+          },
+          code: {
+            get: () => {
+              throw new Error('code getter failed');
+            },
+          },
+          toString: {
+            value: () => {
+              throw new Error('string conversion failed');
+            },
+          },
+        },
+      );
+
+      expect(normalizeTurnResultError(unsafe)).toEqual({
+        message: 'Unknown error',
+      });
+    });
+
+    it('bounds message and code with explicit truncation flags', () => {
+      const normalized = normalizeTurnResultError({
+        message: 'm'.repeat(TURN_RESULT_ERROR_MESSAGE_MAX_CHARS + 1),
+        code: 'c'.repeat(TURN_RESULT_ERROR_CODE_MAX_CHARS + 1),
+      });
+
+      expect(normalized.message).toHaveLength(
+        TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
+      );
+      expect(normalized.code).toHaveLength(TURN_RESULT_ERROR_CODE_MAX_CHARS);
+      expect(normalized.messageTruncated).toBe(true);
+      expect(normalized.codeTruncated).toBe(true);
     });
   });
 

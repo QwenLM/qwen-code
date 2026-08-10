@@ -1,114 +1,152 @@
-# Daemon Turn Status Blocker Fixes Implementation Plan
+# Daemon Turn Status Bounded-History Fixes Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fix the eight confirmed correctness blockers on PR #8682 without expanding the change to unresolved Suggestions.
+**Goal:** Make exact `sessionId + promptId` polling reliable for every active-history turn inside the existing bounded transcript scan window.
 
-**Architecture:** Preserve the existing HTTP routes, persisted `turn_result` format, and bounded terminal overlay. Normalize controlled cancellation at its source, keep pending-list live state aligned with formal terminal publication, make result capture accept only canonical answer emissions, reset rewrite state at automatic-turn ownership boundaries, and map an empty transcript to “no persisted result.”
+**Architecture:** Keep the existing HTTP routes and JSONL transcript. Use the transcript as the bounded durable source, retain only a small transient terminal overlay, and make every normally admitted terminal path append the same bounded `turn_result` shape. Fold the review comments into seven root-cause fixes rather than adding independent stores or state machines.
 
-**Tech Stack:** TypeScript, ACP bridge/session runtime, Vitest, JSONL transcript reader.
+**Tech Stack:** TypeScript, ACP bridge/session runtime, Vitest, JSONL transcript reader, real daemon integration tests.
 
 ## Global Constraints
 
-- Work from exact PR head `20a9dd451c1acc198a96e8f936f1b0256f2e5942` in the isolated worktree.
-- Change only confirmed Critical behavior; defer unresolved Suggestions.
-- Preserve route paths, response schema, authorization, memory bounds, and transcript scan bounds.
-- Add a failing regression test before each production change.
-- Run tests from the owning package directory.
-- Do not force-push.
+- Work from exact PR head `3493ae055c0a4440c51a9013d3f47493381475bd`.
+- “Within the system limit” means the current active transcript chain scanned backward for at most 10 pages × 500 records, with 4 MiB per page.
+- Preserve `GET /session/:id/turns/:promptId` and `/turns/current`, client-id authorization, and the 32,768-character prompt/result cap.
+- Agent-side model settlement keeps the existing best-effort recording behavior; bridge-owned pre-dispatch outcomes are acknowledged only after their strict transcript write succeeds.
+- No database, unbounded daemon history, cron-result routing, or prompt-count index.
+- Add and run a failing regression test before each production behavior change.
+- Tests run from the owning package directory; integration tests run through the repository scripts or from `integration-tests/`.
+- Do not commit, push, reply, resolve threads, rerun CI, or modify the PR without separate authorization.
 
 ---
 
-### Task 1: Normalize controlled prompt cancellation
+### Task 1: Fix deterministic capability CI failure
 
 **Files:**
 
-- Modify: `packages/cli/src/acp-integration/session/Session.ts`
-- Test: `packages/cli/src/acp-integration/session/Session.test.ts`
+- Modify: `integration-tests/cli/qwen-serve-routes.test.ts`
 
 **Interfaces:**
 
-- Consumes: `AbortSignal.reason`, `USER_CANCEL_ABORT_REASON`, and `SESSION_DISPOSE_ABORT_REASON`.
-- Produces: one shared controlled-cancellation predicate used by stream gates and the outer recording classifier.
+- Consumes: `SERVE_CAPABILITY_REGISTRY` order.
+- Produces: integration baseline containing `session_turn_status` immediately after `session_status`.
 
-- [ ] Add a test where `dispose()` aborts a non-stream signal-aware await and assert the persisted state is `cancelled`.
-- [ ] Run the focused test and verify it fails with persisted state `error`.
-- [ ] Add a test where a successor supersedes a predecessor whose await rejects on abort and assert the predecessor persists `cancelled`.
-- [ ] Run the focused test and verify it fails with persisted state `error`.
-- [ ] Abort the predecessor with an explicit controlled reason and reuse one cancellation predicate in all classifiers.
-- [ ] Run the focused tests and the complete `Session.test.ts` file.
+- [ ] Run the integration capability test and capture the expected missing-feature failure.
+- [ ] Add only `session_turn_status` to the expected ordered list.
+- [ ] Re-run the focused integration file and verify it passes.
 
-### Task 2: Preserve deadline recovery and terminal polling precedence
+### Task 2: Bound and race-proof terminal status resolution
 
 **Files:**
 
 - Modify: `packages/acp-bridge/src/bridge.ts`
+- Modify: `packages/acp-bridge/src/bridgeTypes.ts`
 - Test: `packages/acp-bridge/src/bridge.test.ts`
 
 **Interfaces:**
 
-- Consumes: `PendingPromptEntry.removed`, `terminalPublished`, deadline rejection, and the terminal overlay.
-- Produces: prompt polling that never reports a terminal prompt as live and a running removal that retains its deadline recovery fence.
+- Consumes: live pending entries, persisted `turn_result`, and recent formal terminal outcomes.
+- Produces: a small fixed overlay that is re-read after the transcript RPC and evicted when persistence is visible.
 
-- [ ] Add a test that removes a running prompt whose agent ignores cancellation, advances past its deadline, and verifies the FIFO dispatches the successor.
-- [ ] Run the test and verify the successor remains blocked.
-- [ ] Add a test that expires a queued prompt behind a wedged predecessor and verifies by-id polling returns `prompt_deadline_exceeded`, not `queued`.
-- [ ] Run the test and verify it reports `queued`.
-- [ ] Separate “status terminal published” from “deadline recovery completed”: do not let running removal suppress deadline cleanup, and exclude formally terminal entries from live polling.
-- [ ] Run the focused tests and the complete `bridge.test.ts` file.
+- [ ] Add a failing test where a terminal is published while `sessionTurnStatus` is awaiting and assert the post-await terminal wins.
+- [ ] Add a failing capacity test independent of `eventRingSize` and a persisted-match eviction test.
+- [ ] Introduce one small named overlay limit, re-read after await, and delete matching overlay entries after persisted enrichment.
+- [ ] Run focused tests and the complete `bridge.test.ts` file.
 
-### Task 3: Capture only the canonical visible answer
+### Task 3: Persist all normally admitted terminal paths
+
+**Files:**
+
+- Modify: `packages/acp-bridge/src/bridge.ts`
+- Modify: `packages/acp-bridge/src/status.ts`
+- Modify: `packages/cli/src/acp-integration/acpAgent.ts`
+- Modify: `packages/cli/src/acp-integration/session/Session.ts`
+- Modify: `packages/core/src/services/chatRecordingService.ts`
+- Test: corresponding collocated test files.
+
+**Interfaces:**
+
+- Consumes: trusted `InvocationContextV1`, bridge pre-dispatch cancellation/error terminals, and `ChatRecordingService.recordTurnResult`.
+- Produces: one bounded persisted record for queued cancellation and for every failure after bridge admission but before model dispatch.
+
+- [ ] Add failing restart-oriented tests for queued cancellation and pre-record `assertCanStartTurn`/live-tool failure.
+- [ ] Add a trusted child control method that appends a bridge-owned pre-dispatch terminal through the existing recording service; do not add a new file/store.
+- [ ] Validate invocation session ownership before recording, create the recording before fallible child admission checks, and settle every exit path.
+- [ ] Make `startedAt` optional until actual model dispatch and update projections/tests.
+- [ ] Run focused bridge, agent, Session, and recording-service tests.
+
+### Task 4: Normalize bounded terminal errors
+
+**Files:**
+
+- Modify: `packages/core/src/services/chatRecordingService.ts`
+- Modify: `packages/acp-bridge/src/bridge.ts`
+- Modify: `packages/cli/src/acp-integration/session/Session.ts`
+- Test: corresponding collocated test files.
+
+**Interfaces:**
+
+- Consumes: arbitrary thrown values from provider/tool/ACP paths.
+- Produces: a non-throwing error payload with bounded message/code and explicit truncation metadata, shared by persisted and overlay projections.
+
+- [ ] Add failing tests for oversized message/code and throwing coercion/getters.
+- [ ] Implement one core-safe terminal-error normalizer and use it on both sides.
+- [ ] Verify oversized error records remain below transcript page limits and expose truncation flags.
+- [ ] Run focused tests.
+
+### Task 5: Preserve canonical visible-answer and terminal consistency
 
 **Files:**
 
 - Modify: `packages/cli/src/acp-integration/session/Session.ts`
 - Modify: `packages/cli/src/acp-integration/session/rewrite/MessageRewriteMiddleware.ts`
-- Test: `packages/cli/src/acp-integration/session/Session.test.ts`
-- Test: `packages/cli/src/acp-integration/session/rewrite/MessageRewriteMiddleware.test.ts`
+- Test: `Session.test.ts` and `MessageRewriteMiddleware.test.ts`.
 
 **Interfaces:**
 
-- Consumes: `MessageRewriteEmissionContext`, rewrite target, update metadata, and automatic-turn boundaries.
-- Produces: result segments where only a message rewrite can replace a raw answer segment and automatic-turn residue cannot cross into a daemon prompt.
+- Consumes: raw answer chunks, rewritten replacements, diagnostic/status messages, prompt cancellation, and live-end cleanup.
+- Produces: `resultText` equal to the final primary answer the user could observe.
 
-- [ ] Add a test showing the token-limit diagnostic is visible on the wire but absent from persisted `resultText`; verify it fails.
-- [ ] Add a `target: 'thought'` test proving the persisted result remains the raw answer; verify it fails with rewritten thought text.
-- [ ] Add an aborted cron/notification residue test proving the next daemon prompt rewrites only its own answer; verify it fails with cross-turn content.
-- [ ] Tag internal diagnostics as non-answer status output.
-- [ ] Extend the internal rewrite context with whether the rewrite replaces message text, and gate replacement on that field.
-- [ ] Add a middleware reset method that clears buffered turn state without emitting a rewrite, and invoke it after automatic work has drained and before publishing a daemon turn recording.
-- [ ] Run the focused tests, then both complete test files.
+- [ ] Add failing tests proving repeated-tool diagnostics are visible and rewrite-aware but excluded from `resultText`.
+- [ ] Add failing tests for model error during an in-flight rewrite and cancellation immediately before rewrite delivery/commit.
+- [ ] Route diagnostics with explicit non-answer metadata through the rewrite-aware path.
+- [ ] Drain or discard the owning rewrite before settlement and re-check abort immediately before send and commit.
+- [ ] Include awaited live-end cleanup in the terminal outcome so a later cleanup rejection cannot follow an already persisted `completed` result.
+- [ ] Run both complete test files.
 
-### Task 4: Treat an empty transcript as no persisted turn
+### Task 6: Keep fork and rewind identities consistent
 
 **Files:**
 
-- Modify: `packages/cli/src/acp-integration/acpAgent.ts`
-- Test: `packages/cli/src/acp-integration/acpAgent.test.ts`
+- Modify: `packages/core/src/services/sessionService.ts`
+- Modify: `packages/acp-bridge/src/bridge.ts`
+- Test: `sessionService.test.ts` and `bridge.test.ts`.
 
 **Interfaces:**
 
-- Consumes: `SessionTranscriptSnapshotUnavailableError` from a zero-record transcript.
-- Produces: `{ v: 1, sessionId, turnResult: null }` only for the initial empty snapshot while preserving typed failures for unavailable non-empty snapshots and oversized transcripts.
+- Consumes: active transcript reconstruction, fork record copying, and successful rewind response.
+- Produces: forks without source-session `turn_result` identity and rewinds without abandoned overlay terminals.
 
-- [ ] Add a test whose turn-status reader throws `SessionTranscriptSnapshotUnavailableError` for an empty snapshot and assert `turnResult: null`; verify it fails.
-- [ ] Implement the narrow empty-snapshot mapping without swallowing oversized-page or cursor errors.
-- [ ] Run the focused test and complete `acpAgent.test.ts` file.
+- [ ] Add a failing fork test proving a source `turn_result` is not copied.
+- [ ] Add a failing rewind test proving an abandoned overlay result is no longer returned while surviving active transcript results remain readable.
+- [ ] Exclude `turn_result` from fork copies and clear/reconcile terminal overlay immediately after successful transcript rewind.
+- [ ] Run both complete test files.
 
-### Task 5: Verify, self-audit, commit, and push
+### Task 7: Full verification and review
 
 **Files:**
 
-- Review all files changed by Tasks 1–4 and this plan.
+- Review every changed and untracked file.
 
 **Interfaces:**
 
-- Consumes: all four independently green task groups.
-- Produces: a verified commit on `feat/daemon-turn-status-polling`.
+- Consumes: all green task groups.
+- Produces: a verified commit and non-force push after explicit user authorization.
 
-- [ ] Run package-focused tests for every changed test file.
-- [ ] Run `npm run build` and `npm run typecheck` from the repository root.
-- [ ] Run `npm run test:integration:cli:sandbox:none` and the daemon polling E2E scenarios where available.
-- [ ] Perform two consecutive clean diff self-audit passes, resetting the count after any edit.
-- [ ] Commit only the reviewed files with a Conventional Commit message.
-- [ ] Fetch and verify the remote PR head has not moved, then push without force to `origin/feat/daemon-turn-status-polling`.
+- [ ] Run all focused test files from their package directories.
+- [ ] Run formatting on changed files, inspect formatting changes, then `npm run lint`, `npm run build`, `npm run typecheck`, and `npm run bundle`.
+- [ ] Run the six dedicated real-daemon scenarios for capability, completed result polling, the full public turn-state matrix, restart durability, diagnostic/result isolation, late-rewrite cancellation, and provider error polling.
+- [ ] Ask the read-only test-engineer agent to audit every Critical as either public-daemon E2E or a deterministic component-level fault-injection regression.
+- [ ] Perform two consecutive clean full-diff self-audit passes; any edit resets the count.
+- [ ] Re-fetch PR head/state, confirm the reviewed base has not moved, then commit and push without force.

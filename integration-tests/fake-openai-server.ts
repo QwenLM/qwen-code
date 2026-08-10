@@ -26,6 +26,11 @@ export type FakeOpenAIToolCall = {
 };
 
 export type FakeOpenAIResponse = {
+  httpError?: {
+    status: number;
+    message: string;
+    code?: string;
+  };
   model?: string;
   content?: string;
   contentChunks?: string[];
@@ -122,6 +127,14 @@ export async function startFakeOpenAIServer(
       requests.push({ body, headers: req.headers });
 
       const response = await handler({ body, requestIndex });
+      if (response.httpError) {
+        const { status, ...error } = response.httpError;
+        res.writeHead(status, {
+          'content-type': 'application/json',
+        });
+        res.end(JSON.stringify({ error }));
+        return;
+      }
       if (body['stream'] === true) {
         writeStreamed(
           res,

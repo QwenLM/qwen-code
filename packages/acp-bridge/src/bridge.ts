@@ -31,6 +31,7 @@ import {
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TURN_RESULT_TEXT_MAX_CHARS,
+  normalizeTurnResultError,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -610,7 +611,6 @@ interface SessionEntry {
    * transient terminal-to-404 regression.
    */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
-  terminalTurnStatusLimit: number;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -1288,7 +1288,7 @@ function rememberTerminalTurnStatus(
   entry: SessionEntry,
   pendingEntry: PendingPromptEntry,
   terminal: PromptTerminal,
-): void {
+): BridgeTurnStatus {
   const promptText = truncateTurnText(pendingEntry.text);
   const shared = {
     sessionId: entry.sessionId,
@@ -1315,22 +1315,52 @@ function rememberTerminalTurnStatus(
   } else if (terminal.kind === 'cancelled') {
     status = { ...shared, state: 'cancelled', stopReason: 'cancelled' };
   } else {
-    const code = extractErrorCode(terminal.err);
     status = {
       ...shared,
       state: 'error',
-      error: {
-        message: extractErrorMessage(terminal.err),
-        ...(code !== undefined ? { code } : {}),
-      },
+      error: normalizeTurnResultError(terminal.err),
     };
   }
   entry.terminalTurnStatuses.set(pendingEntry.promptId, status);
-  while (entry.terminalTurnStatuses.size > entry.terminalTurnStatusLimit) {
+  while (entry.terminalTurnStatuses.size > TERMINAL_TURN_STATUS_OVERLAY_LIMIT) {
     const oldestPromptId = entry.terminalTurnStatuses.keys().next().value;
     if (oldestPromptId === undefined) break;
     entry.terminalTurnStatuses.delete(oldestPromptId);
   }
+  return status;
+}
+
+function terminalStatusRecord(
+  status: BridgeTurnStatus,
+): TurnResultRecordPayload {
+  if (
+    status.promptId === undefined ||
+    status.endedAt === undefined ||
+    status.state === 'idle' ||
+    status.state === 'queued' ||
+    status.state === 'running'
+  ) {
+    throw new TypeError('Cannot persist a non-terminal turn status.');
+  }
+  return {
+    promptId: status.promptId,
+    state: status.state,
+    ...(status.stopReason !== undefined
+      ? { stopReason: status.stopReason }
+      : {}),
+    ...(status.error !== undefined ? { error: status.error } : {}),
+    ...(status.startedAt !== undefined ? { startedAt: status.startedAt } : {}),
+    endedAt: status.endedAt,
+    ...(status.promptText !== undefined
+      ? { promptText: status.promptText }
+      : {}),
+    ...(status.promptTextTruncated !== undefined
+      ? { promptTextTruncated: status.promptTextTruncated }
+      : {}),
+    ...(status.originatorClientId !== undefined
+      ? { originatorClientId: status.originatorClientId }
+      : {}),
+  };
 }
 
 /**
@@ -1358,7 +1388,19 @@ function publishPromptTerminal(
     return;
   }
   pendingEntry.terminalPublished = true;
-  rememberTerminalTurnStatus(entry, pendingEntry, terminal);
+  const status = rememberTerminalTurnStatus(entry, pendingEntry, terminal);
+  if (
+    !pendingEntry.dispatched &&
+    pendingEntry.terminalPersistence === undefined
+  ) {
+    pendingEntry.terminalPersistence = entry.connection
+      .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord, {
+        sessionId: entry.sessionId,
+        turnResult: terminalStatusRecord(status),
+      })
+      .then(() => undefined);
+    pendingEntry.terminalPersistence.catch(() => {});
+  }
   const originatorClientId = pendingEntry.originatorClientId;
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
@@ -1555,6 +1597,19 @@ function enrichTerminalTurnStatus(
   };
 }
 
+function matchesPersistedTerminal(
+  terminal: BridgeTurnStatus,
+  persisted: BridgeTurnStatus,
+): boolean {
+  return (
+    terminal.promptId === persisted.promptId &&
+    terminal.state === persisted.state &&
+    terminal.stopReason === persisted.stopReason &&
+    terminal.error?.code === persisted.error?.code &&
+    terminal.error?.message === persisted.error?.message
+  );
+}
+
 function latestTerminalTurnStatus(
   entry: SessionEntry,
 ): BridgeTurnStatus | undefined {
@@ -1565,6 +1620,7 @@ function latestTerminalTurnStatus(
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
+const TERMINAL_TURN_STATUS_OVERLAY_LIMIT = 64;
 // Bounded retries for the sub-session `parentSessionId` transcript write on the
 // spawn critical path — a transport/timeout hiccup gets a couple more tries
 // before the child is reported as live-only (`parentSessionPersisted:false`).
@@ -4711,7 +4767,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingAgentNotificationCount: 0,
       pendingPromptList: [],
       terminalTurnStatuses: new Map(),
-      terminalTurnStatusLimit: eventRingSize,
       midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
@@ -7204,7 +7259,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           void maybeCloseIdleSession(entry, 'prompt_settled');
         })
         .catch(() => {});
-      return result;
+      return result.then(
+        async (value) => {
+          await pendingEntry.terminalPersistence;
+          return value;
+        },
+        async (error: unknown) => {
+          await pendingEntry.terminalPersistence;
+          throw error;
+        },
+      );
     },
 
     async cancelSession(sessionId, req, context) {
@@ -8960,7 +9024,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       // Settled state is durable: read the agent's persisted `turn_result`
       // records. This survives daemon restarts (the pending list does not).
-      const terminal =
+      const terminalBeforeRead =
         promptId !== undefined
           ? entry.terminalTurnStatuses.get(promptId)
           : latestTerminalTurnStatus(entry);
@@ -8976,21 +9040,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           { ...(promptId !== undefined ? { promptId } : {}) },
         );
       } catch (error) {
-        if (terminal) return terminal;
+        if (terminalBeforeRead) return terminalBeforeRead;
         throw error;
       }
+      const terminal =
+        promptId !== undefined
+          ? entry.terminalTurnStatuses.get(promptId)
+          : latestTerminalTurnStatus(entry);
       const persisted = result.turnResult
         ? settledTurnStatus(sessionId, result.turnResult)
         : undefined;
+      const terminalPersisted =
+        terminal !== undefined &&
+        persisted !== undefined &&
+        matchesPersistedTerminal(terminal, persisted);
+      if (terminalPersisted && persisted.promptId !== undefined) {
+        entry.terminalTurnStatuses.delete(persisted.promptId);
+      }
       if (promptId !== undefined) {
         if (terminal && persisted) {
-          return enrichTerminalTurnStatus(terminal, persisted);
+          return terminalPersisted
+            ? persisted
+            : enrichTerminalTurnStatus(terminal, persisted);
         }
         if (terminal) return terminal;
         if (persisted) return persisted;
       } else {
         if (terminal && persisted && persisted.promptId === terminal.promptId) {
-          return enrichTerminalTurnStatus(terminal, persisted);
+          return terminalPersisted
+            ? persisted
+            : enrichTerminalTurnStatus(terminal, persisted);
         }
         if (terminal && persisted) {
           return (terminal.endedAt ?? 0) >= (persisted.endedAt ?? 0)
@@ -9008,7 +9087,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { sessionId, state: 'idle' as const };
     },
 
-    removePendingPrompt(sessionId, promptId, context) {
+    async removePendingPrompt(sessionId, promptId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Authorize the caller BEFORE performing any mutation.
@@ -9064,6 +9143,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // from queued/running to unknown while cooperative cancellation drains.
       // The FIFO node's later terminal is deduped by the latch.
       publishPromptTerminal(entry, target, { kind: 'cancelled' });
+      await target.terminalPersistence;
       return { removed: true };
     },
 
@@ -9502,6 +9582,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
+      entry.terminalTurnStatuses.clear();
       const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
       const filesChanged = (response['filesChanged'] as string[]) ?? [];
       const filesFailed = (response['filesFailed'] as string[]) ?? [];

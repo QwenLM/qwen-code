@@ -192,6 +192,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `null` means no matching settled turn was found.
    */
   sessionTurnStatus: 'qwen/control/session/turn_status',
+  sessionTurnResultRecord: 'qwen/control/session/turn_result/record',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
   sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',

@@ -90,6 +90,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   normalizeEventPayload,
   normalizeSnapshotPayload,
+  isTurnResultRecordPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
   extractDaemonTraceContext,
@@ -415,7 +416,8 @@ async function findSettledTurnResult(
       if (record.type !== 'system' || record.subtype !== 'turn_result') {
         continue;
       }
-      const payload = record.systemPayload as TurnResultRecordPayload;
+      const payload = record.systemPayload;
+      if (!isTurnResultRecordPayload(payload)) continue;
       if (promptId === undefined || payload.promptId === promptId) {
         return payload;
       }
@@ -10576,6 +10578,31 @@ class QwenAgent implements Agent {
               }
             : null,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord: {
+        const sessionId = params['sessionId'];
+        const turnResult = params['turnResult'];
+        if (
+          typeof sessionId !== 'string' ||
+          !SESSION_ID_RE.test(sessionId) ||
+          !isTurnResultRecordPayload(turnResult)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid session turn result record',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recorder = session.getConfig().getChatRecordingService();
+        if (!recorder) {
+          throw new RequestError(
+            -32021,
+            'Session transcript writer is unavailable',
+            { errorKind: 'session_writer_unavailable' },
+          );
+        }
+        await recorder.recordTurnResultStrict(turnResult);
+        return { v: 1, sessionId };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionTurnStatus: {
         const sessionId = params['sessionId'];

@@ -4316,6 +4316,22 @@ describe('Session', () => {
       });
 
       it('does not persist framework diagnostics as the main answer', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten diagnostic');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
           originalTokenCount: 1200,
@@ -4339,6 +4355,8 @@ describe('Session', () => {
           stopReason: 'max_tokens',
         });
         expect(payload.resultText).toBeUndefined();
+        expect(rewrite).toHaveBeenCalled();
+        expect(agentMessageChunks()).toContain('rewritten diagnostic');
       });
 
       it('does not append the scheduler exit summary to a cancelled turn result', async () => {
@@ -4740,6 +4758,75 @@ describe('Session', () => {
             state: 'cancelled',
           }),
         );
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0].startedAt,
+        ).toBeUndefined();
+      });
+
+      it('records an error when admission fails before dispatch', async () => {
+        mockConfig.assertCanStartTurn = vi
+          .fn()
+          .mockRejectedValue(new Error('admission failed'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'rejected prompt' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('admission failed');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: { message: 'admission failed' },
+          }),
+        );
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0].startedAt,
+        ).toBeUndefined();
+      });
+
+      it('records an error when awaited turn finalization fails', async () => {
+        (
+          session as unknown as {
+            liveConversationActive: boolean;
+            liveEndInstructionPending: boolean;
+          }
+        ).liveConversationActive = false;
+        (
+          session as unknown as { liveEndInstructionPending: boolean }
+        ).liveEndInstructionPending = true;
+        mockGeminiClient.refreshSystemInstruction.mockRejectedValueOnce(
+          new Error('live cleanup failed'),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cleanup failure' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('live cleanup failed');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: { message: 'live cleanup failed' },
+          }),
+        );
       });
 
       it('records an error turn when the model stream fails', async () => {
@@ -4764,6 +4851,70 @@ describe('Session', () => {
             error: { message: 'model exploded' },
           }),
         );
+      });
+
+      it('discards and drains rewrites before recording an error', async () => {
+        const discardTurn = vi.fn();
+        const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
+        session.messageRewriter = {
+          discardTurn,
+          interceptUpdate: vi.fn().mockResolvedValue(undefined),
+          flushTurn: vi.fn().mockResolvedValue(undefined),
+          waitForPendingRewrites,
+        } as unknown as Session['messageRewriter'];
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('model exploded'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'boom' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('model exploded');
+
+        expect(discardTurn).toHaveBeenCalledTimes(2);
+        expect(waitForPendingRewrites).toHaveBeenCalled();
+        expect(discardTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
+          mockChatRecordingService.recordTurnResult.mock.invocationCallOrder[0],
+        );
+        expect(
+          waitForPendingRewrites.mock.invocationCallOrder.at(-1),
+        ).toBeLessThan(
+          mockChatRecordingService.recordTurnResult.mock.invocationCallOrder[0],
+        );
+      });
+
+      it('bounds persisted error message and code', async () => {
+        const originalError = Object.assign(
+          new Error('m'.repeat(core.TURN_RESULT_ERROR_MESSAGE_MAX_CHARS + 100)),
+          { code: 'c'.repeat(core.TURN_RESULT_ERROR_CODE_MAX_CHARS + 100) },
+        );
+        mockChat.sendMessageStream = vi.fn().mockRejectedValue(originalError);
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'large error' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toBe(originalError);
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.error?.message).toHaveLength(
+          core.TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
+        );
+        expect(payload.error?.code).toHaveLength(
+          core.TURN_RESULT_ERROR_CODE_MAX_CHARS,
+        );
+        expect(payload.error?.messageTruncated).toBe(true);
+        expect(payload.error?.codeTruncated).toBe(true);
       });
 
       it('records a cancelled turn when user cancel races a non-abort stream error', async () => {
@@ -5090,6 +5241,7 @@ describe('Session', () => {
         'Invocation context session does not match the active session',
       );
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordTurnResult).not.toHaveBeenCalled();
     });
 
     it('does not create invocation context for standalone ACP prompts', async () => {
@@ -6083,6 +6235,7 @@ describe('Session', () => {
       const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
       const interceptUpdate = vi.fn().mockResolvedValue(undefined);
       session.messageRewriter = {
+        discardTurn: vi.fn(),
         interceptUpdate,
         flushTurn,
         waitForPendingRewrites,
@@ -9263,10 +9416,17 @@ describe('Session', () => {
           queueMatchingFailureStreak();
 
           await expect(
-            session.prompt({
-              sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: 'run the failing tool' }],
-            }),
+            session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'run the failing tool' }],
+              },
+              {
+                version: 1,
+                sessionId: 'test-session-id',
+                promptId: 'guard-stop-prompt',
+              },
+            ),
           ).resolves.toEqual({ stopReason: 'end_turn' });
 
           expect(execute).toHaveBeenCalledTimes(9);
@@ -9311,6 +9471,12 @@ describe('Session', () => {
                 }),
               }),
             }),
+          );
+          const recorded =
+            mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+          expect(recorded.promptId).toBe('guard-stop-prompt');
+          expect(recorded.resultText ?? '').not.toContain(
+            'Automatic continuation stopped',
           );
         } finally {
           restoreGuardMode();
@@ -9739,6 +9905,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -9769,6 +9939,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -9878,6 +10052,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -10165,6 +10343,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -11665,6 +11847,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -11865,6 +12051,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -14642,6 +14832,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -14658,6 +14852,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'diagnostic',
+                qwenDiscreteMessage: true,
+              },
               content: {
                 type: 'text',
                 text: 'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
@@ -18321,6 +18519,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'diagnostic',
+                qwenDiscreteMessage: true,
+              },
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
@@ -18369,6 +18571,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'diagnostic',
+                qwenDiscreteMessage: true,
+              },
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
@@ -19637,13 +19843,15 @@ describe('Session', () => {
       it('waits for pending rewrites before ending after cancelled ask_user_question', async () => {
         let releaseRewrite!: () => void;
         const flushTurn = vi.fn().mockResolvedValue(undefined);
-        const waitForPendingRewrites = vi.fn(
-          () =>
-            new Promise<void>((resolve) => {
-              releaseRewrite = resolve;
-            }),
-        );
+        const rewriteGate = new Promise<void>((resolve) => {
+          releaseRewrite = resolve;
+        });
+        const waitForPendingRewrites = vi
+          .fn()
+          .mockImplementationOnce(() => rewriteGate)
+          .mockResolvedValue(undefined);
         session.messageRewriter = {
+          discardTurn: vi.fn(),
           interceptUpdate: vi.fn().mockResolvedValue(undefined),
           flushTurn,
           waitForPendingRewrites,
@@ -19725,6 +19933,7 @@ describe('Session', () => {
         const waitForPendingRewrites = vi
           .fn()
           .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce(undefined)
           .mockImplementationOnce(
             () =>
               new Promise<void>((resolve) => {
@@ -19732,6 +19941,7 @@ describe('Session', () => {
               }),
           );
         session.messageRewriter = {
+          discardTurn: vi.fn(),
           interceptUpdate: vi.fn().mockResolvedValue(undefined),
           flushTurn: vi.fn().mockResolvedValue(undefined),
           waitForPendingRewrites,
@@ -19753,7 +19963,7 @@ describe('Session', () => {
         });
 
         await vi.waitFor(() => {
-          expect(waitForPendingRewrites).toHaveBeenCalledTimes(2);
+          expect(waitForPendingRewrites).toHaveBeenCalledTimes(3);
         });
 
         const internals = session as unknown as {
@@ -24977,6 +25187,7 @@ describe('Session', () => {
         releaseWait = resolve;
       });
       session.messageRewriter = {
+        discardTurn: vi.fn(),
         interceptUpdate: vi.fn().mockResolvedValue(undefined),
         waitForPendingRewrites: vi.fn(async () => {
           enterWait();
@@ -28339,6 +28550,7 @@ describe('Session', () => {
       });
       let waitCalls = 0;
       session.messageRewriter = {
+        discardTurn: vi.fn(),
         interceptUpdate: vi.fn().mockResolvedValue(undefined),
         waitForPendingRewrites: vi.fn(async () => {
           if (++waitCalls !== 1) return;

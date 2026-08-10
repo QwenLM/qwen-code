@@ -240,6 +240,35 @@ describe('MessageRewriteMiddleware', () => {
     });
   });
 
+  it('does not deliver or commit a rewrite after its turn signal aborts', async () => {
+    const { middleware, mockSendUpdate } = createMiddleware('message');
+    const { LlmRewriter } = await import('./LlmRewriter.js');
+    const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+      rewrite: ReturnType<typeof vi.fn>;
+      commitOutput: ReturnType<typeof vi.fn>;
+    };
+    let resolveRewrite!: (value: string) => void;
+    rewriter.rewrite.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRewrite = resolve;
+        }),
+    );
+    const turnAbort = new AbortController();
+
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'raw answer' },
+    } as unknown as SessionUpdate);
+    await middleware.flushTurn(turnAbort.signal);
+    turnAbort.abort();
+    resolveRewrite('late rewrite');
+    await middleware.waitForPendingRewrites();
+
+    expect(mockSendUpdate).toHaveBeenCalledTimes(1);
+    expect(rewriter.commitOutput).not.toHaveBeenCalled();
+  });
+
   describe('flushTurn — tool_call boundary', () => {
     it('commits rewrite context only after successful delivery', async () => {
       const { LlmRewriter } = await import('./LlmRewriter.js');

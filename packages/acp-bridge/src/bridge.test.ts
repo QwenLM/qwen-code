@@ -3593,6 +3593,56 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('clears terminal overlays after a successful transcript rewind', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          promptImpl: () => ({ stopReason: 'end_turn' }),
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+              return { v: 1, sessionId: SESS_A, turnResult: null };
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+              return {
+                targetTurnIndex: 0,
+                filesChanged: [],
+                filesFailed: [],
+              };
+            }
+            return {};
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'abandoned answer' }],
+      },
+      undefined,
+      { promptId: 'prompt-before-rewind' },
+    );
+    await expect(
+      bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-before-rewind',
+      ),
+    ).resolves.toMatchObject({ state: 'completed' });
+
+    await bridge.rewindSession(session.sessionId, { promptId: 'turn-0' });
+
+    await expect(
+      bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-before-rewind',
+      ),
+    ).resolves.toBeUndefined();
+    await bridge.shutdown();
+  });
+
   it('keeps durable artifacts when rewind cannot rebuild an artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const bridge = makeBridge({
@@ -9221,9 +9271,9 @@ describe('createAcpSessionBridge', () => {
       });
       const queuedId = bridge.getPendingPrompts(session.sessionId)[1]?.promptId;
       expect(queuedId).toBeDefined();
-      expect(bridge.removePendingPrompt(session.sessionId, queuedId!)).toEqual({
-        removed: true,
-      });
+      await expect(
+        bridge.removePendingPrompt(session.sessionId, queuedId!),
+      ).resolves.toEqual({ removed: true });
 
       expect(() =>
         bridge.sendPrompt(session.sessionId, {
@@ -9692,12 +9742,12 @@ describe('createAcpSessionBridge', () => {
       await vi.waitFor(() => {
         expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
       });
-      expect(
+      await expect(
         bridge.removePendingPrompt(
           session.sessionId,
           'removed-after-promotion',
         ),
-      ).toEqual({ removed: true });
+      ).resolves.toEqual({ removed: true });
       expect(
         handle.agent.extMethodCalls.some(
           (call) => call.method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -9788,7 +9838,10 @@ describe('createAcpSessionBridge', () => {
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
       try {
-        const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
+        const result = await bridge.removePendingPrompt(
+          session.sessionId,
+          queuedId!,
+        );
         expect(result.removed).toBe(true);
         expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
         await vi.waitFor(() => {
@@ -9811,7 +9864,7 @@ describe('createAcpSessionBridge', () => {
         stderrSpy.mockRestore();
       }
 
-      const again = bridge.removePendingPrompt(
+      const again = await bridge.removePendingPrompt(
         session.sessionId,
         'nonexistent',
       );
@@ -9940,7 +9993,10 @@ describe('createAcpSessionBridge', () => {
       const runningId = pending[0]?.promptId;
       expect(runningId).toBeDefined();
 
-      const result = bridge.removePendingPrompt(session.sessionId, runningId!);
+      const result = await bridge.removePendingPrompt(
+        session.sessionId,
+        runningId!,
+      );
       expect(result.removed).toBe(true);
 
       // The running prompt is removed from the list immediately.
@@ -9998,9 +10054,9 @@ describe('createAcpSessionBridge', () => {
         ?.promptId;
       expect(runningId).toBeDefined();
 
-      expect(bridge.removePendingPrompt(session.sessionId, runningId!)).toEqual(
-        { removed: true },
-      );
+      await expect(
+        bridge.removePendingPrompt(session.sessionId, runningId!),
+      ).resolves.toEqual({ removed: true });
 
       const p2 = bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
@@ -10019,11 +10075,11 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('removePendingPrompt throws SessionNotFoundError for unknown sessions', () => {
+    it('removePendingPrompt throws SessionNotFoundError for unknown sessions', async () => {
       const bridge = makeBridge();
-      expect(() => bridge.removePendingPrompt('unknown', 'some-id')).toThrow(
-        SessionNotFoundError,
-      );
+      await expect(
+        bridge.removePendingPrompt('unknown', 'some-id'),
+      ).rejects.toThrow(SessionNotFoundError);
     });
 
     it('getPendingPrompts throws SessionNotFoundError for unknown sessions', () => {
@@ -10381,6 +10437,52 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('observes a terminal published while persisted lookup is pending', async () => {
+      let resolveLookup: (() => void) | undefined;
+      const lookupGate = new Promise<void>((resolve) => {
+        resolveLookup = resolve;
+      });
+      let lookupStarted = false;
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            lookupStarted = true;
+            await lookupGate;
+            return { v: 1, sessionId: 'ignored', turnResult: null };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const statusPromise = bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-settles-during-read',
+      );
+      await vi.waitFor(() => expect(lookupStarted).toBe(true));
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settles during read' }],
+        },
+        undefined,
+        { promptId: 'prompt-settles-during-read' },
+      );
+      resolveLookup!();
+
+      await expect(statusPromise).resolves.toMatchObject({
+        state: 'completed',
+        promptId: 'prompt-settles-during-read',
+      });
+      await bridge.shutdown();
+    });
+
     it('falls back to a terminal status when persisted lookup fails', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
@@ -10417,6 +10519,65 @@ describe('createAcpSessionBridge', () => {
         promptText: 'completed before disconnect',
         stopReason: 'end_turn',
       });
+      await bridge.shutdown();
+    });
+
+    it('drops a terminal overlay once persistence exposes the same turn', async () => {
+      let persistedResult: Record<string, unknown> | null = {
+        promptId: 'prompt-persisted-overlay',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'persisted overlay',
+        resultText: 'persisted answer',
+      };
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return {
+              v: 1,
+              sessionId: 'ignored',
+              turnResult: persistedResult,
+            };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'persisted overlay' }],
+        },
+        undefined,
+        { promptId: 'prompt-persisted-overlay' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-persisted-overlay',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        resultText: 'persisted answer',
+      });
+
+      persistedResult = null;
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-persisted-overlay',
+        ),
+      ).resolves.toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -10466,9 +10627,9 @@ describe('createAcpSessionBridge', () => {
       await vi.waitFor(() => {
         expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
       });
-      expect(
+      await expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-remove-queued'),
-      ).toEqual({ removed: true });
+      ).resolves.toEqual({ removed: true });
       await expect(
         bridge.getSessionTurnStatus(
           session.sessionId,
@@ -10480,9 +10641,9 @@ describe('createAcpSessionBridge', () => {
         stopReason: 'cancelled',
       });
 
-      expect(
+      await expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-remove-running'),
-      ).toEqual({ removed: true });
+      ).resolves.toEqual({ removed: true });
       await expect(
         bridge.getSessionTurnStatus(
           session.sessionId,
@@ -10495,6 +10656,91 @@ describe('createAcpSessionBridge', () => {
       });
 
       await expect(running).rejects.toBeDefined();
+      await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+      await bridge.shutdown();
+    });
+
+    it('persists a queued cancellation before removePendingPrompt resolves', async () => {
+      let releaseRunning!: () => void;
+      const runningGate = new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      });
+      const recorded: Array<Record<string, unknown>> = [];
+      let releasePersistence!: () => void;
+      const persistenceGate = new Promise<void>((resolve) => {
+        releasePersistence = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          if ((request.prompt[0] as { text?: string }).text === 'running') {
+            await runningGate;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: async (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+            recorded.push(params as Record<string, unknown>);
+            await persistenceGate;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'running' }],
+        },
+        undefined,
+        { promptId: 'prompt-running-before-remove' },
+      );
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-durable-queued-remove' },
+      );
+      await vi.waitFor(() =>
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2),
+      );
+
+      const removal = bridge.removePendingPrompt(
+        session.sessionId,
+        'prompt-durable-queued-remove',
+      );
+      let removalSettled = false;
+      void removal.then(
+        () => {
+          removalSettled = true;
+        },
+        () => {},
+      );
+      await vi.waitFor(() => expect(recorded).toHaveLength(1));
+      await Promise.resolve();
+      expect(removalSettled).toBe(false);
+      expect(recorded).toEqual([
+        {
+          sessionId: session.sessionId,
+          turnResult: expect.objectContaining({
+            promptId: 'prompt-durable-queued-remove',
+            state: 'cancelled',
+            stopReason: 'cancelled',
+            promptText: 'queued',
+          }),
+        },
+      ]);
+      releasePersistence();
+      await expect(removal).resolves.toEqual({ removed: true });
+
+      releaseRunning();
+      await running;
       await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
       await bridge.shutdown();
     });
@@ -10552,10 +10798,21 @@ describe('createAcpSessionBridge', () => {
         error: { code: 'prompt_deadline_exceeded' },
         resultText: 'partial visible answer',
       });
+      persistedResult = null;
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-deadline-overlay',
+        ),
+      ).resolves.toMatchObject({
+        state: 'error',
+        error: { code: 'prompt_deadline_exceeded' },
+      });
       await bridge.shutdown();
     });
 
-    it('bounds transient terminal statuses by eventRingSize', async () => {
+    it('bounds transient terminal statuses independently of eventRingSize', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
         extMethodImpl: (method) => {
@@ -10567,11 +10824,12 @@ describe('createAcpSessionBridge', () => {
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
-        eventRingSize: 2,
+        eventRingSize: 100_000,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      for (const promptId of ['prompt-old', 'prompt-middle', 'prompt-new']) {
+      for (let index = 0; index < 65; index++) {
+        const promptId = `prompt-${index}`;
         await bridge.sendPrompt(
           session.sessionId,
           {
@@ -10584,17 +10842,13 @@ describe('createAcpSessionBridge', () => {
       }
 
       await expect(
-        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-old'),
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-0'),
       ).resolves.toBeUndefined();
       await expect(
-        bridge.getSessionTurnStatus(
-          session.sessionId,
-          undefined,
-          'prompt-middle',
-        ),
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-1'),
       ).resolves.toMatchObject({ state: 'completed' });
       await expect(
-        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-new'),
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-64'),
       ).resolves.toMatchObject({ state: 'completed' });
       await bridge.shutdown();
     });
@@ -10684,9 +10938,9 @@ describe('createAcpSessionBridge', () => {
       );
       await new Promise((r) => setTimeout(r, 20));
 
-      expect(bridge.removePendingPrompt(session.sessionId, 'prompt-b')).toEqual(
-        { removed: true },
-      );
+      await expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-b'),
+      ).resolves.toEqual({ removed: true });
       // B's terminal arrives immediately — while A is still running — as a
       // turn_complete{stopReason:'cancelled'} keyed to B's promptId.
       await vi.waitFor(() => {
@@ -10820,9 +11074,9 @@ describe('createAcpSessionBridge', () => {
       );
       wedged.catch(() => {});
       await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
-      expect(
+      await expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-removed-wedge'),
-      ).toEqual({ removed: true });
+      ).resolves.toEqual({ removed: true });
 
       const followup = bridge.sendPrompt(
         session.sessionId,
@@ -10916,11 +11170,21 @@ describe('createAcpSessionBridge', () => {
         state: 'error',
         error: { code: 'prompt_deadline_exceeded' },
       });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+        params: {
+          sessionId: session.sessionId,
+          turnResult: expect.objectContaining({
+            promptId: 'prompt-queued-deadline',
+            state: 'error',
+            error: expect.objectContaining({
+              code: 'prompt_deadline_exceeded',
+            }),
+          }),
+        },
+      });
       await new Promise((r) => setTimeout(r, 60));
       expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
-      expect(
-        bridge.getSessionSummary(session.sessionId).turnError,
-      ).toBeUndefined();
 
       // A queued prompt never ran, so its deadline terminal must not
       // advertise a session-level turnError nor arm the retry path — those
@@ -11068,15 +11332,15 @@ describe('createAcpSessionBridge', () => {
 
       // Remove the RUNNING prompt — the wedged agent ignores the cancel, but
       // removal itself is already the authoritative cancelled outcome.
-      expect(
+      await expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
-      ).toEqual({ removed: true });
+      ).resolves.toEqual({ removed: true });
       // The API no longer shows the prompt…
       expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
       // …and a repeat removal is a no-op.
-      expect(
+      await expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
-      ).toEqual({ removed: false });
+      ).resolves.toEqual({ removed: false });
       await vi.waitFor(() => {
         const removedTerms = terminalsFor(events, 'prompt-removed-running');
         expect(removedTerms).toHaveLength(1);
@@ -11160,9 +11424,9 @@ describe('createAcpSessionBridge', () => {
       ).toBe('running');
 
       // Remove the now-running prompt 2.
-      expect(
+      await expect(
         bridge.removePendingPrompt(session.sessionId, 'prompt-promoted'),
-      ).toEqual({ removed: true });
+      ).resolves.toEqual({ removed: true });
 
       // Let prompt 2 settle cooperatively.
       releaseSecond!();
@@ -11270,7 +11534,7 @@ describe('createAcpSessionBridge', () => {
       // Fire all cancellation paths at once and let the deadline land on
       // top: the latch must keep every promptId at exactly one terminal.
       void bridge.cancelSession(session.sessionId).catch(() => {});
-      bridge.removePendingPrompt(session.sessionId, 'prompt-b');
+      await bridge.removePendingPrompt(session.sessionId, 'prompt-b');
       await new Promise((r) => setTimeout(r, 150));
 
       expect(terminalsFor(events, 'prompt-a')).toHaveLength(1);
