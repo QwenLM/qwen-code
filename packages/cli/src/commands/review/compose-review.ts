@@ -633,7 +633,8 @@ function composeReviewBody(
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
           reasonZh:
-            '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
+            '启动 prompt 为它指定了 diff 中的行，但它从未打开：有工具调用，' +
+            '却没有一次读取 diff',
         });
       }
       if (cov.unopenedAgents.length > 0) {
@@ -1408,10 +1409,12 @@ function composeReviewBody(
       coverageEntries.some((e) => e.subject === 'coverage') ||
       (plannedChunks.length > 0 &&
         coveredChunks.every((id) => disclosedChunkIds.has(id)));
-    // A bare "Reviewed." two words before "Not reviewed:" reads as the body
-    // contradicting itself — the shape that confused readers on #8811. When
-    // disclosures follow, the opener says so; the certifying and the
-    // zero-certified openers above keep their exact wording.
+    // Any opener starting with "Reviewed" reads as contradicting the
+    // "Not reviewed:" clauses below it — announcing the gaps does not fix
+    // it, as the first cut of this wording showed (#8811). When disclosures
+    // follow, the opener says the review is PARTIAL instead, so the pair
+    // reads in one direction; the certifying and the zero-certified openers
+    // above keep their exact wording.
     clauses.push(
       nothingCertified
         ? {
@@ -1422,8 +1425,8 @@ function composeReviewBody(
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
           : notReviewedParts.length > 0
             ? {
-                en: 'Reviewed, with gaps disclosed below.',
-                zh: '已审查，未覆盖部分见下方披露。',
+                en: 'Partially reviewed — gaps disclosed below.',
+                zh: '仅完成部分审查，未覆盖部分见下方披露。',
               }
             : { en: 'Reviewed.', zh: '已审查。' },
     );
