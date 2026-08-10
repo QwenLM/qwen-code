@@ -26,6 +26,7 @@ use url::Url;
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+#[cfg(target_os = "macos")]
 static FULLSCREEN_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -105,25 +106,32 @@ fn main() {
             }
             #[cfg(target_os = "macos")]
             WindowEvent::Focused(true) => {
-                FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+                FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
             }
             #[cfg(target_os = "macos")]
             WindowEvent::CloseRequested { api, .. } => {
                 save_window_state(app_handle);
                 api.prevent_close();
                 if let Some(window) = app_handle.get_webview_window("main") {
-                    if FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed) {
+                    if FULLSCREEN_HIDE_PENDING.load(Ordering::Acquire) {
                         return;
                     }
                     if window.is_fullscreen().unwrap_or(false) {
-                        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Relaxed);
-                        let _ = window.set_fullscreen(false);
+                        if window.set_fullscreen(false).is_err() {
+                            FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+                            return;
+                        }
+                        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+                        let app = app_handle.clone();
+                        let win = window.clone();
                         // ponytail: remove this delay when Tauri exposes fullscreen-exit events.
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(2));
-                            if FULLSCREEN_HIDE_PENDING.swap(false, Ordering::Relaxed) {
-                                let _ = window.hide();
-                            }
+                            let _ = app.run_on_main_thread(move || {
+                                if FULLSCREEN_HIDE_PENDING.swap(false, Ordering::AcqRel) {
+                                    let _ = win.hide();
+                                }
+                            });
                         });
                     } else {
                         let _ = window.hide();
@@ -560,7 +568,8 @@ fn spawn_window_state_flusher(app: AppHandle) {
 }
 
 fn focus_main_window(app: &AppHandle) {
-    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
