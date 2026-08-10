@@ -97,6 +97,28 @@ export interface ReviewBudget {
    * crawl only feeds the wall clock.
    */
   agentToolBudget: number;
+  /**
+   * The reverse-audit loop's round cap: the full `MAX_REVERSE_AUDIT_ROUNDS`
+   * normally, or a reduced `HUGE_REVERSE_AUDIT_ROUNDS` for a diff large
+   * enough that the full loop cannot finish inside any budget.
+   *
+   * A reverse-audit round re-reads the whole diff against a growing
+   * findings list, so its cost scales with the diff — measured at ~90
+   * minutes a round on a 4,000-line PR, where the full five rounds alone
+   * (450 min) exceed the six-hour CI ceiling before the fan-out and tail
+   * are even counted. In a time-budgeted CI run the deadline gate already
+   * refuses a round that will not fit; this static cap is the belt it works
+   * under and the ONLY bound a local run (no deadline) has. Reduced to
+   * three, not two — not because two cannot converge (the all-dry
+   * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
+   * cap of two or more, since the convergence check runs before the cap
+   * gate) but to buy hot chunks one extra audit round before the cap.
+   *
+   * The budget tunes how many rounds the loop runs, never whether it runs:
+   * the reverse audit is a dimension of the high-effort contract. The CLI
+   * only ever writes three or five here.
+   */
+  reverseAuditRounds: number;
 }
 
 /**
@@ -104,6 +126,35 @@ export interface ReviewBudget {
  * it is the first pass again.
  */
 const SWEEP_FLOOR = 25;
+
+/**
+ * The reverse-audit loop's full round cap (SKILL.md Step 5's "stop at the
+ * plan's `reverseAuditRounds` cap"). The normal value; a huge diff gets
+ * `HUGE_REVERSE_AUDIT_ROUNDS` instead. `retirement.ts` re-exports it.
+ */
+export const MAX_REVERSE_AUDIT_ROUNDS = 5;
+
+/**
+ * The reduced cap for a huge diff — three, one audit round above the
+ * convergence floor of two, spent on hot chunks before the cap stops the
+ * loop. Not a convergability minimum: the all-dry rounds-1-and-2 shape
+ * reaches CONVERGED under any cap of two or more, because the reverse
+ * audit's convergence check runs before the round-cap gate.
+ */
+export const HUGE_REVERSE_AUDIT_ROUNDS = 3;
+
+/**
+ * The effective-line threshold above which a diff is "huge": its reverse
+ * audit is capped and its Agent 8 specialists are shed. Set from the
+ * timeout survey — the 6-hour CI reviews that ran to zero posted output
+ * were 4,000-5,300 line PRs (a single reverse-audit round already ~90 min);
+ * 3,000 triggers with margin below that band while leaving the full loop
+ * for the common case. `effective` (the plan's source-weighted line-span
+ * measure) slightly over-counts against source body lines, which only ever
+ * makes this fire a little EARLIER — the safe direction for a
+ * finishability gate.
+ */
+const HUGE_DIFF_FLOOR = 3000;
 
 /** Below this, "one domain dominates the diff" is not a finding about the diff. */
 const SPECIALIST_FLOOR = 80;
@@ -158,14 +209,49 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
   return {
     inlineAngles,
     sweep: effective >= SWEEP_FLOOR,
-    specialistCap: src >= SPECIALIST_FLOOR ? 2 : 0,
+    // Agent 8 sheds in the huge zone. A specialist is a whole-diff pass on
+    // top of the base fan-out, and on a diff too big to finish that extra
+    // pass is the marginal cost that guarantees zero posted output — while
+    // the per-chunk fan-out already covers the ground. Finishability over
+    // an added depth pass, in exactly the band where the review otherwise
+    // posts nothing.
+    specialistCap:
+      src >= SPECIALIST_FLOOR && effective < HUGE_DIFF_FLOOR ? 2 : 0,
     verifyShard: VERIFY_SHARD,
     agentToolBudget: clamp(
       MIN_AGENT_TOOL_BUDGET + Math.floor(effective / LINES_PER_TOOL_CALL),
       MIN_AGENT_TOOL_BUDGET,
       MAX_AGENT_TOOL_BUDGET,
     ),
+    reverseAuditRounds:
+      effective >= HUGE_DIFF_FLOOR
+        ? HUGE_REVERSE_AUDIT_ROUNDS
+        : MAX_REVERSE_AUDIT_ROUNDS,
   };
+}
+
+/**
+ * The reverse-audit round cap a plan's budget carries, for every reader
+ * that enforces or narrates it (the admission gate, the retirement
+ * scheduler, the cold-check note). A plan without the field — an older
+ * CLI — or a garbled value reads as the full cap: an old plan errs toward
+ * more auditing, never less, exactly like every other budget fallback.
+ *
+ * The accepted range is floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the
+ * smallest cap the CLI ever writes. A value of one or two is out of band
+ * (a hand-edited plan): honouring it would force a non-converged round-cap
+ * stop where the full loop would have kept auditing, so it too falls back
+ * to the full cap — never less.
+ */
+export function reverseAuditRoundCap(budget: unknown): number {
+  const v = (budget as { reverseAuditRounds?: unknown } | undefined)
+    ?.reverseAuditRounds;
+  return typeof v === 'number' &&
+    Number.isInteger(v) &&
+    v >= HUGE_REVERSE_AUDIT_ROUNDS &&
+    v <= MAX_REVERSE_AUDIT_ROUNDS
+    ? v
+    : MAX_REVERSE_AUDIT_ROUNDS;
 }
 
 /**
