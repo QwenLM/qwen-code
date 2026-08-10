@@ -409,6 +409,17 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
     },
     {
+      label: 'wrong nested dispatch mode kind',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        groups: { 'group-1': { dispatchMode: ['collect'] } },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
       label: 'string-list with non-string items',
       config: {
         type: 'management-validation-test',
@@ -619,6 +630,34 @@ describe('WorkspaceChannelSettingsStore', () => {
         'Channel field "interactiveCards.questionCard.timeoutMs" has an invalid value.',
     });
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
+  it('preserves unchanged legacy group settings while editing another field', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": { "group-1": { "mentionKeywords": ["@bot"] } }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+        groups: { 'group-1': { mentionKeywords: ['@bot'] } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      groups: { 'group-1': { mentionKeywords: ['@bot'] } },
+    });
   });
 
   it('re-validates an unchanged stored scalar instead of preserving it', async () => {

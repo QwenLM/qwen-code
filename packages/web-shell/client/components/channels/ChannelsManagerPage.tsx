@@ -87,6 +87,10 @@ interface ChannelsManagerPageProps {
 
 type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
 
+function actionErrorKey(workspaceCwd: string | undefined, name: string) {
+  return `${workspaceCwd ?? ''}\0${name}`;
+}
+
 const STATUS_KEYS: Record<DaemonChannelRuntimeState['state'], string> = {
   stopped: 'channels.status.stopped',
   starting: 'channels.status.starting',
@@ -183,6 +187,7 @@ export function ChannelsManagerPage({
     Boolean(activeWorkspaceCwd) &&
     activeWorkspace?.trusted === true;
   const [busy, setBusy] = useState<{
+    workspaceCwd: string;
     name: string;
     action: ChannelAction;
   } | null>(null);
@@ -195,8 +200,6 @@ export function ChannelsManagerPage({
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    setBusy(null);
-    setActionErrors({});
     setDeleteTarget(undefined);
     setDeleteError(undefined);
     setDeleting(false);
@@ -275,6 +278,13 @@ export function ChannelsManagerPage({
       await remove(deleteTarget.instance.name, {
         expectedRevision: snapshot.revision,
       });
+      setActionErrors((current) => {
+        const next = { ...current };
+        delete next[
+          actionErrorKey(deleteTarget.workspaceCwd, deleteTarget.instance.name)
+        ];
+        return next;
+      });
       setDeleteTarget(undefined);
     } catch (removeError) {
       setDeleteError(extractErrorDetail(removeError));
@@ -289,11 +299,13 @@ export function ChannelsManagerPage({
       action: ChannelAction,
       operation: () => Promise<unknown>,
     ) => {
-      if (!canManage || busy) return;
-      setBusy({ name: channel.name, action });
+      if (!canManage || busy || !activeWorkspaceCwd) return;
+      const workspaceCwd = activeWorkspaceCwd;
+      const errorKey = actionErrorKey(workspaceCwd, channel.name);
+      setBusy({ workspaceCwd, name: channel.name, action });
       setActionErrors((current) => {
         const next = { ...current };
-        delete next[channel.name];
+        delete next[errorKey];
         return next;
       });
       try {
@@ -301,13 +313,19 @@ export function ChannelsManagerPage({
       } catch (actionError) {
         setActionErrors((current) => ({
           ...current,
-          [channel.name]: extractErrorDetail(actionError),
+          [errorKey]: extractErrorDetail(actionError),
         }));
       } finally {
-        setBusy(null);
+        setBusy((current) =>
+          current?.workspaceCwd === workspaceCwd &&
+          current.name === channel.name &&
+          current.action === action
+            ? null
+            : current,
+        );
       }
     },
-    [busy, canManage],
+    [activeWorkspaceCwd, busy, canManage],
   );
 
   const renderPrimaryAction = (channel: DaemonChannelInstanceSnapshot) => {
@@ -321,7 +339,9 @@ export function ChannelsManagerPage({
             void runAction(channel, 'start', () => start(channel.name))
           }
         >
-          {busy?.name === channel.name && busy.action === 'start' ? (
+          {busy?.workspaceCwd === activeWorkspaceCwd &&
+          busy.name === channel.name &&
+          busy.action === 'start' ? (
             <Spinner />
           ) : null}
           {t('channels.action.start')}
@@ -337,7 +357,9 @@ export function ChannelsManagerPage({
             void runAction(channel, 'restart', () => restart(channel.name))
           }
         >
-          {busy?.name === channel.name && busy.action === 'restart' ? (
+          {busy?.workspaceCwd === activeWorkspaceCwd &&
+          busy.name === channel.name &&
+          busy.action === 'restart' ? (
             <Spinner />
           ) : null}
           {t('channels.action.retry')}
@@ -353,7 +375,9 @@ export function ChannelsManagerPage({
           void runAction(channel, 'stop', () => stop(channel.name))
         }
       >
-        {busy?.name === channel.name && busy.action === 'stop' ? (
+        {busy?.workspaceCwd === activeWorkspaceCwd &&
+        busy.name === channel.name &&
+        busy.action === 'stop' ? (
           <Spinner />
         ) : null}
         {t('channels.action.stop')}
@@ -519,7 +543,9 @@ export function ChannelsManagerPage({
               {instances.map((channel) => {
                 const descriptor = descriptorFor(channel);
                 const runtimeError =
-                  actionErrors[channel.name] ?? channel.runtime.lastError;
+                  actionErrors[
+                    actionErrorKey(activeWorkspaceCwd, channel.name)
+                  ] ?? channel.runtime.lastError;
                 const canRestart =
                   channel.runtime.state !== 'stopped' &&
                   channel.runtime.state !== 'error';
@@ -597,7 +623,8 @@ export function ChannelsManagerPage({
                                 name: channel.name,
                               })}
                             >
-                              {busy?.name === channel.name &&
+                              {busy?.workspaceCwd === activeWorkspaceCwd &&
+                              busy.name === channel.name &&
                               busy.action === 'restart' ? (
                                 <Spinner />
                               ) : (

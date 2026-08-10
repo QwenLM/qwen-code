@@ -401,6 +401,110 @@ describe('ChannelsManagerPage', () => {
     });
   });
 
+  it('clears a stale lifecycle error after deleting the channel', async () => {
+    channelState.current.start.mockRejectedValueOnce(
+      new Error('stale start failure'),
+    );
+    await renderPage();
+
+    const start = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Start',
+    );
+    await act(async () => start?.click());
+    expect(container.textContent).toContain('stale start failure');
+
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) =>
+        button.getAttribute('aria-label') === 'More actions for DingTalk Bot',
+    );
+    await act(async () => {
+      more?.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const remove = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.getAttribute('aria-label') === 'Delete DingTalk Bot');
+    await act(async () => remove?.click());
+    const confirm = Array.from(
+      document
+        .querySelector('[role="alertdialog"]')
+        ?.querySelectorAll('button') ?? [],
+    ).find((button) => button.textContent?.trim() === 'Delete');
+    await act(async () => confirm?.click());
+
+    expect(container.textContent).not.toContain('stale start failure');
+  });
+
+  it('keeps a lifecycle action busy while a new editor changes workspace', async () => {
+    let finishStart!: () => void;
+    channelState.current.start.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStart = resolve;
+        }),
+    );
+    workspaceState.current = {
+      ...workspaceState.current,
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/workspace/main',
+            displayName: 'Main repo',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/workspace/secondary',
+            displayName: 'Secondary repo',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await renderPage();
+
+    const start = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Start',
+    );
+    await act(async () => start?.click());
+    const platform = container.querySelector<HTMLButtonElement>(
+      '[data-testid="channel-platform-dingtalk"]',
+    );
+    await act(async () => platform?.click());
+    const dialog = document.querySelector('[role="dialog"]');
+    const workspaceLabel = Array.from(
+      dialog?.querySelectorAll<HTMLLabelElement>('label') ?? [],
+    ).find((label) => label.textContent?.includes('Workspace'));
+    const workspaceTrigger = workspaceLabel?.htmlFor
+      ? document.getElementById(workspaceLabel.htmlFor)
+      : undefined;
+    await act(async () => {
+      workspaceTrigger?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const secondary = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Secondary repo');
+    await act(async () => {
+      secondary?.click();
+    });
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/secondary',
+    });
+    expect(start?.disabled).toBe(true);
+    expect(start?.querySelector('[data-slot="spinner"]')).toBeNull();
+    await act(async () => finishStart());
+  });
+
   it('keeps restart in the overflow menu for a running Channel', async () => {
     channelState.current.channels.ding = channel(
       'DingTalk Bot',

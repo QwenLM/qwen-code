@@ -37,7 +37,7 @@ const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
     label: 'Sender Policy',
     kind: 'enum',
     required: true,
-    default: 'pairing',
+    default: 'allowlist',
     description: 'Controls who can start direct conversations',
     options: [
       { value: 'pairing', label: 'Pairing' },

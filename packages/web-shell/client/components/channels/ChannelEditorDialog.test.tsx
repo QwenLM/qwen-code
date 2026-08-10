@@ -373,6 +373,42 @@ describe('ChannelEditorDialog', () => {
     });
   });
 
+  it('cannot be dismissed while a save is in flight', async () => {
+    let finishSave!: () => void;
+    const onSave = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const onOpenChange = vi.fn();
+    await renderDialog({ onSave, onOpenChange });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    const cancel = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Cancel',
+    );
+
+    expect(cancel?.disabled).toBe(true);
+    await act(async () => {
+      cancel?.click();
+    });
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    await act(async () => finishSave());
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it('submits sender and group allowlists in their runtime config shapes', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, onSave });

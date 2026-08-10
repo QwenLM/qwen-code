@@ -126,5 +126,8 @@ describe('built-in channel registry', () => {
       'groupPolicy',
       'sessionScope',
     ]);
+    expect(
+      entry?.fields.find((field) => field.key === 'senderPolicy'),
+    ).toMatchObject({ default: 'allowlist' });
   });
 });

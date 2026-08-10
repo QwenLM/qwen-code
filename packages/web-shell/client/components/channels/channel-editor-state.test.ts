@@ -221,7 +221,7 @@ describe('Channel editor state', () => {
 
     const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
 
-    expect(draft.values.senderPolicy).toBe('pairing');
+    expect(draft.values.senderPolicy).toBe('allowlist');
     expect(draft.values.groupPolicy).toBe('disabled');
     expect(validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, [])).toEqual(
       {},
@@ -265,6 +265,23 @@ describe('Channel editor state', () => {
       'group-a': { dispatchMode: 'collect' },
       'group-new': {},
     });
+  });
+
+  it('rejects unsafe group allowlist keys before building the request', () => {
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS);
+    draft.name = 'release-bot';
+    draft.values.clientId = 'ding-client-id';
+    draft.values.senderPolicy = 'allowlist';
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = '__proto__';
+    draft.secrets.clientSecret = {
+      operation: 'replace',
+      value: 'ding-client-secret',
+    };
+
+    expect(
+      validateChannelEditorDraft(DINGTALK_WITH_ACCESS, draft, []),
+    ).toMatchObject({ allowedGroupIds: 'invalid' });
   });
 
   it('supports explicitly clearing a stored secret', () => {
@@ -449,6 +466,7 @@ const GITHUB: DaemonChannelTypeDescriptor = {
       label: 'Group Policy',
       kind: 'enum',
       required: true,
+      default: 'open',
       options: [
         { value: 'open', label: 'Open' },
         { value: 'allowlist', label: 'Allowlist' },
@@ -460,6 +478,7 @@ const GITHUB: DaemonChannelTypeDescriptor = {
       label: 'Sender Policy',
       kind: 'enum',
       required: true,
+      default: 'allowlist',
       options: [
         { value: 'allowlist', label: 'Allowlist' },
         { value: 'pairing', label: 'Pairing' },
@@ -501,7 +520,7 @@ describe('Descriptor-driven senderPolicy', () => {
     expect(draft.values.allowedUsers).toBe('alice, bob');
   });
 
-  it('leaves enum fields empty when editing an instance that lacks them', () => {
+  it('uses runtime policy fallbacks when editing an instance that lacks them', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'legacy-bot',
       config: { type: 'github' },
@@ -510,8 +529,8 @@ describe('Descriptor-driven senderPolicy', () => {
       runtime: { state: 'stopped' },
     };
     const draft = createChannelEditorDraft(GITHUB, instance);
-    expect(draft.values.groupPolicy).toBe('');
-    expect(draft.values.senderPolicy).toBe('');
+    expect(draft.values.groupPolicy).toBe('disabled');
+    expect(draft.values.senderPolicy).toBe('allowlist');
   });
 
   it('writes senderPolicy via descriptor fields, not the hardcoded path', () => {

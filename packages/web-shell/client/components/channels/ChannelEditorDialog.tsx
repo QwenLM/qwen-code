@@ -594,7 +594,12 @@ export function ChannelEditorDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen || !saving) onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent className="max-w-[calc(100%-2rem)] p-5 sm:max-w-xl">
         <DialogHeader>
           <div className={styles.platformHeader}>
@@ -873,6 +878,7 @@ export function ChannelEditorDialog({
                       description={t(
                         'channels.editor.field.shared.allowedGroupIds.description',
                       )}
+                      error={errors['allowedGroupIds']}
                     >
                       <Input
                         id={`${formId}-allowedGroupIds`}
@@ -920,6 +926,7 @@ export function ChannelEditorDialog({
             <Button
               type="button"
               variant="outline"
+              disabled={saving}
               onClick={() => onOpenChange(false)}
             >
               {t('channels.editor.cancel')}

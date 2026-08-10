@@ -93,12 +93,10 @@ function initialFieldValue(
       return 'chat_thread';
     }
     if (typeof value === 'string' && value) return value;
-    if (
-      instance &&
-      field.key !== 'sessionScope' &&
-      field.default === undefined
-    ) {
-      return '';
+    if (instance) {
+      if (field.key === 'senderPolicy') return 'allowlist';
+      if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key !== 'sessionScope') return '';
     }
     return field.default ?? field.options?.[0]?.value ?? '';
   }
@@ -220,6 +218,13 @@ export function validateChannelEditorDraft(
   }
   if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
     errors['senderPolicy'] = 'policy';
+  }
+  if (
+    splitList(draft.allowedGroupIds).some((groupId) =>
+      UNSAFE_OBJECT_KEYS.includes(groupId),
+    )
+  ) {
+    errors['allowedGroupIds'] = 'invalid';
   }
   return errors;
 }

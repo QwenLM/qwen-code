@@ -139,7 +139,11 @@ function assertNumberRecord(
   }
 }
 
-function assertSharedField(key: string, value: unknown): boolean {
+function assertSharedField(
+  key: string,
+  value: unknown,
+  previous?: unknown,
+): boolean {
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
@@ -173,22 +177,40 @@ function assertSharedField(key: string, value: unknown): boolean {
     if (!isRecord(value)) {
       throw invalidConfig(`Channel field "${key}" must be an object.`);
     }
+    const previousGroups = isRecord(previous) ? previous : {};
     for (const [groupId, groupConfig] of Object.entries(value)) {
       if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
         throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
       }
+      const previousGroup = isRecord(previousGroups[groupId])
+        ? previousGroups[groupId]
+        : {};
       for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
+        const known = [
+          'requireMention',
+          'dispatchMode',
+          'groupHistoryLimit',
+        ].includes(nestedKey);
         const valid =
           (nestedKey === 'requireMention' &&
             typeof nestedValue === 'boolean') ||
           (nestedKey === 'dispatchMode' &&
-            ['collect', 'steer', 'followup'].includes(String(nestedValue))) ||
+            typeof nestedValue === 'string' &&
+            ['collect', 'steer', 'followup'].includes(nestedValue)) ||
           (nestedKey === 'groupHistoryLimit' &&
             typeof nestedValue === 'number' &&
             Number.isFinite(nestedValue));
-        if (!valid) {
+        if (known && !valid) {
           throw invalidConfig(
             `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
+          );
+        }
+        if (!known) {
+          assertPreservedUnknownField(
+            `${key}.${groupId}`,
+            nestedKey,
+            nestedValue,
+            previousGroup,
           );
         }
       }
@@ -371,7 +393,15 @@ function assertManagedConfig(
       );
       continue;
     }
-    if (assertSharedField(key, value)) continue;
+    if (
+      assertSharedField(
+        key,
+        value,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      )
+    ) {
+      continue;
+    }
     assertPreservedUnknownField(undefined, key, value, previous);
   }
   assertRequiredFields(fields, config);
