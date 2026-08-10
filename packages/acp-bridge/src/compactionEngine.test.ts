@@ -978,6 +978,37 @@ describe('TurnBoundaryCompactionEngine', () => {
       },
     );
 
+    it('keeps ACP TextContent annotations and _meta out of merged live entries', () => {
+      // ACP TextContent permits `annotations` and `_meta` beside
+      // `type`/`text`; the merged-entry rebuild models only `{ type,
+      // text }`, so such chunks must replay exactly as SSE delivered them.
+      const withContentFields = (event: BridgeEvent): BridgeEvent => {
+        const content = (
+          event.data as { update: { content: Record<string, unknown> } }
+        ).update.content;
+        content['annotations'] = { audience: ['assistant'] };
+        content['_meta'] = { vendor: 'keep' };
+        return event;
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'first'));
+      engine.ingest(withContentFields(makeTextChunk(2, 'hello')));
+      engine.ingest(makeTextChunk(3, 'third'));
+
+      const live = engine.snapshot().liveJournal;
+      expect(live).toHaveLength(3);
+      expect(extractTexts(live)).toEqual(['first', 'hello', 'third']);
+      expect(live.map((event) => event.id)).toEqual([1, 2, 3]);
+      expect(
+        (live[1]!.data as { update: { content: unknown } }).update.content,
+      ).toEqual({
+        type: 'text',
+        text: 'hello',
+        annotations: { audience: ['assistant'] },
+        _meta: { vendor: 'keep' },
+      });
+    });
+
     it('merges live chunks whose empty-string parentToolCallId the extractor ignores', () => {
       const withEmptyParent = (event: BridgeEvent): BridgeEvent => {
         (event.data as { update: Record<string, unknown> }).update['_meta'] = {

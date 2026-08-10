@@ -856,16 +856,23 @@ function liveJournalTextChunk(event: BridgeEvent):
 }
 
 // `mergeLiveJournalTextEvent` rebuilds a merged entry by spread-merging
-// the segment's first and last source events, so only chunks whose data
-// and update carry exactly the modeled keys can join a segment — any
-// extra key would leak unmodeled fields into the merged aggregate.
+// the segment's first and last source events, so only chunks whose data,
+// update, and content carry exactly the modeled keys can join a segment —
+// extra data/update keys would leak into the merged aggregate, and extra
+// content keys (ACP TextContent `annotations` / `_meta`) would be dropped
+// by the `{ type, text }` content rebuild, so such chunks stay raw entries.
 function hasOnlyModeledChunkKeys(data: SessionUpdateData | undefined): boolean {
   if (!data || !data.update) return false;
+  const content: unknown = data.update.content;
   return (
     Object.keys(data).every((key) => key === 'sessionId' || key === 'update') &&
     Object.keys(data.update).every(
       (key) => key === 'sessionUpdate' || key === 'content' || key === '_meta',
-    )
+    ) &&
+    (content === undefined ||
+      (typeof content === 'object' &&
+        content !== null &&
+        Object.keys(content).every((key) => key === 'type' || key === 'text')))
   );
 }
 
