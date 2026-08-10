@@ -307,4 +307,28 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     expect(manifest).toContain('/tmp/bounded-0.md');
     expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThanOrEqual(25_000);
   });
+
+  it('does not let long descriptions starve later candidates', async () => {
+    const longDocs = Array.from({ length: 20 }, (_, index) => ({
+      ...docs[0],
+      filePath: `/tmp/recent-${index}.md`,
+      description: 'x'.repeat(1_190),
+    }));
+    const lexicalDoc = {
+      ...docs[1],
+      filePath: '/tmp/lexical-target.md',
+    };
+    vi.mocked(runSideQuery).mockResolvedValue({
+      selected_memories: [lexicalDoc.filePath],
+    });
+
+    await expect(
+      selectRelevantAutoMemoryDocumentsByModel(
+        mockConfig,
+        'find the lexical target',
+        [...longDocs, lexicalDoc],
+        5,
+      ),
+    ).resolves.toEqual([lexicalDoc]);
+  });
 });

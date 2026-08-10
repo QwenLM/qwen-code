@@ -63,7 +63,7 @@ function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): {
     const tag = `[${doc.type}] `;
     const ts = new Date(doc.mtimeMs).toISOString();
     const line = doc.description
-      ? `- ${tag}${doc.filePath} (${ts}): ${doc.description}`
+      ? `- ${tag}${doc.filePath} (${ts}): ${doc.description.slice(0, 512)}`
       : `- ${tag}${doc.filePath} (${ts})`;
     const nextBytes = Buffer.byteLength(
       `${lines.length > 0 ? '\n' : ''}${line}`,

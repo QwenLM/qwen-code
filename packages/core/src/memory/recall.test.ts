@@ -514,14 +514,10 @@ describe('auto-memory relevant recall', () => {
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
       activeToolDocs,
     );
+    let modelCandidates: ScannedAutoMemoryDocument[] = [];
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
       async (_config, _query, candidates) => {
-        expect(candidates.map((doc) => doc.filePath)).not.toContain(
-          '/tmp/ata-tool.md',
-        );
-        expect(candidates.map((doc) => doc.filePath)).toContain(
-          '/tmp/ata-gotcha.md',
-        );
+        modelCandidates = candidates;
         throw new Error('selector failed');
       },
     );
@@ -535,6 +531,12 @@ describe('auto-memory relevant recall', () => {
       },
     );
 
+    expect(modelCandidates.map((doc) => doc.filePath)).not.toContain(
+      '/tmp/ata-tool.md',
+    );
+    expect(modelCandidates.map((doc) => doc.filePath)).toContain(
+      '/tmp/ata-gotcha.md',
+    );
     expect(result.strategy).toBe('heuristic');
     expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
       '/tmp/ata-tool.md',
