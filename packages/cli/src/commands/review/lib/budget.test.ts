@@ -12,6 +12,7 @@ import {
   budgetGapDisclosures,
   stripBudgetGapLines,
   launchToolBudget,
+  reverseAuditRoundCap,
   reviewBudget,
 } from './budget.js';
 
@@ -83,11 +84,29 @@ describe('reviewBudget — domain specialists', () => {
 
   it('are capped at two once the diff is big enough for dominance to mean something', () => {
     expect(budget(80).specialistCap).toBe(2);
-    expect(budget(10_000).specialistCap).toBe(2);
+    expect(budget(2999).specialistCap).toBe(2);
+  });
+
+  it('shed to zero on a huge diff — the marginal pass that tips it into a timeout', () => {
+    // At/above the huge floor an Agent 8 whole-diff pass on top of the base
+    // fan-out is what a too-big-to-finish review can least afford.
+    expect(budget(3000).specialistCap).toBe(0);
+    expect(budget(10_000).specialistCap).toBe(0);
   });
 
   it('read source lines only — a test-heavy diff does not unlock them', () => {
     expect(budget(20, 3000).specialistCap).toBe(0);
+  });
+
+  it('shed on a huge non-source diff — the gate keys on effective, not src', () => {
+    // A docs/lockfile-dominated diff (small src, enormous total) is huge by the
+    // effective measure, so Agent 8 sheds even though src alone clears the 80
+    // floor. Pins `effective < HUGE_DIFF_FLOOR` against a slip back to `src`,
+    // which would restore specialistCap: 2 in exactly the timeout band this
+    // gate exists to shed it from.
+    expect(
+      reviewBudget({ srcDiffLines: 100, diffLines: 30_000 }).specialistCap,
+    ).toBe(0);
   });
 });
 
@@ -396,6 +415,69 @@ describe('stripBudgetGapLines — the receipt judged without its disclosures', (
   });
 });
 
+describe('reviewBudget — the reverse-audit round cap', () => {
+  it('runs the full five rounds below the huge floor, three at it and above', () => {
+    // A reverse-audit round re-reads the whole diff against a growing
+    // findings list (~90 min on a 4,000-line PR); five rounds cannot finish
+    // the huge PRs that timed out to zero, so a huge diff caps at three —
+    // one audit round above the convergence floor of two (the all-dry
+    // rounds-1-and-2 shape converges under any cap of two or more).
+    expect(
+      reviewBudget({ srcDiffLines: 100, diffLines: 100 }).reverseAuditRounds,
+    ).toBe(5);
+    expect(
+      reviewBudget({ srcDiffLines: 2999, diffLines: 2999 }).reverseAuditRounds,
+    ).toBe(5);
+    expect(
+      reviewBudget({ srcDiffLines: 3000, diffLines: 3000 }).reverseAuditRounds,
+    ).toBe(3);
+    expect(
+      reviewBudget({ srcDiffLines: 10_000, diffLines: 12_000 })
+        .reverseAuditRounds,
+    ).toBe(3);
+  });
+
+  it('keys on effective lines, not raw source — a huge lockfile diff caps too', () => {
+    // effective = max(src, floor(total/8)); a mostly-generated 30,000-line
+    // diff with little source still costs a huge reverse audit to re-read.
+    // Pins the `effective`-vs-`src` dependence the mutation `effective` →
+    // `src` would otherwise survive.
+    expect(
+      reviewBudget({ srcDiffLines: 100, diffLines: 30_000 }).reverseAuditRounds,
+    ).toBe(3);
+    expect(reviewBudget({ srcDiffLines: 100, diffLines: 30_000 }).sweep).toBe(
+      true,
+    );
+  });
+
+  it('never drops below the convergence minimum', () => {
+    for (const n of [0, 1, 50, 3000, 100_000]) {
+      expect(
+        reviewBudget({ srcDiffLines: n, diffLines: n }).reverseAuditRounds,
+      ).toBeGreaterThanOrEqual(3);
+    }
+  });
+});
+
+describe('reverseAuditRoundCap — the one reader of the plan field', () => {
+  it('passes a valid cap through and defaults everything else to the max', () => {
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 3 })).toBe(3);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 5 })).toBe(5);
+    // Absent, out-of-band and garbled all read as the full cap: an old or
+    // hand-edited plan errs toward more auditing, never less. The range is
+    // floored at HUGE_REVERSE_AUDIT_ROUNDS (3) — the smallest cap the CLI
+    // writes — so 1 and 2 read as the full cap, not as themselves.
+    expect(reverseAuditRoundCap(undefined)).toBe(5);
+    expect(reverseAuditRoundCap({})).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 0 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 1 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 2 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 6 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: 2.5 })).toBe(5);
+    expect(reverseAuditRoundCap({ reverseAuditRounds: '1' })).toBe(5);
+  });
+});
+
 describe('reviewBudget — the budget survives the trip through the plan', () => {
   it('agentToolBudget is an enumerable field of the returned object', () => {
     // The plan is written with JSON.stringify(report); a field that were a
@@ -404,6 +486,7 @@ describe('reviewBudget — the budget survives the trip through the plan', () =>
     // not just the type.
     const b = reviewBudget({ srcDiffLines: 10, diffLines: 10 });
     expect(Object.keys(b)).toContain('agentToolBudget');
+    expect(Object.keys(b)).toContain('reverseAuditRounds');
     expect(
       (JSON.parse(JSON.stringify(b)) as Record<string, unknown>)[
         'agentToolBudget'

@@ -32,9 +32,12 @@ import {
 } from './lib/coverage.js';
 import {
   BUDGET_STOP_PHRASE,
+  ROUND_CAP_PHRASE,
   budgetStopDisclosure,
+  roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
+import { MAX_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
 import {
@@ -426,12 +429,22 @@ function composeReviewBody(
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
+      // A round-cap stop and a time-budget stop both cap the verdict, but
+      // read differently and dedup against a different relayed phrase. The
+      // marker's `cause` picks which; an absent cause is a time stop, for
+      // markers written before the cause field existed.
+      const isRoundCap = stop.cause === 'round-cap';
+      const phrase = isRoundCap ? ROUND_CAP_PHRASE : BUDGET_STOP_PHRASE;
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+        if (unreviewed[i].includes(phrase)) {
           unreviewed.splice(i, 1);
         }
       }
-      budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
+      budgetEntry = isRoundCap
+        ? roundCapStopDisclosure(
+            typeof stop.cap === 'number' ? stop.cap : MAX_REVERSE_AUDIT_ROUNDS,
+          )
+        : budgetStopDisclosure(stop.round ?? undefined);
       coverageEntries.push(budgetEntry);
       roleLabelEntries.add(budgetEntry);
     }
