@@ -10,6 +10,7 @@ import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
+  computeProviderTemplateVersion,
   findExistingProviderModels,
   findProviderByCredentials,
   getDefaultModelIds,
@@ -83,8 +84,11 @@ describe('buildInstallPlan', () => {
       name: '[Test] unknown-model',
     });
     expect(models?.[1]?.generationConfig).toBeUndefined();
+    // The stored version must match the launch-time check, which hashes
+    // the built-in template only — not the final model list that includes
+    // custom/unknown IDs.
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
-      computeModelListVersion(models ?? []),
+      computeProviderTemplateVersion(config, 'https://api.test.com/v1'),
     );
   });
 
@@ -679,12 +683,15 @@ describe('getAllProviderBaseUrls', () => {
 // branch that hasn't been built yet. Re-import via the relative source path so
 // these new edge-case tests exercise the in-tree implementation.
 import {
+  ALL_PROVIDERS as ALL_PROVIDERS_SRC,
   findProviderByCredentials as findProviderByCredentialsSrc,
   getAllProviderBaseUrls as getAllProviderBaseUrlsSrc,
 } from '../all-providers.js';
 import {
   buildInstallPlan as buildInstallPlanSrc,
+  computeProviderTemplateVersion as computeProviderTemplateVersionSrc,
   resolveBaseUrl as resolveBaseUrlSrc,
+  resolveMetadataKey as resolveMetadataKeySrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
 } from '../provider-config.js';
 
@@ -924,5 +931,86 @@ describe('resolveMetadataKey dotted-id guard', () => {
   it("throws when the id contains '.' (would corrupt dotted setValue writes)", () => {
     const config = makeConfig({ id: 'company.ai', models: [{ id: 'm1' }] });
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
+  });
+});
+
+describe('stored provider version matches the launch-time check', () => {
+  // The prompt in useProviderUpdates clears only when the version recorded by
+  // an install/update equals the one recomputed at launch from the built-in
+  // template. Assert that invariant for every built-in provider, with a custom
+  // model installed — the case that used to make the two diverge forever.
+  const providersWithMetadata = ALL_PROVIDERS_SRC.filter((provider) =>
+    resolveMetadataKeySrc(provider),
+  );
+
+  it('covers every built-in provider that records metadata', () => {
+    expect(providersWithMetadata.length).toBeGreaterThan(0);
+  });
+
+  for (const provider of providersWithMetadata) {
+    const metadataKey = resolveMetadataKeySrc(provider)!;
+
+    it(`holds for ${metadataKey} when a custom model is installed`, () => {
+      const baseUrl = resolveBaseUrl(provider);
+      const defaultIds = getDefaultModelIds(provider);
+      const plan = buildInstallPlanSrc(provider, {
+        baseUrl,
+        apiKey: 'sk-test',
+        // A user-added id plus a built-in that upstream renamed away: both
+        // reach the plan as "custom" ids and must not affect the version.
+        modelIds: [...defaultIds, 'user-added-model', 'renamed-away-builtin'],
+      });
+
+      const stored =
+        plan.providerState?.[`${PROVIDER_METADATA_NS}.${metadataKey}`];
+      const launchVersion = computeProviderTemplateVersionSrc(provider, baseUrl);
+
+      expect(stored?.['version']).toBe(launchVersion);
+      // The plan still carries the custom ids — only the version ignores them.
+      expect(plan.modelProviders?.[0]?.models.map((m) => m.id)).toEqual(
+        expect.arrayContaining(['user-added-model', 'renamed-away-builtin']),
+      );
+    });
+  }
+});
+
+describe('computeProviderTemplateVersion', () => {
+  it('equals hashing the built-in template by hand', () => {
+    const config = makeConfig();
+    const baseUrl = resolveBaseUrl(config);
+    expect(computeProviderTemplateVersionSrc(config, baseUrl)).toBe(
+      computeModelListVersion(buildProviderTemplate(config, baseUrl)),
+    );
+  });
+
+  it('ignores installed custom models', () => {
+    const config = makeConfig();
+    const baseUrl = resolveBaseUrl(config);
+    const withCustom = buildInstallPlanSrc(config, {
+      baseUrl,
+      apiKey: 'sk-test',
+      modelIds: [...getDefaultModelIds(config), 'extra-model'],
+    });
+    const withoutCustom = buildInstallPlanSrc(config, {
+      baseUrl,
+      apiKey: 'sk-test',
+      modelIds: getDefaultModelIds(config),
+    });
+    const key = `${PROVIDER_METADATA_NS}.${resolveMetadataKeySrc(config)}`;
+    expect(withCustom.providerState?.[key]?.['version']).toBe(
+      withoutCustom.providerState?.[key]?.['version'],
+    );
+  });
+
+  it('changes when the built-in template changes', () => {
+    const baseUrl = 'https://api.test.com/v1';
+    const before = computeProviderTemplateVersionSrc(makeConfig(), baseUrl);
+    const after = computeProviderTemplateVersionSrc(
+      makeConfig({
+        models: [{ id: 'model-a-renamed', contextWindowSize: 8192 }],
+      }),
+      baseUrl,
+    );
+    expect(after).not.toBe(before);
   });
 });

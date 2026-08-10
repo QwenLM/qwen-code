@@ -229,13 +229,12 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
-  models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
   const key = resolveMetadataKey(config);
   if (key) {
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(models),
+        version: computeProviderTemplateVersion(config, baseUrl),
         baseUrl,
       },
     };
@@ -287,7 +286,7 @@ export function buildInstallPlan(
         ...(ownsModel ? { ownsModel } : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState: resolveProviderState(config, inputs.baseUrl),
   };
 }
 
@@ -297,6 +296,22 @@ export function buildInstallPlan(
 
 export function computeModelListVersion(models: ProviderModelConfig[]): string {
   return createHash('sha256').update(JSON.stringify(models)).digest('hex');
+}
+
+/**
+ * Version of a provider's built-in template (default models only).
+ *
+ * The version recorded at install time and the one recomputed at launch to
+ * detect a pending update must hash the same input, or the update prompt can
+ * never clear. Both sides call this instead of composing
+ * `buildProviderTemplate` + `computeModelListVersion` by hand, so the two
+ * cannot drift apart again.
+ */
+export function computeProviderTemplateVersion(
+  config: ProviderConfig,
+  baseUrl: string,
+): string {
+  return computeModelListVersion(buildProviderTemplate(config, baseUrl));
 }
 
 /**

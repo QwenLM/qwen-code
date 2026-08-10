@@ -23,6 +23,7 @@ export {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
+  computeProviderTemplateVersion,
   findExistingProviderModels,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
