@@ -1247,6 +1247,10 @@ function appendStatusBlock(
     event.data !== undefined
       ? { data: event.data }
       : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') &&
+    event.debugReason
+      ? { debugReason: event.debugReason }
+      : {}),
     ...(event?.type === 'session.branched'
       ? {
           source: 'session_branched',

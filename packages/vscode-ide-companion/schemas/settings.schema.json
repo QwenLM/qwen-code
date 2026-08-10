@@ -704,6 +704,12 @@
           "description": "Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.",
           "type": "string"
         },
+        "openAILogRetentionDays": {
+          "description": "Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Log files older than this are removed by an interactive-session background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour). For a custom openAILoggingDir, configure this at user or system scope; workspace-scoped retention is skipped because one directory can be shared by multiple workspaces.",
+          "type": "number",
+          "default": 7,
+          "minimum": 0
+        },
         "generationConfig": {
           "description": "Generation configuration settings.",
           "type": "object",

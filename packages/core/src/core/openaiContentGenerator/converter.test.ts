@@ -7391,20 +7391,24 @@ describe('modality filtering', () => {
     expect(parts[0].text).toContain('does not support image input');
   });
 
-  it('keeps image when image modality is enabled', () => {
+  it('keeps BMP image data when image modality is enabled', () => {
     const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
-        inlineData: { mimeType: 'image/png', data: 'abc123' },
+        inlineData: { mimeType: 'image/bmp', data: 'abc123' },
       } as unknown as Part,
     ]);
     const messages = conv.convertGeminiRequestToOpenAI(
       request,
       makeRequestContext('gpt-4o', { image: true }),
     );
-    const parts = getUserContentParts(messages);
+    const parts = getUserContentParts(messages) as Array<{
+      type: string;
+      image_url?: { url: string };
+    }>;
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('image_url');
+    expect(parts[0].image_url?.url).toBe('data:image/bmp;base64,abc123');
   });
 
   it('replaces PDF with placeholder when pdf modality is disabled', () => {

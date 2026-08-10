@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -17,6 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
@@ -5846,4 +5847,138 @@ describe('qwen-triage build-process guard', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30000);
+});
+
+describe('triage job budget', () => {
+  // The fixed 30-minute cap was measurably clipping the distribution: 22
+  // successful triage jobs sampled on 2026-08-09 ran median 5.8m / p90
+  // 22.3m / max 29.5m, and five substantial PRs died at exactly the cap,
+  // each discarding a full agent run for nothing — triage is advisory, so
+  // a killed run wastes the runner AND the work it was about to publish.
+  // The budget is a repository variable so the next resize needs no PR;
+  // the fallback keeps an unconfigured repo bounded. Both halves pinned so
+  // neither the knob nor its default can silently vanish.
+  it('is operator-tunable through the sanitized authorize output', () => {
+    // Pinned on the PARSED document, not job-text containment: relocating
+    // either line inside the same job (the output mapping into the budget
+    // step's env:, the job-level timeout-minutes onto a step) kept every
+    // substring match green while the knob silently died — probe-verified
+    // surviving mutations of the substring version. A parsed key also
+    // cannot match a commented-out line.
+    const doc = parse(workflow);
+    expect(doc.jobs.authorize.outputs.triage_timeout_minutes).toBe(
+      '${{ steps.budget.outputs.triage_timeout_minutes }}',
+    );
+    expect(doc.jobs.triage['timeout-minutes']).toBe(
+      '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}',
+    );
+  });
+
+  it('sanitizes the budget: integers clamp, garbage falls back with a warning', () => {
+    // The REAL sanitize step, replayed: timeout-minutes is evaluated before
+    // any step of the consuming job runs, so this bash is the only place a
+    // bad repository variable can be caught — and the knob's whole point is
+    // changing it without a PR, so nothing else reviews the value.
+    const doc = parse(workflow);
+    const budget = doc.jobs.authorize.steps.find((s) => s.id === 'budget');
+    expect(budget).toBeTruthy();
+    // The replay injects RAW itself, so pin the seams it cannot see: which
+    // repository variable feeds RAW (a typo'd name expands to '' and hits
+    // the silent default), and that the step is unconditional (a scoped
+    // step skips on comment events and '' || 60 kills the knob there).
+    expect(budget.env.RAW).toBe('${{ vars.QWEN_TRIAGE_TIMEOUT_MINUTES }}');
+    expect(budget.if).toBeUndefined();
+    const runBudget = (raw) => {
+      const dir = mkdtempSync(join(tmpdir(), 'budget-'));
+      try {
+        const outFile = join(dir, 'out');
+        writeFileSync(outFile, '');
+        // GitHub wraps `shell: bash` steps as `bash --noprofile --norc -eo
+        // pipefail {0}`; makeGhHarness pins the same contract. The script
+        // self-arms `set -euo pipefail`, but only the wrapper's `-e` keeps
+        // the replay fail-fast if a future edit drops that line.
+        const res = execFileSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', budget.run],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, RAW: raw, GITHUB_OUTPUT: outFile },
+          },
+        );
+        return {
+          out: readFileSync(outFile, 'utf8').trim(),
+          warned: res.includes('::warning::'),
+          log: res,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // unset → default, silently
+    expect(runBudget('')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    // a sane value passes through untouched
+    expect(runBudget('90')).toMatchObject({
+      out: 'triage_timeout_minutes=90',
+      warned: false,
+    });
+    // a padded value must stay decimal — without 10#, bash parses 060 as
+    // octal (48)
+    expect(runBudget('060')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    // exactly at the boundaries: no clamp, no warning
+    expect(runBudget('10')).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: false,
+    });
+    expect(runBudget('600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: false,
+    });
+    // 0 would be an instantly-cancelled job — clamped to the floor
+    expect(runBudget('0')).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: true,
+    });
+    // a runaway value would hold the runner for days — ceiling
+    expect(runBudget('3600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // over 18 digits bash's 64-bit math wraps — 92233720368547758180
+    // lands on 100, silently in range — so the length guard must clamp
+    // to the ceiling with a warning instead
+    expect(runBudget('92233720368547758180')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // The guard counts SIGNIFICANT digits: leading zeros are decoration,
+    // so a padded 60 passes through untouched instead of tripping the
+    // ceiling branch, and an all-zero value is still 0 → floor
+    expect(runBudget('000000000000000000060')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    expect(runBudget('0'.repeat(22))).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: true,
+    });
+    // ...and padding must not defeat the wrap guard either: 19
+    // significant digits still clamp to the ceiling
+    expect(runBudget('000' + '9'.repeat(19))).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // every malformed shape the review enumerated falls back and NAMES the
+    // variable, so the operator's run log points at the knob, not fromJSON
+    for (const bad of ['60 minutes', '1h', '6O', '60.5', '"60"']) {
+      const r = runBudget(bad);
+      expect(r.out, bad).toBe('triage_timeout_minutes=60');
+      expect(r.log, bad).toContain('QWEN_TRIAGE_TIMEOUT_MINUTES');
+    }
+  });
 });

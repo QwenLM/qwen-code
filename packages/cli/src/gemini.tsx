@@ -669,7 +669,7 @@ export async function main() {
     }
   }
 
-  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV]) {
+  if (isAcpMode && process.env[QWEN_CODE_SERVE_ENV] === '1') {
     // A daemon-spawned ACP child hosts sessions for arbitrary workspaces.
     // Loader vars from the daemon's launch environment were only needed to
     // boot this process (e.g. the dev harness tsx loader); left in
