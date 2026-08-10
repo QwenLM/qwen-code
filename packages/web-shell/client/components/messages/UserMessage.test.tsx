@@ -339,6 +339,18 @@ describe('UserMessage', () => {
     expect(img!.getAttribute('src')).toBe('data:image/png;base64,abc');
   });
 
+  it('renders BMP images through the shared safe-source policy', () => {
+    const container = render(
+      <UserMessage
+        content=""
+        images={[{ data: 'Qk0=', mimeType: 'image/bmp' }]}
+      />,
+    );
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(
+      'data:image/bmp;base64,Qk0=',
+    );
+  });
+
   it('uses a custom content renderer when provided', () => {
     const container = render(
       <WebShellCustomizationProvider
