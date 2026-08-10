@@ -145,8 +145,21 @@ test('creates and deletes a typed Channel configuration', async ({
   await page.getByLabel('Instance name').fill('release-bot');
   await page.getByLabel('Client ID (AppKey)').fill('ding-client-id');
   await page.getByLabel('Client Secret (AppSecret)').fill('ding-client-secret');
-  await page.getByLabel('Session scope').click();
-  await page.getByRole('option', { name: 'Per chat and thread' }).click();
+  await expect(page.getByLabel('Allowed user IDs')).toHaveCount(0);
+  await expect(
+    page.getByRole('heading', { name: 'Conversation management' }),
+  ).toBeVisible();
+  await expect(page.getByText('By user', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('By chat or thread', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText('Share all', { exact: true })).toBeVisible();
+  await page.getByLabel('By chat or thread').click();
+  await expect(
+    page.getByText(
+      'Messages in the same group or topic share one conversation; best for collaboration.',
+    ),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Save' }).click();
 
   await expect(

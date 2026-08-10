@@ -2585,8 +2585,11 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
-  'channels.editor.section.session': 'Session',
-  'channels.editor.section.access': 'Access policy',
+  'channels.editor.section.session': 'Conversation management',
+  'channels.editor.section.access': 'Access control',
+  'channels.editor.section.access.description':
+    'Configure direct-message and group access separately.',
+  'channels.editor.session.isolation': 'Conversation isolation',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
   'channels.editor.environmentReference': '$ENV_VAR supported',
@@ -2686,14 +2689,19 @@ const EN: Messages = {
     'Comma-separated stable chat or repository IDs allowed to use this Channel.',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
-  'channels.editor.field.shared.sessionScope': 'Session scope',
+  'channels.editor.field.shared.sessionScope': 'Conversation isolation',
   'channels.editor.field.shared.sessionScope.description':
     'Choose how conversations share persistent agent context.',
-  'channels.editor.field.shared.sessionScope.option.user': 'Per user and chat',
+  'channels.editor.field.shared.sessionScope.option.user': 'By user',
   'channels.editor.field.shared.sessionScope.option.chat_thread':
-    'Per chat and thread',
-  'channels.editor.field.shared.sessionScope.option.single':
-    'One shared session',
+    'By chat or thread',
+  'channels.editor.field.shared.sessionScope.option.single': 'Share all',
+  'channels.editor.field.shared.sessionScope.detail.user':
+    "The same user's messages continue in one conversation; users stay isolated from each other.",
+  'channels.editor.field.shared.sessionScope.detail.chat_thread':
+    'Messages in the same group or topic share one conversation; best for collaboration.',
+  'channels.editor.field.shared.sessionScope.detail.single':
+    'Every message shares one conversation; best for a single-bot duty channel.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -5288,8 +5296,11 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
-  'channels.editor.section.session': '会话策略',
-  'channels.editor.section.access': '准入策略',
+  'channels.editor.section.session': '会话管理',
+  'channels.editor.section.access': '访问控制',
+  'channels.editor.section.access.description':
+    '分别设置谁可以私聊，以及哪些群聊可以使用此频道。',
+  'channels.editor.session.isolation': '会话隔离方式',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
   'channels.editor.environmentReference': '支持 $ENV_VAR',
@@ -5386,13 +5397,19 @@ const ZH: Messages = {
     '用英文逗号分隔允许使用此频道的稳定群聊或代码仓库 ID。',
   'channels.editor.field.shared.allowedGroupIds.placeholder':
     'group-a, group-b',
-  'channels.editor.field.shared.sessionScope': '会话范围',
+  'channels.editor.field.shared.sessionScope': '会话隔离方式',
   'channels.editor.field.shared.sessionScope.description':
     '选择不同对话如何共享持久化的智能体上下文。',
-  'channels.editor.field.shared.sessionScope.option.user': '按用户和会话',
+  'channels.editor.field.shared.sessionScope.option.user': '按用户隔离',
   'channels.editor.field.shared.sessionScope.option.chat_thread':
-    '按会话和话题',
-  'channels.editor.field.shared.sessionScope.option.single': '整个频道共享',
+    '按群/话题隔离',
+  'channels.editor.field.shared.sessionScope.option.single': '全部共享',
+  'channels.editor.field.shared.sessionScope.detail.user':
+    '同一用户的消息进入同一个对话，不同用户互不影响。',
+  'channels.editor.field.shared.sessionScope.detail.chat_thread':
+    '同一群聊或话题进入同一个对话，适合群内协作。',
+  'channels.editor.field.shared.sessionScope.detail.single':
+    '所有消息共用一个对话，适合单一机器人值守场景。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',

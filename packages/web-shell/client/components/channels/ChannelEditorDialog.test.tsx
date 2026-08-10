@@ -235,6 +235,16 @@ async function selectOption(label: string, optionLabel: string) {
   });
 }
 
+async function chooseRadioOption(optionLabel: string) {
+  const option = Array.from(document.querySelectorAll('label')).find(
+    (label) => label.textContent?.trim() === optionLabel,
+  );
+  expect(option).not.toBeNull();
+  await act(async () => {
+    option!.click();
+  });
+}
+
 function setInputValue(input: HTMLInputElement, value: string) {
   Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -342,6 +352,7 @@ describe('ChannelEditorDialog', () => {
       setInputValue(clientSecret!, 'ding-client-secret');
     });
 
+    expect(inputByLabel('Allowed user IDs')).toBeNull();
     await selectOption('Direct message policy', 'Allowlist');
     const allowedUsers = inputByLabel('Allowed user IDs');
     expect(allowedUsers).not.toBeNull();
@@ -356,8 +367,14 @@ describe('ChannelEditorDialog', () => {
       setInputValue(allowedGroups!, 'group-a, group-b');
     });
 
-    expect(document.body.textContent).toContain('Session');
-    await selectOption('Session scope', 'Per chat and thread');
+    expect(document.body.textContent).toContain('Conversation management');
+    expect(document.body.textContent).toContain(
+      "The same user's messages continue in one conversation; users stay isolated from each other.",
+    );
+    await chooseRadioOption('By chat or thread');
+    expect(document.body.textContent).toContain(
+      'Messages in the same group or topic share one conversation; best for collaboration.',
+    );
 
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',

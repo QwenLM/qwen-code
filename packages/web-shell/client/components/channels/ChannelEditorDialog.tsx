@@ -219,6 +219,12 @@ export function ChannelEditorDialog({
   const sessionFields = descriptor.fields.filter((field) =>
     SHARED_SESSION_FIELD_KEYS.has(field.key),
   );
+  const sessionScopeField = sessionFields.find(
+    (field) => field.key === 'sessionScope' && field.kind === 'enum',
+  );
+  const remainingSessionFields = sessionFields.filter(
+    (field) => field !== sessionScopeField,
+  );
   const credentialFields = descriptor.fields.filter(
     (field) =>
       !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
@@ -661,15 +667,6 @@ export function ChannelEditorDialog({
               {credentialFields.map(renderField)}
             </section>
 
-            {sessionFields.length > 0 ? (
-              <section className={styles.section}>
-                <h3 className={styles.sectionHeading}>
-                  {t('channels.editor.section.session')}
-                </h3>
-                {sessionFields.map(renderField)}
-              </section>
-            ) : null}
-
             {(() => {
               const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);
               const effectivePolicy = descriptorPolicy
@@ -687,8 +684,7 @@ export function ChannelEditorDialog({
               const visibleAccessFields = accessFields.filter(
                 (field) =>
                   field.key !== 'allowedUsers' ||
-                  effectivePolicy === 'allowlist' ||
-                  effectivePolicy === 'pairing',
+                  effectivePolicy === 'allowlist',
               );
               if (
                 !showRadioGroup &&
@@ -698,10 +694,15 @@ export function ChannelEditorDialog({
                 return null;
               }
               return (
-                <section className={styles.section}>
-                  <h3 className={styles.sectionHeading}>
-                    {t('channels.editor.section.access')}
-                  </h3>
+                <section className={styles.settingsPanel}>
+                  <div className={styles.settingsPanelHeader}>
+                    <h3 className={styles.settingsPanelTitle}>
+                      {t('channels.editor.section.access')}
+                    </h3>
+                    <p className={styles.settingsPanelDescription}>
+                      {t('channels.editor.section.access.description')}
+                    </p>
+                  </div>
                   {showRadioGroup ? (
                     <>
                       <RadioGroup
@@ -795,6 +796,77 @@ export function ChannelEditorDialog({
                 </section>
               );
             })()}
+
+            {sessionFields.length > 0 ? (
+              <section className={styles.settingsPanel}>
+                <h3 className={styles.settingsPanelTitle}>
+                  {t('channels.editor.section.session')}
+                </h3>
+                {sessionScopeField ? (
+                  <div className={styles.sessionScopeField}>
+                    <span className={styles.sessionScopeLabel}>
+                      {t('channels.editor.session.isolation')}
+                    </span>
+                    <RadioGroup
+                      className={styles.sessionScopeControl}
+                      value={String(draft.values[sessionScopeField.key] ?? '')}
+                      aria-label={t('channels.editor.session.isolation')}
+                      aria-invalid={Boolean(errors[sessionScopeField.key])}
+                      aria-required={sessionScopeField.required}
+                      onValueChange={(value) =>
+                        setDraft((current) => ({
+                          ...current,
+                          values: {
+                            ...current.values,
+                            [sessionScopeField.key]: value,
+                          },
+                        }))
+                      }
+                    >
+                      {(sessionScopeField.options ?? []).map((option) => (
+                        <Label
+                          key={option.value}
+                          htmlFor={`${formId}-${sessionScopeField.key}-${option.value}`}
+                          className={styles.sessionScopeOption}
+                          data-selected={
+                            draft.values[sessionScopeField.key] === option.value
+                          }
+                        >
+                          <RadioGroupItem
+                            id={`${formId}-${sessionScopeField.key}-${option.value}`}
+                            className={styles.sessionScopeRadio}
+                            value={option.value}
+                          />
+                          <span>
+                            {fieldOptionLabel(
+                              sessionScopeField,
+                              option.value,
+                              option.label,
+                            )}
+                          </span>
+                        </Label>
+                      ))}
+                    </RadioGroup>
+                    <p
+                      className={styles.sessionScopeDescription}
+                      aria-live="polite"
+                    >
+                      {t(
+                        `channels.editor.field.shared.sessionScope.detail.${String(
+                          draft.values[sessionScopeField.key] ?? 'user',
+                        )}`,
+                      )}
+                    </p>
+                    {errors[sessionScopeField.key] ? (
+                      <p role="alert" className="text-xs text-destructive">
+                        {errors[sessionScopeField.key]}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {remainingSessionFields.map(renderField)}
+              </section>
+            ) : null}
           </div>
           <DialogFooter className="mt-4">
             <Button
