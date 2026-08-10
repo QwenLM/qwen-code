@@ -4595,6 +4595,8 @@ jobs:
             "${WORKDIR}/failure.md" \
             "${WORKDIR}/handoff.md" \
             "${WORKDIR}/gate-output.log" \
+            "${WORKDIR}/gate-output.log.check" \
+            "${WORKDIR}/gate-output.log.baseline" \
             "${WORKDIR}/gate-rejection.md" \
             "${WORKDIR}/agent-api-error" \
             "${WORKDIR}/agent-api-error-kind" \
@@ -5603,6 +5605,16 @@ jobs:
                 echo '<!-- autofix-gate-rejection-start -->'
                 echo "**Why it was not pushed:**"
                 echo
+                # The rejection text below was written BEFORE the stale-base
+                # auto-update: on that path its framing (pre-existing,
+                # unreachable, cured by a base update) is already stale — the
+                # base HAS been updated, and the next round re-measures and
+                # may charge the round. Say so, or the retry agent is steered
+                # toward no-action on the one round designed to re-measure.
+                if [[ "${STALE_BASE_RETRY:-false}" == 'true' ]]; then
+                  echo "_Note: the base has since been auto-updated; the verdict below predates that update, and the next round's re-measurement may charge the round._"
+                  echo
+                fi
                 # reject_fix sizes its own document: the evidence tail is
                 # dynamic (budget 3300 minus the preamble, floored at 500),
                 # so the finished file tops out ≈3.3 KB. 3900 is headroom,
