@@ -58,6 +58,12 @@ describe('Agent Plugins v1 manifest', () => {
     expect(getAgentPluginSchemaStatus(pluginRoot)).toBe('unrelated');
   });
 
+  it('does not read a non-regular root manifest', () => {
+    fs.mkdirSync(path.join(pluginRoot, 'plugin.json'));
+
+    expect(getAgentPluginSchemaStatus(pluginRoot)).toBe('unrelated');
+  });
+
   it('rejects invalid portable fields', () => {
     writeManifest({
       $schema: AGENT_PLUGIN_SCHEMA,

@@ -50,7 +50,9 @@ export async function convertCompatibleExtension(
   let newExtensionDir = extensionDir;
   let originSource: ExtensionOriginSource = 'QwenCode';
   let externalContent = false;
-  const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
+  const agentPluginStatus = pluginName
+    ? 'unrelated'
+    : getAgentPluginSchemaStatus(extensionDir);
   const configFilePath = path.join(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],

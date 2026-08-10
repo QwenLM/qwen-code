@@ -2833,7 +2833,10 @@ export async function copyExtension(
   destination: string,
   options: { skipSymlinks?: boolean } = {},
 ): Promise<void> {
-  await fs.promises.cp(source, destination, {
+  const copySource = options.skipSymlinks
+    ? await fs.promises.realpath(source)
+    : source;
+  await fs.promises.cp(copySource, destination, {
     recursive: true,
     dereference: !options.skipSymlinks,
     filter: async (src: string) => {

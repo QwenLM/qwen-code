@@ -79,4 +79,68 @@ describe('Agent Plugins extension conversion', () => {
       externalContent: false,
     });
   });
+
+  it('honors an explicit marketplace selection over a root Agent Plugin manifest', async () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'root-agent-plugin',
+      }),
+    );
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'sample-marketplace',
+        owner: { name: 'Test Owner', email: 'owner@example.com' },
+        plugins: [
+          {
+            name: 'requested-plugin',
+            version: '2.0.0',
+            source: './plugin-src',
+          },
+        ],
+      }),
+    );
+    const selectedRoot = path.join(pluginRoot, 'plugin-src');
+    fs.mkdirSync(path.join(selectedRoot, '.claude-plugin'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(selectedRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'requested-plugin', version: '2.0.0' }),
+    );
+
+    const selected = await convertCompatibleExtension(
+      pluginRoot,
+      'requested-plugin',
+    );
+    expect(selected.originSource).toBe('Claude');
+    const selectedConfig = JSON.parse(
+      fs.readFileSync(
+        path.join(selected.extensionDir, 'qwen-extension.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(selectedConfig['name']).toBe('requested-plugin');
+    fs.rmSync(selected.extensionDir, { recursive: true, force: true });
+
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: `${AGENT_PLUGIN_SCHEMA_PREFIX}2.0.0/plugin.schema.json`,
+        name: 'future-root-agent-plugin',
+      }),
+    );
+    const selectedWithFutureRoot = await convertCompatibleExtension(
+      pluginRoot,
+      'requested-plugin',
+    );
+    expect(selectedWithFutureRoot.originSource).toBe('Claude');
+    fs.rmSync(selectedWithFutureRoot.extensionDir, {
+      recursive: true,
+      force: true,
+    });
+  });
 });

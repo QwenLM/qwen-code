@@ -339,6 +339,32 @@ describe('extension tests', () => {
       expect(fs.statSync(pluginData!).isDirectory()).toBe(true);
     });
 
+    it.runIf(process.platform !== 'win32')(
+      'installs an Agent Plugin through a symlinked source root',
+      async () => {
+        const sourcePath = path.join(tempWorkspaceDir, 'portable-source-real');
+        const symlinkPath = path.join(tempWorkspaceDir, 'portable-source-link');
+        createAgentPlugin(sourcePath, { name: 'symlinked-plugin' });
+        fs.symlinkSync(sourcePath, symlinkPath, 'dir');
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const installed = await manager.installExtension(
+          { type: 'local', source: symlinkPath },
+          async () => {},
+        );
+
+        expect(installed.name).toBe('symlinked-plugin');
+        expect(installed.installMetadata).toMatchObject({
+          source: symlinkPath,
+          originSource: 'AgentPlugins',
+        });
+        expect(fs.existsSync(path.join(installed.path, 'plugin.json'))).toBe(
+          true,
+        );
+      },
+    );
+
     it('preserves Agent Plugin data across update and reinstall', async () => {
       const sourcePath = path.join(tempWorkspaceDir, 'persistent-source');
       createAgentPlugin(sourcePath, {

@@ -95,6 +95,16 @@ export async function loadAgentPluginMcpServers(
   ) {
     try {
       await fs.promises.mkdir(pluginDataRoot, { recursive: true });
+      const resolvedPluginDataRoot = await fs.promises.realpath(pluginDataRoot);
+      for (const server of Object.values(servers)) {
+        if (
+          server.command &&
+          server.cwd &&
+          isPathWithin(resolvedPluginDataRoot, server.cwd)
+        ) {
+          await fs.promises.mkdir(server.cwd, { recursive: true });
+        }
+      }
     } catch (error) {
       debugLogger.warn(
         `Failed to create Agent Plugins data directory; disabling stdio MCP servers: ${error instanceof Error ? error.message : String(error)}`,

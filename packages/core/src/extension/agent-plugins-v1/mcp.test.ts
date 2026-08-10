@@ -70,17 +70,14 @@ describe('Agent Plugins v1 MCP', () => {
     expect(Object.keys(servers)).toEqual(['local', 'remote']);
     expect(servers['local']).toMatchObject({
       command: path.join(resolvedPluginRoot, 'bin', 'server'),
-      args: [
-        path.join(resolvedPluginRoot, 'input'),
-        path.join(resolvedDataRoot, 'state'),
-      ],
+      args: [`${resolvedPluginRoot}/input`, `${resolvedDataRoot}/state`],
       cwd: path.join(resolvedPluginRoot, 'work'),
       agentPluginV1: true,
     });
     expect(servers['local']?.env).toMatchObject({
       PLUGIN_ROOT: resolvedPluginRoot,
       PLUGIN_DATA: resolvedDataRoot,
-      CACHE: path.join(resolvedDataRoot, 'cache'),
+      CACHE: `${resolvedDataRoot}/cache`,
     });
     expect(servers['remote']).toEqual({
       httpUrl: 'https://example.com/mcp',
@@ -88,6 +85,26 @@ describe('Agent Plugins v1 MCP', () => {
       agentPluginV1: true,
     });
     expect(fs.statSync(pluginDataRoot).isDirectory()).toBe(true);
+  });
+
+  it('creates stdio cwd directories inside PLUGIN_DATA', async () => {
+    writeMcp({
+      local: {
+        type: 'stdio',
+        command: './bin/server',
+        cwd: '${PLUGIN_DATA}/work',
+      },
+    });
+
+    const server = (
+      await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot, {
+        createDataDir: true,
+      })
+    )['local'];
+
+    expect(server).toBeDefined();
+    expect(fs.statSync(server!.cwd!).isDirectory()).toBe(true);
+    expect(() => validateAgentPluginStdioRuntimePaths(server!)).not.toThrow();
   });
 
   it('disables all MCP on a top-level error', async () => {

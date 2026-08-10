@@ -56,6 +56,7 @@ export function getAgentPluginSchemaStatus(
 
   let value: unknown;
   try {
+    if (!fs.statSync(resolvedManifestPath).isFile()) return 'unrelated';
     value = JSON.parse(
       fs.readFileSync(resolvedManifestPath, 'utf8'),
     ) as unknown;
