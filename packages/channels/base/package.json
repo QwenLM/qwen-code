@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-base",
-  "version": "0.21.8",
+  "version": "0.21.8-nightly.20260810.55e20db328",
   "description": "Base channel infrastructure for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
