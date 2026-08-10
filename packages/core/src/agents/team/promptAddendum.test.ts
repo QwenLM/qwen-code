@@ -30,6 +30,7 @@ describe('buildTeammatePromptAddendum', () => {
       readOnly: true,
     });
 
+    expect(prompt).toContain('MARK COMPLETE');
     expect(prompt.indexOf('MARK COMPLETE')).toBeLessThan(
       prompt.indexOf('REPORT RESULTS'),
     );

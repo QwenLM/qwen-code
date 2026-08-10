@@ -1235,7 +1235,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
       }
       if (
-        params.name !== undefined &&
+        params.name &&
         params.working_dir === undefined &&
         !isTeammate() &&
         isTopLevelSession() &&

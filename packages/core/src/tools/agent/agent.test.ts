@@ -1109,6 +1109,16 @@ describe('AgentTool', () => {
       ).toBeNull();
     });
 
+    it('accepts worktree isolation with an empty name placeholder', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: '',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
     it('rejects isolation values other than "worktree"', () => {
       expect(
         agentTool.validateToolParams({
