@@ -778,12 +778,15 @@ function setupAcpTest(
           ],
         });
         expect(promptResult).toBeDefined();
-      } catch (_e) {
+      } catch (e) {
         if (stderr.length) {
           console.error('Agent stderr:', stderr.join(''));
         }
-        // Timeout is acceptable — LLM behavior is non-deterministic.
-        // Still proceed to verify whatever notifications were received.
+        // Only timeouts are acceptable — LLM behavior is non-deterministic.
+        // JSON-RPC errors indicate a real problem and must be surfaced.
+        if (!(e instanceof Error) || !e.message.includes('timed out')) {
+          throw e;
+        }
       }
 
       // Give time for all notifications to be processed
