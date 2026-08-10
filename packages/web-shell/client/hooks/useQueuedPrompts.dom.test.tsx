@@ -574,6 +574,35 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(editor.restoreImages).toHaveBeenCalledWith(images);
   });
 
+  it('does not duplicate attachments when restored text is already present', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    vi.mocked(editor.getText).mockReturnValue('describe');
+    const images = [{ data: 'cG5n', media_type: 'image/png' }];
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: 'describe',
+        reference: { id: 'file:describe', kind: 'file', value: 'describe' },
+      },
+    ];
+
+    act(() =>
+      latest.enqueuePrompt('describe', images, undefined, inputAnnotations),
+    );
+    await act(async () => {
+      pendingSubmit.reject(new DaemonHttpError(413, undefined, 'Too large'));
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(editor.restoreImages).not.toHaveBeenCalled();
+    expect(editor.restoreInputAnnotations).not.toHaveBeenCalled();
+  });
+
   it('restores an uncertain local payload only after an explicit action', async () => {
     const { actions, pendingSubmit } = createActions();
     const { editor, reportError } = mount('responding', actions);

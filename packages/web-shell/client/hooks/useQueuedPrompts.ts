@@ -380,15 +380,22 @@ export function useQueuedPrompts({
         .map((prompt) => prompt.text)
         .filter(Boolean)
         .join('\n');
+      let textWasRestored = false;
       if (restoredText) {
         const nextText = mergeRestoredPromptText(currentText, restoredText);
-        if (nextText !== currentText) editor.setText(nextText);
+        if (nextText !== currentText) {
+          editor.setText(nextText);
+          textWasRestored = true;
+        }
       }
-      const images = restorable.flatMap((prompt) => prompt.images ?? []);
+      const attachmentPrompts = restorable.filter(
+        (prompt) => !prompt.text || textWasRestored,
+      );
+      const images = attachmentPrompts.flatMap((prompt) => prompt.images ?? []);
       if (images.length > 0) editor.restoreImages(images);
       let annotationOffset = 0;
       const inputAnnotations: DaemonInputAnnotation[] = [];
-      for (const prompt of restorable) {
+      for (const prompt of attachmentPrompts) {
         if (!prompt.text) continue;
         for (const annotation of prompt.inputAnnotations ?? []) {
           inputAnnotations.push({
