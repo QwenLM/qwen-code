@@ -462,6 +462,16 @@ describe('AskUserQuestion accessibility', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(container!.querySelector('input')).toBe(input);
     expect(onConfirm).not.toHaveBeenCalled();
+
+    const keyCodeEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(keyCodeEvent, 'keyCode', { value: 229 });
+    act(() => input.dispatchEvent(keyCodeEvent));
+    expect(keyCodeEvent.defaultPrevented).toBe(false);
+    expect(container!.querySelector('input')).toBe(input);
   });
 
   it('does not apply option shortcuts when focus is on an action button', () => {
@@ -670,6 +680,24 @@ describe('AskUserQuestion multiple questions', () => {
       'Enter confirm · Esc stop editing',
     );
   });
+
+  it('confirms a custom answer with Enter and advances', () => {
+    render(undefined, multipleQuestionsRequest);
+    act(() => optionButtons()[2]!.click());
+    const input = container!.querySelector<HTMLInputElement>('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'Purple');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    pressKey(input, 'Enter');
+
+    expect(container!.textContent).toContain('Pick a size');
+    expect(document.activeElement).toBe(optionButtons()[0]);
+  });
 });
 
 describe('AskUserQuestion multi-select', () => {
@@ -733,6 +761,10 @@ describe('AskUserQuestion multi-select', () => {
     pressKey(first, 'Enter');
 
     expect(container!.textContent).toContain('Pick a color');
-    expect(first.getAttribute('aria-pressed')).toBe('true');
+    const previous = Array.from(
+      container!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'previous')!;
+    act(() => previous.click());
+    expect(optionButtons()[0]!.getAttribute('aria-pressed')).toBe('true');
   });
 });
