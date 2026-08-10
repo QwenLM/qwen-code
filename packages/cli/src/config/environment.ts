@@ -238,18 +238,26 @@ export function findEnvFiles(
   } catch {
     // Match loadSettings(): use the resolved path when realpath is unavailable.
   }
-  const isTrusted =
-    workspaceTrusted ??
-    isWorkspaceTrusted(settings, undefined, realStartDir).isTrusted;
-
   const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
   const found: string[] = [];
   const seen = new Set<string>();
 
-  const canUseEnvFile = (filePath: string): boolean =>
-    isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
+  const canUseEnvFile = (filePath: string): boolean => {
+    const normalized = path.normalize(filePath);
+    if (userLevelPaths.has(normalized)) return true;
+    const dirPath = path.dirname(normalized);
+    const workspaceDir =
+      path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
+        ? path.dirname(dirPath)
+        : dirPath;
+    const trusted =
+      workspaceTrusted !== undefined && workspaceDir === realStartDir
+        ? workspaceTrusted
+        : isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted;
+    return trusted !== false;
+  };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
   // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.

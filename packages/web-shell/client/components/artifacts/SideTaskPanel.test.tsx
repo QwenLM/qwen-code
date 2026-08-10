@@ -38,7 +38,11 @@ const {
     },
   ),
   transcript: {
-    blocks: [] as Array<{ kind: string }>,
+    blocks: [] as Array<{
+      kind: string;
+      text?: string;
+      images?: Array<{ data: string; mimeType: string }>;
+    }>,
     hasMore: false,
     loading: false,
     capacityReached: false,
@@ -307,6 +311,29 @@ it('names a restored empty side task from its first prompt', async () => {
     'side-task:side-session-1',
     'Investigate restored task',
     true,
+  );
+});
+
+it('keeps first-text naming available after an image-only user prompt', () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  transcript.blocks = [
+    {
+      kind: 'user',
+      images: [{ data: 'Ym1w', mimeType: 'image/bmp' }],
+    },
+  ];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  act(() => {
+    renderSideTask();
+  });
+
+  expect(latestChatPaneProps.current?.['onFirstPromptAdmitted']).toEqual(
+    expect.any(Function),
   );
 });
 
