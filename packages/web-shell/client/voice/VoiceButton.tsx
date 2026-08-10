@@ -316,7 +316,9 @@ export function VoiceButton({
     if (voiceGate.mode === 'hold') {
       const ignore = event.detail !== 0 && ignoreNextClickRef.current;
       ignoreNextClickRef.current = false;
-      if (ignore) return;
+      if (ignore || (event.detail !== 0 && !isRecording && !isConnecting)) {
+        return;
+      }
     }
     if (isRecording) {
       stop();

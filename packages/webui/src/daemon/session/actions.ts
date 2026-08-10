@@ -257,6 +257,7 @@ export function createDaemonSessionActions({
                     return {
                       ...getConnectionAfterSessionClear(current, sessionId),
                       status: 'disconnected',
+                      sessionId: undefined,
                     };
                   });
                 }
