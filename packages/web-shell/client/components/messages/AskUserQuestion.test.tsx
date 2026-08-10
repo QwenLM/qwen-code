@@ -147,12 +147,16 @@ function pressKey(
   target: Element,
   key: string,
   init: Omit<KeyboardEventInit, 'key' | 'bubbles'> = {},
-): void {
-  act(() => {
-    target.dispatchEvent(
-      new KeyboardEvent('keydown', { key, bubbles: true, ...init }),
-    );
+): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', {
+    key,
+    bubbles: true,
+    ...init,
   });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
 }
 
 function deferred<T>(): {
@@ -664,8 +668,12 @@ describe('AskUserQuestion multiple questions', () => {
   it('does not submit incomplete answers with Command/Ctrl+Enter', () => {
     render(undefined, multipleQuestionsRequest);
 
-    pressKey(optionButtons()[0]!, 'Enter', { metaKey: true });
+    const event = pressKey(optionButtons()[0]!, 'Enter', {
+      metaKey: true,
+      cancelable: true,
+    });
 
+    expect(event.defaultPrevented).toBe(true);
     expect(onConfirm).not.toHaveBeenCalled();
   });
 

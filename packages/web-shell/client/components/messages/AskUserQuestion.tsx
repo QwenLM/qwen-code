@@ -429,8 +429,8 @@ export function AskUserQuestion({
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
         if (canSubmit && !submitting) {
-          e.preventDefault();
           handleSubmit();
         }
         return;
