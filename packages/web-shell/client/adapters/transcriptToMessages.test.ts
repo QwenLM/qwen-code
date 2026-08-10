@@ -1272,6 +1272,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         id: 'debug-1',
         kind: 'debug',
+        debugReason: 'unrecognized_event',
         text:
           'language_changed (unrecognized daemon event): ' +
           '{"sessionId":"dd699cc0-6ef7-4882-92d9-1076ac5b87e9",' +
@@ -1283,6 +1284,273 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toEqual([]);
+  });
+
+  it('filters legacy unrecognized-event blocks that carry no debugReason', () => {
+    // `WebShellTranscript` takes already-projected blocks from its caller, so
+    // blocks projected or persisted by an SDK older than `debugReason` still
+    // arrive with no reason. They must keep being filtered — and not only the
+    // two event types that used to be suppressed by name.
+    const legacy = (id: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy(
+        'legacy-1',
+        'language_changed (unrecognized daemon event): {"language":"en"}',
+      ),
+      legacy(
+        'legacy-2',
+        'session_cwd_changed (unrecognized daemon event): {"cwd":"/work"}',
+      ),
+      legacy(
+        'legacy-3',
+        'some_future_event (unrecognized daemon event): {"a":1}',
+      ),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('filters unrecognized session_update kinds the daemon adds later', () => {
+    // The event kind here is deliberately one no normalizer case handles: the
+    // filter must key off `debugReason`, not a list of known-noisy prefixes.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-2',
+        kind: 'debug',
+        debugReason: 'unrecognized_session_update',
+        text: 'some_future_kind: {"payload":{"nested":"json"}}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('keys the filter off the unrecognized_ category prefix, not the enum', () => {
+    // A newer SDK may stamp reasons this build's `DaemonUiDebugReason` does
+    // not list; the category prefix is the contract. `unrecognized_*` noise
+    // hides, `malformed_*` defect signals keep rendering.
+    const block = (id: string, debugReason: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        debugReason,
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      block(
+        'future-unrecognized',
+        'unrecognized_tool_frame',
+        'tool_frame: {"frameId":"f1"}',
+      ),
+      block(
+        'future-malformed',
+        'malformed_tool_frame',
+        'tool_frame: broken frame payload',
+      ),
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual(['future-malformed']);
+  });
+
+  it('keeps malformed-payload debug blocks visible', () => {
+    // A frame the client *does* know about arrived broken — that is a real
+    // defect signal, not forward-compatibility noise.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-3',
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+        text: 'memory_changed: malformed memory_changed payload',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'debug-3',
+        role: 'system',
+        content: 'memory_changed: malformed memory_changed payload',
+        variant: 'info',
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('filters legacy usage_update and a2ui blocks that carry no debugReason', () => {
+    // The original spam report. #8790 stopped the SDK inserting new
+    // `usage_update` blocks, but a transcript persisted or projected before
+    // that still holds them, and `WebShellTranscript` renders whatever its
+    // caller passes — so without this the reported spam returns on upgrade.
+    const legacy = (id: string, text: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy('legacy-usage', 'usage_update: {"used":46351,"size":1000000}'),
+      legacy('legacy-a2ui', 'a2ui: {"surfaceId":"s1","commands":[]}'),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('filters legacy projections whose payload is not an object', () => {
+    // `DaemonEvent.data` is `unknown`, and `stringifyJson` returns strings
+    // verbatim, primitives as `42` / `true` / `null`, and `''` for undefined.
+    // Keying the match on a leading `{` let all of those through.
+    const legacy = (id: string, payload: string) =>
+      ({
+        id,
+        kind: 'debug',
+        text: `some_future_event (unrecognized daemon event): ${payload}`,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      legacy('obj', '{"a":1}'),
+      legacy('arr', '[1,2]'),
+      legacy('str', 'plain text payload'),
+      legacy('num', '42'),
+      legacy('bool', 'true'),
+      legacy('null', 'null'),
+      legacy('empty', ''),
+    ]);
+
+    expect(messages).toEqual([]);
+  });
+
+  it('only matches the legacy shape, never a quoted marker or a status block', () => {
+    // The text match is a compatibility shim, so it must be scoped to `debug`
+    // blocks and anchored to the whole projection. Matching the marker as a
+    // substring would hide any block that merely relays it.
+    const block = (
+      id: string,
+      kind: string,
+      text: string,
+      extra: Record<string, unknown> = {},
+    ) =>
+      ({
+        id,
+        kind,
+        text,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        ...extra,
+      }) as DaemonTranscriptBlock;
+
+    const messages = transcriptBlocksToDaemonMessages([
+      // A status line is real content even when it quotes the marker.
+      block(
+        'status-1',
+        'status',
+        'peer reported (unrecognized daemon event): malformed frame',
+      ),
+      // A legacy malformed payload relaying an upstream message.
+      block(
+        'legacy-malformed',
+        'debug',
+        'permission_request: {"message":"peer said (unrecognized daemon event): x"}',
+      ),
+      // A client-dispatched summary that happens to quote it.
+      block(
+        'client-1',
+        'debug',
+        'Model switch failed: upstream said (unrecognized daemon event): x',
+        { source: 'model_switch_summary' },
+      ),
+      // A status block whose text starts with a suppressed session-update kind.
+      block('status-2', 'status', 'usage_update: {"used":1}'),
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual([
+      'status-1',
+      'legacy-malformed',
+      'client-1',
+      'status-2',
+    ]);
+  });
+
+  it('does not let the legacy prefixes swallow prose or classified blocks', () => {
+    // The prefix list is a compatibility shim for a specific projection
+    // shape, not a content filter: it must not hide a block the normalizer
+    // explicitly classified, nor text that merely starts with the word.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'malformed-1',
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+        text: 'usage_update: {"used":1}',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+      {
+        id: 'prose-1',
+        kind: 'debug',
+        text: 'usage_update: rejected by the proxy',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages.map((m) => m.id)).toEqual(['malformed-1', 'prose-1']);
+  });
+
+  it('keeps client-dispatched debug blocks that carry no debugReason', () => {
+    // Web Shell dispatches its own `debug` event for the model-switch summary.
+    // Only the normalizer stamps `debugReason`, so client-side debug blocks
+    // must not be swept up by the unrecognized-event filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'debug-4',
+        kind: 'debug',
+        text: 'Model switched to qwen3-coder-plus',
+        source: 'model_switch_summary',
+        data: { modelId: 'qwen3-coder-plus' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      } as DaemonTranscriptBlock,
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'debug-4',
+        role: 'system',
+        content: 'Model switched to qwen3-coder-plus',
+        variant: 'info',
+        timestamp: 1,
+        source: 'model_switch_summary',
+        data: { modelId: 'qwen3-coder-plus' },
+      },
+    ]);
   });
 
   it('filters SDK model switch status noise', () => {
