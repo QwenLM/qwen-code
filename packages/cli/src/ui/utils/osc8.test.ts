@@ -305,6 +305,14 @@ describe('osc8 helpers', () => {
       expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
     });
 
+    it.each([
+      'https://en.wikipedia.org/wiki/Mexico–United_States_border',
+      'https://example.com/it’s',
+      'https://example.com/thing…',
+    ])('keeps typographic punctuation inside %s', (url) => {
+      expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
+    });
+
     it('stops before common CJK punctuation', () => {
       expect(
         new RegExp(BARE_URL_PATTERN).exec(
