@@ -6197,30 +6197,28 @@ export class Session implements SessionContext {
                     nextMessage.parts ?? [],
                     ac.signal,
                   );
-                if (!sendResult.responseStream) {
+                const responseStream = sendResult.responseStream;
+                const preserveFullMessage =
+                  !responseStream && sendResult.stopReason === 'cancelled';
+                if (!responseStream) {
                   this.todoStopGuard.suspend();
-                  const preserveFullMessage =
-                    sendResult.stopReason === 'cancelled';
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
                     preserveFullMessage,
                   );
-                  if (preserveFullMessage && turnCount === 1) {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordCronPrompt([{ text: modelText }], echoText);
-                  }
                   if (sendResult.stopReason === 'max_tokens') {
                     this.#stopCronAfterTokenLimit();
                   }
-                  return;
                 }
-                if (turnCount === 1) {
+                if (
+                  turnCount === 1 &&
+                  (responseStream || preserveFullMessage)
+                ) {
                   this.config
                     .getChatRecordingService()
                     ?.recordCronPrompt([{ text: modelText }], echoText);
                 }
-                const responseStream = sendResult.responseStream;
+                if (!responseStream) return;
                 const channelDeliveryResponseBlock =
                   beginChannelDeliveryResponseBlock(channelDeliveryCapture);
                 const channelDeliveryCheckpoint =
