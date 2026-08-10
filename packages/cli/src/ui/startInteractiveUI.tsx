@@ -169,10 +169,10 @@ export async function startInteractiveUI(
   // rows than Ink's stale erase count (issue #8557); amplify the clear to the
   // reflowed height. Installed before render() so the resize listener runs
   // ahead of Ink's resized().
-  const restoreResizeReflow =
+  const resizeReflow =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
-      : () => {};
+      : { restore: () => {}, repaint: () => {} };
 
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
@@ -205,6 +205,7 @@ export async function startInteractiveUI(
                         initializationResult={initializationResult}
                         initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
+                        repaintViewport={resizeReflow.repaint}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -324,7 +325,7 @@ export async function startInteractiveUI(
       process.stdout.setMaxListeners(stdoutMaxListeners);
     }
     restoreSynchronizedOutput();
-    restoreResizeReflow();
+    resizeReflow.restore();
     restoreTerminalRedrawOptimizer();
     // If the ErrorBoundary caught a rendering error, echo it to stderr
     // now that we are back on the main screen buffer. In VP mode the

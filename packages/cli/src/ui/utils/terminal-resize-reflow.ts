@@ -92,6 +92,16 @@ export interface ResizeReflowOptions {
   virtualViewport?: boolean;
 }
 
+export interface TerminalResizeReflowHandle {
+  restore: () => void;
+  /**
+   * Clear the viewport and replay the last frame that reached the terminal.
+   * Ink skips redraws whose output is unchanged, so a wake/SIGCONT repaint
+   * cannot rely on React alone after an external clear (review #8831).
+   */
+  repaint: () => void;
+}
+
 /**
  * Corrects Ink's shrink-time clear on reflow-capable terminals (issue #8557).
  *
@@ -111,13 +121,14 @@ export interface ResizeReflowOptions {
 export function installTerminalResizeReflow(
   stdout: NodeJS.WriteStream,
   options: ResizeReflowOptions = {},
-): () => void {
+): TerminalResizeReflowHandle {
   if (process.env['QWEN_CODE_LEGACY_RESIZE_ERASE'] === '1') {
-    return () => {};
+    return { restore: () => {}, repaint: () => {} };
   }
   const isVP = options.virtualViewport ?? false;
   let lastWidth = stdout.columns ?? 0;
   let lineWidths: number[] = [];
+  let lastFrameContent = '';
   let pendingAmplify = 0;
   // After a shrink, every redraw (not just Ink's clear) erases with a stale
   // row count against the reflowed on-screen frame, re-stranding the frame
@@ -163,11 +174,13 @@ export function installTerminalResizeReflow(
       ERASE_LINES_PATTERN.lastIndex = 0;
       const match = ERASE_LINES_PATTERN.exec(chunk);
       if (match) {
-        const widths = frameLineWidths(
-          chunk.slice(match.index + match[0].length),
-        );
+        const content = chunk.slice(match.index + match[0].length);
+        const widths = frameLineWidths(content);
         debugLogger.debug('match', { modelLines: widths?.length ?? 0 });
-        if (widths) lineWidths = widths;
+        if (widths) {
+          lineWidths = widths;
+          lastFrameContent = content;
+        }
         if (isVP && Date.now() < clearUntil) {
           debugLogger.debug('clear-viewport');
           chunk =
@@ -197,10 +210,15 @@ export function installTerminalResizeReflow(
   } as typeof stdout.write;
   stdout.write = reflowWrite;
 
-  return () => {
-    if (stdout.write === reflowWrite) {
-      stdout.write = originalWrite;
-    }
-    stdout.off('resize', onResize);
+  return {
+    restore: () => {
+      if (stdout.write === reflowWrite) {
+        stdout.write = originalWrite;
+      }
+      stdout.off('resize', onResize);
+    },
+    repaint: () => {
+      originalWrite.call(stdout, CLEAR_VIEWPORT + lastFrameContent);
+    },
   };
 }

@@ -624,6 +624,12 @@ interface AppContainerProps {
   initializationResult: InitializationResult;
   initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
+  /**
+   * VP wake/SIGCONT repaint: clear the viewport and replay the last frame
+   * (Ink skips unchanged-output redraws, so a bare clear would blank the
+   * screen). Falls back to a viewport clear when absent.
+   */
+  repaintViewport?: () => void;
 }
 
 /**
@@ -639,8 +645,13 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult, initialUseVirtualViewport } =
-    props;
+  const {
+    settings,
+    config,
+    initializationResult,
+    initialUseVirtualViewport,
+    repaintViewport,
+  } = props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
@@ -1287,15 +1298,17 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
-  // region via ink 7 native overflow clipping. Writing clearTerminal /
-  // cursorTo+eraseDown would be a wasted flash and would also corrupt the
-  // in-app scroll position. The remount-key bump is also a near-no-op for
-  // VP: nothing in the VP render path is keyed by historyRemountKey, so
-  // keeping the bump is harmless because the startup-scoped VP decision
-  // is intentionally restart-only to match Ink's alternateScreen lifetime.
-  // The visible refresh in VP mode comes for free from the React tree
-  // re-reading `mergedHistory` / `allVirtualItems` on whatever state
-  // change triggered refreshStatic (Ctrl+O, model change, etc.).
+  // region via ink 7 native overflow clipping, and the remount-key bump is a
+  // near-no-op for VP (nothing in the VP render path is keyed by
+  // historyRemountKey; the startup-scoped VP decision is intentionally
+  // restart-only to match Ink's alternateScreen lifetime). Ordinary
+  // refreshStatic callers (Ctrl+O, model change, ...) get their visible
+  // refresh for free from the state change that triggered them. The wake /
+  // SIGCONT path is different: the terminal buffer may be stale or
+  // rearranged, and Ink both erases with a stale relative count and skips
+  // redraws whose output is unchanged — so VP repaints there by replaying
+  // the last frame over a clean viewport (repaintViewport), viewport-only
+  // because clearTerminal's 3J would destroy scrollback / Warp history.
   const [useTerminalBuffer] = useState(
     () =>
       initialUseVirtualViewport ??
@@ -1310,17 +1323,10 @@ export const AppContainer = (props: AppContainerProps) => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
     } else {
-      // VP never renders <Static>, so the remount alone repaints nothing;
-      // after wake/SIGCONT the terminal buffer may be stale or rearranged and
-      // Ink's relative erase (internal previous-frame height) lands wrong,
-      // stranding frame-top residue and jumping the frame height (flicker).
-      // Blank the alternate-screen viewport so the remount-driven repaint
-      // starts clean. Viewport-only: clearTerminal's 3J would destroy
-      // scrollback / Warp block history.
-      stdout.write(ansiEscapes.clearViewport);
+      (repaintViewport ?? (() => stdout.write(ansiEscapes.clearViewport)))();
     }
     remountStaticHistory();
-  }, [useTerminalBuffer, remountStaticHistory, stdout]);
+  }, [useTerminalBuffer, remountStaticHistory, repaintViewport, stdout]);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly

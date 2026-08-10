@@ -40,7 +40,7 @@ class FakeStdout extends EventEmitter {
 describe('installTerminalResizeReflow', () => {
   it('amplifies the post-shrink erase to the reflowed frame height', () => {
     const stdout = new FakeStdout();
-    const restore = installTerminalResizeReflow(
+    const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
     );
     try {
@@ -57,7 +57,7 @@ describe('installTerminalResizeReflow', () => {
 
   it('VP mode replaces the stale clear with a viewport clear', () => {
     const stdout = new FakeStdout();
-    const restore = installTerminalResizeReflow(
+    const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
       { virtualViewport: true },
     );
@@ -74,7 +74,7 @@ describe('installTerminalResizeReflow', () => {
 
   it('leaves grows and pre-shrink writes untouched', () => {
     const stdout = new FakeStdout();
-    const restore = installTerminalResizeReflow(
+    const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
     );
     try {
@@ -90,7 +90,7 @@ describe('installTerminalResizeReflow', () => {
 
   it('does not amplify Static-style appends (no erase prefix)', () => {
     const stdout = new FakeStdout();
-    const restore = installTerminalResizeReflow(
+    const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
     );
     try {
@@ -106,9 +106,25 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
+  it('repaint replays the last frame over a clean viewport', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.written.length = 0;
+      repaint();
+      expect(stdout.written).toEqual([`${ESC}2J${ESC}H` + frame(60, 10)]);
+    } finally {
+      restore();
+    }
+  });
+
   it('passes writes through untouched after restore', () => {
     const stdout = new FakeStdout();
-    const restore = installTerminalResizeReflow(
+    const { restore } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
     );
     restore();
