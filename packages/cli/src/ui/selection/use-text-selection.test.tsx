@@ -169,6 +169,26 @@ describe('TextSelectionController', () => {
     return vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
   };
 
+  const mountWithFooter = (
+    getFooterRect: () => {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    } | null,
+  ): ((event: MouseEvent) => void) => {
+    render(
+      <TextSelectionController
+        isActive
+        getViewportRect={() => viewportRect}
+        getFooterRect={getFooterRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    return vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+  };
+
   const selectHello = (handler: (event: MouseEvent) => void): void => {
     handler(makeEvent('left-press', 1));
     handler(makeEvent('move', 5));
@@ -282,5 +302,114 @@ describe('TextSelectionController', () => {
     listener!(makeTwoLineFrame('hello', 'footer'));
 
     expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  describe('footer selection', () => {
+    it('starts and copies a selection pressed inside the footer rect', () => {
+      frame = makeTwoLineFrame('prompt', 'hello');
+      viewportRect = { x: 0, y: 0, width: 6, height: 1 };
+      const footerRect = { x: 0, y: 1, width: 5, height: 1 };
+      const handler = mountWithFooter(() => footerRect);
+
+      handler(makeEvent('left-press', 1, 2));
+      handler(makeEvent('move', 5, 2));
+      handler(makeEvent('left-release', 5, 2));
+
+      expect(setSelection).toHaveBeenLastCalledWith({
+        sx: 0,
+        sy: 1,
+        ex: 4,
+        ey: 1,
+      });
+      expect(copyToClipboard).toHaveBeenCalledWith('hello');
+    });
+
+    it('clears the selection when a press lands outside both the history and footer rects', () => {
+      frame = makeTwoLineFrame('prompt', 'hello');
+      viewportRect = { x: 0, y: 0, width: 6, height: 1 };
+      const footerRect = { x: 0, y: 1, width: 5, height: 1 };
+      const handler = mountWithFooter(() => footerRect);
+      handler(makeEvent('left-press', 1, 2));
+      handler(makeEvent('left-release', 5, 2));
+      setSelection.mockClear();
+
+      // Row 3 is outside both the history (row 1) and footer (row 2) rects.
+      handler(makeEvent('left-press', 1, 3));
+
+      expect(setSelection).toHaveBeenCalledWith(null);
+    });
+
+    it('leaves a history-region selection unaffected by footer geometry', () => {
+      frame = makeTwoLineFrame('hello', 'prompt');
+      viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+      const footerRect = { x: 0, y: 1, width: 6, height: 1 };
+      const handler = mountWithFooter(() => footerRect);
+
+      selectHello(handler);
+
+      expect(setSelection).toHaveBeenLastCalledWith({
+        sx: 0,
+        sy: 0,
+        ex: 4,
+        ey: 0,
+      });
+      expect(copyToClipboard).toHaveBeenCalledWith('hello');
+    });
+
+    it('does not select when the footer is not mounted (getFooterRect returns null)', () => {
+      frame = makeTwoLineFrame('prompt', 'hello');
+      viewportRect = { x: 0, y: 0, width: 6, height: 1 };
+      const handler = mountWithFooter(() => null);
+
+      handler(makeEvent('left-press', 1, 2));
+
+      expect(setSelection).not.toHaveBeenCalled();
+    });
+
+    it('clears a footer selection when footer content changes', () => {
+      frame = makeTwoLineFrame('prompt', 'hello');
+      viewportRect = { x: 0, y: 0, width: 6, height: 1 };
+      const footerRect = { x: 0, y: 1, width: 5, height: 1 };
+      const handler = mountWithFooter(() => footerRect);
+      handler(makeEvent('left-press', 1, 2));
+      handler(makeEvent('move', 5, 2));
+      handler(makeEvent('left-release', 5, 2));
+      setSelection.mockClear();
+
+      listener!(makeTwoLineFrame('prompt', 'hullo'));
+
+      expect(setSelection).toHaveBeenCalledWith(null);
+    });
+
+    it('clears a footer selection when the footer rect resizes', () => {
+      frame = makeTwoLineFrame('prompt', 'hello');
+      viewportRect = { x: 0, y: 0, width: 6, height: 1 };
+      let footerRect = { x: 0, y: 1, width: 5, height: 1 };
+      const handler = mountWithFooter(() => footerRect);
+      handler(makeEvent('left-press', 1, 2));
+      handler(makeEvent('move', 5, 2));
+      handler(makeEvent('left-release', 5, 2));
+      setSelection.mockClear();
+
+      footerRect = { x: 0, y: 1, width: 4, height: 1 };
+      listener!(frame);
+
+      expect(setSelection).toHaveBeenCalledWith(null);
+    });
+
+    it('keeps a footer selection across its own highlight repaint', () => {
+      frame = makeTwoLineFrame('prompt', 'hello');
+      viewportRect = { x: 0, y: 0, width: 6, height: 1 };
+      const footerRect = { x: 0, y: 1, width: 5, height: 1 };
+      const handler = mountWithFooter(() => footerRect);
+      handler(makeEvent('left-press', 1, 2));
+      handler(makeEvent('move', 5, 2));
+      handler(makeEvent('left-release', 5, 2));
+      setSelection.mockClear();
+
+      listener!(makeTwoLineFrame('prompt', 'hello'));
+
+      expect(setSelection).not.toHaveBeenCalled();
+    });
   });
 });

@@ -17,6 +17,7 @@ import { wordSpanAt, lineSpanAt } from './selection-span.js';
 import {
   terminalToGrid,
   pointInViewport,
+  pointInAnyViewport,
   clampToViewport,
   type ViewportRect,
 } from './selection-coords.js';
@@ -66,6 +67,16 @@ export interface TextSelectionControllerProps {
   isActive: boolean;
   /** Reads from the history viewport; called at event time (may be null early). */
   getViewportRect: () => ViewportRect | null;
+  /**
+   * Reads from the read-only footer chrome (statusline, hints, static
+   * footer metadata), if currently mounted. Optional so existing callers
+   * (and tests) that only care about the history viewport keep working
+   * unchanged; defaults to a no-op returning `null`. Kept as a separate
+   * rect rather than merged into `getViewportRect`'s bounding box so a gap
+   * between the two regions (or a width/x-offset mismatch) never becomes
+   * falsely selectable — see `pointInAnyViewport`.
+   */
+  getFooterRect?: () => ViewportRect | null;
   getScrollState: () => ScrollState;
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
 }
@@ -99,6 +110,16 @@ export function TextSelectionController(
   const baselineScrollHeightRef = useRef<number>(0);
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
   const baselineViewportRectRef = useRef<ViewportRect | null>(null);
+  // The rect (history viewport or footer) the *current* selection/drag is
+  // anchored to. A drag never spans both regions — the rect it started in
+  // is used to clamp `move`/`left-release` coordinates and as the baseline
+  // for invalidation, so cross-region drag semantics never need to be
+  // invented (see plan item 5).
+  const activeRectRef = useRef<ViewportRect | null>(null);
+  // Whether `activeRectRef` refers to the footer rect rather than the
+  // history viewport rect, so invalidation re-measures the correct region
+  // by calling the matching getter instead of inferring it from geometry.
+  const isFooterSelectionRef = useRef(false);
   const lastClickRef = useRef<ClickRecord | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
@@ -117,6 +138,8 @@ export function TextSelectionController(
       return;
     }
     selection.clear();
+    activeRectRef.current = null;
+    isFooterSelectionRef.current = false;
     getBuffer()?.setSelection(null);
   }, [getBuffer]);
 
@@ -135,7 +158,10 @@ export function TextSelectionController(
     baselineScrollTopRef.current = scrollState.scrollTop;
     baselineScrollHeightRef.current = scrollState.scrollHeight;
     baselineFrameRef.current = getBuffer()?.frame ?? null;
-    baselineViewportRectRef.current = propsRef.current.getViewportRect();
+    // Baseline the rect the active selection is anchored to (history or
+    // footer), not unconditionally the history viewport — a footer
+    // selection must invalidate on footer content/resize changes too.
+    baselineViewportRectRef.current = activeRectRef.current;
   }, [getBuffer]);
 
   const copySelection = useCallback(() => {
@@ -153,13 +179,22 @@ export function TextSelectionController(
   const mapEvent = useCallback(
     (
       event: MouseEvent,
+      /**
+       * Rect to clamp/report against. When omitted (press), the point is
+       * resolved against whichever candidate region (history or footer)
+       * contains it. When provided (move/release), the drag's own
+       * `activeRectRef` is used instead, so a pointer that strays outside
+       * both regions mid-drag still clamps to where the drag started
+       * rather than being reclassified into the other region.
+       */
+      rectOverride?: ViewportRect,
     ): {
       point: ReturnType<typeof terminalToGrid>;
       rect: ViewportRect;
+      isFooter: boolean;
     } | null => {
       const buffer = getBuffer();
-      const rect = propsRef.current.getViewportRect();
-      if (!buffer || !rect) {
+      if (!buffer) {
         return null;
       }
       const frameHeight = buffer.dimensions.height;
@@ -178,7 +213,23 @@ export function TextSelectionController(
         row[point.x - 1]?.fullWidth
           ? { ...point, x: point.x - 1 }
           : point;
-      return { point: snappedPoint, rect };
+
+      if (rectOverride) {
+        return {
+          point: snappedPoint,
+          rect: rectOverride,
+          isFooter: isFooterSelectionRef.current,
+        };
+      }
+      const footerRect = propsRef.current.getFooterRect?.() ?? null;
+      const rect = pointInAnyViewport(snappedPoint, [
+        propsRef.current.getViewportRect(),
+        footerRect,
+      ]);
+      if (!rect) {
+        return null;
+      }
+      return { point: snappedPoint, rect, isFooter: rect === footerRect };
     },
     [getBuffer, stdout],
   );
@@ -206,6 +257,8 @@ export function TextSelectionController(
           return;
         }
         const { point } = mapped;
+        activeRectRef.current = mapped.rect;
+        isFooterSelectionRef.current = mapped.isFooter;
 
         // Multi-click detection (double = word, triple = line).
         const now = Date.now();
@@ -247,13 +300,14 @@ export function TextSelectionController(
         lastClickRef.current = null;
         // A scroll under the drag invalidates coordinates in B1.
         if (
+          !isFooterSelectionRef.current &&
           propsRef.current.getScrollState().scrollTop !==
-          dragScrollTopRef.current
+            dragScrollTopRef.current
         ) {
           clearSelection();
           return;
         }
-        const mapped = mapEvent(event);
+        const mapped = mapEvent(event, activeRectRef.current ?? undefined);
         if (!mapped) {
           return;
         }
@@ -267,7 +321,7 @@ export function TextSelectionController(
         if (!selection.dragging) {
           return;
         }
-        const mapped = mapEvent(event);
+        const mapped = mapEvent(event, activeRectRef.current ?? undefined);
         if (mapped) {
           selection.extend(clampToViewport(mapped.point, mapped.rect));
         }
@@ -313,10 +367,16 @@ export function TextSelectionController(
         return;
       }
       const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
-      const viewportRect = propsRef.current.getViewportRect();
+      // Re-measure the same region (history or footer) the active selection
+      // is anchored to, so a footer selection is invalidated by footer
+      // content/resize drift too, not only by history-viewport changes.
+      const viewportRect = isFooterSelectionRef.current
+        ? (propsRef.current.getFooterRect?.() ?? null)
+        : propsRef.current.getViewportRect();
       if (
-        scrollTop !== baselineScrollTopRef.current ||
-        scrollHeight !== baselineScrollHeightRef.current ||
+        (!isFooterSelectionRef.current &&
+          (scrollTop !== baselineScrollTopRef.current ||
+            scrollHeight !== baselineScrollHeightRef.current)) ||
         !sameViewportRect(baselineViewportRectRef.current, viewportRect) ||
         !sameViewportContent(baselineFrameRef.current, frame, viewportRect)
       ) {
