@@ -220,11 +220,13 @@ export function AskUserQuestion({
       }
       const label = current.options[idx].label;
       if (isMulti) {
-        const prev = selectedMulti[currentIdx] || [];
-        const next = prev.includes(label)
-          ? prev.filter((l) => l !== label)
-          : [...prev, label];
-        setSelectedMulti({ ...selectedMulti, [currentIdx]: next });
+        setSelectedMulti((prev) => {
+          const selected = prev[currentIdx] || [];
+          const next = selected.includes(label)
+            ? selected.filter((l) => l !== label)
+            : [...selected, label];
+          return { ...prev, [currentIdx]: next };
+        });
       } else {
         const nextAnswers = { ...answers, [currentIdx]: label };
         setAnswers(nextAnswers);
@@ -236,7 +238,7 @@ export function AskUserQuestion({
         });
       }
     },
-    [current, currentIdx, isMulti, selectedMulti, answers, focusCustomInput],
+    [current, currentIdx, isMulti, answers, focusCustomInput],
   );
 
   const handleToggle = useCallback(
@@ -247,13 +249,15 @@ export function AskUserQuestion({
         return;
       }
       const label = current.options[idx].label;
-      const prev = selectedMulti[currentIdx] || [];
-      const next = prev.includes(label)
-        ? prev.filter((l) => l !== label)
-        : [...prev, label];
-      setSelectedMulti({ ...selectedMulti, [currentIdx]: next });
+      setSelectedMulti((prev) => {
+        const selected = prev[currentIdx] || [];
+        const next = selected.includes(label)
+          ? selected.filter((l) => l !== label)
+          : [...selected, label];
+        return { ...prev, [currentIdx]: next };
+      });
     },
-    [current, isMulti, selectedMulti, currentIdx, focusCustomInput],
+    [current, isMulti, currentIdx, focusCustomInput],
   );
 
   // Unified option activation for click, native Enter/Space, and digit
