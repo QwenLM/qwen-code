@@ -158,6 +158,24 @@ describe('WebBridge actions', () => {
     ).resolves.toMatchObject({ url: 'https://example.test/final' });
   });
 
+  it('accepts about:blank as a completed navigation target', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 17,
+      url: 'about:blank',
+      status: 'complete',
+      groupId: -1,
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'about:blank',
+        newTab: true,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ url: 'about:blank' });
+  });
+
   it('reports Page.navigate failures', async () => {
     cdp.send.mockResolvedValue({
       frameId: 'frame-1',
@@ -369,6 +387,17 @@ describe('WebBridge actions', () => {
     ).toBe('hello');
   });
 
+  it.each(['constructor', 'constructor+a'])(
+    'rejects inherited key name %s',
+    async (keys) => {
+      const { executeWebBridgeAction } = await loadActions();
+
+      await expect(
+        executeWebBridgeAction('send_keys', { keys, _tabId: 17 }),
+      ).rejects.toThrow('send_keys');
+    },
+  );
+
   it('creates stable snapshot refs and clicks them through DOM.resolveNode', async () => {
     cdp.send
       .mockResolvedValueOnce({
@@ -562,6 +591,25 @@ describe('WebBridge actions', () => {
       _session: 'research',
     });
 
+    expect(cdp.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('stops a session capture after the current tab changes', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    await executeWebBridgeAction('network', {
+      cmd: 'stop',
+      _tabId: 18,
+      _session: 'research',
+    });
+
+    expect(cdp.withTab).toHaveBeenLastCalledWith(17, expect.any(Function));
     expect(cdp.unsubscribe).toHaveBeenCalledOnce();
   });
 
@@ -812,6 +860,25 @@ describe('WebBridge actions', () => {
         _tabIds: [17],
       }),
     ).rejects.toThrow('no tab matching');
+  });
+
+  it.each([
+    ['https://example.test/*', 'https://example.test/inbox'],
+    ['*://*.example.test/*', 'https://app.example.test/inbox'],
+  ])('finds tabs with host pattern %s', async (url, actual) => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 17,
+      url: actual,
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('find_tab', {
+        url,
+        _session: 'research',
+        _tabIds: [17],
+      }),
+    ).resolves.toMatchObject({ tabId: 17 });
   });
 
   it('returns screenshot and PDF bytes for daemon-side persistence', async () => {

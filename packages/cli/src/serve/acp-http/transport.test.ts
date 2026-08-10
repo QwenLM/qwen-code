@@ -9033,6 +9033,22 @@ describe('ACP WebSocket transport security', () => {
     ws.close();
   });
 
+  it('does not trust WebBridge identity from another allowed extension', async () => {
+    const otherOrigin = 'chrome-extension://other-extension';
+    await startServer({
+      allowedOrigins: {
+        allowAny: false,
+        origins: new Set([extensionOrigin, otherOrigin]),
+      },
+    });
+    const ws = await wsConnect({ headers: { Origin: otherOrigin } });
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    expect(webBridgeRegistry.status().extensionConnected).toBe(false);
+    ws.close();
+  });
+
   // ── Host allowlist ──────────────────────────────────────────────────
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();

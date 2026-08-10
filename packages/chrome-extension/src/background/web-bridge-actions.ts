@@ -250,7 +250,7 @@ async function createSessionTab(
   if (tab.id === undefined) throw new Error('navigate: created tab has no id');
   try {
     await groupTab(tab.id, args);
-    const loaded = await waitForLoad(tab.id);
+    const loaded = await waitForLoad(tab.id, url);
     await withCdpTab(tab.id, async () => undefined);
     rememberTab(args, tab.id);
     return { url: loaded.url ?? url, tabId: tab.id };
@@ -531,13 +531,19 @@ async function network(args: Args): Promise<unknown> {
     return { success: true, message: 'network capture started' };
   }
   if (command === 'stop') {
-    networkCaptures.delete(key);
-    if (
-      ![...networkCaptures.values()].some(
-        (candidate) => candidate.tabId === tab.id,
-      )
-    ) {
-      await withCdpTab(tab.id, async (send) => {
+    const captures = [...networkCaptures.entries()].filter(
+      ([, capture]) => capture.session === session,
+    );
+    for (const [captureKey, capture] of captures) {
+      networkCaptures.delete(captureKey);
+      if (
+        [...networkCaptures.values()].some(
+          ({ tabId }) => tabId === capture.tabId,
+        )
+      ) {
+        continue;
+      }
+      await withCdpTab(capture.tabId, async (send) => {
         try {
           await send('Network.disable');
         } catch {
@@ -846,11 +852,18 @@ async function onCurrentTab<T>(
   return withCdpTab(tab.id, (send) => operation(send, tab.id));
 }
 
-async function waitForLoad(tabId: number): Promise<chrome.tabs.Tab> {
+async function waitForLoad(
+  tabId: number,
+  requestedUrl: string,
+): Promise<chrome.tabs.Tab> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId);
-    if (tab.status === 'complete' && tab.url && tab.url !== 'about:blank') {
+    if (
+      tab.status === 'complete' &&
+      tab.url &&
+      (tab.url !== 'about:blank' || requestedUrl === 'about:blank')
+    ) {
       return tab;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1120,7 +1133,9 @@ function parseKey(value: string, platform: string): KeySequence {
         ? platform === 'mac'
           ? MODIFIERS['cmd']
           : MODIFIERS['ctrl']
-        : MODIFIERS[normalized];
+        : Object.prototype.hasOwnProperty.call(MODIFIERS, normalized)
+          ? MODIFIERS[normalized]
+          : undefined;
     if (!modifier) throw new Error(`send_keys: "${part}" is not a modifier`);
     return modifier;
   });
@@ -1132,7 +1147,10 @@ function parseKey(value: string, platform: string): KeySequence {
 }
 
 function keySpec(value: string): KeySpec {
-  const special = SPECIAL_KEYS[value.toLowerCase()];
+  const normalized = value.toLowerCase();
+  const special = Object.prototype.hasOwnProperty.call(SPECIAL_KEYS, normalized)
+    ? SPECIAL_KEYS[normalized]
+    : undefined;
   if (special) return special;
   const functionKey = /^f(\d{1,2})$/i.exec(value);
   if (functionKey) {
@@ -1284,11 +1302,16 @@ function tabIds(args: Args): number[] {
 function matchesHost(actual: string | undefined, requested: string): boolean {
   if (!actual) return false;
   try {
-    const expectedHost = requested.includes('*')
-      ? requested.replace(/^\*:\/\//, '').replace(/\/\*$/, '')
-      : new URL(requested.includes('://') ? requested : `https://${requested}`)
-          .hostname;
-    return new URL(actual).hostname === expectedHost;
+    const expectedHost = new URL(
+      requested.includes('://')
+        ? requested.replace(/^\*:\/\//, 'https://')
+        : `https://${requested}`,
+    ).hostname;
+    const hostname = new URL(actual).hostname;
+    return expectedHost.startsWith('*.')
+      ? hostname === expectedHost.slice(2) ||
+          hostname.endsWith(expectedHost.slice(1))
+      : hostname === expectedHost;
   } catch {
     return false;
   }

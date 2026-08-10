@@ -37,7 +37,7 @@ type WebBridgeSend = (
 ) => void;
 const ARTIFACT_CHUNK_LENGTH = 8 * 1024 * 1024;
 const JSON_CHUNK_LENGTH = 2 * 1024 * 1024;
-const MAX_RESULT_CHARS = 140 * 1024 * 1024;
+const MAX_RESULT_CHARS = 32 * 1024 * 1024;
 
 export function isWebBridgeFrame(type: unknown): boolean {
   return type === 'webbridge_call';
@@ -65,7 +65,7 @@ async function execute(
     if (isRecord(data) && typeof data['data'] === 'string') {
       const { data: artifact, ...metadata } = data;
       if (artifact.length > MAX_RESULT_CHARS) {
-        throw new Error('WebBridge result exceeds 140 MB');
+        throw new Error('WebBridge result exceeds 32 MiB');
       }
       for (
         let offset = 0;
@@ -90,7 +90,7 @@ async function execute(
     const serialized = JSON.stringify(data);
     if (serialized !== undefined && serialized.length > JSON_CHUNK_LENGTH) {
       if (serialized.length > MAX_RESULT_CHARS) {
-        throw new Error('WebBridge result exceeds 140 MB');
+        throw new Error('WebBridge result exceeds 32 MiB');
       }
       for (
         let offset = 0;
