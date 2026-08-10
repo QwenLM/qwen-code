@@ -1,4 +1,4 @@
-/* eslint-disable react/no-unknown-property, default-case, import/no-duplicates */
+/* eslint-disable react/no-unknown-property, default-case */
 /** @jsxImportSource @opentui/react */
 /**
  * qwen-code × OpenTUI POC — chat app demonstrating:
@@ -20,16 +20,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { EditBufferRenderable } from '@opentui/core';
 import { copyText } from './clipboard.js';
 import { buildScenario, TOKEN_INTERVAL_MS } from './stream-script.js';
-import type { StreamEvent } from '../model/streamingModel.js';
-
-// ---------------------------------------------------------------------------
-// state model
-// ---------------------------------------------------------------------------
-
-// Data shapes come from the framework-neutral model (single source of truth).
-import type { HistoryItem as ChatItem } from '../model/streamingModel.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import {
+  foldLiveEvent,
+  livePhase,
+  settleOpenTools,
+  type LiveHistoryItem,
+  type LivePhase,
+  type LiveToolItem,
+} from './live-session-model.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { livePromptEvents } from './live-session.js';
+import { resumeEventsFromConfig } from './resume-session.js';
 import { isSlashCommandInput } from './slash-dispatch.js';
 import { commandRouteFor } from './commands-registry.js';
 
@@ -38,15 +40,26 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 let spinnerTick = 0;
 const nextSpinner = () => SPINNER[spinnerTick++ % SPINNER.length];
 
-let uid = 0;
-const nid = (p: string) => `${p}${++uid}`;
+const PHASE_LABEL: Record<LivePhase, string> = {
+  idle: '',
+  thinking: 'thinking',
+  tool: 'running tool',
+  approving: 'awaiting approval',
+  responding: 'responding',
+};
+
+/** One-line truncated preview of the tool-call args JSON. */
+const argsPreview = (args: string) => {
+  const line = args.split('\n')[0] ?? '';
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
+};
 
 // ---------------------------------------------------------------------------
 // components
 // ---------------------------------------------------------------------------
 
 function ThinkingBlock(props: {
-  item: Extract<ChatItem, { kind: 'thinking' }>;
+  item: Extract<LiveHistoryItem, { kind: 'thinking' }>;
   expanded: boolean;
   onToggle: (id: string) => void;
 }) {
@@ -86,7 +99,7 @@ function ThinkingBlock(props: {
 }
 
 function ToolCard(props: {
-  item: Extract<ChatItem, { kind: 'tool' }>;
+  item: LiveToolItem;
   expanded: boolean;
   onToggle: (id: string) => void;
 }) {
@@ -94,9 +107,28 @@ function ToolCard(props: {
   const [hover, setHover] = useState(false);
   const renderer = useRenderer();
 
-  const icon = !item.done ? nextSpinner() : item.success ? '✓' : '✗';
-  const iconColor = !item.done ? C.accent : item.success ? C.green : C.red;
+  const pendingApproval = item.confirm === 'pending';
+  const icon = !item.done
+    ? pendingApproval
+      ? '⏸'
+      : nextSpinner()
+    : item.success
+      ? '✓'
+      : '✗';
+  const iconColor = !item.done
+    ? pendingApproval
+      ? C.yellow
+      : C.accent
+    : item.success
+      ? C.green
+      : C.red;
   const suffix = item.done && item.summary ? ` · ${item.summary}` : '';
+  const confirmLabel =
+    item.confirm === 'pending'
+      ? ' · awaiting approval…'
+      : item.confirm === 'rejected'
+        ? ' · rejected'
+        : '';
   const hint = item.done
     ? expanded
       ? ' · click to collapse'
@@ -123,7 +155,13 @@ function ToolCard(props: {
           {suffix}
           {hint}
         </text>
+        {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
       </box>
+      {item.args && (
+        <box paddingLeft={3}>
+          <text fg={C.dim}>{argsPreview(item.args)}</text>
+        </box>
+      )}
       {expanded && item.output.length > 0 && (
         <box paddingLeft={3} marginTop={0}>
           <code
@@ -139,7 +177,7 @@ function ToolCard(props: {
 }
 
 function TaskCard(props: {
-  item: Extract<ChatItem, { kind: 'task' }>;
+  item: Extract<LiveHistoryItem, { kind: 'task' }>;
   expanded: boolean;
   onToggle: (id: string) => void;
 }) {
@@ -198,7 +236,7 @@ function TaskCard(props: {
 }
 
 function AssistantMessage(props: {
-  item: Extract<ChatItem, { kind: 'assistant' }>;
+  item: Extract<LiveHistoryItem, { kind: 'assistant' }>;
 }) {
   const { item } = props;
   return (
@@ -221,12 +259,12 @@ function App({
   events,
   config,
 }: {
-  events?: AsyncIterable<StreamEvent>;
+  events?: AsyncIterable<OpenTuiStreamEvent>;
   config?: Config;
 }) {
   const renderer = useRenderer();
   const { width } = useTerminalDimensions();
-  const [items, setItems] = useState<ChatItem[]>([]);
+  const [items, setItems] = useState<LiveHistoryItem[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -245,8 +283,12 @@ function App({
   }, [renderer]);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const queueRef = useRef<StreamEvent[]>([]);
+  const queueRef = useRef<OpenTuiStreamEvent[]>([]);
+  const liveAbortRef = useRef<AbortController | null>(null);
   const promptRef = useRef<EditBufferRenderable | null>(null);
+
+  // Streaming phase for the status bar / spinner / border (F1.1).
+  const phase = livePhase(items, streaming);
 
   const toggle = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -271,125 +313,8 @@ function App({
     renderer.clearSelection();
   });
 
-  const applyEvent = useCallback((ev: StreamEvent) => {
-    setItems((prev) => {
-      const items = [...prev];
-      const last = items[items.length - 1];
-      switch (ev.type) {
-        case 'thinking': {
-          if (last?.kind === 'thinking' && !last.done) {
-            items[items.length - 1] = { ...last, text: last.text + ev.delta };
-          } else {
-            items.push({
-              kind: 'thinking',
-              id: nid('th'),
-              text: ev.delta,
-              done: false,
-            });
-          }
-          return items;
-        }
-        case 'thinking-end': {
-          if (last?.kind === 'thinking')
-            items[items.length - 1] = { ...last, done: true };
-          return items;
-        }
-        case 'text': {
-          if (last?.kind === 'assistant' && last.streaming) {
-            items[items.length - 1] = { ...last, text: last.text + ev.delta };
-          } else {
-            items.push({
-              kind: 'assistant',
-              id: nid('as'),
-              text: ev.delta,
-              streaming: true,
-            });
-          }
-          return items;
-        }
-        case 'tool-start':
-          if (last?.kind === 'assistant' && last.streaming)
-            items[items.length - 1] = { ...last, streaming: false };
-          items.push({
-            kind: 'tool',
-            id: ev.id,
-            tool: ev.tool,
-            title: ev.title,
-            output: '',
-            done: false,
-          });
-          return items;
-        case 'tool-output': {
-          const i = items.findIndex(
-            (it) => it.kind === 'tool' && it.id === ev.id,
-          );
-          if (i >= 0 && items[i].kind === 'tool') {
-            const t = items[i] as Extract<ChatItem, { kind: 'tool' }>;
-            items[i] = { ...t, output: t.output + ev.delta };
-          }
-          return items;
-        }
-        case 'tool-end': {
-          const i = items.findIndex(
-            (it) => it.kind === 'tool' && it.id === ev.id,
-          );
-          if (i >= 0 && items[i].kind === 'tool') {
-            const t = items[i] as Extract<ChatItem, { kind: 'tool' }>;
-            items[i] = {
-              ...t,
-              done: true,
-              success: ev.success,
-              summary: ev.summary,
-            };
-          }
-          return items;
-        }
-        case 'task-start':
-          if (last?.kind === 'assistant' && last.streaming)
-            items[items.length - 1] = { ...last, streaming: false };
-          items.push({
-            kind: 'task',
-            id: ev.id,
-            name: ev.name,
-            description: ev.description,
-            progress: [],
-            done: false,
-          });
-          return items;
-        case 'task-progress': {
-          const i = items.findIndex(
-            (it) => it.kind === 'task' && it.id === ev.id,
-          );
-          if (i >= 0 && items[i].kind === 'task') {
-            const t = items[i] as Extract<ChatItem, { kind: 'task' }>;
-            items[i] = { ...t, progress: [...t.progress.slice(-2), ev.line] };
-          }
-          return items;
-        }
-        case 'task-end': {
-          const i = items.findIndex(
-            (it) => it.kind === 'task' && it.id === ev.id,
-          );
-          if (i >= 0 && items[i].kind === 'task') {
-            const t = items[i] as Extract<ChatItem, { kind: 'task' }>;
-            items[i] = {
-              ...t,
-              done: true,
-              stats: `${ev.tools} tools · ${ev.seconds}s · ${ev.tokens} tokens`,
-            };
-          }
-          return items;
-        }
-        case 'done': {
-          if (last?.kind === 'assistant' && last.streaming)
-            items[items.length - 1] = { ...last, streaming: false };
-          return items;
-        }
-        default:
-          return items;
-      }
-      return items;
-    });
+  const applyEvent = useCallback((ev: OpenTuiStreamEvent) => {
+    setItems((prev) => foldLiveEvent(prev, ev));
     if (ev.type === 'done') {
       setStreaming(false);
       if (timerRef.current) {
@@ -411,17 +336,21 @@ function App({
   }, [applyEvent]);
 
   // Real event source (P1d seam) if provided; scripted demo only when there is
-  // no live config (qwen2-demo). With a live config, start empty and wait for
+  // no live config (qwen2-demo). With a live config, replay the resumed
+  // session (--resume / --continue) through resume-session and then wait for
   // real input so qwen2 behaves like the real interactive CLI.
   useEffect(() => {
-    if (config && !events) return; // live mode: wait for user input
-    setItems([
-      {
-        kind: 'user',
-        id: nid('u'),
+    if (config && !events) {
+      const replay = resumeEventsFromConfig(config);
+      if (replay) for (const ev of replay) applyEvent(ev);
+      return; // live mode: wait for user input
+    }
+    setItems(
+      foldLiveEvent([], {
+        type: 'user',
         text: '分析 VP 模式的渲染性能问题，给出优化建议',
-      },
-    ]);
+      }),
+    );
     if (events) {
       let cancelled = false;
       (async () => {
@@ -448,12 +377,16 @@ function App({
       return;
     }
     if (key.name === 'escape' && streaming) {
-      // interrupt the stream
+      // interrupt: abort the live stream (AbortSignal into sendMessageStream)
+      // and stop the scripted demo timer.
+      liveAbortRef.current?.abort();
+      liveAbortRef.current = null;
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
       queueRef.current = [];
+      setItems((prev) => settleOpenTools(prev, 'interrupted'));
       setStreaming(false);
       setToast('✗ Interrupted');
       setTimeout(() => setToast(null), 1200);
@@ -466,7 +399,7 @@ function App({
     el?.clear();
     el?.requestRender();
     if (!text) return;
-    setItems((prev) => [...prev, { kind: 'user', id: nid('u'), text }]);
+    applyEvent({ type: 'user', text });
     // Slash-command routing (parity with the 67-command registry).
     if (isSlashCommandInput(text)) {
       const name = text.replace(/^[/?]/, '').split(/\s/)[0] ?? '';
@@ -484,12 +417,36 @@ function App({
       return;
     }
     if (config) {
-      // Live client wiring: submit to the real agent loop.
+      // Live client wiring: submit to the real agent loop; Esc aborts via the
+      // AbortController whose signal reaches client.sendMessageStream.
+      liveAbortRef.current?.abort();
+      const controller = new AbortController();
+      liveAbortRef.current = controller;
+      setStreaming(true);
       (async () => {
         try {
-          for await (const ev of livePromptEvents(config, text)) applyEvent(ev);
+          for await (const ev of livePromptEvents(
+            config,
+            text,
+            controller.signal,
+          ))
+            applyEvent(ev);
         } catch (err) {
-          applyEvent({ type: 'text', delta: `\n[live error] ${String(err)}` });
+          if (!controller.signal.aborted) {
+            applyEvent({
+              type: 'text',
+              delta: `\n[live error] ${String(err)}`,
+            });
+          }
+          setItems((prev) =>
+            settleOpenTools(
+              prev,
+              controller.signal.aborted ? 'interrupted' : 'error',
+            ),
+          );
+        } finally {
+          if (liveAbortRef.current === controller) liveAbortRef.current = null;
+          setStreaming(false);
         }
       })();
       return;
@@ -565,7 +522,7 @@ function App({
       <box paddingLeft={1} paddingRight={1}>
         <text fg={C.dim}>
           {streaming
-            ? `${nextSpinner()} streaming… (Esc interrupt · Ctrl+C quit)`
+            ? `${nextSpinner()} streaming… (${PHASE_LABEL[phase]}) (Esc interrupt · Ctrl+C quit)`
             : `ready · click cards to expand · drag text to copy · wheel to scroll (Ctrl+C quit)`}
           {toast ? `   ${toast}` : ''}
         </text>
