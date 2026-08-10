@@ -12,6 +12,8 @@ This package is an isolated Tauri 2 shell around the existing Web Shell. It does
 
 The Tauri app starts `qwen serve` on an ephemeral loopback port with a per-launch bearer token, waits for `/health`, and then opens that same daemon-served Web Shell in the native window.
 
+Use **Control → Local Control…** to temporarily share that live daemon with a phone on the same Wi-Fi. The app displays a QR code, keeps the computer awake while sharing is enabled, and closes the LAN gateway when the control window closes or the user turns it off.
+
 ## Local development
 
 From this directory:
@@ -23,7 +25,7 @@ npm test --workspaces=false
 npm run dev --workspaces=false
 ```
 
-Use `QWEN_DESKTOP_WORKSPACE=/absolute/path` to choose the initial workspace. Without it, the app shows a workspace picker on first launch.
+Use `QWEN_DESKTOP_WORKSPACE=/absolute/path` to override the initial workspace. The app otherwise restores its saved primary workspace or creates `~/Documents/Qwen` on first launch. `QWEN_DEFAULT_WORKSPACE_DIR=/absolute/path` relocates that first-launch default, matching the Electron shell. Add and switch project workspaces from the Web Shell after startup.
 
 ## Releases
 

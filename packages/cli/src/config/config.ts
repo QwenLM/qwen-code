@@ -72,19 +72,9 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
+import { isValidSessionId } from './session-id.js';
 
-// UUID v4 regex pattern for validation
-const SESSION_ID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
-
-/**
- * Validates if a string is a valid session ID format.
- * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
- * (used by Arena to give each agent a deterministic session ID).
- */
-export function isValidSessionId(value: string): boolean {
-  return SESSION_ID_REGEX.test(value);
-}
+export { isValidSessionId } from './session-id.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
