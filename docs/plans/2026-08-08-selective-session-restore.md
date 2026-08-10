@@ -108,7 +108,7 @@ returns the requested replay semantics.
   `activateRestoredWork()`: preparation restores state and performs legacy
   migration without starting autonomous work; activation latches idempotently,
   waits for preparation, and then starts pending checkpoint/continuation work.
-  Daemon publication does not await preparation merely for migration, while
+  Daemon Session creation does not await preparation merely for migration, while
   `getGoalRuntimeReady()` waits for both phases. Retain `restore()` as the
   non-daemon wrapper that awaits both, and make disposal prevent unfinished
   preparation or activation from committing runtime state or broadcasting.
@@ -120,18 +120,22 @@ returns the requested replay semantics.
 
 ## Phase 3: Migrate every load/resume consumer
 
-- Initialize Gemini model history, token counts, and session-scoped UI telemetry
-  from runtime state. Retain the process-global attribution snapshot until the
-  final synchronous child commit. Guarantee that child pre-publication failures
-  do not apply it; explicitly do not promise rollback after a #8691 public
-  timeout whose underlying child restore later publishes and is closed.
+- Initialize Gemini model history, token counts, and UI telemetry from runtime
+  state with the existing telemetry replay timing and process-aggregate behavior.
+  Retain process-global attribution until the narrow non-throwing
+  selective-restore finalizer after the existing fallible Session setup and
+  rewriter installation but before cron/command startup. Guarantee that a child
+  path returning a restore failure does not apply attribution;
+  explicitly do not promise rollback after a #8691 public timeout whose
+  underlying child restore later succeeds and is closed.
 - Build and validate the response-mode replay envelope, then prebuild modes,
   models, config options, artifact/replay metadata, and the complete ACP success
-  value before hydrating the runtime FileHistoryService or constructing a
-  provisional Session. Only then synchronously restore file history exactly once
-  before Session publication; do not defer it until `/rewind` or the first file
-  operation. Start its best-effort missing-backup validation once only after
-  publication, because that validation may append a transcript record.
+  value before hydrating the runtime FileHistoryService or calling
+  `createAndStoreSession()`. Only then synchronously restore file history exactly
+  once in the existing creation sequence; do not defer it until `/rewind` or the
+  first file operation. Start its best-effort missing-backup validation once only
+  from successful restore finalization, because that validation may append a
+  transcript record.
   Restore turn parents, initial turn, background notification ids, goal
   runtime/hooks, and artifact state from their explicit projection fields; feed
   the normalized minimal Goal records through the existing recovery and
@@ -178,26 +182,26 @@ returns the requested replay semantics.
   of surfacing that direct-ACP error as REST 413.
 - Reuse #8691's `startingSessionIds`/`reserveStartingSessionId()` reservation;
   do not create a parallel preparation set. Hold the existing reservation from
-  before settings/existence I/O until atomic publication or failure, extending
-  its handle only as needed for final ownership validation. Run all fallible
-  preparation before publishing with `sessions.set`. Validate reservation
-  ownership and the absence of an active entry before touching attribution. Then
-  apply attribution, publish the map entry, clear initializing state, and
-  best-effort notify the reporter in one no-`await`, no-remaining-failure block.
-  Use a map-independent teardown for provisional state: dispose Session and Goal
-  hooks/observers, release MCP and telemetry ownership, then shut down Config,
-  recorder, and lease without replacing the original failure.
-- Make `activateAfterPublication()` synchronous, idempotent, and non-throwing.
-  Use one Session-level activation gate, reuse existing component idempotency,
-  and add a narrower latch only for a component independently callable outside
-  that gate. Enable event receivers first, switch capture-only callbacks to
-  sending mode and drain them second, then schedule Goal
-  checkpoint/continuation, file-history validation, restored background work,
-  cron, and command producers. Give every activation action an error boundary;
-  chain an asynchronous receiver's dependent producer from successful receiver
-  completion. One failure skips only its dependent producer, and
-  activation/reporting never rolls back the committed Session or changes its
-  prebuilt response.
+  before settings/existence I/O through the existing Session creation attempt or
+  failure. Keep the current handler `finally` release and conflict checks; do not
+  add reservation-to-map conversion, a provisional unregistered Session, or a
+  second publication protocol.
+- Preserve `createAndStoreSession()`'s current early map insertion, reporter
+  notification, fallible replay/worktree/Goal/rewriter setup, and
+  `discardStoredSessionIfCurrent()`/`removeStoredSessionEntry()` rollback. New
+  projection, envelope, and response-builder failures happen before the call and
+  leave no map entry; failures at the existing guarded setup points use their
+  current stored-session cleanup. Do not add map-independent teardown, gate every
+  Session constructor callback, or claim to repair unrelated pre-existing
+  cleanup edges.
+- Add one narrow ACP-only selective-restore finalizer after
+  `session.installRewriter()` and before `session.startCronScheduler()` and the
+  available-command timer. It is called exactly once, is synchronous, and does
+  not throw, with independent error boundaries around best-effort attribution application, scheduling
+  `GoalRuntime.activateRestoredWork()`, and starting idempotent FileHistory
+  missing-backup validation. Do not await async completion or change
+  existing background/worktree, callback, reporter, cron, command, publication,
+  or rollback timing.
 
 ## Phase 4: Errors and observability
 
@@ -224,26 +228,28 @@ returns the requested replay semantics.
   migration record, invalidates the old projection cache key, and still does not
   register a Session.
 - Verify a pending Goal checkpoint performs no restore-time full load and starts
-  no verifier or continuation before publication; successful publication
-  activates it once from the projected bounded window, while failure disposes it.
+  no verifier or continuation before successful restore finalization; the
+  finalizer activates it once from the projected bounded window, while failure
+  disposes it.
 - Verify activation requested before Goal preparation settles waits correctly,
   repeated preparation/activation coalesces, `getGoalRuntimeReady()` waits for
   both, disposal suppresses unfinished state/broadcast/work, and non-daemon
   `restore()` retains its current awaited semantics. Also verify activation
   before preparation starts rejects and disposal does not leave readiness
-  pending while it waits for publication that will never occur.
-- Verify every child pre-publication failure leaves the process-global
-  attribution singleton unchanged and successful child publication applies the
-  projected snapshot once. Inject a failed final reservation/active-entry guard
-  and assert attribution is still untouched. Document that a #8691 late-abandoned
+  pending while it waits for finalization that will never occur.
+- Verify every child path that returns a restore failure leaves process-global
+  attribution unchanged, while successful restore finalization applies the
+  projected snapshot once. Inject failures at every existing fallible setup point
+  before the finalizer and assert attribution is still untouched. Document that a #8691 late-abandoned
   child can briefly apply attribution and run activated Goal, file-history,
-  background, cron, or command work before cleanup. Obtain explicit maintainer
-  acceptance for that existing child-publication/parent-adoption window; if it is
-  rejected, make a parent/child adoption acknowledgement a prerequisite instead
-  of adding it implicitly to this PR. Verify every activated producer remains
-  owned by Session teardown and stops when #8691 closes the late-abandoned child.
+  background, cron, or command work before cleanup. Treat that as an existing
+  child-lifecycle residual rather than a new prerequisite unless implementation
+  evidence shows this slice expands it. Verify newly activated Goal work is
+  suppressed by Goal disposal; FileHistory validation retains its existing
+  service/callback lifecycle and gains no detached owner or new cancellation
+  protocol.
 - Verify a response-builder failure occurs before FileHistory hydration,
-  provisional Session construction, or any Session map entry.
+  `createAndStoreSession()`, or any Session map entry.
 - Verify live projection and envelope-limit failures release the close gate and
   preserve the registered Session, client accounting, and runtime services.
 - Add #8691 child restore phases for index, state selection, selected reads,
@@ -265,22 +271,21 @@ returns the requested replay semantics.
   evidence. Cover a dead-branch side-task source, glued fragments, concurrent
   fresh/cached builds, stale pending completion, and failed-read cache admission.
 - Exercise both lease modes, recorder-disabled mode, same-id reservation races,
-  every post-model/post-Session teardown point, and Goal migration complete or
-  pending when a later step fails. A same-id retry must observe no stale hook,
-  observer, pool, telemetry, Config, lease, or map state.
-- Exercise pending Goal checkpoint recovery, attribution commit timing, and a
+  every new pre-creation failure and existing stored-session rollback point, and
+  Goal migration complete or pending when a later step fails. A same-id retry
+  must observe no stale hook, observer, Config, lease, reservation, or map state.
+- Exercise pending Goal checkpoint recovery, attribution finalization timing, and a
   throwing response builder. Cover prepare/activate ordering, repeated calls,
   disposal during legacy migration, and non-daemon compatibility. No restore-time
-  old-loader call, pre-publication verifier/continuation, pre-publication
-  attribution mutation, FileHistory hydration, or half-published Session is
+  old-loader call, pre-finalization verifier/continuation, failed-restore
+  attribution mutation, FileHistory validation, or stale Session entry is
   permitted.
-- Exercise missing file-history backups and due autonomous work: envelope or
-  prepare failure appends nothing and emits nothing; successful publication
-  restores once, validates once, enables receivers before producers, and arms
-  each buffered notification/cron/timer exactly once through the Session-level
-  activation gate. Inject each activation failure independently, including an
-  asynchronous receiver failure, and prove unrelated steps still activate while
-  only the receiver's direct producer is skipped.
+- Exercise missing file-history backups and the targeted finalizer: envelope or
+  setup failure appends nothing; success hydrates once, then runs the finalizer
+  once after rewriter installation and before cron/commands. Inject independent
+  attribution, Goal activation, and FileHistory validation failures and prove
+  the other two actions still run, the prebuilt response is unchanged, and
+  existing Session constructor callback timing is unchanged.
 - Rebase onto #8824 and run its transactional integration coverage with
   selective-restore 409, 413, timeout/504, cancellation, and staging failures.
   Assert the committed session-id and workspace-cwd source tuple remains attached
@@ -357,13 +362,15 @@ returns the requested replay semantics.
       blocks legacy fallback.
 - [ ] Pending Goal checkpoint evidence is reduced during the single projection,
       matches the production evidence-window helper, never calls the old loader,
-      and activates checkpoint/continuation work only after publication.
+      and activates checkpoint/continuation work only from successful restore
+      finalization.
 - [ ] Active file-history batches preserve last-write-wins, first-insertion,
       100-snapshot cap, and whole-record malformed-skip semantics.
 - [ ] Transcript file-history records are reduced inside the single projection;
-      after envelope validation the runtime service restores exactly once before
-      Session publication, and missing-backup validation starts once afterward.
-      Envelope/prepare failure performs no file-history append.
+      after envelope validation the runtime service restores exactly once during
+      existing Session setup, and missing-backup validation starts once from the
+      successful finalizer. Envelope/prepare failure performs no file-history
+      append.
 - [ ] Selected-read tests prove file-history and artifact inputs are reduced
       incrementally and are not retained in a transcript-sized intermediate
       array.
@@ -388,31 +395,31 @@ returns the requested replay semantics.
       projection payloads; Config does not become a second lifetime history
       cache.
 - [ ] #8691's existing session-id reservation, without a second preparation set,
-      covers settings/existence I/O through atomic publication; concurrent
-      direct-ACP restores of one id cannot both prepare, and every failure frees
-      the reservation for a clean retry.
-- [ ] Provisional teardown is independent of the sessions map and leaves no
-      Session/Goal hook, observer, MCP pool ownership, telemetry state, Config,
-      recorder, or lease after any pre-publication failure.
+      covers settings/existence I/O through the existing Session creation
+      attempt; concurrent direct-ACP restores of one id cannot both prepare, and
+      every failure frees the reservation for a clean retry.
+- [ ] New failures before `createAndStoreSession()` leave no map entry; failures
+      at its currently guarded setup points use the existing stored-session
+      rollback and leave no stale Session/Goal hook, observer, Config, or map
+      entry.
 - [ ] Goal preparation and activation are separately memoized; activation waits
       for preparation, readiness waits for both, disposal suppresses unfinished
       work, and non-daemon `restore()` preserves existing awaited behavior.
-- [ ] Every child pre-publication failure leaves process-global attribution
-      unchanged; the projected snapshot is applied once in the successful
-      no-`await` child commit after final reservation validation. A failing
-      validation leaves attribution untouched. The broader late-abandoned window
-      for attribution and activated autonomous work is documented and has
-      maintainer acceptance, or an adoption acknowledgement is made a
-      prerequisite. Every activated producer stops with #8691 Session teardown
-      and leaves no detached work after late cleanup.
+- [ ] Every child path that returns a restore failure leaves process-global
+      attribution unchanged; the projected snapshot is applied once by the
+      successful non-throwing finalizer after existing fallible setup. The
+      broader late-abandoned window remains documented as existing lifecycle
+      behavior rather than a new prerequisite unless implementation evidence
+      shows this slice expands it. Goal activation remains disposal-owned, while
+      FileHistory validation retains existing service/callback lifetime without
+      a new detached owner or cancellation protocol.
 - [ ] The complete ACP success value is built before FileHistory hydration and
-      provisional Session construction; a response-builder failure performs
+      `createAndStoreSession()`; a response-builder failure performs
       neither and leaves no Session.
-- [ ] Goal work, notification drains, cron, command timers, file-history
-      validation, and all session-visible callbacks do not execute or emit before
-      publication. One Session-level gate activates receivers before producers;
-      existing component idempotency arms each step once, and one injected
-      failure skips only its direct dependents.
+- [ ] The selective finalizer runs once after rewriter installation and before
+      cron/command startup. Attribution, Goal activation, and FileHistory
+      validation failures are independently contained and do not replace the
+      prebuilt response; existing Session callback timing is unchanged.
 - [ ] #8824 integration proves selective-restore 409, 413, timeout/504,
       cancellation, and staging failures preserve the committed session-id and
       workspace-cwd source tuple, while a successful switch commits transcript,

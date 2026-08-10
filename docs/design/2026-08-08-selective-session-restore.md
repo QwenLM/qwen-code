@@ -279,10 +279,10 @@ accessors or an equivalent explicit handoff. File-history transcript records are
 eagerly reduced into the capped snapshot state during projection. After the
 response-mode replay envelope has passed its limits,
 `createAndStoreSession()` must force the existing lazy service owner to consume
-that state before publishing the `Session` and before the final release. This is
-runtime service hydration, not a second transcript read.
+that state during its existing setup sequence and before the final release. This
+is runtime service hydration, not a second transcript read.
 
-After complete response construction and successful publication:
+After complete response construction and successful Session creation:
 
 - `Config` retains no `apiHistory`, normalized `goalRecords`, UI telemetry
   array, replay `ChatRecord[]`, or artifact reconstruction input from the
@@ -627,8 +627,8 @@ sequenceDiagram
   end
   C->>S: "complete recorder and goal initialization"
   A->>A: "build and validate bounded replay envelope"
-  A->>S: "hydrate file history and prepare provisional Session"
-  A->>S: "atomically publish, then arm autonomous work"
+  A->>S: "run existing Session creation and rollback sequence"
+  A->>S: "finalize selective restore before cron/commands"
   A-->>B: "published state + bounded replay envelope"
   B-->>D: "restored session"
 ```
@@ -692,8 +692,8 @@ activateRestoredWork(): Promise<void>;
 `prepareRestore()` starts at most once and returns one memoized preparation
 promise. It restores state and performs the existing legacy migration, but it
 does not run a checkpoint verifier, queue a continuation, or start host work.
-The selective daemon path starts preparation before publication without waiting
-for a legacy migration to settle. `activateRestoredWork()` sets an idempotent
+The selective daemon path starts preparation before Session creation without
+waiting for a legacy migration to settle. `activateRestoredWork()` sets an idempotent
 activation latch and returns one memoized completion that waits for preparation
 before it starts any pending checkpoint or continuation. Calling activation
 before preparation settles is therefore safe. `Config.getGoalRuntimeReady()`
@@ -710,7 +710,7 @@ the Session restore. Disposal prevents an unfinished preparation from committing
 runtime state or broadcasting and prevents a latched activation from starting;
 a legacy migration record that already reached the journal remains the one
 allowed pre-response write. Disposal also rejects an activation/readiness waiter
-that is waiting only for the post-publication latch, so teardown cannot leave an
+that is waiting only for successful restore finalization, so teardown cannot leave an
 unsettled Goal readiness promise. An already-running journal operation may
 settle before the disposed preparation rejects, but its result cannot commit
 runtime state or schedule work.
@@ -719,21 +719,24 @@ Legacy Goal recovery may append one migrated v2 `goal_state` after recorder
 activation. That is an expected local post-projection write: if it completes,
 it occurs only after the final snapshot/lease check, advances recorder state
 normally, and invalidates the old cache key through the transcript's new
-size/mtime. Publication does not await the memoized preparation merely to
-manufacture this migration; post-publication activation waits internally for
-that preparation. A later failure may race with the journal write, so cleanup
+size/mtime. Session creation does not await the memoized preparation merely to
+manufacture this migration; successful restore finalization schedules
+activation, which waits internally for that preparation. A later failure may
+race with the journal write, so cleanup
 must dispose the runtime and stop any remaining work. Initial replay still
 derives its bootstrap from the pre-migration normalized `goalRecords`, matching
 the legacy Stop-hook state that the client needs to see.
 
 `GeminiClient.initialize()` consumes `apiHistory`, resume token counts, and UI
-telemetry events directly. It does not rebuild them from replay records. Commit
-attribution is a process-global singleton rather than session-scoped state, so a
-provisional target cannot safely apply and roll it back while sibling sessions
-exist. Retain the projected attribution snapshot until the final synchronous
-commit block and apply it there on a best-effort basis immediately before
-`sessions.set()`. Any failure before publication in the ACP child therefore
-leaves attribution unchanged. This guarantee intentionally does not cover a
+telemetry events directly. It does not rebuild them from replay records. Keep UI
+telemetry replay timing and its existing process-aggregate behavior unchanged;
+fixing that ownership is not required for bounded hydration. Attribution is a
+separate process-global singleton that a target cannot safely apply and roll back
+while sibling sessions exist. Retain the projected attribution snapshot until the narrow
+non-throwing selective-restore finalizer that runs after the existing fallible
+Session setup and `installRewriter()`, but before the existing cron and command
+startup. Any child path that still returns a restore failure therefore leaves
+attribution unchanged. This guarantee intentionally does not cover a
 #8691 public timeout whose underlying ACP restore later publishes successfully
 and is then closed as an abandoned result: the child may briefly apply the
 snapshot before late cleanup, and rolling the singleton back is unsafe while a
@@ -746,20 +749,22 @@ file-history validation, restored background work, cron, or command producers
 may be activated. If the parent has already timed out, those producers may
 briefly write or emit before #8691 recognizes the late result and closes the
 abandoned child Session. #8824 preserves the old visible source but does not add
-a parent-to-child adoption acknowledgement. The implementation PR must call out
-this existing residual and obtain explicit maintainer acceptance; if it is not
-accepted, a parent/child adoption acknowledgement is a prerequisite scope change
-rather than an implicit addition to selective restore. Every activated producer
-must remain owned by Session teardown and stop when #8691 closes a late-abandoned
-Session; selective restore must not create detached work that survives cleanup.
+a parent-to-child adoption acknowledgement. This is an existing child-lifecycle
+residual rather than a new selective-restore prerequisite; reopen that protocol
+question only if implementation evidence shows this slice expands the window or
+creates work outside current teardown ownership. Goal activation remains owned by
+`GoalRuntime` disposal. FileHistory validation retains its existing service and
+recording-callback lifetime; this slice does not add a detached owner or a new
+in-flight cancellation protocol.
 The projection reader has already reduced transcript file-history records into
 snapshots, but it has not hydrated `FileHistoryService`.
 `Config.getFileHistoryService()` remains the single lazy owner of that runtime
 state. Split its synchronous snapshot restore from
 `validateRestoredSnapshots()`: after the replay envelope passes its limits,
-hydrate state once before publication, then start best-effort validation once
-after publication. Validation may append a replacement snapshot for a missing
-backup, so it must not run while a target can still fail preparation. Recorder
+hydrate state once in the existing `createAndStoreSession()` setup, then start
+best-effort validation from the successful selective-restore finalizer.
+Validation may append a replacement snapshot for a missing backup, so it must
+not run on a path that can still return a restore failure. Recorder
 turn boundaries already come from `runtime.recording`, and ACP turn/background
 state comes from its precomputed fields, so neither may be rebuilt from a recent
 replay page. The session replays only `SessionRestoreReplayPage.records` plus
@@ -771,7 +776,7 @@ initialization but before runtime FileHistoryService hydration or `Session`
 construction. Once the envelope fits, immediately build the complete ACP success
 value from the initialized Config and projection, including modes, models,
 config options, artifact state, and replay metadata. Only after that succeeds may
-the runtime hydrate file history, construct the provisional Session, and copy
+the runtime call `createAndStoreSession()`, hydrate file history, and copy
 the precomputed replay usage/turn state into it. A size/count or response-build
 failure therefore cleans up only an unregistered Config and reservation, without
 hydrating file history or constructing a Session. No fallible response builder
@@ -779,58 +784,47 @@ may run after that point. The existing replay-conversion partial result may stil
 register a fully initialized runtime and report bounded
 `partial`/`replayError`; it must not be confused with an envelope-limit failure.
 
-### Atomic Session publication and cleanup
+### Existing Session creation and targeted restore finalization
 
 Reuse #8691's existing `startingSessionIds` reservation and
 `reserveStartingSessionId()` lifecycle; do not add a second `preparingSessions`
 set. The reservation is acquired before cold settings/existence I/O and remains
-owned through projection, complete response construction, and atomic
-publication or failure. Active and reserved ids both reject a second direct-ACP
-prepare, so two restores cannot build independent provisional Sessions for the
-same id. Evolve the existing reservation handle only as needed to validate final
-ownership, atomically publish the `sessions` entry, and release exactly once on
-every failure.
+owned through projection, complete response construction, existing Session
+creation, or failure. Active and reserved ids both reject a second direct-ACP
+prepare, and the current handler-level `finally` releases the reservation exactly
+once. Do not add reservation-to-map conversion, a provisional unregistered
+Session, or another publication protocol.
 
-All fallible preparation runs before publication: authentication and tool
-setup, model initialization, envelope validation, complete response construction,
-synchronous file-history hydration, provisional Session construction,
-precomputed ACP state, replay, screen/worktree/rewriter setup, and Goal
-hook/observer installation. Immediately before commit, validate reservation
-ownership and the absence of an active entry while attribution is still
-untouched. After that guard succeeds, the no-`await` commit block has no
-remaining fallible operation: it best-effort applies attribution, replaces the
-reservation with the `sessions` entry, removes the initializing Config, and
-best-effort notifies the reporter. A failure after model or Session construction
-uses one map-independent teardown path that preserves the original error while
-best-effort cleaning `Session.dispose()`, the Goal hook and observer, MCP pool
-ownership, UI telemetry session state, Config, recorder, and writer lease.
-Cleanup must not depend on finding the provisional Session in `sessions`.
+Keep `createAndStoreSession()`'s current publication and rollback structure. It
+continues to create and insert the Session before its existing replay,
+screen/worktree, Goal-hook, and rewriter setup. Failures already guarded by its
+current `try` continue through
+`discardStoredSessionIfCurrent()`/`removeStoredSessionEntry()`. Selective restore
+must finish its fresh projection, replay transformation and envelope limits,
+Goal bootstrap, and complete ACP response construction before calling it. A
+failure in those new steps therefore has no Session entry; guarded failures in
+the existing creation sequence keep their current stored-session rollback. Do
+not replace either path with a map-independent teardown, move every Session
+constructor callback behind a new lifecycle gate, or claim to repair unrelated
+pre-existing cleanup edges.
 
-Autonomous or session-visible callbacks are armed only after publication. A
-provisional Session may install capture-only callbacks where a one-shot event
-could otherwise be missed, but they may only append to bounded in-memory state;
-they cannot persist, drain, or emit. `activateAfterPublication()` is synchronous,
-idempotent, and never throws to the restore caller. One Session-level activation
-gate owns the transition; reuse existing component idempotency and add a narrower
-latch only where a component can be invoked independently. It first enables receivers
-for background-agent, monitor, shell, workflow-approval, title,
-recording-diagnostic, subsession, Goal-observer, and MCP-budget events; it then
-switches capture-only callbacks to sending mode and drains their buffers; only
-then does it schedule producer work such as Goal checkpoint/continuation,
-file-history validation, restored background work, cron, and command updates.
-Async producer completion is not awaited by the restore response.
+Add one narrow ACP-only selective-restore finalizer at the end of the successful
+setup sequence: invoke it after `session.installRewriter()` and before the
+existing `session.startCronScheduler()` and available-command timer. The
+finalizer is called exactly once, is synchronous, and does not throw. It performs
+only three selective-specific actions, each behind its own error boundary:
+best-effort apply process attribution, schedule
+`GoalRuntime.activateRestoredWork()`, and start the idempotent FileHistory
+missing-backup validation. Async completion is not awaited and cannot replace
+the already-built success response. Existing Session constructor callbacks,
+background/worktree restore, reporter notification, cron, commands, publication
+timing, and rollback ownership otherwise remain unchanged.
 
-Each activation action has an error boundary. One failure is caught and logged
-without skipping unrelated steps. A producer whose required receiver failed is
-the only dependent step skipped; when receiver setup is asynchronous, schedule
-that producer from the receiver's successful completion rather than racing both.
-All other receivers and producers still activate once. Reporter failure follows
-the same best-effort rule. None of these failures rolls back an already-published
-Session or replaces its prebuilt response. Here publication means addressability
-in the ACP child, not acknowledgement of #8824's WebUI commit. #8691 owns
-late-result fencing and cleanup, and #8824 owns the old WebUI attachment; absent
-the explicitly out-of-scope adoption acknowledgement, the late-abandoned
-autonomous-work window above remains.
+Here child publication still means addressability in the ACP child, not
+acknowledgement of #8824's WebUI commit. #8691 owns late-result fencing and
+cleanup, and #8824 owns the old WebUI attachment. The existing late-abandoned
+autonomous-work window remains, but this slice adds no second client-commit
+protocol and no general callback-capture framework.
 
 ### Live session load or resume
 
@@ -910,20 +904,20 @@ selective path rejects the largest input.
 Every current consumer of full `ResumedSessionData` on the daemon path must have
 an explicit replacement:
 
-| Consumer                          | Current dependency                                                       | Replacement                                                        |
-| --------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| `loadCliConfig()`                 | First full load                                                          | Preload one projection only when the writer protocol is disabled   |
-| `Config.activateChatRecording()`  | Optional second full authoritative load                                  | Resolve the deferred projection under the acquired lease           |
-| `ChatRecordingService.activate()` | Last UUID, turn parents, title and lineage from all messages             | `runtime.recording`                                                |
-| `Config.initializeGoalRuntime()`  | Full message list                                                        | normalized `runtime.goalRecords`                                   |
-| Goal pending-checkpoint recovery  | `readActiveTranscriptChain()` full reload                                | projected bounded Goal checkpoint window                           |
-| `GeminiClient.initialize()`       | API history, telemetry, token counts, attribution from full conversation | Pre-reduced runtime fields; attribution applied at commit          |
-| `Config.getFileHistoryService()`  | Lazy restore from `sessionData.fileHistorySnapshots`                     | Synchronous restore once after envelope validation                 |
-| `createAndStoreSession()`         | File snapshots, turn boundaries, replay records                          | Prepare before atomic publication; validate file history afterward |
-| `Session.primeTurnFromHistory()`  | Initial turn and background notification ids                             | Precomputed ACP state                                              |
-| daemon goal hook restore          | Slash-command cards from all messages                                    | normalized `runtime.goalRecords` through the existing helpers      |
-| load response artifact state      | Rebuilt from all physical records                                        | `runtime.artifactSnapshot`                                         |
-| live load/resume                  | Full reload under write barrier                                          | Consumer-limited live projection under the same barrier            |
+| Consumer                          | Current dependency                                                       | Replacement                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `loadCliConfig()`                 | First full load                                                          | Preload one projection only when the writer protocol is disabled                       |
+| `Config.activateChatRecording()`  | Optional second full authoritative load                                  | Resolve the deferred projection under the acquired lease                               |
+| `ChatRecordingService.activate()` | Last UUID, turn parents, title and lineage from all messages             | `runtime.recording`                                                                    |
+| `Config.initializeGoalRuntime()`  | Full message list                                                        | normalized `runtime.goalRecords`                                                       |
+| Goal pending-checkpoint recovery  | `readActiveTranscriptChain()` full reload                                | projected bounded Goal checkpoint window                                               |
+| `GeminiClient.initialize()`       | API history, telemetry, token counts, attribution from full conversation | Pre-reduced runtime fields; attribution applied by the finalizer                       |
+| `Config.getFileHistoryService()`  | Lazy restore from `sessionData.fileHistorySnapshots`                     | Synchronous restore once after envelope validation                                     |
+| `createAndStoreSession()`         | File snapshots, turn boundaries, replay records                          | Reuse existing creation/rollback; run narrow restore finalization before cron/commands |
+| `Session.primeTurnFromHistory()`  | Initial turn and background notification ids                             | Precomputed ACP state                                                                  |
+| daemon goal hook restore          | Slash-command cards from all messages                                    | normalized `runtime.goalRecords` through the existing helpers                          |
+| load response artifact state      | Rebuilt from all physical records                                        | `runtime.artifactSnapshot`                                                             |
+| live load/resume                  | Full reload under write barrier                                          | Consumer-limited live projection under the same barrier                                |
 
 The implementation is incomplete if any `session/load` or `session/resume`
 consumer named above still calls the old loader or silently treats a recent
@@ -1054,41 +1048,38 @@ behavior rather than inventing a new fallback.
 - Same-shape bridge requests coalesce, while omitted/full versus explicit recent
   replay and unequal explicit page sizes return `restore_in_progress`; a waiter
   never receives another request's replay shape or loses typed error data.
-- Session-id reservation covers scan through publication. Concurrent direct-ACP
-  restores of one id cannot both prepare or publish provisional Sessions.
-- Every post-model and post-Session failure leaves no Goal hook/observer, MCP
-  pool ownership, telemetry session, recorder, lease, Config, reservation, or
-  map entry, and an immediate same-id retry starts cleanly.
+- Session-id reservation covers scan through the existing creation attempt.
+  Concurrent direct-ACP restores of one id cannot both prepare, and every
+  failure releases the reservation for a clean retry.
+- New failures before `createAndStoreSession()` leave no map entry. Failures in
+  its currently guarded setup sequence use the stored-session rollback and leave
+  no stale Goal hook/observer, MCP ownership, Config, or map entry.
 - Envelope overflow and later prepare failure do not hydrate or validate the
   runtime FileHistoryService and cannot append a missing-backup snapshot.
-  Successful publication restores state once and starts validation once.
-- Goal checkpoint verification/continuation, background/monitor/shell/workflow
-  callbacks, subsession spawning, notification drains, due cron work, command
-  timers, and file-history validation perform no work or outbound emission
-  before publication and arm exactly once afterward.
+  Successful creation restores state once and starts validation once from the
+  narrow finalizer.
 - Pending Goal checkpoints use only the projected bounded evidence window: the
   restore path neither invokes the old full loader nor starts verification or
-  continuation before publication.
+  continuation before successful restore finalization.
 - Goal preparation and activation are each memoized. Activation may be requested
   before preparation settles, `getGoalRuntimeReady()` waits for both phases, and
   non-daemon `restore()` retains its existing awaited behavior. Activation before
   preparation starts rejects, while disposal settles any waiter that would
-  otherwise remain blocked on the post-publication activation latch.
-- Every ACP-child pre-publication failure leaves process-global attribution
-  unchanged; a successful child publication applies its snapshot once in the
-  final no-`await` commit. Reservation/active-entry invariants are checked before
-  attribution is applied. A later #8691 abandoned-result cleanup is not claimed
-  as rollback-safe for either the singleton or autonomous work activated between
-  child publication and parent adoption; the implementation PR records explicit
-  maintainer acceptance or adds an adoption-ack prerequisite.
+  otherwise remain blocked waiting for successful restore finalization.
+- Every child path that returns a restore failure leaves process-global
+  attribution unchanged. The narrow non-throwing finalizer applies the snapshot
+  once after all existing fallible setup and before cron/commands. A later #8691
+  abandoned-result cleanup is not claimed as rollback-safe for either the
+  singleton or autonomous work activated between child publication and parent
+  adoption; this existing residual is documented without adding a new protocol
+  prerequisite unless implementation evidence shows the slice expands it.
 - The complete ACP success response is built before runtime FileHistoryService
-  hydration or provisional Session construction. A response-builder failure
+  hydration or `createAndStoreSession()`. A response-builder failure
   performs neither and leaves no map entry.
-- Post-publication receivers activate before their producers. One Session-level
-  activation gate plus existing component idempotency arms each step once. An
-  injected activation failure skips only its dependent producer; every unrelated
-  receiver/producer still arms, and no activation or reporter failure converts
-  the prebuilt success into a restore failure.
+- The selective finalizer runs once after rewriter installation and before cron
+  and command startup. Attribution, Goal activation, and FileHistory validation
+  failures are independently contained and cannot convert the prebuilt success
+  into a restore failure. Existing Session callback timing is unchanged.
 - ACP `errorKind: transcript_too_large` is request-scoped, REST maps it to
   `413 transcript_too_large`, and a registered sibling remains usable.
 - Cold projection and cold envelope-limit failures do not register new runtime
@@ -1100,9 +1091,9 @@ behavior rather than inventing a new fallback.
 - A timed-out selective projection follows #8691's abandoned-restore fence,
   same-id retry, late cleanup, settlement-grace, and condemned-channel drain
   semantics. In particular, an overdue child that cannot answer a close probe
-  must still be locally torn down after its clients detach, and every activated
-  Goal, file-history, background, cron, or command producer stops with Session
-  teardown rather than surviving as detached work.
+  must still be locally torn down after its clients detach. Newly activated Goal
+  work is suppressed by Goal disposal; FileHistory validation retains its
+  existing service/callback cleanup semantics and does not gain a detached owner.
 - #8691 timeout and late-result fencing tests continue to pass.
 - #8824 integration tests prove that selective-restore 409, 413, timeout/504,
   cancellation, and staging failures preserve the committed session-id and
@@ -1189,14 +1180,15 @@ files and backups, so those triggers are too late. `Config.getFileHistoryService
 is synchronous, and retaining projection data or reopening the transcript for
 later asynchronous restoration would broaden ownership and failure semantics.
 This slice therefore reduces file-history records during projection and forces
-one synchronous service-state initialization before Session publication and
-projection release. Only the existing best-effort backup validation is deferred
-until after publication so it cannot write for a failed target; making the
-service's required restore state asynchronous would require a separate design.
+one synchronous service-state initialization during the existing Session setup
+and before projection release. Only the existing best-effort backup validation
+is deferred to the successful non-throwing finalizer so it cannot write for a
+failed target; making the service's required restore state asynchronous would
+require a separate design.
 
 ### Add the durable checkpoint in the same PR
 
-Checkpoint validation, atomic publication, crash recovery, transcript
+Checkpoint validation, a new atomic publication protocol, crash recovery, transcript
 replacement, rewind invalidation, and legacy bootstrap are a separate failure
 domain. Combining them would make the first performance PR harder to review and
 roll back. The streaming selective scan is also the required fallback for a
@@ -1253,23 +1245,27 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 - **Goal recovery silently re-enters the old loader or starts hidden work.**
   Project the bounded pending-checkpoint evidence window during the one scan,
   memoize state preparation and activation separately, let activation wait for
-  preparation, and arm the verifier/continuation only after publication.
-- **Provisional attribution corrupts a sibling through the global singleton.**
-  Retain the snapshot in the one-shot projection and apply it only in the final
-  non-fallible child commit block; guarantee only pre-publication failures and
+  preparation, and arm the verifier/continuation only from successful restore
+  finalization.
+- **Failed-target attribution corrupts a sibling through the global singleton.**
+  Retain the snapshot in the one-shot projection and apply it only in the narrow
+  non-throwing finalizer after existing fallible Session setup; guarantee failed
+  child restores leave it unchanged and
   document that a #8691 late-abandoned success cannot be rolled back safely.
 - **A late-abandoned child starts hidden autonomous work.** Child publication is
   not parent adoption. Document that Goal, file-history, background, cron, or
-  command work may briefly run until #8691 late cleanup, require maintainer
-  acceptance, make teardown own and stop every producer, and make a parent/child
-  adoption acknowledgement a prerequisite if that residual is rejected rather
-  than quietly widening this PR.
+  command work may briefly run until #8691 late cleanup. Keep Goal activation
+  under existing runtime disposal and FileHistory validation under its existing
+  service/callback lifetime; do not add a detached owner. Reopen a parent/child
+  adoption protocol only if implementation evidence shows this slice widens the
+  existing residual.
 - **The Session publishes before its response is known to be buildable.** Build
   the complete ACP success value before FileHistory hydration and Session
   construction, then make every later activation best-effort.
-- **One activation failure leaves a partially armed published Session.** Enable
-  receivers before producers and isolate every idempotent activation step so one
-  failure skips only its direct dependents.
+- **Selective finalization failure changes a successful restore.** Keep the
+  finalizer non-throwing and isolate attribution, Goal activation, and
+  FileHistory validation so one failure does not skip the other two or replace
+  the prebuilt response.
 - **Selected reads are accumulated before reduction.** Use a consumer dispatcher
   with per-record fragment assembly; stream file-history and artifact inputs into
   their existing semantics and retain only unavoidable projection outputs.
