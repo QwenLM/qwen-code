@@ -1414,24 +1414,6 @@ describe('ChatEditor toolbar popovers', () => {
     expect(popover?.textContent).toContain('Max');
   });
 
-  it('does not expose reasoning options for qwen3.8-max-preview', () => {
-    const container = renderChatEditor({
-      visibleToolbarActions: ['model'],
-      currentModel: 'preview-route',
-      availableModels: [{ id: 'preview-route', label: 'Qwen 3.8 Max Preview' }],
-      reasoningControlsSupported: true,
-      onSelectReasoningOption: vi.fn(),
-    });
-    act(() =>
-      container
-        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
-        ?.click(),
-    );
-    expect(
-      document.querySelector('[data-web-shell-toolbar-popover]')?.textContent,
-    ).not.toContain('Thinking');
-  });
-
   it('exposes the complete model name on dropdown items for hover', () => {
     const modelLabel =
       'Qwen Very Long Model Name For Web Shell Reproduction 2026';

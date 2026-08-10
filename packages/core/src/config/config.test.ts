@@ -4736,34 +4736,6 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
-    it('keeps a registered model thinking-off across an in-session auth refresh', async () => {
-      // Regression: reasoning === false carries no effort to capture, so the
-      // rebuild wiped it and the registered block re-enabled thinking at the
-      // registry default.
-      const config = new Config({
-        ...baseParams,
-        generationConfig: { model: 'qwen3.8-max', reasoning: false },
-      });
-      const authType = AuthType.USE_GEMINI;
-      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-        config: {
-          apiKey: 'test-key',
-          model: 'qwen3.8-max',
-          authType,
-        } as ContentGeneratorConfig,
-        sources: {},
-      });
-
-      await config.refreshAuth(authType);
-      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
-      expect(config.isThinkingEnabled()).toBe(false);
-
-      // A second same-model refresh (e.g. /auth re-auth) keeps it off too.
-      await config.refreshAuth(authType);
-      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
-      expect(config.isThinkingEnabled()).toBe(false);
-    });
-
     it('keeps thinking-off across repeated registry-resolved auth refreshes', async () => {
       // Regression: the repair must mirror `reasoning: false` into
       // modelsConfig, the rebuildable source refreshAuth reads

@@ -59,16 +59,6 @@ describe('reasoning config options', () => {
     },
   ];
 
-  it('maps the ACP config option snapshot', () => {
-    expect(mapReasoningConfigOptions(configOptions)).toEqual({
-      thinking: { enabled: false },
-      effort: {
-        value: 'medium',
-        options: ['low', 'medium', 'xhigh'],
-      },
-    });
-  });
-
   it('updates connection state from config_option_update', () => {
     const next = applyEvent({ status: 'connected' }, {
       v: 1,

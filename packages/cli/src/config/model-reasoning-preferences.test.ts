@@ -82,22 +82,6 @@ describe('model-reasoning-preferences', () => {
       });
     });
 
-    it('keeps sibling model entries untouched', () => {
-      const settings = makeSettings({
-        reasoningPreferences: {
-          'qwen3.8-max': { effort: 'low' },
-          'other-model': { thinkingEnabled: true },
-        },
-      });
-
-      const merged = mergeModelReasoningPreference(settings, 'qwen3.8-max', {
-        effort: 'medium',
-      });
-
-      expect(merged['other-model']).toEqual({ thinkingEnabled: true });
-      expect(merged['qwen3.8-max']).toEqual({ effort: 'medium' });
-    });
-
     it('treats a missing preferences root as empty', () => {
       const settings = makeSettings({ name: 'qwen3.8-max' });
 

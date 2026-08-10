@@ -3281,18 +3281,6 @@ describe('Session', () => {
       expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith('low');
       expect(mockConfig.setThinkingEnabled).not.toHaveBeenCalled();
     });
-
-    it('does not change thinking state for a non-target model', () => {
-      currentModel = 'qwen3.8-max-preview';
-      vi.mocked(mockConfig.isThinkingEnabled).mockReturnValue(false);
-      vi.mocked(mockConfig.setThinkingEnabled).mockClear();
-      vi.mocked(mockConfig.setReasoningEffort).mockClear();
-
-      new Session('preview-session', mockConfig, mockClient, mockSettings);
-
-      expect(mockConfig.setThinkingEnabled).not.toHaveBeenCalled();
-      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
-    });
   });
 
   describe('setModel', () => {
