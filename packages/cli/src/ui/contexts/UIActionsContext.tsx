@@ -81,6 +81,7 @@ export interface UIActions {
     options?: {
       deferUntilIdle?: boolean;
       submittedPrompt?: string;
+      skipComposerState?: boolean;
     },
   ) => void;
   handleRetryLastPrompt: () => void;

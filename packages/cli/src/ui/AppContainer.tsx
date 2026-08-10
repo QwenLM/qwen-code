@@ -2504,9 +2504,11 @@ export const AppContainer = (props: AppContainerProps) => {
       options?: {
         deferUntilIdle?: boolean;
         submittedPrompt?: string;
+        skipComposerState?: boolean;
       },
     ) => {
-      const consumesComposerState = options !== undefined;
+      const skipComposerState = options?.skipComposerState === true;
+      const consumesComposerState = options !== undefined && !skipComposerState;
       const restoredSubmission = consumesComposerState
         ? restoredSubmissionRef.current
         : null;
@@ -2519,7 +2521,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // are unquestionably what is being submitted — and a peer envelope
       // popped into the composer would drain as `UserQuery` and reach the
       // shell. The flag already tracks composer contents on its own.
-      const submitsPeerContent = composerHoldsPeerContentRef.current;
+      const submitsPeerContent =
+        !skipComposerState && composerHoldsPeerContentRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
         submittedPromptProvenanceUnavailableRef.current = false;
@@ -2527,7 +2530,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Cleared here rather than inside the block above for the same
       // reason: the vim path consumes the composer without saying so, and
       // a flag left set would tag the *next* submission `'peer'` too.
-      composerHoldsPeerContentRef.current = false;
+      if (!skipComposerState) {
+        composerHoldsPeerContentRef.current = false;
+      }
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
@@ -3139,7 +3144,7 @@ export const AppContainer = (props: AppContainerProps) => {
       welcomeBackChoice !== 'restart' &&
       geminiClient?.isInitialized?.()
     ) {
-      handleFinalSubmit(initialPrompt);
+      handleFinalSubmit(initialPrompt, { skipComposerState: true });
       initialPromptSubmitted.current = true;
     }
   }, [

@@ -2617,6 +2617,33 @@ describe('AppContainer State Management', () => {
         );
       });
 
+      it('preserves the peer tag when an initial prompt submits first', () => {
+        const initialPrompt = 'configured initial prompt';
+        const { mockQueueMessage } = renderWithStash(stashedEnvelope);
+
+        capturedUIActions.handleFinalSubmit(initialPrompt, {
+          skipComposerState: true,
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          initialPrompt,
+          false,
+          undefined,
+        );
+
+        mockQueueMessage.mockClear();
+        capturedUIActions.handleFinalSubmit(stashedEnvelope, {
+          submittedPrompt: stashedEnvelope,
+        });
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          stashedEnvelope,
+          false,
+          undefined,
+          'peer',
+        );
+      });
+
       it('leaves an ordinary restored prompt untagged', () => {
         // The text is all the provenance there is after a restart, so the
         // marker test has to be narrow enough not to swallow typed input.
