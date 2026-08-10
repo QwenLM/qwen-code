@@ -104,6 +104,10 @@ fn main() {
                     .store(true, Ordering::Relaxed);
             }
             #[cfg(target_os = "macos")]
+            WindowEvent::Focused(true) => {
+                FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+            }
+            #[cfg(target_os = "macos")]
             WindowEvent::CloseRequested { api, .. } => {
                 save_window_state(app_handle);
                 api.prevent_close();
