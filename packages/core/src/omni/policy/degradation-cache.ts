@@ -32,6 +32,13 @@ export interface DegradationCacheEntry {
   createdAt: string;
 }
 
+/** Ceiling on a cached disclosure's length. Disclosures are one-line
+ * summaries (tens of characters in practice); the cache file is
+ * workspace-shippable, and an unbounded field served verbatim into
+ * model-visible content would hand a hostile repo an arbitrarily large
+ * prompt-stuffing channel on every cache hit. */
+export const MAX_CACHED_DISCLOSURE_LENGTH = 2048;
+
 /** Io params are per-invocation plumbing, never policy identity: the same
  * policy applied to the same object must hit regardless of where the
  * source file sat or which staging dir the run used. */
@@ -121,7 +128,9 @@ export class OmniDegradationCache {
       // 64-hex (it addresses the object store), the extension a single
       // dotted component (no traversal segments), and the disclosure
       // non-empty (lossy reuse without disclosure would silently break
-      // the D8 invariant). Malformed entries are dropped, not served —
+      // the D8 invariant) and bounded (an unbounded field served
+      // verbatim into model-visible content is a prompt-stuffing
+      // channel). Malformed entries are dropped, not served —
       // the orchestrator then re-derives and overwrites them.
       if (
         !/^[0-9a-f]{64}$/.test(entry.degradedSha256) ||
@@ -129,6 +138,7 @@ export class OmniDegradationCache {
         !OBJECT_EXTENSION_RE.test(entry.extension) ||
         typeof entry.disclosure !== 'string' ||
         entry.disclosure.length === 0 ||
+        entry.disclosure.length > MAX_CACHED_DISCLOSURE_LENGTH ||
         typeof entry.mimeType !== 'string' ||
         entry.mimeType.length === 0 ||
         (entry.role !== undefined &&

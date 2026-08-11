@@ -698,23 +698,41 @@ async function executePolicy(
         const actualSha256 = await hashFileSha256(objectPath, signal);
         if (actualSha256 === hit.degradedSha256) {
           const recognized = await recognizeMediaFile(objectPath, { signal });
-          debugLogger.debug(
-            `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
+          // Same cross-check a fresh derivation gets in validateArtifact:
+          // the recognized bytes must be a media type this tool DECLARES
+          // producing. The cache file is workspace-shippable, so without
+          // this a crafted entry could route an arbitrary store object —
+          // wrong modality included — through a policy that never made
+          // it, skipping every per-derivation validation gate.
+          const declared = descriptor.outputs.some(
+            (o) =>
+              o.kind === 'media' &&
+              o.mimeTypes?.includes(recognized.detectedMimeType),
           );
-          return {
-            outcome: 'cache_hit',
-            derived: [
-              {
-                filePath: objectPath,
-                recognized,
-                sha256: hit.degradedSha256,
-                disclosure: hit.disclosure,
-                degraded: true,
-                role: hit.role,
-              },
-            ],
-            derivedFiles: [],
-          };
+          if (declared) {
+            debugLogger.debug(
+              `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
+            );
+            return {
+              outcome: 'cache_hit',
+              derived: [
+                {
+                  filePath: objectPath,
+                  recognized,
+                  sha256: hit.degradedSha256,
+                  disclosure: hit.disclosure,
+                  degraded: true,
+                  role: hit.role,
+                },
+              ],
+              derivedFiles: [],
+            };
+          }
+          debugLogger.debug(
+            `degradation cache hit for policy=${policy.id} recognized as ` +
+              `undeclared media type ${recognized.detectedMimeType}; ` +
+              `dropping the entry and re-transcoding`,
+          );
         }
       }
     } catch (err) {

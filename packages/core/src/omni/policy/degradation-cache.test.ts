@@ -244,6 +244,10 @@ describe('OmniDegradationCache', () => {
       ['non-string extension', { ...ENTRY, extension: 42 }],
       ['empty disclosure (D8 invariant)', { ...ENTRY, disclosure: '' }],
       ['missing disclosure', { ...ENTRY, disclosure: undefined }],
+      [
+        'oversized disclosure (prompt-stuffing channel)',
+        { ...ENTRY, disclosure: 'x'.repeat(4096) },
+      ],
       ['empty mimeType', { ...ENTRY, mimeType: '' }],
       ['missing mimeType', { ...ENTRY, mimeType: undefined }],
       ['empty role', { ...ENTRY, role: '' }],
