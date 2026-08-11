@@ -505,8 +505,8 @@ fn choose_lan_ipv4(
     routed: Option<Ipv4Addr>,
     mut physical: Vec<LocalNetwork>,
 ) -> Result<LocalNetwork, String> {
-    physical.sort_unstable();
-    physical.dedup();
+    physical.sort_unstable_by_key(|network| (network.address, std::cmp::Reverse(network.netmask)));
+    physical.dedup_by_key(|network| network.address);
     if let Some(network) = routed.and_then(|routed| {
         physical
             .iter()
@@ -647,6 +647,17 @@ mod tests {
             .expect("routed LAN")
             .address,
             routed
+        );
+        assert_eq!(
+            choose_lan_ipv4(
+                Some(routed),
+                vec![
+                    network("192.168.1.20", "255.255.0.0"),
+                    network("192.168.1.20", "255.255.255.0"),
+                ],
+            )
+            .expect("narrowest duplicate"),
+            network("192.168.1.20", "255.255.255.0"),
         );
     }
 
