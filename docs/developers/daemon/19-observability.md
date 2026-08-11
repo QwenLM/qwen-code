@@ -229,7 +229,7 @@ flowchart TD
 ## Caveats and known limits
 
 - **DaemonLogger file logs are structured** and can be filtered by `route`, `sessionId`, and `clientId`. `QWEN_SERVE_DEBUG` stderr logs remain unstructured text.
-- **Accepted prompt, continuation, and cancellation mutations have lifecycle logs.** `prompt enqueued`, `continuation enqueued`, and `cancel sent` include `sessionId`, `promptId` when applicable, and `clientId`; prompt content is not logged. Use a distinct stable client ID for each independent controller. Controllers that intentionally share an ID are indistinguishable in these records.
+- **Accepted prompt, continuation, and cancellation mutations have lifecycle logs.** `prompt enqueued`, `continuation enqueued`, and `cancel sent` include `sessionId`, `promptId` when applicable, and `clientId` when supplied; prompt content is not logged. Use a distinct stable client ID for each independent controller. Controllers that intentionally share an ID are indistinguishable in these records.
 - **DaemonLogger retention is size based, not age based.** The active file and four archives are bounded per family; live fallback owners are never deleted.
 - **Access summaries are intentional loss accounting.** A WARN `access logs suppressed` represents individual access records omitted from both stderr and file; it does not indicate dropped HTTP requests.
 - **External logrotate must not mutate the active family.** Use a shipper that reads/copies and reopens the stable pathname after replacement.

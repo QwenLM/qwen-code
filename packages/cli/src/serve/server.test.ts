@@ -9075,11 +9075,18 @@ describe('createServeApp', () => {
       });
       const promptId = bridge.continueSessionContexts[0]?.promptId;
       expect(typeof promptId).toBe('string');
-      expect(daemonLog.info).toHaveBeenCalledWith('continuation enqueued', {
-        sessionId: 's-1',
-        promptId,
-        clientId: 'client-xyz',
-      });
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.filter(
+            ([message]) => message === 'continuation enqueued',
+          ),
+      ).toEqual([
+        [
+          'continuation enqueued',
+          { sessionId: 's-1', promptId, clientId: 'client-xyz' },
+        ],
+      ]);
       expect(
         JSON.stringify(vi.mocked(daemonLog.info).mock.calls),
       ).not.toContain('must not appear in logs');
@@ -9102,10 +9109,11 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ accepted: false, interruption: 'none' });
-      expect(daemonLog.info).not.toHaveBeenCalledWith(
-        'continuation enqueued',
-        expect.anything(),
-      );
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.some(([message]) => message === 'continuation enqueued'),
+      ).toBe(false);
     });
 
     it('maps session continue bridge errors', async () => {
@@ -9129,10 +9137,11 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
-      expect(daemonLog.info).not.toHaveBeenCalledWith(
-        'continuation enqueued',
-        expect.anything(),
-      );
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.some(([message]) => message === 'continuation enqueued'),
+      ).toBe(false);
     });
   });
 
