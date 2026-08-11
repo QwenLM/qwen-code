@@ -198,6 +198,11 @@ async function generateMiniMaxImage(
     throw new Error(formatImageGenerationError(response.status, payload));
   }
   const payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
+  const baseResponse = isRecord(payload) ? payload['base_resp'] : undefined;
+  const statusCode = readStringOrNumber(baseResponse, 'status_code');
+  if (statusCode && statusCode !== '0') {
+    throw new Error(formatImageGenerationError(response.status, payload));
+  }
   const image = findMiniMaxGeneratedImage(payload);
   if (!image) {
     throw new Error('Image generation response did not contain an image URL.');
@@ -280,8 +285,12 @@ async function readBoundedBody(
 }
 
 function formatImageGenerationError(status: number, payload: unknown): string {
-  const code = readString(payload, 'code');
-  const message = readString(payload, 'message');
+  const baseResponse = isRecord(payload) ? payload['base_resp'] : undefined;
+  const code =
+    readStringOrNumber(payload, 'code') ??
+    readStringOrNumber(baseResponse, 'status_code');
+  const message =
+    readString(payload, 'message') ?? readString(baseResponse, 'status_msg');
   const suffix = [code, message].filter(Boolean).join(': ');
 
   if (status === 429 || /throttl|rate.?limit/i.test(`${code} ${message}`)) {
@@ -297,7 +306,8 @@ function formatImageGenerationError(status: number, payload: unknown): string {
   if (/DataInspectionFailed/i.test(code ?? '')) {
     return `The image generation endpoint blocked the prompt during content moderation${message ? `: ${message}` : '.'}`;
   }
-  return `Image generation failed with HTTP ${status}${suffix ? ` (${suffix})` : ''}.`;
+  const statusText = status >= 200 && status < 300 ? '' : ` with HTTP ${status}`;
+  return `Image generation failed${statusText}${suffix ? ` (${suffix})` : ''}.`;
 }
 
 function findGeneratedImageUrl(payload: unknown): string | undefined {
@@ -517,6 +527,23 @@ function readString(value: unknown, ...keys: string[]): string | undefined {
   if (!isRecord(value)) return undefined;
   for (const key of keys) {
     const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function readStringOrNumber(
+  value: unknown,
+  ...keys: string[]
+): string | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return String(candidate);
+    }
     if (typeof candidate === 'string' && candidate.trim()) {
       return candidate.trim();
     }

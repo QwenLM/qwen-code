@@ -245,6 +245,32 @@ describe('generateImage', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('surfaces MiniMax application errors returned with HTTP 200', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          base_resp: {
+            status_code: 1008,
+            status_msg: 'insufficient balance',
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(
+      generateImage({
+        baseUrl: 'https://api.minimax.io/v1',
+        apiKey: 'secret',
+        model: 'image-01',
+        prompt: 'poster',
+        signal: new AbortController().signal,
+        fetchFn,
+      }),
+    ).rejects.toThrow('Image generation failed (1008: insufficient balance).');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
   it('pins the validated result hostname for the download connection', async () => {
     const lookup = vi.fn();
     networkPolicyMocks.resolveNetworkTarget.mockResolvedValueOnce({
