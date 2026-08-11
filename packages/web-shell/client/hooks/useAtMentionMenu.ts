@@ -1864,7 +1864,16 @@ export function useAtMentionMenu({
           changes: { from: current.from, to: current.to, insert: '' },
           selection: { anchor: current.from },
         });
-        if (onUploadRequest) onUploadRequest(fileDirectoryRef.current);
+        if (onUploadRequest) {
+          // Typed queries (`@src/`) browse a directory derived from the query
+          // text without syncing fileDirectoryRef, so re-derive the same
+          // directory the panel is displaying.
+          const { dirPath } = splitFileQuery(
+            current.query,
+            fileDirectoryRef.current,
+          );
+          onUploadRequest(dirPath);
+        }
         close();
         return true;
       }

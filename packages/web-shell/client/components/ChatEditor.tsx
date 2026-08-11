@@ -119,6 +119,23 @@ export type ComposerToolbarAction =
   | 'voice'
   | 'workspace';
 
+// Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
+// items API can tell them apart, and folder uploads are out of scope.
+function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
+  const items = dataTransfer.items;
+  if (!items || items.length === 0) {
+    return Array.from(dataTransfer.files);
+  }
+  const files: File[] = [];
+  for (const item of Array.from(items)) {
+    if (item.kind !== 'file') continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
+}
+
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
   'contextUsage',
@@ -1452,7 +1469,7 @@ export const ChatEditor = memo(
           core.imageTransferHandlers.onDropCapture(event);
           return;
         }
-        const files = Array.from(event.dataTransfer.files);
+        const files = collectDroppedFiles(event.dataTransfer);
         uploadDragDepthRef.current = 0;
         setUploadDragActive(false);
         if (disabled) {

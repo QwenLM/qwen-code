@@ -360,6 +360,12 @@ describe('useFileUpload', () => {
     expect(latest!.uploads).not.toBe(before);
     expect(latest!.uploads[0].progress).toBeCloseTo(0.03);
 
+    // A near-final commit: once the last committed value is >= 0.98, the
+    // final event sits under the 2% threshold, so only the `progress < 1`
+    // guard keeps it committing.
+    act(() => onProgress!({ loaded: 990, total: 1000 }));
+    expect(latest!.uploads[0].progress).toBeCloseTo(0.99);
+
     // The final value always commits, regardless of the threshold.
     act(() => onProgress!({ loaded: 1000, total: 1000 }));
     expect(latest!.uploads[0].progress).toBe(1);
@@ -701,6 +707,105 @@ describe('useFileUpload', () => {
         hash: `sha256:${'0'.repeat(64)}`,
       });
     });
+    expect(latest!.uploads).toHaveLength(0);
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it('never uploads a queued item after unmount', async () => {
+    const gates: Array<
+      Deferred<{
+        kind: 'file_upload';
+        path: string;
+        sizeBytes: number;
+        hash: `sha256:${string}`;
+      }>
+    > = [];
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(() => {
+        const gate =
+          deferred<
+            Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>
+          >();
+        gates.push(gate as never);
+        return gate.promise;
+      }),
+    };
+    const onUploaded = vi.fn();
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles(
+        [makeFile('a.txt'), makeFile('b.txt')],
+        '.',
+        onUploaded,
+      );
+    });
+    // The first file is in flight; the second is still queued.
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      root!.unmount();
+      root = null;
+    });
+
+    // Releasing the in-flight upload must not re-drain the queue into a
+    // post-unmount HTTP request: the queued controller was aborted.
+    await act(async () => {
+      gates[0].resolve({
+        kind: 'file_upload',
+        path: 'a.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it('never uploads a queued item after the target workspace switches', async () => {
+    const gates: Array<
+      Deferred<{
+        kind: 'file_upload';
+        path: string;
+        sizeBytes: number;
+        hash: `sha256:${string}`;
+      }>
+    > = [];
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(() => {
+        const gate =
+          deferred<
+            Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>
+          >();
+        gates.push(gate as never);
+        return gate.promise;
+      }),
+    };
+    const onUploaded = vi.fn();
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles(
+        [makeFile('a.txt'), makeFile('b.txt')],
+        '.',
+        onUploaded,
+      );
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+
+    render({ client, maxBytes: MAX, targetKey: 'ws:/b' });
+
+    // The queued item's controller was aborted by the switch, so releasing
+    // the in-flight gate must not start it under the new target.
+    await act(async () => {
+      gates[0].resolve({
+        kind: 'file_upload',
+        path: 'a.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'b'.repeat(64)}`,
+      });
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
     expect(latest!.uploads).toHaveLength(0);
     expect(onUploaded).not.toHaveBeenCalled();
   });

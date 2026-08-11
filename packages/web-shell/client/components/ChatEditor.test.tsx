@@ -294,7 +294,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function renderChatEditor(props: {
+interface ChatEditorRenderProps {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
   gitBranch?: string;
@@ -319,7 +319,13 @@ function renderChatEditor(props: {
   atWorkspaceCwd?: string;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
-}) {
+}
+
+function renderChatEditorInto(
+  root: Root,
+  portalRoot: HTMLDivElement,
+  props: ChatEditorRenderProps,
+) {
   const {
     composerTags,
     pastedImages,
@@ -334,14 +340,6 @@ function renderChatEditor(props: {
   if (pastedImages) {
     mockComposerCoreState.pastedImages = pastedImages;
   }
-  const container = document.createElement('div');
-  container.dataset.webShellRoot = '';
-  const portalRoot = document.createElement('div');
-  portalRoot.dataset.webShellPortalRoot = '';
-  document.body.appendChild(container);
-  document.body.appendChild(portalRoot);
-  const root = createRoot(container);
-  mounted.push({ root, container, portalRoot });
 
   act(() => {
     root.render(
@@ -367,8 +365,31 @@ function renderChatEditor(props: {
       </WebShellPortalRootContext.Provider>,
     );
   });
+}
+
+function renderChatEditor(props: ChatEditorRenderProps) {
+  const container = document.createElement('div');
+  container.dataset.webShellRoot = '';
+  const portalRoot = document.createElement('div');
+  portalRoot.dataset.webShellPortalRoot = '';
+  document.body.appendChild(container);
+  document.body.appendChild(portalRoot);
+  const root = createRoot(container);
+  mounted.push({ root, container, portalRoot });
+  renderChatEditorInto(root, portalRoot, props);
 
   return container;
+}
+
+// Re-render an already-mounted editor with new props (e.g. to switch the
+// upload target while a picker session is conceptually open).
+function rerenderChatEditor(
+  container: HTMLDivElement,
+  props: ChatEditorRenderProps,
+) {
+  const entry = mounted.find((m) => m.container === container);
+  if (!entry) throw new Error('container is not mounted by renderChatEditor');
+  renderChatEditorInto(entry.root, entry.portalRoot, props);
 }
 
 describe('ChatEditor voice toolbar integration', () => {
@@ -1432,10 +1453,23 @@ describe('ChatEditor file upload gating', () => {
     type: string,
     types: string[],
     files: File[] = [],
+    items?: Array<{ file: File; isDirectory?: boolean }>,
   ) => {
     const event = new Event(type, { bubbles: true, cancelable: true });
+    // When `items` is provided it mimics the DataTransfer items API (how
+    // browsers expose dropped folders); without it the handler falls back to
+    // `dataTransfer.files`.
+    const transferItems = items?.map(({ file, isDirectory }) => ({
+      kind: 'file',
+      getAsFile: () => file,
+      webkitGetAsEntry: () => ({ isDirectory: isDirectory === true }),
+    }));
     Object.defineProperty(event, 'dataTransfer', {
-      value: { types, files },
+      value: {
+        types,
+        files,
+        ...(transferItems ? { items: transferItems } : {}),
+      },
     });
     act(() => target.dispatchEvent(event));
     return event;
@@ -1459,6 +1493,7 @@ describe('ChatEditor file upload gating', () => {
       customization: { fileUploadEnabled: false },
     });
     expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+    expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
   it('fileUploadEnabled={true} still requires the capability (AND, not override)', () => {
@@ -1469,12 +1504,14 @@ describe('ChatEditor file upload gating', () => {
       customization: { fileUploadEnabled: true },
     });
     expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+    expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
   it('stays disabled without the capability and without the prop', () => {
     uploadWorkspaceState.current = makeWorkspace([]);
     const container = renderChatEditor({});
     expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+    expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
   it('stays disabled for an untrusted legacy-primary workspace', () => {
@@ -1484,6 +1521,7 @@ describe('ChatEditor file upload gating', () => {
     );
     const container = renderChatEditor({});
     expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
+    expect(composerCoreState.onFileUploadRequest).toBeUndefined();
   });
 
   it('does not intercept non-file drops', () => {
@@ -1601,7 +1639,7 @@ describe('ChatEditor file upload gating', () => {
     expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
   });
 
-  it('routes mixed image-and-file drops to the upload path', () => {
+  it('routes mixed image-and-file drops to the upload path', async () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
     const container = renderChatEditor({});
@@ -1620,14 +1658,15 @@ describe('ChatEditor file upload gating', () => {
     expect(
       container.querySelector('[data-web-shell-upload-strip]'),
     ).not.toBeNull();
+    await act(async () => {});
+    // Both dropped files enter the upload batch — image-media files are not
+    // filtered out of mixed drops.
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(2);
   });
 
   it('intercepts file drops before the editor and renders status above it', () => {
-    uploadWorkspaceState.current = makeWorkspace(
-      ['workspace_file_upload'],
-      true,
-      1,
-    );
+    const workspace = makeWorkspace(['workspace_file_upload'], true, 1);
+    uploadWorkspaceState.current = workspace;
     const container = renderChatEditor({});
     const surface = container.querySelector(
       '[data-web-shell-composer-surface]',
@@ -1650,6 +1689,10 @@ describe('ChatEditor file upload gating', () => {
     expect(strip).not.toBeNull();
     expect(strip?.nextElementSibling).toBe(surface);
     expect(surface.contains(strip)).toBe(false);
+    // The daemon-advertised 1-byte cap must reach the size pre-check: the
+    // 2-byte file fails locally and is never sent.
+    expect(strip?.querySelector('[data-status="error"]')).not.toBeNull();
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('uploads picker selections into the captured directory and inserts a tag', async () => {
@@ -1675,10 +1718,24 @@ describe('ChatEditor file upload gating', () => {
       value: [new File(['abc'], 'notes.txt')],
       configurable: true,
     });
+    // jsdom (like browsers) rejects non-empty programmatic values on file
+    // inputs, so shadow the accessor to observe the handler's reset.
+    let inputValue = 'C:\\fakepath\\notes.txt';
+    Object.defineProperty(input, 'value', {
+      configurable: true,
+      get: () => inputValue,
+      set: (next: string) => {
+        inputValue = next;
+      },
+    });
     act(() => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await act(async () => {});
+
+    // Clearing the input lets re-selecting the same file fire a new change
+    // event in real browsers.
+    expect(input.value).toBe('');
 
     expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
     expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
@@ -1764,6 +1821,94 @@ describe('ChatEditor file upload gating', () => {
       ],
       { placement: 'inline', position: 'end' },
     );
+  });
+
+  it('falls back to the 50 MiB default when a capable daemon omits the limit', async () => {
+    const workspace = {
+      client: { uploadWorkspaceFile: vi.fn() },
+      capabilities: {
+        features: ['workspace_file_upload'],
+        workspaces: [{ cwd: '/workspace', primary: true, trusted: true }],
+      },
+    };
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'small.txt',
+      sizeBytes: 2,
+      hash: `sha256:${'a'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    const oversized = new File(['x'], 'big.bin');
+    Object.defineProperty(oversized, 'size', {
+      value: 50 * 1024 * 1024 + 1,
+    });
+    dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [oversized, new File(['ok'], 'small.txt')],
+    );
+    await act(async () => {});
+
+    const strip = container.querySelector('[data-web-shell-upload-strip]');
+    expect(strip?.textContent).toContain(
+      'File exceeds the 50 MiB upload limit',
+    );
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'small.txt',
+    );
+  });
+
+  it('skips dropped folders instead of publishing phantom files', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'data.csv',
+      sizeBytes: 3,
+      hash: `sha256:${'a'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const folder = new File([], 'myfolder');
+    const file = new File(['csv'], 'data.csv', { type: 'text/csv' });
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [folder, file],
+      [{ file: folder, isDirectory: true }, { file }],
+    );
+    await act(async () => {});
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'data.csv',
+    );
+    expect(composerCoreState.addTags).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes folder-only drops to the image lane without uploading', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const folder = new File([], 'myfolder');
+    dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [folder],
+      [{ file: folder, isDirectory: true }],
+    );
+
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   describe('qualified upload targeting', () => {
@@ -1857,6 +2002,38 @@ describe('ChatEditor file upload gating', () => {
       expect(
         container.querySelector('[data-web-shell-upload-input]'),
       ).toBeNull();
+    });
+
+    it('blocks a picker upload after the target workspace switched', async () => {
+      const { workspace, qualifiedClient } = makeQualifiedWorkspace(
+        qualifiedFeatures,
+        primaryAndSecondary,
+      );
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({});
+      const input = container.querySelector<HTMLInputElement>(
+        '[data-web-shell-upload-input]',
+      )!;
+
+      // The picker opens against the primary target, then the workspace
+      // selection switches while the OS picker (which does not block the
+      // page) is still open.
+      act(() => {
+        composerCoreState.onFileUploadRequest?.('docs');
+      });
+      rerenderChatEditor(container, { atWorkspaceCwd: '/secondary' });
+
+      Object.defineProperty(input, 'files', {
+        value: [new File(['abc'], 'notes.txt')],
+        configurable: true,
+      });
+      act(() => {
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await act(async () => {});
+
+      expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+      expect(qualifiedClient.uploadWorkspaceFile).not.toHaveBeenCalled();
     });
   });
 });

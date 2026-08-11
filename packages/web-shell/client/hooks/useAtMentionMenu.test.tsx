@@ -200,6 +200,14 @@ describe('useAtMentionMenu', () => {
       },
     });
 
+    const order: string[] = [];
+    view.dispatch = vi.fn(() => {
+      order.push('dispatch');
+    });
+    onUploadRequest.mockImplementation(() => {
+      order.push('upload');
+    });
+
     act(() => latest!.refreshForView(view));
     act(() => latest!.enterCategory(0));
     await runDebounce();
@@ -210,6 +218,66 @@ describe('useAtMentionMenu', () => {
       selection: { anchor: 0 },
     });
     expect(onUploadRequest).toHaveBeenCalledWith('.');
+    // The mention must be removed before the picker opens: the native file
+    // dialog blocks the event loop, so anything deferred until after it
+    // would stay visible (or be skipped) for the whole picker session.
+    expect(order).toEqual(['dispatch', 'upload']);
+  });
+
+  it('uploads into the directory shown by a typed path query', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@src/');
+    const onUploadRequest = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+
+    // The menu browses `src/` from the typed query even though
+    // fileDirectoryRef still holds the click-navigation value ('.'), so the
+    // upload item must target the displayed directory.
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(onUploadRequest).toHaveBeenCalledWith('src');
+  });
+
+  it('hides the upload item while filtering files with an entry query', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        { name: 'file-0.ts', kind: 'file', ignored: false },
+        { name: 'other.txt', kind: 'file', ignored: false },
+      ],
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      onUploadRequest: vi.fn(),
+    });
+
+    act(() => latest!.refreshForView(makeView('@file-0')));
+    await runDebounce();
+
+    expect(latest!.state?.items.some((item) => item.id === 'upload-file')).toBe(
+      false,
+    );
+    expect(latest!.state?.items.map((item) => item.label)).toContain(
+      'file-0.ts',
+    );
   });
 
   it('closes the upload item without dispatching once the composer is disabled', async () => {

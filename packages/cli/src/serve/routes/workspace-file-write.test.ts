@@ -612,6 +612,20 @@ describe('POST /file/upload', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it.each(['report.', 'report ', 'CON.txt'])(
+    'rejects the suspicious basename %s before buffering',
+    async (name) => {
+      // `docs/` does not exist: rejection must come from the basename
+      // pre-check, before parent resolution, gate slots, and body buffering.
+      const res = await upload(`docs/${name}`).send(Buffer.from('x'));
+      expect(res.status).toBe(400);
+      expect(res.body.errorKind).toBe('parse_error');
+      await expect(
+        fsp.stat(path.join(h.workspace, name)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
   it('rejects a symlinked parent that escapes the workspace', async () => {
     const outsideDir = path.join(h.scratch, 'outside-dir');
     await fsp.mkdir(outsideDir);
@@ -625,23 +639,45 @@ describe('POST /file/upload', () => {
   });
 
   it('preserves a generation-closed error from the parent stat', async () => {
-    await teardown(h);
-    let checks = 0;
-    h = await makeHarness({
-      token: 'secret',
-      generationGuard: {
-        assertOpen() {
-          checks += 1;
-          if (checks === 3) {
-            throw Object.assign(new Error('closed'), {
-              code: 'workspace_generation_closed',
-            });
-          }
-        },
-      },
+    // Throw from an instrumented stat (same Proxy technique as the
+    // disconnect test) so the pin is stage-aware: it fails if the error no
+    // longer originates at the admission parent stat.
+    const realFactory = createWorkspaceFileSystemFactory({
+      boundWorkspaces: [h.workspace],
+      trusted: true,
+      emit: () => {},
     });
-
-    const res = await upload('a.txt').send(Buffer.from('x'));
+    const statFactory = {
+      assertCanWrite: () => {},
+      forRequest: (ctx: { originatorClientId?: string; route: string }) => {
+        const realFs = realFactory.forRequest(ctx);
+        return new Proxy(realFs, {
+          get(target, prop, receiver) {
+            if (prop === 'stat') {
+              return (_resolved: Parameters<typeof realFs.stat>[0]) => {
+                throw Object.assign(new Error('closed'), {
+                  code: 'workspace_generation_closed',
+                });
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      },
+    };
+    const app = createServeApp(
+      { ...baseOpts, workspace: h.workspace, token: 'secret' },
+      undefined,
+      { fsFactory: statFactory as never },
+    );
+    const res = await request(app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'application/octet-stream')
+      .query({ path: 'a.txt' })
+      .send(Buffer.from('x'));
     expect(res.status).toBe(503);
     expect(res.headers['retry-after']).toBe('1');
     expect(res.body.code).toBe('workspace_runtime_unavailable');

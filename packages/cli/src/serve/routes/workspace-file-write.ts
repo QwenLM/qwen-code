@@ -10,6 +10,7 @@ import express from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   MAX_UPLOAD_BYTES,
+  hasSuspiciousPathPattern,
   isContentHash,
   isFsError,
   type ContentHash,
@@ -568,6 +569,12 @@ function fileUploadAdmission(
         const basename = path.basename(queryPath);
         if (basename.length === 0 || basename === '.' || basename === '..') {
           sendParseError(res, ROUTE, '`path` must name a file');
+          return;
+        }
+        // Reject statically detectable bad names before taking a gate slot
+        // and buffering the body; fs.resolve would throw on them anyway.
+        if (hasSuspiciousPathPattern(basename)) {
+          sendParseError(res, ROUTE, 'filename contains a suspicious pattern');
           return;
         }
         if (Buffer.byteLength(basename, 'utf-8') > MAX_UPLOAD_FILENAME_BYTES) {

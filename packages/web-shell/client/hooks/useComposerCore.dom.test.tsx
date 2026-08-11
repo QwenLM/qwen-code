@@ -1319,6 +1319,9 @@ describe('useComposerCore tags', () => {
     const text = latest!.viewRef.current!.state.doc.toString();
     expect(text).toContain('please review');
     expect(text).toContain('now');
+    // The chip's serialized text must be removed from the doc, not just its
+    // decoration — uncovered text would be submitted as plain prompt text.
+    expect(text).not.toContain('@orders');
     expect(latest!.hasAttachments).toBe(false);
   });
 
@@ -1351,6 +1354,24 @@ describe('useComposerCore tags', () => {
     expect(doc).toBe('draft text @orders ');
     expect(view.state.selection.main.from).toBe(5);
     expect(document.activeElement).toBe(outside);
+
+    // The end-placed tag must become a real chip decoration: a wrong
+    // effect-range offset would leave the doc text correct but decorate the
+    // wrong span, breaking the remove button and atomic-range behavior.
+    expect(latest!.hasAttachments).toBe(true);
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+    // The remove button deletes the chip's serialized text (separator
+    // spacing aside), restoring the pre-upload content.
+    const removed = view.state.doc.toString();
+    expect(removed).not.toContain('@orders');
+    expect(removed.trim()).toBe('draft text');
+    expect(latest!.hasAttachments).toBe(false);
     outside.remove();
   });
 

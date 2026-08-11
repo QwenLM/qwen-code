@@ -1941,7 +1941,13 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, label);
-        return (await res.json()) as DaemonWorkspaceFileUploadResult;
+        const body = (await res.json()) as unknown;
+        // Match the XHR path's shape check so the two transports fail
+        // identically on malformed 2xx bodies.
+        if (!body || typeof body !== 'object' || !('path' in body)) {
+          throw new Error(`${label}: invalid upload response body`);
+        }
+        return body as DaemonWorkspaceFileUploadResult;
       },
       req.timeoutMs,
       'rest',

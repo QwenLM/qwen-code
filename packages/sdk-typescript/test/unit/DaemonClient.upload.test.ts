@@ -134,6 +134,27 @@ describe('uploadWorkspaceFile', () => {
     expect(calls[0]?.body).toBe(data);
   });
 
+  it('sends Blob bodies untouched on the fetch path', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(201, uploadResult),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const data = new Blob(['blob-bytes']);
+    await client.uploadWorkspaceFile({ path: 'a.bin', data });
+    expect(calls[0]?.body).toBe(data);
+  });
+
+  it('rejects a 2xx fetch response whose JSON body is missing path', async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(200, {}));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data: new Uint8Array([1]),
+      }),
+    ).rejects.toThrow(/invalid upload response body/);
+  });
+
   it('uses the workspace-qualified route via workspaceByCwd', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(201, uploadResult),
@@ -470,6 +491,7 @@ describe('uploadWorkspaceFile', () => {
     it('aborts on signal cancellation and detaches the abort listener', async () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon' });
       const ctrl = new AbortController();
+      const addSpy = vi.spyOn(ctrl.signal, 'addEventListener');
       const removeSpy = vi.spyOn(ctrl.signal, 'removeEventListener');
 
       const promise = client
@@ -483,7 +505,11 @@ describe('uploadWorkspaceFile', () => {
 
       ctrl.abort();
       await expect(promise).resolves.toMatchObject({ name: 'AbortError' });
-      expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+      const registered = addSpy.mock.calls.find(
+        ([type]) => type === 'abort',
+      )?.[1];
+      expect(registered).toBeTypeOf('function');
+      expect(removeSpy).toHaveBeenCalledWith('abort', registered);
     });
 
     it('rejects and cleans up when xhr.send throws synchronously', async () => {
@@ -492,6 +518,7 @@ describe('uploadWorkspaceFile', () => {
         throw new Error('detached buffer');
       };
       const ctrl = new AbortController();
+      const addSpy = vi.spyOn(ctrl.signal, 'addEventListener');
       const removeSpy = vi.spyOn(ctrl.signal, 'removeEventListener');
 
       const error = await client
@@ -504,12 +531,17 @@ describe('uploadWorkspaceFile', () => {
         .catch((caught: unknown) => caught);
 
       expect(error).toMatchObject({ message: 'detached buffer' });
-      expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+      const registered = addSpy.mock.calls.find(
+        ([type]) => type === 'abort',
+      )?.[1];
+      expect(registered).toBeTypeOf('function');
+      expect(removeSpy).toHaveBeenCalledWith('abort', registered);
     });
 
     it('detaches the abort listener after a successful upload settles', async () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon' });
       const ctrl = new AbortController();
+      const addSpy = vi.spyOn(ctrl.signal, 'addEventListener');
       const removeSpy = vi.spyOn(ctrl.signal, 'removeEventListener');
 
       const promise = client.uploadWorkspaceFile({
@@ -524,7 +556,11 @@ describe('uploadWorkspaceFile', () => {
       xhr.onload?.();
 
       await expect(promise).resolves.toEqual(uploadResult);
-      expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+      const registered = addSpy.mock.calls.find(
+        ([type]) => type === 'abort',
+      )?.[1];
+      expect(registered).toBeTypeOf('function');
+      expect(removeSpy).toHaveBeenCalledWith('abort', registered);
     });
 
     it('rejects a pre-aborted signal before constructing an XHR', async () => {
@@ -562,6 +598,64 @@ describe('uploadWorkspaceFile', () => {
       expect(error).toMatchObject({
         message: expect.stringContaining('invalid upload response body'),
       });
+    });
+
+    it('rejects a 2xx response whose JSON body is missing path', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+
+      const promise = client
+        .uploadWorkspaceFile({
+          path: 'a.bin',
+          data: new Uint8Array([1]),
+          onProgress: () => {},
+        })
+        .catch((caught: unknown) => caught);
+      const xhr = FakeXMLHttpRequest.latest!;
+      xhr.status = 200;
+      xhr.responseText = JSON.stringify({});
+      xhr.onload?.();
+
+      const error = await promise;
+      expect(error).toMatchObject({
+        message: expect.stringContaining('invalid upload response body'),
+      });
+    });
+
+    it('sends Blob bodies untouched on the XHR path', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+      const data = new Blob(['blob-bytes']);
+
+      const promise = client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data,
+        onProgress: () => {},
+      });
+      const xhr = FakeXMLHttpRequest.latest!;
+      expect(xhr.sentBody).toBe(data);
+      xhr.status = 201;
+      xhr.responseText = JSON.stringify(uploadResult);
+      xhr.onload?.();
+      await expect(promise).resolves.toEqual(uploadResult);
+    });
+
+    it('inherits the client timeout on the XHR when timeoutMs is omitted', async () => {
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetchTimeoutMs: 30_000,
+      });
+
+      const promise = client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data: new Uint8Array([1]),
+        onProgress: () => {},
+      });
+      const xhr = FakeXMLHttpRequest.latest!;
+      xhr.status = 201;
+      xhr.responseText = JSON.stringify(uploadResult);
+      xhr.onload?.();
+
+      await expect(promise).resolves.toEqual(uploadResult);
+      expect(xhr.timeout).toBe(30_000);
     });
   });
 });
