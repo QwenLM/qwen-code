@@ -1330,8 +1330,13 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     });
     const parts = result.llmContent as Array<Record<string, unknown>>;
     expect(parts).toHaveLength(3);
-    // Zoom hint shows the DELIVERED image's resolution (the derivative).
-    expect(parts[0]!['text']).toContain('1568x1176');
+    // Zoom hint shows the DELIVERED image's resolution (the derivative) —
+    // and must not call it "full resolution", which would contradict the
+    // degradation disclosure right below and steer the model away from
+    // zoom_image (the remedy that reads the original from disk).
+    expect(parts[0]!['text']).toContain('delivered at 1568x1176 px');
+    expect(parts[0]!['text']).toContain('after degradation');
+    expect(parts[0]!['text']).not.toContain('full resolution');
     expect(parts[1]!['text']).toBe(
       '【媒体降质】pic.png：downsampled to 1568px',
     );

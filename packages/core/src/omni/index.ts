@@ -915,10 +915,19 @@ export async function readMediaViaOmniDelivery(params: {
       width !== undefined &&
       height !== undefined
     ) {
+      // On the degradation path `delivery.recognized` re-recognizes the
+      // DERIVATIVE, so width/height are the downsampled dimensions —
+      // calling them "full resolution" would contradict the disclosure
+      // pushed right below and steer the model away from zoom_image, the
+      // exact remedy for degradation-stripped detail (it reads the
+      // original from disk).
       parts.push({
-        text:
-          `Image ${displayName}: full resolution ${width}x${height} px. ` +
-          `Use zoom_image for a closer look at details.`,
+        text: delivery.disclosure
+          ? `Image ${displayName}: delivered at ${width}x${height} px ` +
+            `after degradation. Use zoom_image to inspect details — it ` +
+            `reads the original file.`
+          : `Image ${displayName}: full resolution ${width}x${height} px. ` +
+            `Use zoom_image for a closer look at details.`,
       });
     }
     // Disclosure IMMEDIATELY before its media part (decision D8): provider
