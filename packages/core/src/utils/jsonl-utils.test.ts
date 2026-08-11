@@ -267,13 +267,25 @@ describe('reader resource cleanup', () => {
     );
     const controller = new AbortController();
     const reason = new Error('jsonl scan cancelled');
-    const readPromise = readLines<{ i: number }>(file, 1_000, {
-      signal: controller.signal,
-    });
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) =>
+        originalCreateReadStream(...args),
+      );
 
-    controller.abort(reason);
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1_000, {
+        signal: controller.signal,
+      });
+      expect(spy).toHaveBeenCalledWith(file, { signal: controller.signal });
 
-    await expect(readPromise).rejects.toBe(reason);
+      controller.abort(reason);
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('observes cancellation while readLines is closing its stream', async () => {

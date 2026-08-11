@@ -3317,6 +3317,76 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('keeps a shared session/list scan alive when one connection is destroyed', async () => {
+    let loadSignal: AbortSignal | undefined;
+    let resolveScan!: (value: {
+      items: [];
+      nextCursor: undefined;
+      hasMore: false;
+    }) => void;
+    let rejectScan!: (reason?: unknown) => void;
+    const scan = new Promise<{
+      items: [];
+      nextCursor: undefined;
+      hasMore: false;
+    }>((resolve, reject) => {
+      resolveScan = resolve;
+      rejectScan = reject;
+    });
+    const listSessionsSpy = vi
+      .spyOn(SessionService.prototype, 'listSessions')
+      .mockImplementation(async (options) => {
+        const signal = options?.signal;
+        expect(signal).toBeDefined();
+        loadSignal = signal;
+        signal?.addEventListener('abort', () => rejectScan(signal.reason), {
+          once: true,
+        });
+        return scan;
+      });
+
+    try {
+      const firstConnId = await initialize();
+      const secondConnId = await initialize();
+      const secondStream = await openStream(secondConnId);
+      const secondFrame = takeFrames(secondStream, 1);
+      await Promise.all([
+        post(firstConnId, {
+          jsonrpc: '2.0',
+          id: 131,
+          method: 'session/list',
+          params: { workspaceCwd: TEST_WORKSPACE, view: 'organized' },
+        }),
+        post(secondConnId, {
+          jsonrpc: '2.0',
+          id: 132,
+          method: 'session/list',
+          params: { workspaceCwd: TEST_WORKSPACE, view: 'organized' },
+        }),
+      ]);
+      await waitUntil(() => loadSignal !== undefined);
+      expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+
+      const deleted = await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': firstConnId },
+      });
+      expect(deleted.status).toBe(202);
+      expect(loadSignal?.aborted).toBe(false);
+
+      resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      await expect(secondFrame).resolves.toEqual([
+        expect.objectContaining({
+          id: 132,
+          result: expect.objectContaining({ sessions: [] }),
+        }),
+      ]);
+    } finally {
+      resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      listSessionsSpy.mockRestore();
+    }
+  });
+
   it('_qwen/sessions/archive rejects invalid batch params', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);

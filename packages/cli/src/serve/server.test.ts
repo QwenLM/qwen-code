@@ -191,7 +191,9 @@ import { getActiveSseCount } from './routes/sse-events.js';
 // `mockWt.impl` to control instance behaviour.
 const mockWt = vi.hoisted(() => ({
   impl: undefined as (() => Record<string, unknown>) | undefined,
-  readSidecar: undefined as (() => Promise<unknown>) | undefined,
+  readSidecar: undefined as
+    | ((...args: unknown[]) => Promise<unknown>)
+    | undefined,
   realpath: undefined as ((p: string) => string) | undefined,
 }));
 const mockTmpdir = vi.hoisted(() => ({
@@ -223,7 +225,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...original,
     readWorktreeSession: (...args: unknown[]) =>
       mockWt.readSidecar
-        ? mockWt.readSidecar()
+        ? mockWt.readSidecar(...args)
         : (original.readWorktreeSession as (...a: unknown[]) => unknown)(
             ...args,
           ),
@@ -12997,6 +12999,7 @@ describe('createServeApp', () => {
         });
         catalogRequest.abort();
         await vi.waitFor(() => expect(preflightSignal?.aborted).toBe(true));
+        expect(secondaryBridge.listCalls).toEqual([]);
       } finally {
         listSessionsSpy.mockRestore();
       }
@@ -13735,6 +13738,64 @@ describe('createServeApp', () => {
       }
     });
 
+    it('propagates catalog cancellation through worktree enrichment', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440016';
+      const controller = new AbortController();
+      const reason = new Error('cancelled during worktree enrichment');
+      let sidecarSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items: [
+            {
+              sessionId,
+              cwd: WS_BOUND,
+              startTime: '2026-05-17T12:00:00.000Z',
+              mtime: Date.parse('2026-05-17T12:00:00.000Z'),
+              prompt: 'persisted prompt',
+              filePath: `/tmp/${sessionId}.jsonl`,
+            },
+          ],
+          nextCursor: undefined,
+          hasMore: false,
+        });
+      mockWt.readSidecar = async (_filePath: unknown, options: unknown) => {
+        sidecarSignal = (options as { signal?: AbortSignal }).signal;
+        await new Promise<void>((_resolve, reject) => {
+          sidecarSignal?.addEventListener(
+            'abort',
+            () => reject(sidecarSignal?.reason),
+            { once: true },
+          );
+        });
+        return null;
+      };
+
+      try {
+        const result = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { view: 'organized' },
+          {
+            runtimeBaseDir: path.join(runtimeDir, 'cancel-sidecar'),
+            signal: controller.signal,
+          },
+        );
+        await vi.waitFor(() =>
+          expect(sidecarSignal).toBeInstanceOf(AbortSignal),
+        );
+        expect(sidecarSignal).not.toBe(controller.signal);
+
+        controller.abort(reason);
+
+        await expect(result).rejects.toBe(reason);
+        expect(sidecarSignal?.aborted).toBe(true);
+      } finally {
+        listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
+      }
+    });
+
     it('propagates cancellation through numeric pagination', async () => {
       const controller = new AbortController();
       const reason = new Error('numeric request disconnected');
@@ -13792,7 +13853,45 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps a shared REST catalog scan alive when only one request disconnects', async () => {
+    it('aborts a REST catalog scan when its last request disconnects', async () => {
+      const workspaceCwd = path.join(WS_BOUND, 'rest-cancel-last-waiter');
+      let loadSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          loadSignal = options.signal;
+          await new Promise<void>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => reject(options.signal?.reason),
+              { once: true },
+            );
+          });
+          return { items: [], nextCursor: undefined, hasMore: false };
+        });
+      const app = createServeApp(
+        { ...baseOpts, workspace: workspaceCwd },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: workspaceCwd },
+      );
+      const catalogRequest = request(app)
+        .get(
+          `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?view=organized`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      catalogRequest.end(() => undefined);
+
+      try {
+        await vi.waitFor(() => expect(loadSignal).toBeDefined());
+        catalogRequest.abort();
+        await vi.waitFor(() => expect(loadSignal?.aborted).toBe(true));
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('keeps a shared REST catalog scan alive until every request disconnects', async () => {
       const workspaceCwd = path.join(WS_BOUND, 'rest-cancel-waiter');
       const scan = deferred<{
         items: SessionListItem[];
@@ -13816,14 +13915,10 @@ describe('createServeApp', () => {
         .get(url)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       firstRequest.end(() => undefined);
-      const secondResponse = new Promise<request.Response>((resolve, reject) =>
-        request(app)
-          .get(url)
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .end((error, response) =>
-            error ? reject(error) : resolve(response),
-          ),
-      );
+      const secondRequest = request(app)
+        .get(url)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      secondRequest.end(() => undefined);
 
       try {
         await vi.waitFor(() => expect(loadSignal).toBeDefined());
@@ -13831,8 +13926,8 @@ describe('createServeApp', () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
         expect(loadSignal?.aborted).toBe(false);
 
-        scan.resolve({ items: [], nextCursor: undefined, hasMore: false });
-        await expect(secondResponse).resolves.toMatchObject({ status: 200 });
+        secondRequest.abort();
+        await vi.waitFor(() => expect(loadSignal?.aborted).toBe(true));
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
       } finally {
         scan.resolve({ items: [], nextCursor: undefined, hasMore: false });
@@ -14084,16 +14179,24 @@ describe('createServeApp', () => {
           'single_flight',
         );
 
+        await Promise.all([
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { sourceType: 'default' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { parentSessionId: 'missing-parent' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+        ]);
         await listWorkspaceSessionsForResponse(
           fakeBridge(),
           WS_BOUND,
           { sourceType: 'default' },
-          { runtimeBaseDir: runtimeDir },
-        );
-        await listWorkspaceSessionsForResponse(
-          fakeBridge(),
-          WS_BOUND,
-          { parentSessionId: 'missing-parent' },
           { runtimeBaseDir: runtimeDir },
         );
         expect(setAttribute).toHaveBeenCalledWith(
@@ -14128,6 +14231,12 @@ describe('createServeApp', () => {
           'qwen-code.daemon.session_list.scan_duration_ms',
           expect.any(Number),
         );
+        expect(
+          setAttribute.mock.calls.filter(
+            ([name]) =>
+              name === 'qwen-code.daemon.session_list.scan_duration_ms',
+          ),
+        ).toHaveLength(2);
       } finally {
         getSpanSpy.mockRestore();
         listSessionsSpy.mockRestore();
