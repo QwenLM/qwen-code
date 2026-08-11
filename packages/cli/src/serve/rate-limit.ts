@@ -70,13 +70,9 @@ function resolveTier(
   // Strip trailing slash for consistent matching
   const p = path.endsWith('/') && path.length > 1 ? path.slice(0, -1) : path;
 
-  // Exempt: OPTIONS, health, demo, heartbeat, SSE events, ACP transport
+  // Exempt: OPTIONS, health, heartbeat, SSE events, ACP transport
   if (method === 'OPTIONS') return null;
-  if (
-    (method === 'GET' || method === 'HEAD') &&
-    (p === '/health' || p === '/demo')
-  )
-    return null;
+  if ((method === 'GET' || method === 'HEAD') && p === '/health') return null;
   if (
     method === 'POST' &&
     p.startsWith('/session/') &&

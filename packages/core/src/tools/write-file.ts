@@ -509,6 +509,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: file_path,
         content,
+        toolWriteOrigin: 'write_file',
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,

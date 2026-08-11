@@ -631,6 +631,7 @@ class NotebookEditInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: this.params.notebook_path,
         content: prepared.updatedContent,
+        toolWriteOrigin: 'notebook_edit',
         _meta: {
           bom: prepared.bom,
           encoding: prepared.encoding,

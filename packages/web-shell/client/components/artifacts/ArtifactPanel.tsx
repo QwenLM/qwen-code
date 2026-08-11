@@ -15,7 +15,9 @@ import { DownloadIcon } from 'lucide-react';
 import {
   ChevronRightIcon,
   CirclePlusIcon,
+  Maximize2Icon,
   MessageCirclePlusIcon,
+  Minimize2Icon,
   PanelRightIcon,
   PlusIcon,
   SquareActivityIcon,
@@ -249,8 +251,12 @@ interface ArtifactPanelProps {
   ) => void;
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  deferSubagentMount?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
+  fullscreen?: boolean;
+  onToggleFullscreen?: () => void;
 }
 
 export function ArtifactPanel({
@@ -281,8 +287,12 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onError,
   sessionWorkflowEnabled,
+  onImageIngestionNotice,
+  deferSubagentMount = false,
   onClose,
   variant = 'docked',
+  fullscreen = false,
+  onToggleFullscreen,
 }: ArtifactPanelProps) {
   const { t } = useI18n();
   const [sideTaskMenuOpen, setSideTaskMenuOpen] = useState(false);
@@ -339,9 +349,9 @@ export function ArtifactPanel({
 
   return (
     <aside
-      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''} ${fullscreen ? styles.panelFullscreen : ''}`}
       style={
-        variant === 'docked' && panelWidth
+        variant === 'docked' && panelWidth && !fullscreen
           ? { flexBasis: panelWidth, width: panelWidth }
           : undefined
       }
@@ -454,6 +464,26 @@ export function ArtifactPanel({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+          )}
+          {onToggleFullscreen && (
+            <button
+              type="button"
+              className={`${styles.iconButton} ${styles.fullscreenButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              onClick={onToggleFullscreen}
+              aria-label={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+              aria-pressed={fullscreen}
+              title={t(
+                fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
+              )}
+            >
+              {fullscreen ? (
+                <Minimize2Icon className={styles.toolbarIcon} aria-hidden />
+              ) : (
+                <Maximize2Icon className={styles.toolbarIcon} aria-hidden />
+              )}
+            </button>
           )}
           <button
             type="button"
@@ -650,15 +680,17 @@ export function ArtifactPanel({
             error={error}
           />
         ) : activeTab.kind === 'subagent' ? (
-          <SubagentDetail
-            sessionId={activeTab.sessionId}
-            rootToolCallId={activeTab.rootToolCallId}
-            initialRootTool={activeTab.rootTool}
-            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
-            onRightPanelOpen={onNestedRightPanelOpen}
-            onArtifactsChange={onNestedArtifactsChange}
-            onError={onError}
-          />
+          deferSubagentMount ? null : (
+            <SubagentDetail
+              sessionId={activeTab.sessionId}
+              rootToolCallId={activeTab.rootToolCallId}
+              initialRootTool={activeTab.rootTool}
+              workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+              onRightPanelOpen={onNestedRightPanelOpen}
+              onArtifactsChange={onNestedArtifactsChange}
+              onError={onError}
+            />
+          )
         ) : activeTab.kind === 'monitor' ? (
           <MonitorTaskDetail
             key={activeTab.id}
@@ -690,6 +722,7 @@ export function ArtifactPanel({
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
+            onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : (
           <ScheduledTaskDetail
