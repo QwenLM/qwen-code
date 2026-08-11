@@ -117,21 +117,21 @@ omni.delivery.upload.urlTtlHours                 上传 URL 缓存时长(≤ 48)
 
 ### 可用字段
 
-| 命名空间    | 字段                        | 含义                              |
-| ----------- | --------------------------- | --------------------------------- |
-| `resource.` | `sizeBytes`                 | 文件字节数                        |
-|             | `durationMs`                | 时长(毫秒,音/视频)                |
-|             | `width` / `height`          | 像素宽高                          |
-|             | `maxWidth` / `maxHeight`    | 宽高中的较大/较小值的便捷别名     |
-|             | `frameRate` / `frameCount`  | 帧率 / 总帧数                     |
-|             | `bitRate`                   | 比特率                            |
-|             | `sampleRateHz` / `channels` | 采样率 / 声道数                   |
-|             | `estimatedTokenCount`       | 该资源的预估 token 消耗           |
-| `request.`  | `totalEstimatedMediaTokens` | 本次请求全部媒体的预估 token 总量 |
-| `session.`  | `contextWindowTokens`       | 模型上下文窗口                    |
-|             | `promptTokenCount`          | 当前 prompt 已占 token            |
-|             | `reservedOutputTokens`      | 预留输出 token                    |
-|             | `availableContextTokens`    | 剩余可用上下文                    |
+| 命名空间    | 字段                        | 含义                                                                           |
+| ----------- | --------------------------- | ------------------------------------------------------------------------------ |
+| `resource.` | `sizeBytes`                 | 文件字节数                                                                     |
+|             | `durationMs`                | 时长(毫秒,音/视频)                                                             |
+|             | `width` / `height`          | 像素宽高                                                                       |
+|             | `maxWidth` / `maxHeight`    | `width` / `height` 的同值别名                                                  |
+|             | `frameRate` / `frameCount`  | 帧率 / 总帧数                                                                  |
+|             | `bitRate`                   | 比特率                                                                         |
+|             | `sampleRateHz` / `channels` | 采样率 / 声道数                                                                |
+|             | `estimatedTokenCount`       | 该资源的预估 token 消耗                                                        |
+| `request.`  | `totalEstimatedMediaTokens` | 当前调度 pass 中该资源及其派生物的预估 token 总量(按资源逐个计算,非跨资源合计) |
+| `session.`  | `contextWindowTokens`       | 模型上下文窗口                                                                 |
+|             | `promptTokenCount`          | 当前 prompt 已占 token                                                         |
+|             | `reservedOutputTokens`      | 预留输出 token                                                                 |
+|             | `availableContextTokens`    | 剩余可用上下文                                                                 |
 
 ### 三值语义
 
