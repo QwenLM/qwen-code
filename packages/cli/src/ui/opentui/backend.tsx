@@ -277,6 +277,13 @@ function App({
       setThemeTick((t) => t + 1);
     };
     renderer.on('theme_mode', onMode);
+    // Initial detection in case the event never fires (light terminals).
+    renderer
+      .waitForThemeMode(1000)
+      .then((m) => {
+        if (m) onMode(m);
+      })
+      .catch(() => {});
     return () => {
       renderer.off('theme_mode', onMode);
     };
