@@ -83,14 +83,15 @@ export function AddWorkspaceDialog({
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
-  useEffect(
-    () => () => {
-      if (blurTimeoutRef.current !== undefined) {
-        clearTimeout(blurTimeoutRef.current);
-      }
-    },
-    [],
-  );
+
+  const cancelBlurDismiss = useCallback(() => {
+    if (blurTimeoutRef.current !== undefined) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  useEffect(() => () => cancelBlurDismiss(), [cancelBlurDismiss]);
 
   const closeList = useCallback(() => {
     setListOpen(false);
@@ -167,13 +168,9 @@ export function AddWorkspaceDialog({
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
     inputRef.current?.blur();
-    // The blur above scheduled the delayed suppress/close; apply both now
-    // and cancel the timer so a fast-settling picker cannot race it and
-    // re-set the flag after the outcome below has been handled.
-    if (blurTimeoutRef.current !== undefined) {
-      clearTimeout(blurTimeoutRef.current);
-      blurTimeoutRef.current = undefined;
-    }
+    // The blur above scheduled the delayed dismiss; cancel it and apply the
+    // close + suppress now so the timer cannot fire after the outcome below.
+    cancelBlurDismiss();
     closeList();
     suppressNextFetchOpenRef.current = true;
     setBrowsing(true);
@@ -200,7 +197,7 @@ export function AddWorkspaceDialog({
     } finally {
       setBrowsing(false);
     }
-  }, [onPick, path, closeList, t]);
+  }, [onPick, path, closeList, cancelBlurDismiss, t]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -313,20 +310,16 @@ export function AddWorkspaceDialog({
                     if (error) setError(null);
                   }}
                   onKeyDown={handleInputKeyDown}
-                  onFocus={() => {
-                    if (blurTimeoutRef.current !== undefined) {
-                      clearTimeout(blurTimeoutRef.current);
-                      blurTimeoutRef.current = undefined;
-                    }
-                  }}
+                  onFocus={cancelBlurDismiss}
                   onBlur={() => {
                     // Delay so a mousedown on a suggestion wins over blur.
-                    if (blurTimeoutRef.current !== undefined) {
-                      clearTimeout(blurTimeoutRef.current);
-                    }
+                    cancelBlurDismiss();
                     blurTimeoutRef.current = setTimeout(() => {
                       blurTimeoutRef.current = undefined;
-                      suppressNextFetchOpenRef.current = true;
+                      // Invalidate in-flight lookups via the sequence counter
+                      // rather than suppressing the next fetch, which would
+                      // leak into the first edit after the user refocuses.
+                      ++suggestSeqRef.current;
                       closeList();
                     }, 100);
                   }}

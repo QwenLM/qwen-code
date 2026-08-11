@@ -441,6 +441,71 @@ describe('AddWorkspaceDialog', () => {
       expect(listbox()).not.toBeNull();
     });
 
+    it('opens suggestions on the first edit after the blur dismiss fired', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      // Stay blurred past the dismiss window so the timer fires.
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(listbox()).toBeNull();
+
+      // Returning and editing must reopen the list on the first edit.
+      act(() => input().focus());
+      type('/home/me/cod');
+      await settle();
+
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('keeps suggestions closed when a pre-blur lookup resolves after refocus', async () => {
+      let resolveSuggestions!: (value: typeof SUGGESTIONS) => void;
+      const onSuggest = vi.fn(
+        () =>
+          new Promise<typeof SUGGESTIONS>((resolve) => {
+            resolveSuggestions = resolve;
+          }),
+      );
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      // Let the debounce fire so the lookup is in flight, then blur past the
+      // dismiss window so the timer fires while the lookup is pending.
+      await settle();
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      // Refocus before the stale lookup resolves: the dismiss must
+      // invalidate it, not let it pop the list open with zero edits.
+      act(() => input().focus());
+      await act(async () => {
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+
+      expect(listbox()).toBeNull();
+    });
+
     it('opens suggestions for a focused input in a shadow-DOM portal root', async () => {
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       const host = document.createElement('div');
@@ -561,6 +626,8 @@ describe('AddWorkspaceDialog', () => {
       act(() => {
         browseButton().click();
       });
+      // Browse closes the open list while the picker is up.
+      expect(listbox()).toBeNull();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(100);
       });
@@ -703,8 +770,7 @@ describe('AddWorkspaceDialog', () => {
         'Unable to open the system folder picker',
       );
 
-      // Let the blur window elapse: a still-pending blur timer must not
-      // re-set the suppress flag the error path cleared.
+      // Cross the blur timer's deadline before the first edit below.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(100);
       });
