@@ -138,3 +138,5 @@ tmp/
 # Auto-generated computer-use marker can also appear under nested packages.
 **/.qwen/computer-use/
 .playwright-mcp/
+tui-poc-lab/*.log
+tui-poc-lab/q2.err
