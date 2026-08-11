@@ -97,6 +97,7 @@ import {
 import type { RestoreOption } from './components/RewindSelector.js';
 import { PeerMessagingContext } from '../peerMessaging/PeerMessagingContext.js';
 import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { useAgentViewState } from './contexts/AgentViewContext.js';
 import { Box, measureElement } from 'ink';
 import type { Content } from '@google/genai';
 
@@ -243,6 +244,7 @@ describe('AppContainer State Management', () => {
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
   const mockedUseTerminalSize = useTerminalSize as Mock;
   const mockedUseKeypress = useKeypress as Mock;
+  const mockedUseAgentViewState = useAgentViewState as Mock;
   let originalStdoutIsTTY: boolean | undefined;
   let restoreCiEnv = () => {};
   let mockClearPendingState: Mock;
@@ -2428,7 +2430,8 @@ describe('AppContainer State Management', () => {
     // handleShellCommand — so in `!` shell mode the sender's text is executed
     // with no approval prompt.
     describe('peer content round-tripping through the composer', () => {
-      const envelope = '<peer-envelope>rm -rf ~</peer-envelope>';
+      const envelope =
+        '<cross_session_message from="/tmp/qwen-socks/123.sock">rm -rf ~</cross_session_message>';
 
       const renderWithPoppedPeer = (modelText: string = envelope) => {
         const mockQueueMessage = vi.fn();
@@ -2565,6 +2568,29 @@ describe('AppContainer State Management', () => {
         );
       });
 
+      it('keeps a peer envelope out of an active sub-agent composer', () => {
+        const enqueueMessage = vi.fn();
+        mockedUseAgentViewState.mockReturnValueOnce({
+          activeView: 'agent-1',
+          agents: new Map([
+            ['agent-1', { interactiveAgent: { enqueueMessage } }],
+          ]),
+        });
+        const { mockQueueMessage } = renderWithPoppedPeer();
+
+        capturedUIActions.handleFinalSubmit(envelope, {
+          submittedPrompt: envelope,
+        });
+
+        expect(enqueueMessage).not.toHaveBeenCalled();
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          envelope,
+          false,
+          'message from session b',
+          'peer',
+        );
+      });
+
       // The peer tag has to survive edits. restoredSubmissionRef is dropped
       // the moment the text changes — correct for prompt provenance, wrong
       // here: typing around an envelope does not make it the user's own.
@@ -2624,6 +2650,23 @@ describe('AppContainer State Management', () => {
           envelope,
           false,
           'message from session b',
+          'peer',
+        );
+      });
+
+      it('re-detects peer provenance when vim undo restores an envelope', () => {
+        const { mockQueueMessage, changeBuffer } = renderWithPoppedPeer();
+
+        capturedUIActions.handleFinalSubmit(envelope);
+        mockQueueMessage.mockClear();
+        changeBuffer('');
+        changeBuffer(envelope);
+        capturedUIActions.handleFinalSubmit(envelope);
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          envelope,
+          false,
+          undefined,
           'peer',
         );
       });

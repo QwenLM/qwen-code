@@ -1297,6 +1297,7 @@ export const AppContainer = (props: AppContainerProps) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
     }
+    composerHoldsPeerContentRef.current ||= isPeerEnvelope(text);
   }, []);
 
   const buffer = useTextBuffer({
@@ -2637,14 +2638,6 @@ export const AppContainer = (props: AppContainerProps) => {
         setBufferText('', { clearUndoHistory: true });
       }
 
-      // Route to active in-process agent if viewing a sub-agent tab.
-      if (agentViewState.activeView !== 'main') {
-        const agent = agentViewState.agents.get(agentViewState.activeView);
-        if (agent) {
-          agent.interactiveAgent.enqueueMessage(submittedValue.trim());
-          return;
-        }
-      }
       // Peer content that round-tripped through the composer goes back onto
       // the queue tagged `'peer'`, and nothing below runs for it. The drain
       // then submits it as `SendMessageType.Peer`, which is the one path
@@ -2661,6 +2654,15 @@ export const AppContainer = (props: AppContainerProps) => {
           'peer',
         );
         return;
+      }
+
+      // Route to active in-process agent if viewing a sub-agent tab.
+      if (agentViewState.activeView !== 'main') {
+        const agent = agentViewState.agents.get(agentViewState.activeView);
+        if (agent) {
+          agent.interactiveAgent.enqueueMessage(submittedValue.trim());
+          return;
+        }
       }
 
       // The user's raw text, captured before any `<system-reminder>` prefix is
