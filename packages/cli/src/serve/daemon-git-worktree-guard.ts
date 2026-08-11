@@ -1784,6 +1784,10 @@ interface EvaluationScope {
   // (`eval`, alias, function) inherits it, so a plain assignment there is
   // exported just as the real shell would.
   readonly allExport?: boolean;
+  // Alias/function bodies and their Git-shaped names, shared with a
+  // same-shell body so `outer() { inner; }` can see `inner`.
+  readonly definedBodies?: Map<string, { body: string; alias: boolean }>;
+  readonly gitShapedNames?: Set<string>;
 }
 
 /**
@@ -1920,14 +1924,15 @@ async function evaluateCommandWithCwd(
   const shellLocals = scope.locals ?? new Map<string, GuardToken>();
   // `alias g='git …'` and `f() { git …; }` both make a later bare word run a
   // body defined earlier; without them that word is an opaque `other` run.
-  const definedBodies = new Map<string, { body: string; alias: boolean }>();
+  const definedBodies =
+    scope.definedBodies ?? new Map<string, { body: string; alias: boolean }>();
   // Names carrying the export attribute from a name-only `export KEY`; a
   // later assignment to one of them reaches the git subprocess.
   const exportedNames = scope.exportedNames ?? new Set<string>();
   // Function bodies that `splitCommands` cut across segments cannot be
   // replayed verbatim, so the name is recorded as Git-shaped instead and the
   // later bare word answers to the unrecognized-program containment rule.
-  const gitShapedNames = new Set<string>();
+  const gitShapedNames = scope.gitShapedNames ?? new Set<string>();
   let insideDefinition: string | undefined;
   let definitionBody = '';
   // Paths a run in this command may have re-pointed. Any containment the
@@ -2044,12 +2049,16 @@ async function evaluateCommandWithCwd(
         entryCwd,
         activeContext(),
         depth + 1,
-        // A substitution runs in a subshell: it inherits the variables but
-        // its own assignments die with it, so it gets a copy.
+        // A substitution runs in a subshell: it inherits the variables, the
+        // option state and the definitions, but its own changes die with it,
+        // so it gets copies and nothing is merged back.
         {
           relink: scope.relink,
           locals: new Map(shellLocals),
           exportedNames: new Set(exportedNames),
+          allExport,
+          definedBodies: new Map(definedBodies),
+          gitShapedNames: new Set(gitShapedNames),
         },
       );
       if (nested.denial) {
@@ -2133,7 +2142,13 @@ async function evaluateCommandWithCwd(
               // and the export attributes; a `sh -c` subprocess inherits only
               // exported ones.
               ...(analysis.propagatesCwd
-                ? { locals: shellLocals, exportedNames, allExport }
+                ? {
+                    locals: shellLocals,
+                    exportedNames,
+                    allExport,
+                    definedBodies,
+                    gitShapedNames,
+                  }
                 : {}),
             },
           );
@@ -2148,7 +2163,9 @@ async function evaluateCommandWithCwd(
               exported.relocations.push(...nested.exportedAfter.relocations);
               if (nested.exportedAfter.unresolved) exported.unresolved = true;
             }
-            if (nested.allExportAfter) allExport = true;
+            if (nested.allExportAfter !== undefined) {
+              allExport = nested.allExportAfter;
+            }
             for (const [key, token] of nested.shellLocalsAfter ?? []) {
               shellLocals.set(key, token);
             }
@@ -2378,6 +2395,8 @@ async function evaluateCommandWithCwd(
                 locals: shellLocals,
                 exportedNames,
                 allExport,
+                definedBodies,
+                gitShapedNames,
               },
             );
             if (nested.denial) {
@@ -2391,7 +2410,9 @@ async function evaluateCommandWithCwd(
               exported.relocations.push(...nested.exportedAfter.relocations);
               if (nested.exportedAfter.unresolved) exported.unresolved = true;
             }
-            if (nested.allExportAfter) allExport = true;
+            if (nested.allExportAfter !== undefined) {
+              allExport = nested.allExportAfter;
+            }
             for (const [key, token] of nested.shellLocalsAfter ?? []) {
               shellLocals.set(key, token);
             }

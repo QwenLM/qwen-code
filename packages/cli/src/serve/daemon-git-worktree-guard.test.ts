@@ -1850,6 +1850,39 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  it.each([
+    // A command substitution inherits the caller's `set -a`.
+    () => `set -a; echo $(GIT_WORK_TREE=${plainOutsidePath}; git reset --hard)`,
+    // A nested function defined in the caller is visible to the body it runs.
+    () =>
+      `inner() { cd ${plainOutsidePath}; }; outer() { inner; }; outer; git reset --hard`,
+  ])(
+    'shares option and definition state with a same-shell body %#',
+    async (b) => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(b()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('lets a same-shell body turn allexport back off', async () => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    // `set +a` in the body persists, so the later assignment is unexported.
+    for (const command of [
+      `set -a; f() { set +a; }; f; GIT_WORK_TREE=${plainOutsidePath}; git status`,
+      `set -a; eval 'set +a'; GIT_WORK_TREE=${plainOutsidePath}; git status`,
+      // A substitution's own changes die with it.
+      `echo $(GIT_WORK_TREE=${plainOutsidePath}; git status)`,
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
