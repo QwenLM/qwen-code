@@ -6085,7 +6085,7 @@ describe('useGeminiStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([]);
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([
@@ -7112,7 +7112,7 @@ describe('useGeminiStream', () => {
       });
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([]);
@@ -7124,7 +7124,7 @@ describe('useGeminiStream', () => {
       });
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([
@@ -7181,7 +7181,7 @@ describe('useGeminiStream', () => {
       expect(result.current.pendingHistoryItems).toEqual([]);
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([
@@ -7240,7 +7240,7 @@ describe('useGeminiStream', () => {
       });
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       const thoughtItems = mockAddItem.mock.calls
@@ -7772,7 +7772,7 @@ describe('useGeminiStream', () => {
       });
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([]);
@@ -7785,7 +7785,7 @@ describe('useGeminiStream', () => {
       });
 
       await act(async () => {
-        vi.advanceTimersByTime(60);
+        vi.advanceTimersByTime(100);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([
