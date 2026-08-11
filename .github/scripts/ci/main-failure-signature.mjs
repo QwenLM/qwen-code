@@ -31,6 +31,11 @@ export const MAX_SEARCH_MARKERS = 5;
  * provider key, model outage) can fail every test at once; the body must stay
  * under GitHub's 65,536-character limit or `gh issue create` hard-fails. */
 export const MAX_BODY_TESTS = 20;
+export const MAX_TARGETED_E2E_CASES = 5;
+export const TARGETED_E2E_SCHEMA_VERSION = 1;
+export const TRUSTED_EXTERNAL_PROCESS_E2E_TESTS = new Set([
+  'cli/qwen-serve-client-mcp.test.ts',
+]);
 
 // Vitest and pytest colourise their output and Actions stores the escapes
 // verbatim, so failure lines arrive wrapped in SGR sequences.
@@ -84,6 +89,154 @@ export function testKey(testId) {
     .slice(0, 12);
 }
 
+export function parseE2eJobName(jobName) {
+  const linux =
+    /^E2E Test \(Linux\) - sandbox:(none|docker) - shard (\d+\/\d+)$/.exec(
+      String(jobName ?? ''),
+    );
+  if (linux) {
+    return {
+      os: 'linux',
+      sandbox: linux[1],
+      shard: linux[2],
+    };
+  }
+
+  const macos = /^E2E Test - macOS - shard (\d+\/\d+)$/.exec(
+    String(jobName ?? ''),
+  );
+  if (macos) {
+    return {
+      os: 'macos',
+      sandbox: 'none',
+      shard: macos[1],
+    };
+  }
+
+  return null;
+}
+
+export function parseVitestTestId(testId) {
+  const segments = String(testId ?? '')
+    .split(' > ')
+    .map((segment) => segment.trim());
+  if (segments.length < 2 || !/\.test\.[cm]?[jt]sx?$/.test(segments[0])) {
+    return null;
+  }
+  const name = segments.slice(1).join(' > ');
+  if (!name) return null;
+  return { file: segments[0], name };
+}
+
+export function buildTargetedE2eAnalysis(workflowName, jobs) {
+  if (workflowName !== 'E2E Tests') return null;
+
+  const cases = [];
+  const environments = [];
+  const reasons = [];
+  if (jobs.length === 0) {
+    reasons.push('no failed jobs were available for analysis');
+  }
+  for (const job of jobs) {
+    const environment = parseE2eJobName(job.name);
+    if (!environment) {
+      reasons.push(`unsupported failed job: ${job.name || '(unnamed)'}`);
+      continue;
+    }
+    environments.push(environment);
+    if (typeof job.log !== 'string') {
+      reasons.push(`missing log for failed job: ${job.name}`);
+      continue;
+    }
+    const failedTests = extractFailingTests(job.log);
+    if (!failedTests.length) {
+      reasons.push(`no exact Vitest failure found in job: ${job.name}`);
+      continue;
+    }
+    for (const id of failedTests) {
+      const parsed = parseVitestTestId(id);
+      if (!parsed) {
+        reasons.push(`unsupported E2E test identifier: ${id}`);
+        continue;
+      }
+      if (!TRUSTED_EXTERNAL_PROCESS_E2E_TESTS.has(parsed.file)) {
+        reasons.push(
+          `E2E test does not use the trusted external-process harness: ${parsed.file}`,
+        );
+        continue;
+      }
+      cases.push({
+        id,
+        ...parsed,
+        job: job.name,
+        ...environment,
+      });
+    }
+  }
+
+  const totalCases = cases.length;
+  if (totalCases > MAX_TARGETED_E2E_CASES) {
+    reasons.push(
+      `too many environment-specific failures: ${totalCases} > ${MAX_TARGETED_E2E_CASES}`,
+    );
+  }
+  if (environments.some((environment) => environment.os !== 'linux')) {
+    reasons.push('macOS E2E failures are unsupported by the Linux verifier');
+  }
+  if (environments.some((environment) => environment.sandbox !== 'none')) {
+    reasons.push(
+      'Docker E2E failures are unsupported by credential-free read-only verification',
+    );
+  }
+
+  return {
+    schemaVersion: TARGETED_E2E_SCHEMA_VERSION,
+    eligible:
+      jobs.length > 0 &&
+      totalCases > 0 &&
+      totalCases <= MAX_TARGETED_E2E_CASES &&
+      reasons.length === 0,
+    complete: reasons.length === 0,
+    reasons: [...new Set(reasons)],
+    totalCases,
+    cases: cases.slice(0, MAX_TARGETED_E2E_CASES),
+  };
+}
+
+export function isAutofixEligible(analysis) {
+  return (
+    analysis.workflow === 'E2E Tests' &&
+    analysis.targetedE2e?.eligible === true &&
+    analysis.targetedE2e.complete === true
+  );
+}
+
+export function buildTargetedE2eMetadata({
+  analysis,
+  repository,
+  issue = null,
+  occurrence,
+}) {
+  if (!analysis.targetedE2e) return null;
+  return {
+    schemaVersion: TARGETED_E2E_SCHEMA_VERSION,
+    kind: 'main-e2e-failure',
+    repository,
+    issue,
+    workflow: analysis.workflow,
+    source: {
+      runId: Number(occurrence.runId),
+      runAttempt: Number(occurrence.runAttempt),
+      runUrl: occurrence.runUrl,
+      headSha: occurrence.sha,
+      headBranch: 'main',
+      event: 'push',
+      conclusion: 'failure',
+    },
+    verification: analysis.targetedE2e,
+  };
+}
+
 /**
  * A signature over the whole failure set, recorded in the body for humans
  * comparing two issues. Matching is done with the per-test markers, which
@@ -113,7 +266,7 @@ export function shortenForTitle(testId, limit = 110) {
     : `${collapsed.slice(0, limit - 1)}…`;
 }
 
-export function analyzeLogs(workflowName, logTexts) {
+export function analyzeLogs(workflowName, logTexts, jobs = []) {
   const tests = [];
   for (const logText of logTexts) {
     for (const id of extractFailingTests(logText)) {
@@ -126,6 +279,7 @@ export function analyzeLogs(workflowName, logTexts) {
   return {
     workflow: workflowName,
     tests,
+    targetedE2e: buildTargetedE2eAnalysis(workflowName, jobs),
     signature: tests.length
       ? failureSignature(
           workflowName,
@@ -150,11 +304,21 @@ function occurrenceLine({ sha, runUrl, runId, at }) {
 const TRIMMED_NOTE = '_Older recurrences trimmed._';
 const RECURRENCE_HEADING = '## Recurrences';
 const ALSO_FAILING_HEADING = '## Also failing';
+const FAILING_TESTS_HEADING = '## Failing tests';
 // The "## Also failing" list is machine-owned and rebuilt from the current
 // failure set on every merge, so the previous one is stripped first. The block
 // is the heading plus its contiguous bullet list — nothing else is ever written
 // under it.
 const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
+// Eligible issues are machine-routed and auto-approved, so their prose keeps
+// no log-sourced test names; the note tells humans where the exact failures
+// are visible and that body prose does not survive the next recurrence.
+const AUTOFIX_REDACTION_NOTE = [
+  'Test names are redacted to case keys because this issue is machine-routed;',
+  'the source run linked under each recurrence shows the exact failing tests.',
+  'The body is rebuilt on every recurrence, so keep investigative notes in',
+  'comments instead of editing the body.',
+].join('\n');
 
 function splitOccurrenceBlock(body) {
   const index = body.indexOf(OCCURRENCE_MARKER);
@@ -179,6 +343,12 @@ function splitOccurrenceBlock(body) {
   return { head, lines, tail: rest.slice(cursor).join('\n').trim() };
 }
 
+function autofixDisposition(analysis) {
+  return isAutofixEligible(analysis)
+    ? 'This issue is eligible for Autofix to create a verified repair PR.'
+    : 'This failure is not eligible for Autofix and requires human investigation.';
+}
+
 /**
  * A run that failed before any test result was reported — an install or build
  * break — has nothing to dedupe on, so it keeps the original per-commit marker
@@ -196,7 +366,7 @@ function renderPerCommitBody({ analysis, occurrence }) {
     `- Run ID: ${occurrence.runId}`,
     `- Commit: ${occurrence.sha}`,
     '',
-    'This issue is labeled for autofix so the existing agent can create a repair PR.',
+    autofixDisposition(analysis),
     '',
   ].join('\n');
 }
@@ -227,6 +397,7 @@ export function renderIssueBody({
   occurrence,
   maxOccurrences = MAX_OCCURRENCES,
   existingBody = '',
+  autofixEligible = false,
 }) {
   if (!analysis.tests.length) {
     // Nothing to merge into: the per-commit path opens one issue per commit and
@@ -243,20 +414,23 @@ export function renderIssueBody({
   const testLines = cappedTestLines(analysis.tests);
 
   if (!existingBody.trim()) {
-    const head = [
+    const headLines = [
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
       `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
       '',
-      '## Failing tests',
+      FAILING_TESTS_HEADING,
       '',
       ...testLines,
       '',
-      'This issue is labeled for autofix so the existing agent can create a repair PR.',
+      autofixDisposition(analysis),
       'It is deduped by failing test, so every later commit that hits the same',
       'failure is appended below instead of opening another issue.',
-    ].join('\n');
+    ];
+    if (autofixEligible)
+      headLines.push('', ...AUTOFIX_REDACTION_NOTE.split('\n'));
+    const head = headLines.join('\n');
     return [
       head,
       '',
@@ -279,17 +453,30 @@ export function renderIssueBody({
   // disappear instead of being listed forever.
   const strippedProse = prose.replace(ALSO_FAILING_BLOCK, '').trimEnd();
 
+  // Machine rebuilds of eligible issues strip the body down to markers and
+  // occurrence lines, losing the create-time failing-tests section. Rebuild
+  // it from the current failure set so the list stays authoritative instead
+  // of being re-emitted under the "Also failing" heading's inverted meaning.
+  const baseProse =
+    autofixEligible && !strippedProse.includes(FAILING_TESTS_HEADING)
+      ? `${strippedProse}\n\n${FAILING_TESTS_HEADING}\n\n${testLines.join('\n')}`
+      : strippedProse;
+
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
   const missingMarkers = bodyMarkers.filter(
-    (marker) => !strippedProse.includes(marker),
+    (marker) => !baseProse.includes(marker),
   );
   const missingTests = testLines.filter(
-    (line) => line.startsWith('- `') && !strippedProse.includes(line),
+    (line) => line.startsWith('- `') && !baseProse.includes(line),
   );
+  const notedProse =
+    autofixEligible && !baseProse.includes(AUTOFIX_REDACTION_NOTE)
+      ? `${baseProse}\n\n${AUTOFIX_REDACTION_NOTE}`
+      : baseProse;
   const withMarkers = missingMarkers.length
-    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
-    : strippedProse;
+    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${notedProse}`
+    : notedProse;
   const withTests = missingTests.length
     ? `${withMarkers}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
     : withMarkers;
@@ -316,6 +503,59 @@ export function renderIssueBody({
   ].join('\n');
 }
 
+function publicIssueAnalysis(analysis, redact = isAutofixEligible(analysis)) {
+  if (!redact || !analysis.tests.length) return analysis;
+  const tests = analysis.tests.map((test) => ({
+    ...test,
+    id: `case ${test.key}`,
+  }));
+  const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
+  // Eligibility requires every case file to be on the trusted allowlist, so
+  // the file name is safe to show; the log-sourced test name stays redacted.
+  const file = analysis.targetedE2e?.cases?.[0]?.file ?? '';
+  const label = file ? `${file} (${tests[0].id})` : tests[0].id;
+  return {
+    ...analysis,
+    tests,
+    title: `Main CI failed: ${analysis.workflow} — ${label}${extra}`,
+  };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function publicMachineMarkers(body, repository) {
+  const text = String(body ?? '');
+  const testMarkerPattern = new RegExp(
+    `<!-- ${escapeRegExp(TEST_MARKER_PREFIX)}([0-9a-f]{12}) -->`,
+    'g',
+  );
+  const markers = [
+    ...new Set([...text.matchAll(testMarkerPattern)].map((match) => match[0])),
+  ];
+  const signaturePattern = new RegExp(
+    `^<!-- ${escapeRegExp(SIGNATURE_MARKER_PREFIX)}[0-9a-f]{12} -->$`,
+  );
+  const signatureLine = text
+    .split('\n')
+    .find((line) => signaturePattern.test(line));
+  const { lines } = splitOccurrenceBlock(text);
+  // The timestamp slot is pinned to the shape occurrenceLine emits: a loose
+  // `.+` would carry forged markdown through every machine rebuild.
+  const occurrencePattern = new RegExp(
+    `^- \x60[0-9a-f]{12}\x60 \u00b7 \\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z \u00b7 \\[run \\d+\\]\\(https://github\\.com/${escapeRegExp(repository)}/actions/runs/\\d+\\)$`,
+  );
+  const validLines = lines.filter((line) => occurrencePattern.test(line));
+  const parts = [];
+  if (signatureLine) parts.push(signatureLine);
+  parts.push(...markers);
+  if (validLines.length) {
+    parts.push('', OCCURRENCE_MARKER, ...validLines);
+  }
+  return parts.join('\n');
+}
+
 function parseArgs(argv) {
   const options = {};
   const positional = [];
@@ -337,8 +577,14 @@ export function runCli(argv) {
 
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));
+    const jobs = options.jobs
+      ? JSON.parse(readFileSync(options.jobs, 'utf8')).map((job) => ({
+          ...job,
+          log: job.logPath ? readFileSync(job.logPath, 'utf8') : null,
+        }))
+      : [];
     process.stdout.write(
-      `${JSON.stringify(analyzeLogs(options.workflow ?? '', logTexts))}\n`,
+      `${JSON.stringify(analyzeLogs(options.workflow ?? '', logTexts, jobs))}\n`,
     );
     return;
   }
@@ -354,15 +600,39 @@ export function runCli(argv) {
       sha: options.sha,
       runUrl: options['run-url'],
       runId: options['run-id'],
+      runAttempt: options['run-attempt'],
       at: options.at,
     };
+    // A merge must keep the redaction state of the issue it updates: an
+    // ineligible recurrence merged into a machine-redacted eligible issue
+    // must not re-inject raw log-sourced identifiers under the redaction
+    // note (and void the recorded approval digest), so key the redaction
+    // on the existing body as well as the current run.
+    const redactMerge =
+      isAutofixEligible(analysis) ||
+      existingBody.includes(AUTOFIX_REDACTION_NOTE);
+    const issueAnalysis = publicIssueAnalysis(analysis, redactMerge);
+    const publicExistingBody = redactMerge
+      ? publicMachineMarkers(existingBody, options.repository ?? '')
+      : existingBody;
     process.stdout.write(
       `${JSON.stringify({
-        title: renderIssueTitle({ analysis, occurrence }),
-        body: renderIssueBody({ analysis, existingBody, occurrence }),
+        title: renderIssueTitle({ analysis: issueAnalysis, occurrence }),
+        body: renderIssueBody({
+          analysis: issueAnalysis,
+          existingBody: publicExistingBody,
+          occurrence,
+          autofixEligible: redactMerge,
+        }),
         searchMarkers: analysis.tests.length
           ? analysis.searchMarkers
           : [`${LEGACY_MARKER_PREFIX}${occurrence.sha}`],
+        autofixEligible: isAutofixEligible(analysis),
+        targetedE2e: buildTargetedE2eMetadata({
+          analysis,
+          repository: options.repository ?? '',
+          occurrence,
+        }),
       })}\n`,
     );
     return;

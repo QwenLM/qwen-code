@@ -725,7 +725,18 @@ jobs:
         ${{ needs.route.outputs.do_issue == 'true' && needs.route.outputs.dry_run != 'true' && (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true')) && format('qwen-autofix-issue-{0}', needs.route.outputs.issue_number || github.event.issue.number || 'scheduled') || format('qwen-autofix-issue-run-{0}', github.run_id) }}
       cancel-in-progress: false
     permissions:
+      actions: 'read'
       contents: 'read'
+      issues: 'read'
+    outputs:
+      issue: '${{ steps.decision.outputs.go_issue }}'
+      targeted_e2e_required: '${{ steps.targeted-e2e.outputs.required }}'
+      claim_owned: '${{ steps.claim.outputs.claim_owned }}'
+      claim_oid: '${{ steps.claim.outputs.claim_oid }}'
+      approved_prose_sha256: '${{ steps.claim.outputs.approved_prose_sha256 }}'
+      base_oid: '${{ steps.trusted-base.outputs.oid }}'
+      agent_declined: '${{ steps.decline.outputs.agent_declined }}'
+      agent_detail: '${{ steps.decline.outputs.agent_detail }}'
     env:
       REPO: '${{ github.repository }}'
       # Per-run private dir: this pool carries many registrations sharing one
@@ -735,7 +746,17 @@ jobs:
       EVENT_NAME: '${{ github.event_name }}'
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_APPROVED_LABEL: 'autofix/approved'
-      AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
+      E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'
+      AUTOFIX_ROUTING_LABEL: 'autofix/routing'
+      AUTOFIX_ISSUE_EXCLUDES: '-linked:pr -label:autofix/skip -label:autofix/in-progress -label:autofix/routing -label:status/need-information -label:status/need-retesting sort:created-desc'
+      # Approvals labeled before this date predate the approval-marker
+      # rollout; the scan backfills their marker from the label event time
+      # instead of rejecting them forever — but only while the issue itself
+      # saw no activity after the approval label event (its current prose
+      # was approved). Keep the date past the rollout merge: approvals
+      # labeled while the recording step is not yet on main have no marker
+      # to match and would otherwise stay unselectable until re-labeled.
+      APPROVAL_MARKER_CUTOVER: '2026-08-18T00:00:00Z'
     steps:
       # Self-hosted runners reuse the workspace; a prior containerised job
       # can leave root-owned, read-only files anywhere in it. Restore
@@ -855,6 +876,13 @@ jobs:
             printf '%s\n' "${STALE}" | xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true
           fi
 
+      - name: 'Capture trusted base'
+        id: 'trusted-base'
+        run: |-
+          base_oid="$(git rev-parse HEAD^{commit})"
+          [[ "${base_oid}" =~ ^[0-9a-f]{40}$ ]]
+          echo "oid=${base_oid}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Reset autofix workspace'
         run: |-
           rm -rf "${WORKDIR}"
@@ -887,13 +915,11 @@ jobs:
           git for-each-ref --format='%(refname:short)' "refs/heads/${BRANCH_PREFIX}*" \
             | xargs -r -n 1 git branch -D 2>/dev/null || true
 
-      # Same staging as the review-address job: the verify gate always runs the
-      # trusted checkout's copy of the schema gate, never a working-tree copy.
-      - name: 'Stage trusted schema gate'
+      # This job only executes the metadata loader (targeted E2E routing);
+      # the deterministic gate scripts are staged by the jobs that run them.
+      - name: 'Stage trusted metadata loader'
         run: |-
-          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
-          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
-          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+          cp .github/scripts/load-autofix-e2e-metadata.mjs "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs"
 
       - name: 'Check bot credentials'
         env:
@@ -1028,6 +1054,74 @@ jobs:
           PATH="${qwen_bin}:${PATH}"
           qwen --version
 
+      - name: 'Record approved issue prose'
+        # Fires on EVERY issues event that routes to the issue phase, not
+        # only the autofix/approved labeled event: do_issue only turns true
+        # once the issue carries both required labels (and the sender is
+        # trusted), which is often reached by the SECOND label event, the
+        # bot-assignment event, or a late non-trigger label — none of which
+        # carries label.name == 'autofix/approved'. Keying on the approval
+        # label alone left those approvals unrecorded and the issue
+        # permanently un-autofixable.
+        if: |-
+          ${{ github.event_name == 'issues' && needs.route.outputs.do_issue == 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
+          EVENT_ACTION: '${{ github.event.action }}'
+          ISSUE_LABEL: '${{ github.event.label.name }}'
+        run: |-
+          approved_prose="$(jq -c '[.issue.title // "", .issue.body // ""]' \
+            "${GITHUB_EVENT_PATH}")"
+          approval_digest="$(printf '%s\n' "${approved_prose}" | sha256sum | cut -d ' ' -f 1)"
+          [[ "${approval_digest}" =~ ^[0-9a-f]{64}$ ]]
+          approval_marker="<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+          if ! approval_comments="$(gh api --paginate \
+            "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp)"; then
+            echo "::error::Failed to read the approval marker record for issue #${ISSUE}; refusing to record an approval."
+            exit 1
+          fi
+          # Follow-up trigger events for the same approval (the second
+          # label, the bot assignment, a late non-trigger label) re-enter
+          # this step; skip re-recording an already-present marker.
+          if jq -e --arg bot "${AUTOFIX_BOT}" --arg marker "${approval_marker}" \
+            'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
+            <<< "${approval_comments}" > /dev/null; then
+            echo "Issue #${ISSUE} already carries its approval marker; nothing to record."
+            exit 0
+          fi
+          # A bot marker for a DIFFERENT digest proves the prose was edited
+          # after its approval was recorded. Any later trusted issues event
+          # (a late non-trigger label, the second required label, a bot
+          # assignment) routes here; recording a fresh marker there would
+          # silently re-approve text no maintainer ever approved — issue
+          # authors can always edit their own prose, and nothing removes the
+          # approval label on edit. Only re-applying the approval label,
+          # which a maintainer performs against the visible current prose,
+          # grants a fresh approval. Fail closed on every other event.
+          if jq -e --arg bot "${AUTOFIX_BOT}" \
+            'any(.[].[]; .user.login == $bot and ((.body // "") | test("^<!-- autofix-approved-prose-sha256:[0-9a-f]{64} -->$")))' \
+            <<< "${approval_comments}" > /dev/null; then
+            if [[ "${EVENT_ACTION}" != 'labeled' || "${ISSUE_LABEL}" != "${AUTOFIX_APPROVED_LABEL}" ]]; then
+              echo "::error::Issue #${ISSUE} prose changed after its recorded approval; re-apply ${AUTOFIX_APPROVED_LABEL} to approve the current text."
+              exit 1
+            fi
+          fi
+          issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json state,title,body,labels)"
+          if ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" --arg approved "${AUTOFIX_APPROVED_LABEL}" \
+            --argjson prose "${approved_prose}" '
+              .state == "OPEN" and
+              [(.title // ""), (.body // "")] == $prose and
+              ((.labels // []) | map(.name) |
+                index($ready) != null and index($approved) != null)
+            ' <<< "${issue_json}" > /dev/null; then
+            echo "::error::Issue #${ISSUE} changed before its approved prose could be recorded."
+            exit 1
+          fi
+          gh issue comment "${ISSUE}" --repo "${REPO}" \
+            --body "${approval_marker}"
+
       - name: 'Find candidate issues'
         id: 'scan'
         env:
@@ -1043,15 +1137,21 @@ jobs:
             echo "🎯 Forced issue #${FORCED_ISSUE}"
             forced_issue_json="${WORKDIR}/forced-issue.json"
             gh issue view "${FORCED_ISSUE}" --repo "${REPO}" \
-              --json number,title,body,labels,createdAt,url,state \
+              --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url,state,updatedAt \
               > "${forced_issue_json}"
             if jq -e \
-              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress")' \
+              '(.labels // []) | map(.name) | any(. == "autofix/skip" or . == "autofix/in-progress" or . == "autofix/routing" or . == "status/need-information" or . == "status/need-retesting")' \
               "${forced_issue_json}" > /dev/null; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} has an autofix exclusion label; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            elif jq -e --arg bot "${AUTOFIX_BOT}" '
+              ((.assignees // []) | length == 0 or any(.login != $bot)) or
+              ((.closedByPullRequestsReferences // []) | length > 0)
+            ' "${forced_issue_json}" > /dev/null; then
+              echo "⏭️ Forced issue #${FORCED_ISSUE} has no bot assignee, another owner, or a linked PR; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             # workflow_dispatch is a maintainer-initiated escape hatch, so it
             # intentionally bypasses the label gates that protect event/cron
@@ -1089,18 +1189,71 @@ jobs:
               echo "🔍 Ready-for-agent issues (newest first)..."
               if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
-              --limit 30 --json number,title,body,labels,createdAt,url \
+              --limit 30 --json number,title,body,labels,assignees,closedByPullRequestsReferences,createdAt,url,updatedAt \
               > "${WORKDIR}/scan.json"; then
                 echo "::warning::Ready-for-agent issue scan failed; falling back to an empty candidate list."
                 jq -n -c '[]' > "${WORKDIR}/candidates.json"
               else
-                if ! jq -c '.[0:10] | map(. + {autofixTier: 1})' \
-                  "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
+                if ! jq -c --arg bot "${AUTOFIX_BOT}" '
+                  [ .[] |
+                    select(((.assignees // []) | length > 0 and all(.login == $bot)) and
+                      ((.closedByPullRequestsReferences // []) | length == 0))
+                  ][0:10] | map(. + {autofixTier: 1})
+                ' "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
                   echo "::warning::Ready-for-agent result processing failed; falling back to an empty candidate list."
                   jq -n -c '[]' > "${WORKDIR}/candidates.json"
                 fi
               fi
             fi
+          fi
+
+          if [[ "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
+            approved_candidates="${WORKDIR}/approved-candidates.jsonl"
+            : > "${approved_candidates}"
+            while IFS= read -r candidate; do
+              candidate_issue="$(jq -r '.number' <<< "${candidate}")"
+              approval_digest="$(jq -c '[.title // "", .body // ""]' <<< "${candidate}" | sha256sum | cut -d ' ' -f 1)"
+              approval_marker="<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+              if ! approval_comments="$(gh api --paginate \
+                "repos/${REPO}/issues/${candidate_issue}/comments?per_page=100" --slurp)"; then
+                echo "::warning::Failed to load approval records for issue #${candidate_issue}; skipping."
+                continue
+              fi
+              if jq -e --arg bot "${AUTOFIX_BOT}" --arg marker "${approval_marker}" \
+                'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
+                <<< "${approval_comments}" > /dev/null; then
+                printf '%s\n' "${candidate}" >> "${approved_candidates}"
+                continue
+              fi
+              # Rollout grandfather: approvals labeled before the marker
+              # existed have no bot comment to match. Backfill the marker
+              # from the approval label event time; post-cutover approvals
+              # must keep the marker the labeled-event step records. An issue
+              # updated after the approval label event (or after the cutover)
+              # is not backfilled — that prose was never approved, so it
+              # fails closed until a maintainer re-applies the approval
+              # label.
+              approval_labeled_at="$(gh api --paginate \
+                "repos/${REPO}/issues/${candidate_issue}/timeline?per_page=100" --slurp \
+                | jq -r --arg approved "${AUTOFIX_APPROVED_LABEL}" \
+                  '[ .[][] | select(.event == "labeled" and (.label.name // "") == $approved) | .created_at ] | max // empty')" \
+                || approval_labeled_at=''
+              if [[ -n "${approval_labeled_at}" && "${approval_labeled_at}" < "${APPROVAL_MARKER_CUTOVER}" ]] &&
+                jq -e --arg cutover "${APPROVAL_MARKER_CUTOVER}" --arg labeled "${approval_labeled_at}" '
+                  (.updatedAt // "") as $updated |
+                  ($updated != "") and ($updated < $cutover) and
+                  ((($updated | fromdateiso8601) - ($labeled | fromdateiso8601)) <= 60)
+                ' <<< "${candidate}" > /dev/null &&
+                gh issue comment "${candidate_issue}" --repo "${REPO}" \
+                  --body "${approval_marker}"; then
+                echo "🕰️ Issue #${candidate_issue} approval predates the marker rollout; recorded the marker and continuing."
+                printf '%s\n' "${candidate}" >> "${approved_candidates}"
+              else
+                echo "::notice::Issue #${candidate_issue} was dropped because its prose does not match a bot-recorded approval; re-apply ${AUTOFIX_APPROVED_LABEL} to record a fresh approval."
+                echo "⏭️ Issue #${candidate_issue} prose does not match a bot-recorded approval; skipping."
+              fi
+            done < <(jq -c '.[]' "${WORKDIR}/candidates.json")
+            jq -s '.' "${approved_candidates}" > "${WORKDIR}/candidates.json"
           fi
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
@@ -1261,7 +1414,7 @@ jobs:
           fi
 
           if [[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
-            if ! live_issue_json="$(gh issue view "${GO}" --repo "${REPO}" --json labels,state)"; then
+            if ! live_issue_json="$(gh issue view "${GO}" --repo "${REPO}" --json labels,state,assignees,closedByPullRequestsReferences)"; then
               echo "::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error"
               echo "go_issue=" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -1271,10 +1424,15 @@ jobs:
               echo "go_issue=" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
-            if ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" --arg approved "${AUTOFIX_APPROVED_LABEL}" \
-              '(.labels // []) | map(.name) as $labels | (($labels | index($ready)) and ($labels | index($approved)))' \
+            if ! jq -e --arg bot "${AUTOFIX_BOT}" --arg ready "${READY_FOR_AGENT_LABEL}" --arg approved "${AUTOFIX_APPROVED_LABEL}" --arg routing "${AUTOFIX_ROUTING_LABEL}" \
+              '(.labels // [] | map(.name)) as $labels |
+                (($labels | index($ready)) and
+                 ($labels | index($approved)) and
+                 (($labels | index($routing)) == null)) and
+                ((.assignees // []) | length > 0 and all(.login == $bot)) and
+                ((.closedByPullRequestsReferences // []) | length == 0)' \
               <<< "${live_issue_json}" > /dev/null; then
-              echo "⏭️ Selected issue #${GO} no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}; skipping."
+              echo "⏭️ Selected issue #${GO} no longer has both required labels or is still routing; skipping."
               echo "go_issue=" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
@@ -1305,6 +1463,86 @@ jobs:
                 done
           fi
 
+      - name: 'Load targeted E2E requirement'
+        id: 'targeted-e2e'
+        if: |-
+          ${{ steps.decision.outputs.go_issue != '' }}
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+        run: |-
+          rm -f "${WORKDIR}/ci-failure.json" "${WORKDIR}/targeted-e2e-report.md"
+          issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" --json labels)"
+          if ! jq -e --arg label "${E2E_REQUIRED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${issue_json}" > /dev/null; then
+            echo 'required=false' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
+            --issue "${ISSUE}" \
+            --repository "${REPO}" \
+            --output "${WORKDIR}/ci-failure.json" 2>&1 |
+            tee "${WORKDIR}/e2e-load.log"; then
+            exit 1
+          fi
+          echo 'required=true' >> "${GITHUB_OUTPUT}"
+
+      - name: 'Neutralize expired targeted E2E requirement'
+        if: |-
+          ${{ failure() && steps.targeted-e2e.outcome == 'failure' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+        run: |-
+          if ! grep -Eq 'No (live|trusted) artifact with prefix' \
+            "${WORKDIR}/e2e-load.log" 2> /dev/null; then
+            echo 'Metadata load failed without a definitive missing-artifact diagnosis; leaving routing state untouched.'
+            exit 0
+          fi
+          if ! live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" --json labels)"; then
+            echo '::warning::Failed to re-read issue labels; leaving routing state untouched.'
+            exit 0
+          fi
+          if ! jq -e --arg label "${E2E_REQUIRED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${live_issue_json}" > /dev/null; then
+            echo "Issue #${ISSUE} no longer carries ${E2E_REQUIRED_LABEL}; nothing to neutralize."
+            exit 0
+          fi
+          # Removing only the requirement label would silently degrade this
+          # issue to deterministic-gate-only publication — the pre-PR gate —
+          # although it may be one the bot auto-approved without human
+          # review. Consume the approval too so a maintainer must re-apply
+          # it (re-recording the approval marker) before autofix proceeds.
+          # The approval is consumed FIRST so every partial state fails
+          # closed: once the requirement label is gone, `Load targeted E2E
+          # requirement` reports required=false forever and this step never
+          # re-fires, so a transient failure of the approval removal AFTER
+          # the requirement removal would leave the issue approved-but-not-
+          # required with no later run to repair it. In this order a failed
+          # approval removal keeps the requirement label in place so the
+          # next run re-enters this step, and a failed requirement removal
+          # leaves an unapproved, still-required issue the next run
+          # neutralizes again.
+          if jq -e --arg label "${AUTOFIX_APPROVED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${live_issue_json}" > /dev/null &&
+            ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+              --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
+            echo '::error::Failed to consume the approval for the expired targeted E2E requirement.'
+            exit 1
+          fi
+          if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+            --remove-label "${E2E_REQUIRED_LABEL}"; then
+            echo '::error::Failed to remove the expired targeted E2E requirement label.'
+            exit 1
+          fi
+          gh issue comment "${ISSUE}" --repo "${REPO}" \
+            --body "🤖 The targeted E2E metadata artifact for this issue expired or no longer exists, so the \`autofix/e2e-verification-required\` label was removed to keep the issue from failing closed forever. Because publication without targeted E2E verification falls back to the deterministic gates alone, the \`autofix/approved\` label was also consumed: re-apply it after reviewing the issue again to let autofix proceed. A future authenticated main E2E failure will re-route the issue with fresh metadata." \
+            || echo '::warning::Failed to post the targeted E2E neutralization comment.'
+
       - name: 'Claim issue'
         id: 'claim'
         if: |-
@@ -1312,13 +1550,82 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          TRUSTED_BASE_OID: '${{ steps.trusted-base.outputs.oid }}'
         run: |-
-          BODY="🤖 The scheduled autofix agent is picking this issue up. It will attempt to establish the current behavior, implement the requested change, run E2E verification, and open a pull request linked to this issue. If the attempt fails, this claim will be withdrawn so a human can take over.
-
-          Maintainers: comment or assign someone to stop future automated attempts, or add the \`autofix/skip\` label."
-
-          # The label, not the comment, is what future scans key off to
-          # avoid double-claiming.
+          claim_ref="refs/heads/autofix/claim-issue-${ISSUE}"
+          claim_push_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          claim_oid="$(printf 'Autofix claim for issue #%s by run %s attempt %s\n' \
+            "${ISSUE}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" |
+            git -c user.name='Qwen Code Autofix' \
+              -c user.email='qwen-code-dev-bot@users.noreply.github.com' \
+              commit-tree "$(git rev-parse "${TRUSTED_BASE_OID}^{tree}")" \
+              -p "${TRUSTED_BASE_OID}")"
+          [[ "${claim_oid}" =~ ^[0-9a-f]{40}$ ]]
+          release_claim_ref() {
+            git push --no-verify \
+              --force-with-lease="${claim_ref}:${claim_oid}" \
+              "${claim_push_url}" --delete "${claim_ref#refs/heads/}"
+          }
+          if ! git push --no-verify \
+            --force-with-lease="${claim_ref}:" \
+            "${claim_push_url}" "${claim_oid}:${claim_ref}"; then
+            echo "::error::Issue #${ISSUE} already has an active or unrecoverable Autofix claim."
+            exit 1
+          fi
+          trap 'release_claim_ref || true' EXIT
+          echo 'claim_owned=true' >> "${GITHUB_OUTPUT}"
+          echo "claim_oid=${claim_oid}" >> "${GITHUB_OUTPUT}"
+          live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json state,title,body,labels,assignees,closedByPullRequestsReferences)"
+          if ! jq -e --arg bot "${AUTOFIX_BOT}" '
+            .state == "OPEN" and
+            ((.labels // []) | map(.name) |
+              index("autofix/in-progress") == null and
+              index("autofix/skip") == null and
+              index("autofix/routing") == null and
+              index("status/need-information") == null and
+              index("status/need-retesting") == null) and
+            ((.assignees // []) | length > 0 and all(.login == $bot)) and
+            ((.closedByPullRequestsReferences // []) | length == 0)
+          ' <<< "${live_issue_json}" > /dev/null; then
+            echo "::error::Issue #${ISSUE} changed ownership or eligibility before claim."
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" != 'workflow_dispatch' ]] && ! jq -e \
+            --arg ready "${READY_FOR_AGENT_LABEL}" \
+            --arg approved "${AUTOFIX_APPROVED_LABEL}" '
+              (.labels // []) | map(.name) |
+              index($ready) != null and index($approved) != null
+            ' <<< "${live_issue_json}" > /dev/null; then
+            echo "::error::Issue #${ISSUE} lost its ready or approval label before claim."
+            exit 1
+          fi
+          live_prose="$(jq -c '[.title // "", .body // ""]' <<< "${live_issue_json}")"
+          approval_digest="$(printf '%s\n' "${live_prose}" | sha256sum | cut -d ' ' -f 1)"
+          [[ "${approval_digest}" =~ ^[0-9a-f]{64}$ ]]
+          if [[ "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
+            selected_prose="$(jq -c --argjson issue "${ISSUE}" \
+              'first(.[] | select(.number == $issue) | [(.title // ""), (.body // "")]) // empty' \
+              "${WORKDIR}/candidates.json")"
+            if [[ -z "${selected_prose}" || "${live_prose}" != "${selected_prose}" ]]; then
+              echo "::error::Issue #${ISSUE} prose changed after candidate selection."
+              exit 1
+            fi
+            approval_marker="<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+            if ! approval_comments="$(gh api --paginate \
+              "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp)" ||
+              ! jq -e --arg bot "${AUTOFIX_BOT}" --arg marker "${approval_marker}" \
+                'any(.[].[]; .user.login == $bot and (.body // "") == $marker)' \
+                <<< "${approval_comments}" > /dev/null; then
+              echo "::error::Issue #${ISSUE} prose no longer matches a bot-recorded approval."
+              exit 1
+            fi
+          fi
+          echo "approved_prose_sha256=${approval_digest}" >> "${GITHUB_OUTPUT}"
+          # From this point onward an API failure may have partially changed
+          # issue ownership, so preserve the unique claim ref for recovery.
+          trap - EXIT
           gh label create 'autofix/in-progress' --repo "${REPO}" \
             --description 'The scheduled autofix agent has claimed this issue' \
             --color '1d76db' 2> /dev/null || true
@@ -1326,13 +1633,32 @@ jobs:
             --description 'Maintainer explicitly approved this issue for autonomous autofix' \
             --color '0e8a16' 2> /dev/null || true
           if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
-            --add-label 'autofix/in-progress'; then
-            echo "::error::Failed to add autofix/in-progress label on #${ISSUE} before claim comment was posted"
+            --add-label 'autofix/in-progress' \
+            --add-assignee "${AUTOFIX_BOT}"; then
+            echo "::error::Failed to claim #${ISSUE} for ${AUTOFIX_BOT} before the claim comment was posted"
             exit 1
           fi
-          gh issue edit "${ISSUE}" --repo "${REPO}" \
-            --remove-label "${AUTOFIX_APPROVED_LABEL}" || true
+          if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+            --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
+            echo "::error::Failed to consume approval for #${ISSUE}; preserving the claim for recovery"
+            exit 1
+          fi
+          echo 'claimed=true' >> "${GITHUB_OUTPUT}"
 
+      - name: 'Post claim comment'
+        id: 'claim-comment'
+        if: |-
+          ${{ steps.claim.outputs.claimed == 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+        run: |-
+          CLAIM_COMMENT_MARKER="<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} -->"
+          BODY="🤖 The scheduled autofix agent is picking this issue up. It will attempt to establish the current behavior, implement the requested change, run E2E verification, and open a pull request linked to this issue. If the attempt fails, this claim will be withdrawn so a human can take over.
+
+          Maintainers: assign someone else or add the \`autofix/skip\` label to stop this attempt and future automated attempts.
+
+          ${CLAIM_COMMENT_MARKER}"
           COMMENT_URL="$(gh issue comment "${ISSUE}" --repo "${REPO}" --body "${BODY}")"
           COMMENT_ID="${COMMENT_URL##*-}"
           echo "comment_id=${COMMENT_ID}" >> "${GITHUB_OUTPUT}"
@@ -1393,8 +1719,28 @@ jobs:
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}"
 
-      - name: 'Verification gate'
-        id: 'verify'
+      - name: 'Record agent decline'
+        id: 'decline'
+        if: |-
+          ${{ always() && steps.decision.outputs.go_issue != '' }}
+        run: |-
+          # The runner harness also writes failure.md for transient timeouts
+          # and API errors (with matching sentinel files); only a failure.md
+          # without them is the agent's own terminal verdict.
+          if [[ -s "${WORKDIR}/failure.md" &&
+            ! -f "${WORKDIR}/agent-timeout" &&
+            ! -f "${WORKDIR}/agent-api-error" ]]; then
+            delim="AUTOFIX_AGENT_DETAIL_$(openssl rand -hex 8)"
+            {
+              echo 'agent_declined=true'
+              echo "agent_detail<<${delim}"
+              head -c 1500 "${WORKDIR}/failure.md" | iconv -f utf-8 -t utf-8 -c || true
+              echo
+              echo "${delim}"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Package candidate'
         if: |-
           ${{ steps.decision.outputs.go_issue != '' }}
         env:
@@ -1408,25 +1754,31 @@ jobs:
             cat "${WORKDIR}/failure.md"
             exit 1
           fi
-
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             echo "🛑 Agent aborted intentionally:"
             cat "${WORKDIR}/failure.md"
             exit 1
           fi
-
           if ! git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             echo "❌ Expected branch ${BRANCH} does not exist"
             exit 1
           fi
           git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
-
-          if git diff --quiet origin/main..."${BRANCH}"; then
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo '❌ Candidate branch has uncommitted changes.'
+            git status --short
+            exit 1
+          fi
+          base_oid='${{ steps.trusted-base.outputs.oid }}'
+          candidate_oid="$(git rev-parse "${BRANCH}")"
+          [[ "${base_oid}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${candidate_oid}" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "${base_oid}" "${candidate_oid}"
+          if git diff --quiet "${base_oid}...${candidate_oid}"; then
             echo "❌ Branch has no changes against main"
             exit 1
           fi
-
           for f in pr-title.txt pr-body.md e2e-report.md; do
             if [[ ! -s "${WORKDIR}/${f}" ]]; then
               echo "❌ Missing required output ${f}"
@@ -1434,55 +1786,26 @@ jobs:
             fi
           done
 
-          echo '🔬 Re-running deterministic checks (independent of the agent)...'
-          npm run build
-          npm run typecheck
-          npm run lint
+          candidate_dir="${RUNNER_TEMP}/autofix-candidate"
+          rm -rf "${candidate_dir}"
+          mkdir -p "${candidate_dir}/workdir"
+          git bundle create "${candidate_dir}/candidate.bundle" \
+            "^${base_oid}" "refs/heads/${BRANCH}"
+          printf '%s\n' "${base_oid}" > "${candidate_dir}/base-oid"
+          printf '%s\n' "${candidate_oid}" > "${candidate_dir}/candidate-oid"
+          cp "${WORKDIR}/pr-title.txt" "${candidate_dir}/workdir/pr-title.txt"
+          cp "${WORKDIR}/pr-body.md" "${candidate_dir}/workdir/pr-body.md"
+          cp "${WORKDIR}/e2e-report.md" "${candidate_dir}/workdir/e2e-report.md"
 
-          # Settings-schema freshness gate, shared with the triage-and-address
-          # verify step so the two copies cannot drift (rationale + the
-          # generator crash guard live in the script). On failure it writes
-          # outcome=failed to GITHUB_OUTPUT and exits 1.
-          # Run the copy staged from the trusted base checkout: a PR branch
-          # that predates the script does not contain it (bash would exit 127
-          # and kill the gate with no outcome), and the gate logic must come
-          # from the trusted base, not the branch under verification.
-          bash "${RUNNER_TEMP}/check-settings-schema.sh"
-          git diff --name-only "origin/main...${BRANCH}" \
-            | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
-
-          # Run changed/related tests for the packages this fix touches.
-          # --changed follows the import graph so transitive breakage is caught.
-          # Full regression is covered by regular CI on the PR after the push.
-          # Map each changed file to its OWNING npm workspace via the trusted
-          # staged resolver, shared with the other verify gate so both resolve
-          # packages identically. It expands the on-disk root package.json
-          # workspaces globs (so a workspace the branch ADDS is included) and
-          # takes each file's longest-prefix workspace — never a flat
-          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
-          # package.json inside a workspace's src tree (would skip the owning
-          # workspace's tests). No '|| true': a resolver error (missing node, an
-          # unreadable manifest) must fail the gate loudly rather than silently
-          # skip package tests; legitimate no-match input already exits 0 empty.
-          CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
-          if [[ -z "${CHANGED_PKGS}" ]]; then
-            echo 'No package changes detected; skipping package tests.'
-          else
-            for p in ${CHANGED_PKGS}; do
-              if [[ ! -f "${p}/package.json" ]]; then
-                echo "Skipping ${p}: no package.json."
-                continue
-              fi
-              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
-              if [[ "${test_script}" != *vitest* ]]; then
-                echo "Skipping ${p}: test script is not Vitest."
-                continue
-              fi
-              echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
-            done
-          fi
+      - name: 'Upload candidate'
+        if: |-
+          ${{ steps.decision.outputs.go_issue != '' }}
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'autofix-candidate-${{ steps.decision.outputs.go_issue }}'
+          path: '${{ runner.temp }}/autofix-candidate/'
+          if-no-files-found: 'error'
+          retention-days: 1
 
       - name: 'Show run artifacts'
         if: |-
@@ -1494,7 +1817,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/fix.diff" || true
           fi
-          for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
+          for f in decision.json ci-failure.json pr-title.txt pr-body.md e2e-report.md targeted-e2e-report.md failure.md fix.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -1511,25 +1834,702 @@ jobs:
           path: '${{ env.WORKDIR }}/'
           if-no-files-found: 'ignore'
 
+      - name: 'Report dry-run / failure'
+        if: |-
+          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
+        env:
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+        run: |-
+          SUFFIX=''
+          [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
+          {
+            echo "### Issue autofix${ISSUE:+ #${ISSUE}}${SUFFIX}"
+            echo
+            for f in decision.json ci-failure.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
+              if [[ -s "${WORKDIR}/${f}" ]]; then
+                echo "**${f}:**"
+                echo '```'
+                cat "${WORKDIR}/${f}"
+                echo '```'
+                echo
+              fi
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every run would leave its transcripts and decision files behind
+      # forever. Last step, after every reader including the artifact
+      # upload. always() covers cancellation too; only a hard runner kill
+      # abandons the dir, and run_id never repeats — the age sweep in
+      # Reset autofix workspace reclaims it.
+      - name: 'Clean up autofix workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
+
+  issue-autofix-verify:
+    needs: ['route', 'issue-autofix']
+    if: |-
+      ${{ needs.issue-autofix.result == 'success' && needs.issue-autofix.outputs.issue != '' && needs.route.outputs.dry_run != 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 90
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    outputs:
+      candidate_oid: '${{ steps.candidate.outputs.oid }}'
+    env:
+      ISSUE: '${{ needs.issue-autofix.outputs.issue }}'
+      BRANCH: 'autofix/issue-${{ needs.issue-autofix.outputs.issue }}'
+      TRUSTED_BASE_OID: '${{ needs.issue-autofix.outputs.base_oid }}'
+    steps:
+      - name: 'Checkout trusted base'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Re-pin trusted base'
+        run: |-
+          # The checkout above is unpinned: if main advanced after the
+          # issue-autofix job captured the base, restore the frozen OID so
+          # staging, gates, and proof operate on the trusted tree rather
+          # than the new tip.
+          git checkout --detach "${TRUSTED_BASE_OID}"
+
+      - name: 'Stage trusted deterministic gates'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+          cp .github/scripts/prepare-autofix-verification-worktree.sh "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh"
+          cp .github/scripts/run-autofix-verification-command.sh "${RUNNER_TEMP}/run-autofix-verification-command.sh"
+          cp .github/scripts/validate-autofix-verification-outputs.mjs "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"
+          chmod +x "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            "${RUNNER_TEMP}/run-autofix-verification-command.sh"
+
+      - name: 'Download candidate'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'autofix-candidate-${{ needs.issue-autofix.outputs.issue }}'
+          path: '${{ runner.temp }}/autofix-candidate'
+
+      - name: 'Restore exact candidate commit'
+        id: 'candidate'
+        run: |-
+          candidate_dir="${RUNNER_TEMP}/autofix-candidate"
+          base_oid="$(tr -d '\r\n' < "${candidate_dir}/base-oid")"
+          expected_oid="$(tr -d '\r\n' < "${candidate_dir}/candidate-oid")"
+          if [[ ! "${base_oid}" =~ ^[0-9a-f]{40}$ || ! "${expected_oid}" =~ ^[0-9a-f]{40}$ || "${base_oid}" != "${TRUSTED_BASE_OID}" || "$(git rev-parse HEAD^{commit})" != "${TRUSTED_BASE_OID}" ]]; then
+            echo '::error::Candidate artifact does not match the independently captured trusted base.'
+            exit 1
+          fi
+          git bundle verify "${candidate_dir}/candidate.bundle"
+          git fetch "${candidate_dir}/candidate.bundle" \
+            "refs/heads/${BRANCH}:refs/heads/${BRANCH}"
+          if [[ "$(git rev-parse "${BRANCH}")" != "${expected_oid}" ]]; then
+            echo '::error::Candidate bundle does not match its declared commit OID.'
+            exit 1
+          fi
+          git cat-file -e "${base_oid}^{commit}"
+          git merge-base --is-ancestor "${base_oid}" "${expected_oid}"
+          git config core.hooksPath /dev/null
+          git checkout --detach "${expected_oid}"
+          echo "oid=${expected_oid}" >> "${GITHUB_OUTPUT}"
+          echo "base_oid=${base_oid}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Protect candidate worktree'
+        run: |-
+          git clean -ffdx
+          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" "${GITHUB_WORKSPACE}"
+
+      - name: 'Install dependencies'
+        run: |-
+          node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs" \
+            --base "${{ steps.candidate.outputs.base_oid }}"
+          verify_cmd="${RUNNER_TEMP}/run-autofix-verification-command.sh"
+          "${verify_cmd}" "${GITHUB_WORKSPACE}" \
+            npm ci --ignore-scripts --prefer-offline --no-audit --progress=false
+          "${verify_cmd}" "${GITHUB_WORKSPACE}" \
+            npx --no-install patch-package
+          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            "${GITHUB_WORKSPACE}" dependencies
+
+      - name: 'Verification gate'
+        env:
+          EXPECTED_OID: '${{ steps.candidate.outputs.oid }}'
+        run: |-
+          echo '🔬 Re-running deterministic checks on the packaged candidate...'
+          verify_cmd="${RUNNER_TEMP}/run-autofix-verification-command.sh"
+          "${verify_cmd}" "${GITHUB_WORKSPACE}" npm run build
+          "${verify_cmd}" "${GITHUB_WORKSPACE}" npm run typecheck
+          "${verify_cmd}" "${GITHUB_WORKSPACE}" npm run lint
+          node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"
+          base_oid='${{ steps.candidate.outputs.base_oid }}'
+          # The Vitest-based gates run before the finalize seal: Vite loads
+          # each package's TypeScript vitest config by bundling it into a
+          # `<config>.timestamp-*.mjs` temp file next to the config, which
+          # EACCESes once finalize makes every directory read-only for the
+          # unprivileged verifier UID. Coverage and JUnit reporting are
+          # disabled for these runs because the ignored artifacts they write
+          # would fail the post-test output audit. Tracked files and sealed
+          # dependencies remain non-writable throughout, and the audit
+          # repeated after the seal still fails closed on anything left
+          # behind.
+          git diff --name-only "${base_oid}...HEAD" \
+            | AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \
+              bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
+          CHANGED_PKGS="$(git diff --name-only -z "${base_oid}...HEAD" \
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
+          if [[ -z "${CHANGED_PKGS}" ]]; then
+            echo 'No package changes detected; skipping package tests.'
+          else
+            for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                continue
+              fi
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" == *vitest* ]]; then
+                "${verify_cmd}" "${GITHUB_WORKSPACE}" \
+                  npm run test --workspace "${p}" --if-present -- --changed "${base_oid}" --passWithNoTests --coverage.enabled=false --reporter=default
+              fi
+            done
+          fi
+          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            "${GITHUB_WORKSPACE}" finalize
+          AUTOFIX_VERIFY_COMMAND="${verify_cmd}" \
+            bash "${RUNNER_TEMP}/check-settings-schema.sh"
+          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            "${GITHUB_WORKSPACE}" cleanup
+          node "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"
+          if [[ "$(git rev-parse HEAD)" != "${EXPECTED_OID}" ]]; then
+            echo '::error::Candidate verification changed the checked-out commit.'
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo '::error::Candidate verification changed the verified worktree.'
+            git status --short
+            exit 1
+          fi
+
+      - name: 'Report verification failure'
+        if: |-
+          ${{ always() && failure() }}
+        run: |-
+          {
+            echo "### Autofix deterministic verification failed for issue #${ISSUE}"
+            echo
+            echo 'The packaged candidate failed the re-run deterministic gates; the gate output in this job log is authoritative. The agent-authored files below are context only.'
+            echo
+            workdir="${RUNNER_TEMP}/autofix-candidate/workdir"
+            for f in pr-title.txt pr-body.md e2e-report.md; do
+              if [[ -s "${workdir}/${f}" ]]; then
+                echo "**${f}:**"
+                echo '```'
+                cat "${workdir}/${f}"
+                echo '```'
+                echo
+              fi
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  issue-autofix-targeted-e2e:
+    needs: ['issue-autofix', 'issue-autofix-verify']
+    if: |-
+      ${{ needs.issue-autofix-verify.result == 'success' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 60
+    permissions:
+      actions: 'read'
+      contents: 'read'
+      issues: 'read'
+    outputs:
+      metadata_sha256: '${{ steps.metadata.outputs.sha256 }}'
+    env:
+      REPO: '${{ github.repository }}'
+      ISSUE: '${{ needs.issue-autofix.outputs.issue }}'
+      BRANCH: 'autofix/issue-${{ needs.issue-autofix.outputs.issue }}'
+      E2E_REQUIRED: '${{ needs.issue-autofix.outputs.targeted_e2e_required }}'
+      E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'
+      TRUSTED_BASE_OID: '${{ needs.issue-autofix.outputs.base_oid }}'
+      VERIFIED_CANDIDATE_OID: '${{ needs.issue-autofix-verify.outputs.candidate_oid }}'
+    steps:
+      - name: 'Checkout trusted base'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Re-pin trusted base'
+        run: |-
+          # The checkout above is unpinned: if main advanced after the
+          # issue-autofix job captured the base, restore the frozen OID so
+          # staging, gates, and proof operate on the trusted tree rather
+          # than the new tip.
+          git checkout --detach "${TRUSTED_BASE_OID}"
+
+      - name: 'Stage trusted targeted verifier'
+        run: |-
+          cp .github/scripts/load-autofix-e2e-metadata.mjs "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs"
+          cp .github/scripts/run-autofix-targeted-e2e.mjs "${RUNNER_TEMP}/run-autofix-targeted-e2e.mjs"
+          cp .github/scripts/autofix-vitest.config.mjs "${RUNNER_TEMP}/autofix-vitest.config.mjs"
+          cp .github/scripts/autofix-cli-launcher.mjs "${RUNNER_TEMP}/autofix-cli-launcher.mjs"
+          cp .github/scripts/run-autofix-vitest.sh "${RUNNER_TEMP}/run-autofix-vitest.sh"
+          cp .github/scripts/prepare-autofix-verification-worktree.sh "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh"
+          cp .github/scripts/run-autofix-verification-command.sh "${RUNNER_TEMP}/run-autofix-verification-command.sh"
+          cp .github/scripts/validate-autofix-verification-outputs.mjs "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"
+          chmod +x "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            "${RUNNER_TEMP}/run-autofix-verification-command.sh" \
+            "${RUNNER_TEMP}/run-autofix-vitest.sh"
+
+      - name: 'Download candidate'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'autofix-candidate-${{ needs.issue-autofix.outputs.issue }}'
+          path: '${{ runner.temp }}/autofix-candidate'
+
+      - name: 'Load current targeted requirement'
+        id: 'metadata'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+        run: |-
+          issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" --json labels)"
+          live_required="$(jq -r --arg label "${E2E_REQUIRED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${issue_json}")"
+          if [[ "${live_required}" != "${E2E_REQUIRED}" ]]; then
+            echo '::error::Targeted E2E routing changed before isolated verification.'
+            exit 1
+          fi
+          metadata="${RUNNER_TEMP}/ci-failure.json"
+          if [[ "${live_required}" == 'true' ]]; then
+            node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
+              --issue "${ISSUE}" --repository "${REPO}" --output "${metadata}"
+            echo "sha256=$(shasum -a 256 "${metadata}" | cut -d ' ' -f 1)" >> "${GITHUB_OUTPUT}"
+          else
+            echo 'sha256=none' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Restore exact candidate commit'
+        id: 'candidate'
+        run: |-
+          candidate_dir="${RUNNER_TEMP}/autofix-candidate"
+          base_oid="$(tr -d '\r\n' < "${candidate_dir}/base-oid")"
+          expected_oid="$(tr -d '\r\n' < "${candidate_dir}/candidate-oid")"
+          if [[ ! "${base_oid}" =~ ^[0-9a-f]{40}$ || ! "${expected_oid}" =~ ^[0-9a-f]{40}$ || "${base_oid}" != "${TRUSTED_BASE_OID}" || "$(git rev-parse HEAD^{commit})" != "${TRUSTED_BASE_OID}" || "${expected_oid}" != "${VERIFIED_CANDIDATE_OID}" ]]; then
+            echo '::error::Candidate artifact no longer matches the independently captured base or deterministically verified commit.'
+            exit 1
+          fi
+          git bundle verify "${candidate_dir}/candidate.bundle"
+          git fetch "${candidate_dir}/candidate.bundle" \
+            "refs/heads/${BRANCH}:refs/heads/${BRANCH}"
+          [[ "$(git rev-parse "${BRANCH}")" == "${expected_oid}" ]]
+          git cat-file -e "${base_oid}^{commit}"
+          git merge-base --is-ancestor "${base_oid}" "${expected_oid}"
+          git config core.hooksPath /dev/null
+          git checkout --detach "${expected_oid}"
+          echo "oid=${expected_oid}" >> "${GITHUB_OUTPUT}"
+          echo "base_oid=${base_oid}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Protect candidate worktree'
+        if: |-
+          ${{ needs.issue-autofix.outputs.targeted_e2e_required == 'true' }}
+        run: |-
+          git clean -ffdx
+          "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" "${GITHUB_WORKSPACE}"
+
+      - name: 'Run isolated targeted E2E verification'
+        if: |-
+          ${{ needs.issue-autofix.outputs.targeted_e2e_required == 'true' }}
+        env:
+          EXPECTED_OID: '${{ steps.candidate.outputs.oid }}'
+        run: |-
+          node "${RUNNER_TEMP}/run-autofix-targeted-e2e.mjs" \
+            --metadata "${RUNNER_TEMP}/ci-failure.json" \
+            --report "${RUNNER_TEMP}/targeted-e2e-report.md" \
+            --base "${{ steps.candidate.outputs.base_oid }}" \
+            --command-wrapper "${RUNNER_TEMP}/run-autofix-verification-command.sh" \
+            --vitest-wrapper "${RUNNER_TEMP}/run-autofix-vitest.sh" \
+            --worktree-helper "${RUNNER_TEMP}/prepare-autofix-verification-worktree.sh" \
+            --output-validator "${RUNNER_TEMP}/validate-autofix-verification-outputs.mjs"
+          if [[ "$(git rev-parse HEAD)" != "${EXPECTED_OID}" ]]; then
+            echo '::error::Targeted E2E changed the verified candidate commit.'
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo '::error::Targeted E2E changed the verified candidate worktree.'
+            git status --short
+            exit 1
+          fi
+
+      - name: 'Package verified candidate'
+        run: |-
+          verified="${RUNNER_TEMP}/autofix-verified"
+          mkdir -p "${verified}/workdir"
+          cp "${RUNNER_TEMP}/autofix-candidate/candidate.bundle" "${verified}/candidate.bundle"
+          cp "${RUNNER_TEMP}/autofix-candidate/base-oid" "${verified}/base-oid"
+          cp "${RUNNER_TEMP}/autofix-candidate/candidate-oid" "${verified}/candidate-oid"
+          cp "${RUNNER_TEMP}/autofix-candidate/workdir/"* "${verified}/workdir/"
+          if [[ -s "${RUNNER_TEMP}/targeted-e2e-report.md" ]]; then
+            cp "${RUNNER_TEMP}/targeted-e2e-report.md" "${verified}/workdir/targeted-e2e-report.md"
+          fi
+
+      - name: 'Upload verified candidate'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'autofix-verified-${{ needs.issue-autofix.outputs.issue }}'
+          path: '${{ runner.temp }}/autofix-verified/'
+          if-no-files-found: 'error'
+          retention-days: 1
+
+      - name: 'Report targeted E2E failure'
+        if: |-
+          ${{ always() && failure() }}
+        run: |-
+          {
+            echo "### Autofix targeted E2E verification failed for issue #${ISSUE}"
+            echo
+            if [[ -s "${RUNNER_TEMP}/targeted-e2e-report.md" ]]; then
+              echo '```'
+              cat "${RUNNER_TEMP}/targeted-e2e-report.md"
+              echo '```'
+            else
+              echo 'No targeted E2E report was produced.'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  issue-autofix-publish:
+    needs:
+      - 'route'
+      - 'issue-autofix'
+      - 'issue-autofix-verify'
+      - 'issue-autofix-targeted-e2e'
+    if: |-
+      ${{ always() && needs.issue-autofix.outputs.issue != '' && needs.route.outputs.dry_run != 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    concurrency:
+      group: 'qwen-autofix-issue-${{ needs.issue-autofix.outputs.issue }}'
+      cancel-in-progress: false
+    permissions:
+      actions: 'read'
+      contents: 'read'
+      issues: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      ISSUE: '${{ needs.issue-autofix.outputs.issue }}'
+      BRANCH: 'autofix/issue-${{ needs.issue-autofix.outputs.issue }}'
+      CLAIM_OID: '${{ needs.issue-autofix.outputs.claim_oid }}'
+      APPROVED_PROSE_SHA256: '${{ needs.issue-autofix.outputs.approved_prose_sha256 }}'
+      E2E_REQUIRED: '${{ needs.issue-autofix.outputs.targeted_e2e_required }}'
+      E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'
+      VERIFIED_METADATA_SHA256: '${{ needs.issue-autofix-targeted-e2e.outputs.metadata_sha256 }}'
+      TRUSTED_BASE_OID: '${{ needs.issue-autofix.outputs.base_oid }}'
+      VERIFIED_CANDIDATE_OID: '${{ needs.issue-autofix-verify.outputs.candidate_oid }}'
+      MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+      AGENT_DECLINED: '${{ needs.issue-autofix.outputs.agent_declined }}'
+      AGENT_DETAIL: '${{ needs.issue-autofix.outputs.agent_detail }}'
+      AGENT_RESULT: '${{ needs.issue-autofix.result }}'
+      VERIFY_RESULT: '${{ needs.issue-autofix-verify.result }}'
+      TARGETED_RESULT: '${{ needs.issue-autofix-targeted-e2e.result }}'
+    steps:
+      - name: 'Checkout trusted base'
+        if: |-
+          ${{ needs.issue-autofix.outputs.claim_owned == 'true' }}
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Re-pin trusted base'
+        if: |-
+          ${{ needs.issue-autofix.outputs.claim_owned == 'true' }}
+        run: |-
+          # The checkout above is unpinned: if main advanced after the
+          # issue-autofix job captured the base, restore the frozen OID so
+          # the proof operates on the trusted tree rather than the new tip.
+          git checkout --detach "${TRUSTED_BASE_OID}"
+
+      - name: 'Stage trusted metadata loader'
+        if: |-
+          ${{ needs.issue-autofix-targeted-e2e.result == 'success' }}
+        run: |-
+          cp .github/scripts/load-autofix-e2e-metadata.mjs "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs"
+
+      - name: 'Download verified candidate'
+        if: |-
+          ${{ needs.issue-autofix-targeted-e2e.result == 'success' }}
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'autofix-verified-${{ needs.issue-autofix.outputs.issue }}'
+          path: '${{ runner.temp }}/autofix-verified'
+
+      - name: 'Revalidate proof and restore candidate'
+        id: 'proof'
+        if: |-
+          ${{ needs.issue-autofix-targeted-e2e.result == 'success' }}
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+        run: |-
+          [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]]
+          claim_ref_error_file="$(mktemp)"
+          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/heads/autofix/claim-issue-${ISSUE}" \
+            --jq '.object.sha' 2>"${claim_ref_error_file}")"; then
+            if grep -q 'HTTP 404' "${claim_ref_error_file}"; then
+              rm -f "${claim_ref_error_file}"
+              echo '::error::The claim ref no longer exists: an earlier attempt already withdrew it (or this run released it before taking ownership). Re-running this job cannot publish; re-apply the autofix/approved label to start a fresh cycle.'
+              exit 1
+            fi
+            rm -f "${claim_ref_error_file}"
+            echo '::warning::Could not confirm claim ref; preserving the claim for recovery.'
+            echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          rm -f "${claim_ref_error_file}"
+          [[ "${claim_oid}" == "${CLAIM_OID}" ]]
+          if ! issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json state,title,body,labels,assignees,closedByPullRequestsReferences)"; then
+            echo '::warning::Could not confirm issue state; preserving the claim for recovery.'
+            echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          live_prose="$(jq -c '[.title // "", .body // ""]' <<< "${issue_json}")"
+          live_prose_sha256="$(printf '%s\n' "${live_prose}" | sha256sum | cut -d ' ' -f 1)"
+          [[ "${APPROVED_PROSE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${live_prose_sha256}" == "${APPROVED_PROSE_SHA256}" ]]
+          jq -e --arg bot "${AUTOFIX_BOT}" '
+            .state == "OPEN" and
+            ((.labels // []) | map(.name) |
+              index("autofix/in-progress") != null and
+              index("autofix/skip") == null and
+              index("autofix/routing") == null and
+              index("status/need-information") == null and
+              index("status/need-retesting") == null) and
+            ((.assignees // []) | length > 0 and all(.login == $bot)) and
+            ((.closedByPullRequestsReferences // []) | length == 0)
+          ' <<< "${issue_json}" > /dev/null
+          live_required="$(jq -r --arg label "${E2E_REQUIRED_LABEL}" \
+            '(.labels // []) | map(.name) | index($label) != null' \
+            <<< "${issue_json}")"
+          [[ "${live_required}" == "${E2E_REQUIRED}" ]]
+          if [[ "${live_required}" == 'true' ]]; then
+            current_metadata="${RUNNER_TEMP}/ci-failure-current.json"
+            if ! node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
+              --issue "${ISSUE}" --repository "${REPO}" --output "${current_metadata}"; then
+              echo '::warning::Could not confirm targeted E2E metadata; preserving the claim for recovery.'
+              echo "preserve_claim=true" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
+            current_sha="$(shasum -a 256 "${current_metadata}" | cut -d ' ' -f 1)"
+            [[ "${current_sha}" == "${VERIFIED_METADATA_SHA256}" ]]
+          else
+            [[ "${VERIFIED_METADATA_SHA256}" == 'none' ]]
+          fi
+          candidate_dir="${RUNNER_TEMP}/autofix-verified"
+          base_oid="$(tr -d '\r\n' < "${candidate_dir}/base-oid")"
+          expected_oid="$(tr -d '\r\n' < "${candidate_dir}/candidate-oid")"
+          [[ "${base_oid}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${expected_oid}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${base_oid}" == "${TRUSTED_BASE_OID}" ]]
+          [[ "$(git rev-parse HEAD^{commit})" == "${TRUSTED_BASE_OID}" ]]
+          [[ "${expected_oid}" == "${VERIFIED_CANDIDATE_OID}" ]]
+          git bundle verify "${candidate_dir}/candidate.bundle"
+          git fetch "${candidate_dir}/candidate.bundle" \
+            "refs/heads/${BRANCH}:refs/heads/${BRANCH}"
+          [[ "$(git rev-parse "${BRANCH}")" == "${expected_oid}" ]]
+          git cat-file -e "${base_oid}^{commit}"
+          git merge-base --is-ancestor "${base_oid}" "${expected_oid}"
+          git config core.hooksPath /dev/null
+          git checkout --detach "${expected_oid}"
+          [[ -z "$(git status --porcelain)" ]]
+          echo "oid=${expected_oid}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Publish PR'
         id: 'publish'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
+          ${{ needs.issue-autofix-targeted-e2e.result == 'success' && needs.route.outputs.dry_run != 'true' }}
         env:
-          # CI_DEV_BOT_PAT opens the PR as the configured autofix bot. This is
-          # required: the default GITHUB_TOKEN is
-          # blocked from creating PRs ("GitHub Actions is not permitted to
-          # create or approve pull requests"), and PRs it does create do not
-          # trigger CI. The bot PAT clears both problems.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          EXPECTED_OID: '${{ steps.proof.outputs.oid }}'
         run: |-
-          MODEL_DISPLAY="${MODEL:-default}"
-          if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
-            exit 1
-          fi
+          preserve_claim() {
+            echo 'preserve_claim=true' >> "${GITHUB_OUTPUT}"
+          }
+          check_live_issue() {
+            allowed_pr="${1:-}"
+            [[ -z "${allowed_pr}" || "${allowed_pr}" =~ ^[1-9][0-9]*$ ]] || return 2
+            [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]] || return 2
+            claim_oid="$(gh api "repos/${REPO}/git/ref/heads/autofix/claim-issue-${ISSUE}" \
+              --jq '.object.sha')" || return 2
+            [[ "${claim_oid}" == "${CLAIM_OID}" ]] || return 1
+            issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+              --json state,title,body,labels,assignees,closedByPullRequestsReferences)" || return 2
+            jq -e '
+              type == "object" and
+              (.state | type == "string") and
+              (.title | type == "string") and
+              ((.body == null) or (.body | type == "string")) and
+              (.labels | type == "array") and
+              all(.labels[]; type == "object" and (.name | type == "string")) and
+              (.assignees | type == "array") and
+              all(.assignees[]; type == "object" and (.login | type == "string")) and
+              (.closedByPullRequestsReferences | type == "array") and
+              all(.closedByPullRequestsReferences[];
+                type == "object" and
+                (.number | type == "number") and
+                (.number > 0) and
+                (.number == (.number | floor)))
+            ' <<< "${issue_json}" > /dev/null || return 2
+            [[ "${APPROVED_PROSE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || return 2
+            live_prose="$(jq -c '[.title // "", .body // ""]' <<< "${issue_json}")" || return 2
+            live_prose_sha256="$(printf '%s\n' "${live_prose}" | sha256sum | cut -d ' ' -f 1)" || return 2
+            [[ "${live_prose_sha256}" == "${APPROVED_PROSE_SHA256}" ]] || return 1
+            if jq -e --arg bot "${AUTOFIX_BOT}" --arg allowed_pr "${allowed_pr}" '
+              .state == "OPEN" and
+              ((.labels // []) | map(.name) |
+                index("autofix/in-progress") != null and
+                index("autofix/skip") == null and
+                index("autofix/routing") == null and
+                index("status/need-information") == null and
+                index("status/need-retesting") == null) and
+              ((.assignees // []) | length > 0 and all(.login == $bot)) and
+              ((.closedByPullRequestsReferences // []) as $linked |
+                if $allowed_pr == "" then
+                  ($linked | length) == 0
+                else
+                  ($linked | length) == 0 or
+                  (($linked | length) == 1 and
+                    ($linked[0].number | tostring) == $allowed_pr)
+                end)
+            ' <<< "${issue_json}" > /dev/null; then
+              :
+            else
+              status=$?
+              [[ "${status}" == '1' ]] && return 1
+              return 2
+            fi
+            live_required="$(jq -r --arg label "${E2E_REQUIRED_LABEL}" \
+              '(.labels // []) | map(.name) | index($label) != null' \
+              <<< "${issue_json}")" || return 2
+            [[ "${live_required}" == "${E2E_REQUIRED}" ]] || return 1
+            if [[ "${live_required}" == 'true' ]]; then
+              current_metadata="${RUNNER_TEMP}/ci-failure-publish.json"
+              node "${RUNNER_TEMP}/load-autofix-e2e-metadata.mjs" \
+                --issue "${ISSUE}" --repository "${REPO}" --output "${current_metadata}" || return 2
+              current_sha="$(node -e '
+                const { createHash } = require("node:crypto");
+                const { readFileSync } = require("node:fs");
+                process.stdout.write(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"));
+              ' "${current_metadata}")" || return 2
+              [[ "${current_sha}" =~ ^[0-9a-f]{64}$ ]] || return 2
+              [[ "${current_sha}" == "${VERIFIED_METADATA_SHA256}" ]] || return 1
+            else
+              [[ "${VERIFIED_METADATA_SHA256}" == 'none' ]] || return 1
+            fi
+          }
+          remote_oid() {
+            remote_output="$(git ls-remote origin "refs/heads/${BRANCH}")" || return 1
+            IFS=$'\t' read -r remote_sha remote_ref remote_extra <<< "${remote_output}"
+            [[ "${remote_output}" != *$'\n'* && -z "${remote_extra}" ]] || return 1
+            [[ "${remote_ref}" == "refs/heads/${BRANCH}" ]] || return 1
+            printf '%s\n' "${remote_sha}"
+          }
+          # The branch/claim deletes authenticate with the same one-shot,
+          # host-scoped credential helper as the publish push above — the
+          # remote URL is never token-bearing.
+          remove_verified_branch() {
+            git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+              push --no-verify \
+              --force-with-lease="refs/heads/${BRANCH}:${EXPECTED_OID}" \
+              origin --delete "${BRANCH}"
+          }
+          remove_claim_ref() {
+            [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            claim_oid="$(gh api "repos/${REPO}/git/ref/heads/autofix/claim-issue-${ISSUE}" \
+              --jq '.object.sha')" || return 1
+            [[ "${claim_oid}" == "${CLAIM_OID}" ]] || return 1
+            git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+              push --no-verify \
+              --force-with-lease="refs/heads/autofix/claim-issue-${ISSUE}:${CLAIM_OID}" \
+              origin --delete "autofix/claim-issue-${ISSUE}"
+          }
+          find_verified_pr() {
+            prs="$(gh pr list --repo "${REPO}" --state open \
+              --head "${BRANCH}" \
+              --json number,author,baseRefName,headRefOid)" || return 1
+            jq -er --arg bot "${AUTOFIX_BOT}" --arg oid "${EXPECTED_OID}" '
+              if
+                length == 1 and
+                .[0].author.login == $bot and
+                .[0].baseRefName == "main" and
+                .[0].headRefOid == $oid
+              then .[0].number
+              else empty
+              end
+            ' <<< "${prs}"
+          }
+          close_verified_pr() {
+            number="${1:?PR number is required}"
+            comment="${2:?close comment is required}"
+            gh pr close "${number}" --repo "${REPO}" \
+              --comment "${comment}" || return 1
+            state="$(gh pr view "${number}" --repo "${REPO}" \
+              --json state --jq '.state')" || return 1
+            [[ "${state}" == 'CLOSED' ]] || return 1
+            remove_verified_branch
+          }
+          check_verified_pr() {
+            number="${1:?PR number is required}"
+            pr_json="$(gh pr view "${number}" --repo "${REPO}" \
+              --json number,state,author,baseRefName,headRefOid,closingIssuesReferences)" || return 2
+            jq -e '
+              type == "object" and
+              (.number | type == "number") and
+              (.state | type == "string") and
+              (.author.login | type == "string") and
+              (.baseRefName | type == "string") and
+              (.headRefOid | type == "string") and
+              (.closingIssuesReferences | type == "array") and
+              all(.closingIssuesReferences[];
+                type == "object" and
+                (.number | type == "number") and
+                (.repository.nameWithOwner | type == "string"))
+            ' <<< "${pr_json}" > /dev/null || return 2
+            if jq -e \
+              --argjson number "${number}" \
+              --argjson issue "${ISSUE}" \
+              --arg repo "${REPO}" \
+              --arg bot "${AUTOFIX_BOT}" \
+              --arg oid "${EXPECTED_OID}" '
+                .number == $number and
+                .state == "OPEN" and
+                .author.login == $bot and
+                .baseRefName == "main" and
+                .headRefOid == $oid and
+                (.closingIssuesReferences | length) == 1 and
+                .closingIssuesReferences[0].number == $issue and
+                .closingIssuesReferences[0].repository.nameWithOwner == $repo
+              ' <<< "${pr_json}" > /dev/null; then
+              return 0
+            else
+              status=$?
+              [[ "${status}" == '1' ]] && return 1
+              return 2
+            fi
+          }
+
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_OID}" ]]
+          [[ -z "$(git status --porcelain)" ]]
           api_error_file="$(mktemp)"
           if ! publish_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -1543,97 +2543,269 @@ jobs:
             echo "::error::CI_DEV_BOT_PAT authenticates as ${publish_actor}; expected ${AUTOFIX_BOT}."
             exit 1
           fi
-          BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
-          git config core.hooksPath /dev/null
-          # Authenticate the push with a one-shot, host-scoped credential
-          # helper via `git -c`: nothing is written to the reused
-          # workspace's .git/config (no error path can strand it there),
-          # argv holds only the literal ${GITHUB_TOKEN} reference, and the
-          # host scope means it cannot answer a non-GitHub URL.
-          git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
-            push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
-
-          PR_URL="$(gh pr create --repo "${REPO}" \
-            --base main --head "${BRANCH}" \
-            --title "$(cat "${WORKDIR}/pr-title.txt")" \
-            --body-file "${WORKDIR}/pr-body.md")"
-          echo "🚀 Opened ${PR_URL}"
-
-          # Per AGENTS.md, post the E2E report as a separate PR comment.
-          {
-            echo
-            echo "---"
-            echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
-          } >> "${WORKDIR}/e2e-report.md"
-          gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"
-
-      - name: 'Report dry-run / failure'
-        if: |-
-          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
-        env:
-          ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
-        run: |-
-          SUFFIX=''
-          [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
-          {
-            echo "### Issue autofix${ISSUE:+ #${ISSUE}} — outcome=${OUTCOME:-unknown}${SUFFIX}"
-            echo
-            for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
-              if [[ -s "${WORKDIR}/${f}" ]]; then
-                echo "**${f}:**"
-                echo '```'
-                cat "${WORKDIR}/${f}"
-                echo '```'
-                echo
-              fi
-            done
-          } >> "${GITHUB_STEP_SUMMARY}"
+          set +e
+          check_live_issue
+          pre_push_status=$?
+          set -e
+          if [[ "${pre_push_status}" == '1' ]]; then
+            echo '::error::Autofix issue state changed before branch publication.'
+            exit 1
+          elif [[ "${pre_push_status}" != '0' ]]; then
+            preserve_claim
+            echo '::error::Could not confirm Autofix issue state before branch publication; preserving the claim for recovery.'
+            exit 1
+          fi
+          preserve_claim
+          if existing_oid="$(remote_oid)"; then
+            if [[ "${existing_oid}" != "${EXPECTED_OID}" ]]; then
+              echo '::error::Autofix branch already exists at an unexpected commit; preserving it for recovery.'
+              exit 1
+            fi
+            echo 'Verified branch already published by an earlier attempt; reusing it.'
+          else
+            # Authenticate the push with a one-shot, host-scoped credential
+            # helper via `git -c`: nothing is written to the reused
+            # workspace's .git/config (no error path can strand it there),
+            # argv holds only the literal ${GITHUB_TOKEN} reference, and the
+            # host scope means it cannot answer a non-GitHub URL. The URL is
+            # tokenless — the PAT is never persisted in the remote — and the
+            # lease is create-only, so an unexpected existing branch is
+            # preserved for recovery instead of overwritten.
+            git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+              push --no-verify \
+              --force-with-lease="refs/heads/${BRANCH}:" \
+              "https://github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"
+          fi
+          if ! published_oid="$(remote_oid)" || [[ ! "${published_oid}" =~ ^[0-9a-f]{40}$ ]]; then
+            preserve_claim
+            echo '::error::Could not confirm the published branch OID; preserving the branch for recovery.'
+            exit 1
+          fi
+          if [[ "${published_oid}" != "${EXPECTED_OID}" ]]; then
+            preserve_claim
+            echo '::error::Autofix branch did not resolve to the verified candidate commit; preserving it for recovery.'
+            exit 1
+          fi
+          set +e
+          check_live_issue
+          issue_status=$?
+          set -e
+          if [[ "${issue_status}" == '1' ]]; then
+            if ! remove_verified_branch; then
+              preserve_claim
+              echo '::error::The Autofix branch could not be removed after issue state changed; preserving it for recovery.'
+              exit 1
+            fi
+            echo '::error::Autofix issue state changed immediately after branch publication.'
+            exit 1
+          elif [[ "${issue_status}" != '0' ]]; then
+            preserve_claim
+            echo '::error::Could not confirm Autofix issue state after branch publication; preserving the branch for recovery.'
+            exit 1
+          fi
+          workdir="${RUNNER_TEMP}/autofix-verified/workdir"
+          publication_body="${workdir}/publication-pr-body.md"
+          append_agent_content() {
+            while IFS= read -r line || [[ -n "${line}" ]]; do
+              printf '> %s\n' "${line}"
+            done < "${1:?agent content path is required}"
+          }
+          workflow_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          printf '## Verified candidate\n\n- Commit: `%s`\n- Deterministic verification: passed\n- Approved issue prose SHA-256: `%s`\n- Targeted E2E metadata SHA-256: `%s`\n- Verification workflow: [run %s, attempt %s](%s)\n' \
+            "${EXPECTED_OID}" "${APPROVED_PROSE_SHA256}" \
+            "${VERIFIED_METADATA_SHA256}" "${GITHUB_RUN_ID}" \
+            "${GITHUB_RUN_ATTEMPT}" "${workflow_url}" > "${publication_body}"
+          if [[ -s "${workdir}/targeted-e2e-report.md" ]]; then
+            printf '\n## Trusted targeted E2E proof\n\n' >> "${publication_body}"
+            cat "${workdir}/targeted-e2e-report.md" >> "${publication_body}"
+          fi
+          printf '\n\n## Agent-authored change summary\n\nThe following prose is generated by the coding agent and is not verification evidence.\n\n' \
+            >> "${publication_body}"
+          append_agent_content "${workdir}/pr-body.md" >> "${publication_body}"
+          printf '\n## Agent-reported checks\n\nThe following notes are self-reported by the coding agent; the independent gates above are authoritative.\n\n' \
+            >> "${publication_body}"
+          append_agent_content "${workdir}/e2e-report.md" >> "${publication_body}"
+          printf '\n---\n🧠 Handled by **Qwen Code** · model/模型 `%s`\n' \
+            "${MODEL:-default}" >> "${publication_body}"
+          if PR_URL="$(gh pr create --repo "${REPO}" --base main --head "${BRANCH}" \
+            --title "$(cat "${workdir}/pr-title.txt")" --body-file "${publication_body}")"; then
+            pr_number="${PR_URL##*/}"
+          elif ! pr_number="$(find_verified_pr)"; then
+            preserve_claim
+            echo '::error::Failed to confirm Autofix PR creation after branch publication; preserving the verified branch for recovery.'
+            exit 1
+          fi
+          set +e
+          check_verified_pr "${pr_number}"
+          pr_status=$?
+          check_live_issue "${pr_number}"
+          issue_status=$?
+          set -e
+          if [[ "${issue_status}" == '1' || "${pr_status}" == '1' ]]; then
+            if ! close_verified_pr "${pr_number}" \
+              'Autofix publication was closed because its verified issue, commit, or closing-reference binding changed during publication.'; then
+              preserve_claim
+              echo '::error::Failed to confirm Autofix PR closure; preserving the branch for recovery.'
+              exit 1
+            fi
+            echo '::error::Autofix publication binding changed after PR creation.'
+            exit 1
+          elif [[ "${issue_status}" != '0' || "${pr_status}" != '0' ]]; then
+            preserve_claim
+            echo '::error::Could not confirm Autofix issue and PR bindings after PR creation; preserving the PR and branch for recovery.'
+            exit 1
+          fi
+          # A transient failure on this final call would orphan the claim
+          # ref: the step exits 0, withdraw does not fire after a
+          # successful publication, and no sweep exists yet — the orphaned
+          # ref then wedges every future claim of this issue (create-only
+          # lease rejected) until manual deletion. Retry with backoff.
+          for attempt in 1 2 3; do
+            if remove_claim_ref; then
+              break
+            fi
+            if [[ "${attempt}" == '3' ]]; then
+              echo '::warning::Autofix PR was published, but its claim ref could not be released.'
+              break
+            fi
+            sleep $((attempt * 5))
+          done
 
       - name: 'Withdraw claim on failure'
         if: |-
-          ${{ (failure() || cancelled()) && steps.claim.outcome == 'success' }}
+          ${{ always() && needs.issue-autofix.outputs.claim_owned == 'true' && steps.publish.outcome != 'success' && steps.publish.outputs.preserve_claim != 'true' && steps.proof.outputs.preserve_claim != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          COMMENT_ID: '${{ steps.claim.outputs.comment_id }}'
-          PUBLISH_OUTCOME: '${{ steps.publish.outcome }}'
         run: |-
-          # shellcheck disable=SC2016
-          if [[ -f "${WORKDIR}/failure.md" ]]; then
+          [[ -z "$(git status --porcelain)" ]]
+          claim_ref="refs/heads/autofix/claim-issue-${ISSUE}"
+          [[ "${CLAIM_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 0
+          claim_ref_error_file="$(mktemp)"
+          if ! claim_oid="$(gh api "repos/${REPO}/git/ref/${claim_ref#refs/}" --jq '.object.sha' 2>"${claim_ref_error_file}")"; then
+            if ! grep -q 'HTTP 404' "${claim_ref_error_file}"; then
+              rm -f "${claim_ref_error_file}"
+              echo '::warning::Could not confirm Autofix claim ownership; preserving the claim ref for recovery.'
+              exit 1
+            fi
+            rm -f "${claim_ref_error_file}"
+            # Absent ref: this run's claim trap released it before any
+            # ownership write, or an earlier attempt withdrew it. Only the
+            # visible issue state can still need cleanup.
+            if ! live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+              --json labels,assignees)"; then
+              echo '::warning::Failed to read visible issue ownership; preserving the claim for recovery.'
+              exit 1
+            fi
+            if jq -e --arg bot "${AUTOFIX_BOT}" '
+              ((.labels // []) | map(.name) | index("autofix/in-progress") == null) and
+              ((.assignees // []) | map(.login) | index($bot) == null)
+            ' <<< "${live_issue_json}" > /dev/null; then
+              echo 'Claim ref is absent and no visible ownership remains; nothing to withdraw.'
+              exit 0
+            fi
+            echo '::warning::Claim ref is absent but visible ownership remains; preserving the claim for recovery.'
+            exit 1
+          fi
+          if [[ "${claim_oid}" != "${CLAIM_OID}" ]]; then
+            echo '::warning::Autofix claim ownership changed; leaving the issue and claim ref untouched.'
+            exit 0
+          fi
+          if [[ "${AGENT_DECLINED}" == 'true' ]]; then
             REASON='no further automated attempts will be made on this issue.'
-            DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
-            LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
-          elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
-            REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
-            DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
-            LABEL_ARGS=(--remove-label 'autofix/in-progress')
+            DETAIL="${AGENT_DETAIL}"
           else
             REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
-            DETAIL='The run failed before producing a verified fix.'
-            LABEL_ARGS=(--remove-label 'autofix/in-progress')
+            if [[ "${AGENT_RESULT}" != 'success' ]]; then
+              DETAIL='The agent stage failed before a candidate could be verified. Check the issue-autofix job logs.'
+            elif [[ "${VERIFY_RESULT}" != 'success' ]]; then
+              DETAIL='Deterministic verification of the candidate failed. Check the issue-autofix-verify job logs.'
+            elif [[ "${TARGETED_RESULT}" != 'success' ]]; then
+              DETAIL='Isolated targeted E2E verification failed. Check the issue-autofix-targeted-e2e job logs.'
+            else
+              DETAIL='The publication stage failed after verification. Check the issue-autofix-publish job logs.'
+            fi
           fi
-          gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
-          gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}
+          if ! live_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json labels,assignees)"; then
+            echo '::warning::Failed to read visible issue ownership; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          if jq -e '(.labels // []) | map(.name) | index("autofix/in-progress") != null' \
+            <<< "${live_issue_json}" > /dev/null &&
+            ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+              --remove-label 'autofix/in-progress'; then
+            echo '::warning::Failed to remove the visible claim label; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          if [[ "${AGENT_DECLINED}" == 'true' ]]; then
+            gh label create 'autofix/skip' --repo "${REPO}" \
+              --description 'Not eligible for the scheduled autofix agent' \
+              --color 'ededed' 2> /dev/null || true
+            if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+              --add-label 'autofix/skip'; then
+              echo '::warning::Failed to record the permanent decline; preserving the claim ref for recovery.'
+              exit 1
+            fi
+          fi
+          if jq -e --arg bot "${AUTOFIX_BOT}" \
+            '(.assignees // []) | map(.login) | index($bot) != null' \
+            <<< "${live_issue_json}" > /dev/null &&
+            ! gh issue edit "${ISSUE}" --repo "${REPO}" \
+              --remove-assignee "${AUTOFIX_BOT}"; then
+            echo '::warning::Failed to remove the visible claim assignee; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          # Attempt-independent prefix: after 'Re-run failed jobs' the attempt
+          # number no longer matches the comment posted by the original claim.
+          claim_comment_marker="<!-- autofix-claim issue=${ISSUE} run=${GITHUB_RUN_ID}"
+          if ! claim_comment_ids="$(gh api --paginate \
+            "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --slurp |
+            jq -c --arg bot "${AUTOFIX_BOT}" --arg marker "${claim_comment_marker}" \
+              '[.[].[] | select(.user.login == $bot and ((.body // "") | contains($marker))) | .id]')"; then
+            echo '::warning::Failed to recover the claim comment; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          if [[ "$(jq 'length' <<< "${claim_comment_ids}")" -gt 1 ]]; then
+            echo '::warning::Found multiple matching claim comments; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          claim_comment_id="$(jq -r '.[0] // empty' <<< "${claim_comment_ids}")"
+          if [[ -n "${claim_comment_id}" ]] &&
+            ! gh api -X DELETE "/repos/${REPO}/issues/comments/${claim_comment_id}"; then
+            echo '::warning::Failed to remove the claim comment; preserving the claim ref for recovery.'
+            exit 1
+          fi
+          claim_push_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          if ! git push --no-verify \
+            --force-with-lease="${claim_ref}:${CLAIM_OID}" \
+            "${claim_push_url}" --delete "${claim_ref#refs/heads/}"; then
+            echo '::warning::Visible issue ownership was withdrawn, but the claim ref could not be released.'
+            exit 1
+          fi
+          comment_body="🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}"
+          if [[ "${AGENT_DECLINED}" == 'true' ]]; then
+            comment_body="${comment_body}
 
           What the agent found, in case it helps a human contributor:
 
-          ${DETAIL}" || true
-          if [[ -n "${COMMENT_ID}" ]]; then
-            gh api -X DELETE "/repos/${REPO}/issues/comments/${COMMENT_ID}" || true
-          fi
+          ${DETAIL}"
+          else
+            comment_body="${comment_body}
 
-      # Nothing else removes the per-run WORKDIR; on the persistent pool
-      # every run would leave its transcripts and decision files behind
-      # forever. Last step, after every reader including the artifact
-      # upload. always() covers cancellation too; only a hard runner kill
-      # abandons the dir, and run_id never repeats — the age sweep in
-      # Reset autofix workspace reclaims it.
-      - name: 'Clean up autofix workdir'
-        if: 'always()'
-        run: 'rm -rf "${WORKDIR}"'
+          ${DETAIL}"
+          fi
+          gh issue comment "${ISSUE}" --repo "${REPO}" --body "${comment_body}" || true
+
+      - name: 'Report publication failure'
+        if: |-
+          ${{ always() && failure() }}
+        run: |-
+          {
+            echo "### Autofix publication failed for issue #${ISSUE}"
+            echo
+            echo 'Publication stopped before a verified PR was created. Check the proof, publish, and withdraw steps above; the claim is preserved or withdrawn as reported there.'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # ===========================================================================
   # TAKEOVER COMMAND — the accepted comment command's side effects are the

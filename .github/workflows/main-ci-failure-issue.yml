@@ -31,9 +31,12 @@ jobs:
       issue_number: '${{ steps.plan.outputs.issue_number }}'
       title: '${{ steps.plan.outputs.title }}'
       body: '${{ steps.plan.outputs.body }}'
+      autofix_eligible: '${{ steps.plan.outputs.autofix_eligible }}'
+      targeted_e2e: '${{ steps.plan.outputs.targeted_e2e }}'
+      search_markers: '${{ steps.plan.outputs.search_markers }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
 
@@ -42,26 +45,35 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          WORKFLOW_RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
         run: |-
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
 
-          mapfile -t job_ids < <(
-            gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
-              --paginate \
-              --jq '.jobs[] | select(.conclusion == "failure") | .id'
-          )
-          echo "Failed jobs: ${#job_ids[@]}"
+          jobs_json="${RUNNER_TEMP}/failed-jobs.json"
+          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${WORKFLOW_RUN_ATTEMPT}/jobs?per_page=100" \
+            --paginate \
+            --slurp \
+            | jq '[.[].jobs[] | select(.conclusion == "failure") | {id, name}]' \
+            > "${jobs_json}"; then
+            echo "::warning::Could not list failed jobs; falling back to per-commit issue" >&2
+            echo '[]' > "${jobs_json}"
+          fi
+          echo "Failed jobs: $(jq 'length' "${jobs_json}")"
 
-          for job_id in "${job_ids[@]}"; do
-            if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
-              > "${log_dir}/${job_id}.log"; then
-              # A missing log only costs precision: with no identifiable test the
-              # plan below falls back to the per-commit issue.
-              echo "::warning::Could not download the log of job ${job_id}"
-              rm -f "${log_dir}/${job_id}.log"
+          manifest="${RUNNER_TEMP}/failed-job-manifest.json"
+          jq -c '.[]' "${jobs_json}" | while IFS= read -r job; do
+            job_id="$(jq -r '.id' <<< "${job}")"
+            log_path="${log_dir}/${job_id}.log"
+            if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > "${log_path}"; then
+              echo "::warning::Could not download the log of job ${job_id}" >&2
+              rm -f "${log_path}"
+              log_path=''
             fi
-          done
+            jq -c --arg log_path "${log_path}" \
+              '. + {logPath: (if $log_path == "" then null else $log_path end)}' \
+              <<< "${job}"
+          done | jq -s '.' > "${manifest}"
 
       - name: 'Plan the issue'
         id: 'plan'
@@ -70,19 +82,23 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_NAME: '${{ github.event.workflow_run.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          WORKFLOW_RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           # Actions supplies the timestamp; the helper stays free of clock reads
           # so its output is reproducible under test.
           WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
         run: |-
           shopt -s nullglob
           logs=("${RUNNER_TEMP}/failed-logs/"*.log)
 
           helper='.github/scripts/ci/main-failure-signature.mjs'
           analysis="${RUNNER_TEMP}/analysis.json"
-          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" "${logs[@]}" \
-            > "${analysis}"
+          node "${helper}" analyze \
+            --workflow "${WORKFLOW_NAME}" \
+            --jobs "${RUNNER_TEMP}/failed-job-manifest.json" \
+            "${logs[@]}" > "${analysis}"
           echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
           jq -r '.tests[].id' "${analysis}"
 
@@ -90,8 +106,10 @@ jobs:
             --analysis "${analysis}"
             --sha "${HEAD_SHA}"
             --run-id "${WORKFLOW_RUN_ID}"
+            --run-attempt "${WORKFLOW_RUN_ATTEMPT}"
             --run-url "${WORKFLOW_RUN_URL}"
             --at "${WORKFLOW_RUN_AT}"
+            --repository "${REPO}"
           )
           plan="${RUNNER_TEMP}/plan.json"
           node "${helper}" plan "${plan_args[@]}" > "${plan}"
@@ -104,7 +122,8 @@ jobs:
             existing_issue="$(
               gh issue list \
                 --repo "${REPO}" \
-                --state open \
+                --state all \
+                --author "${AUTOFIX_BOT}" \
                 --search "${marker} in:body" \
                 --json number \
                 --jq '.[0].number // ""'
@@ -136,11 +155,14 @@ jobs:
             echo "body<<${delim}"
             jq -r '.body' "${plan}"
             echo "${delim}"
+            echo "autofix_eligible=$(jq -r '.autofixEligible' "${plan}")"
+            echo "targeted_e2e=$(jq -c '.targetedE2e' "${plan}")"
+            echo "search_markers=$(jq -c '.searchMarkers' "${plan}")"
           } >> "${GITHUB_OUTPUT}"
 
   # Every GitHub write happens here, as the autofix bot. This job deliberately
-  # checks out nothing and runs no repository code: it only consumes the title
-  # and body the job above produced.
+  # checks out nothing and runs no repository code: it only consumes the title,
+  # body, and metadata the read-only job above produced.
   file_issue:
     name: 'Create autofix issue'
     needs: 'analyze'
@@ -153,40 +175,263 @@ jobs:
       issues: 'write'
     steps:
       - name: 'File or update the autofix issue'
+        id: 'issue'
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           REPO: '${{ github.repository }}'
           EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
           ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
           ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
-          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
-          BUG_LABEL: 'type/bug'
-          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_ELIGIBLE: '${{ needs.analyze.outputs.autofix_eligible }}'
+          TARGETED_E2E: '${{ needs.analyze.outputs.targeted_e2e }}'
+          SEARCH_MARKERS: '${{ needs.analyze.outputs.search_markers }}'
+          RECURRENCE_RUN_ID: '${{ github.event.workflow_run.id }}'
+          RECURRENCE_RUN_URL: '${{ github.event.workflow_run.html_url }}'
+          RECURRENCE_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_ROUTING_LABEL: 'autofix/routing'
+          BUG_LABEL: 'type/bug'
+          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
         run: |-
-          apply_autofix_route() {
-            gh issue edit "$1" \
-              --repo "${REPO}" \
-              --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
-              --add-assignee "${AUTOFIX_BOT}"
-          }
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
+          concurrent_reuse='false'
+          if [[ -z "${EXISTING_ISSUE}" ]]; then
+            while IFS= read -r marker; do
+              concurrent_issue="$(
+                gh issue list \
+                  --repo "${REPO}" \
+                  --state all \
+                  --author "${AUTOFIX_BOT}" \
+                  --search "${marker} in:body" \
+                  --json number \
+                  --jq '.[0].number // ""'
+              )" || concurrent_issue=''
+              if [[ -n "${concurrent_issue}" ]]; then
+                echo "Issue #${concurrent_issue} was created by a concurrent run; reusing it without overwriting its body."
+                EXISTING_ISSUE="${concurrent_issue}"
+                concurrent_reuse='true'
+                break
+              fi
+            done < <(jq -r '.[]' <<< "${SEARCH_MARKERS}")
+          fi
 
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
-          if [[ -n "${EXISTING_ISSUE}" ]]; then
-            gh issue edit "${EXISTING_ISSUE}" \
-              --repo "${REPO}" \
-              --body-file "${body_file}"
-            echo "Recorded this run on issue #${EXISTING_ISSUE}."
-            apply_autofix_route "${EXISTING_ISSUE}"
-            exit 0
+          # A closed non-eligible issue must not be reused: GitHub sends no
+          # notification for body edits, so main would stay red with no open
+          # issue tracking it. File a new one instead — safe without approval
+          # labels. (Eligible closed issues get the recurrence comment below.)
+          if [[ -n "${EXISTING_ISSUE}" && "${AUTOFIX_ELIGIBLE}" != 'true' ]]; then
+            existing_issue_state="$(gh issue view "${EXISTING_ISSUE}" \
+              --repo "${REPO}" --json state --jq '.state // ""')"
+            if [[ "${existing_issue_state}" == 'CLOSED' ]]; then
+              echo "Issue #${EXISTING_ISSUE} is closed; filing a new issue for this recurrence."
+              EXISTING_ISSUE=''
+            fi
           fi
 
-          issue_url="$(
-            gh issue create \
+          route_allowed='true'
+          if [[ -n "${EXISTING_ISSUE}" ]]; then
+            if [[ "${AUTOFIX_ELIGIBLE}" != 'true' ]]; then
+              if [[ "${concurrent_reuse}" != 'true' ]]; then
+                # An approved+routed issue body is machine-redacted and
+                # bound to a recorded approval digest; overwriting it with
+                # an ineligible merge would re-inject raw log-sourced
+                # identifiers under the redaction note and silently void
+                # the digest. Record the recurrence as a comment instead
+                # and leave the body unchanged. Fail closed: an unreadable
+                # label state also preserves the body.
+                preserve_body='false'
+                if ! existing_labels_json="$(gh issue view "${EXISTING_ISSUE}" \
+                  --repo "${REPO}" --json labels)"; then
+                  echo "::warning::Failed to read labels of issue #${EXISTING_ISSUE}; leaving its body unchanged."
+                  preserve_body='true'
+                elif jq -e \
+                  --arg ready "${READY_FOR_AGENT_LABEL}" \
+                  --arg approved "${AUTOFIX_APPROVED_LABEL}" '
+                    (.labels // []) | map(.name) |
+                    index($ready) != null and index($approved) != null
+                  ' <<< "${existing_labels_json}" > /dev/null; then
+                  preserve_body='true'
+                fi
+                if [[ "${preserve_body}" == 'true' ]]; then
+                  gh issue comment "${EXISTING_ISSUE}" \
+                    --repo "${REPO}" \
+                    --body "🤖 This failure recurred in [run ${RECURRENCE_RUN_ID}](${RECURRENCE_RUN_URL}) (commit \`${RECURRENCE_HEAD_SHA}\`) with a failure set that is not eligible for Autofix. Because this issue is approved for Autofix routing, its machine-redacted body and recorded approval were left unchanged instead of merging the ineligible recurrence; the linked source run shows the exact failing tests." \
+                    || echo "::warning::Failed to record the recurrence comment on issue #${EXISTING_ISSUE}."
+                  echo "Recorded this ineligible recurrence as a comment on issue #${EXISTING_ISSUE}; its approved body was left unchanged."
+                else
+                  gh issue edit "${EXISTING_ISSUE}" \
+                    --repo "${REPO}" \
+                    --body-file "${body_file}"
+                  echo "Recorded this run on issue #${EXISTING_ISSUE}."
+                fi
+              fi
+              echo "Issue #${EXISTING_ISSUE} already tracks this failure; leaving its routing unchanged."
+              echo "number=${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
+              echo 'route_allowed=false' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            existing_state="$(gh issue view "${EXISTING_ISSUE}" \
               --repo "${REPO}" \
-              --title "${ISSUE_TITLE}" \
+              --json state,labels,assignees,closedByPullRequestsReferences)"
+            if ! jq -e \
+              --arg bot "${AUTOFIX_BOT}" \
+              --arg ready "${READY_FOR_AGENT_LABEL}" \
+              --arg approved "${AUTOFIX_APPROVED_LABEL}" '
+                .state == "OPEN" and
+                ((.labels // []) | map(.name) |
+                  index($ready) != null and
+                  index($approved) != null and
+                  index("autofix/in-progress") == null and
+                  index("autofix/skip") == null and
+                  index("status/need-information") == null and
+                  index("status/need-retesting") == null) and
+                ((.assignees // []) | length > 0 and all(.login == $bot)) and
+                ((.closedByPullRequestsReferences // []) | length == 0)
+              ' <<< "${existing_state}" > /dev/null; then
+              route_allowed='false'
+            fi
+            if [[ "${route_allowed}" != 'true' ]]; then
+              existing_issue_state="$(jq -r '.state // ""' <<< "${existing_state}")"
+              if [[ "${existing_issue_state}" == 'CLOSED' && "${concurrent_reuse}" != 'true' ]]; then
+                gh issue comment "${EXISTING_ISSUE}" \
+                  --repo "${REPO}" \
+                  --body "Main CI failure recurred after this issue was closed (source run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}). Not recreating an automatically approved issue; reopen this issue or file a new one if this is a regression."
+              fi
+              echo "Issue #${EXISTING_ISSUE} has a live claim, cancellation, ownership change, or linked PR; leaving it and its trusted metadata unchanged."
+              echo "number=${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
+              echo 'route_allowed=false' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            gh label create "${AUTOFIX_ROUTING_LABEL}" --repo "${REPO}" \
+              --description 'Trusted Autofix routing transaction in progress' \
+              --color 'FBCA04' --force
+            gh issue edit "${EXISTING_ISSUE}" \
+              --repo "${REPO}" \
+              --add-label "${AUTOFIX_ROUTING_LABEL}"
+            if [[ "${concurrent_reuse}" != 'true' ]]; then
+              gh issue edit "${EXISTING_ISSUE}" \
+                --repo "${REPO}" \
+                --body-file "${body_file}"
+              echo "Recorded this run on issue #${EXISTING_ISSUE}."
+            fi
+            issue_number="${EXISTING_ISSUE}"
+          else
+            create_args=(
+              --repo "${REPO}"
+              --title "${ISSUE_TITLE}"
               --body-file "${body_file}"
-          )"
-          apply_autofix_route "${issue_url}"
+              --label "${BUG_LABEL}"
+            )
+            if [[ "${AUTOFIX_ELIGIBLE}" == 'true' ]]; then
+              gh label create "${AUTOFIX_ROUTING_LABEL}" --repo "${REPO}" \
+                --description 'Trusted Autofix routing transaction in progress' \
+                --color 'FBCA04' --force
+              create_args+=(
+                --label "${READY_FOR_AGENT_LABEL}"
+                --label "${AUTOFIX_APPROVED_LABEL}"
+                --label "${AUTOFIX_ROUTING_LABEL}"
+                --assignee "${AUTOFIX_BOT}"
+              )
+            else
+              route_allowed='false'
+            fi
+            issue_url="$(gh issue create "${create_args[@]}")"
+            issue_number="${issue_url##*/}"
+          fi
+
+          echo "number=${issue_number}" >> "${GITHUB_OUTPUT}"
+          echo "route_allowed=${route_allowed}" >> "${GITHUB_OUTPUT}"
+          if [[ "${AUTOFIX_ELIGIBLE}" == 'true' && "${TARGETED_E2E}" != 'null' ]]; then
+            metadata_dir="${RUNNER_TEMP}/targeted-e2e"
+            mkdir -p "${metadata_dir}"
+            jq --argjson issue "${issue_number}" '.issue = $issue' \
+              <<< "${TARGETED_E2E}" > "${metadata_dir}/metadata.json"
+          fi
+
+      - name: 'Upload targeted E2E metadata'
+        if: |-
+          ${{ steps.issue.outputs.route_allowed == 'true' && needs.analyze.outputs.autofix_eligible == 'true' && needs.analyze.outputs.targeted_e2e != 'null' }}
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'autofix-e2e-failure-${{ steps.issue.outputs.number }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/targeted-e2e/metadata.json'
+          if-no-files-found: 'error'
+          retention-days: 30
+
+      - name: 'Route issue to Autofix'
+        env:
+          GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          REPO: '${{ github.repository }}'
+          ISSUE: '${{ steps.issue.outputs.number }}'
+          ROUTE_ALLOWED: '${{ steps.issue.outputs.route_allowed }}'
+          AUTOFIX_ELIGIBLE: '${{ needs.analyze.outputs.autofix_eligible }}'
+          TARGETED_E2E: '${{ needs.analyze.outputs.targeted_e2e }}'
+          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
+          E2E_REQUIRED_LABEL: 'autofix/e2e-verification-required'
+          AUTOFIX_ROUTING_LABEL: 'autofix/routing'
+        run: |-
+          if [[ "${ROUTE_ALLOWED}" != 'true' ]]; then
+            echo "Issue #${ISSUE} has a live human cancellation or ownership change; recurrence recorded without re-routing."
+            exit 0
+          fi
+          live_state="$(gh issue view "${ISSUE}" \
+            --repo "${REPO}" \
+            --json state,labels,assignees,closedByPullRequestsReferences)"
+          if ! jq -e \
+            --arg bot "${AUTOFIX_BOT}" \
+            --arg ready "${READY_FOR_AGENT_LABEL}" \
+            --arg approved "${AUTOFIX_APPROVED_LABEL}" \
+            --arg routing "${AUTOFIX_ROUTING_LABEL}" '
+              .state == "OPEN" and
+              ((.labels // []) | map(.name) |
+                index($ready) != null and
+                index($approved) != null and
+                index($routing) != null and
+                index("autofix/in-progress") == null and
+                index("autofix/skip") == null and
+                index("status/need-information") == null and
+                index("status/need-retesting") == null) and
+              ((.assignees // []) | length > 0 and all(.login == $bot)) and
+              ((.closedByPullRequestsReferences // []) | length == 0)
+            ' <<< "${live_state}" > /dev/null; then
+            echo "Issue #${ISSUE} changed during publication; leaving its current routing unchanged."
+            exit 0
+          fi
+          if [[ "${AUTOFIX_ELIGIBLE}" != 'true' || "${TARGETED_E2E}" == 'null' ]]; then
+            echo "::error::Issue #${ISSUE} reached trusted routing without targeted E2E metadata."
+            exit 1
+          fi
+          gh label create "${E2E_REQUIRED_LABEL}" --repo "${REPO}" \
+            --description 'Require trusted targeted E2E verification before Autofix publication' \
+            --color 'B60205' --force
+          gh issue edit "${ISSUE}" \
+            --repo "${REPO}" \
+            --add-label "${E2E_REQUIRED_LABEL}"
+          approved_issue_json="$(gh issue view "${ISSUE}" --repo "${REPO}" \
+            --json title,body)"
+          approval_digest="$(jq -c '[.title // "", .body // ""]' \
+            <<< "${approved_issue_json}" | sha256sum | cut -d ' ' -f 1)"
+          [[ "${approval_digest}" =~ ^[0-9a-f]{64}$ ]]
+          gh issue comment "${ISSUE}" --repo "${REPO}" \
+            --body "<!-- autofix-approved-prose-sha256:${approval_digest} -->"
+          gh issue edit "${ISSUE}" \
+            --repo "${REPO}" \
+            --remove-label "${AUTOFIX_ROUTING_LABEL}"

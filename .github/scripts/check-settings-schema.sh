@@ -23,18 +23,34 @@ fail() {
   exit 1
 }
 
-# Guard the generator itself: if it CRASHES (e.g. a type error the agent
-# introduced in the schema source), a caller running under set -eo pipefail
-# would abort before outcome=failed is written, leaving OUTCOME unset. Handle
-# it here so the failure is explicit, not inferred from job.status.
-if ! npm run generate:settings-schema; then
-  echo "❌ Settings schema generator failed to run."
-  fail
-fi
-
-if [[ -n "$(git status --porcelain "${SCHEMA_FILE}")" ]]; then
-  echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
-  git --no-pager diff -- "${SCHEMA_FILE}" || true
-  git checkout -- "${SCHEMA_FILE}" || true
-  fail
+# Autofix rejects changes to the committed schema and to a best-effort
+# snapshot of the sources that feed it (the protected-path allowlist in
+# validate-autofix-verification-outputs.mjs) before this gate runs; the
+# snapshot is hand-curated, and the normal schema gate still runs on the
+# published PR. Executing the candidate's schema module graph here would let
+# module initialization short-circuit the trusted comparison.
+# TODO: run-autofix-review-verification.sh still executes the generator
+# on candidate code without this wrapper or the protected-path allowlist; the
+# review-address chain was scoped out of the targeted E2E redesign and needs
+# the same isolation before its schema gate is trusted the same way.
+if [[ -n "${AUTOFIX_VERIFY_COMMAND:-}" ]]; then
+  echo 'Skipping settings-schema freshness check: Autofix rejects changes to the committed schema and its protected sources before this gate runs.'
+  exit 0
+else
+  # Guard the generator itself: if it CRASHES (e.g. a type error introduced in
+  # the schema source), report an explicit gate failure.
+  if ! npm run generate:settings-schema; then
+    echo "❌ Settings schema generator failed to run."
+    fail
+  fi
+  if ! schema_status="$(git status --porcelain "${SCHEMA_FILE}")"; then
+    echo "❌ Failed to inspect ${SCHEMA_FILE} after generation."
+    fail
+  fi
+  if [[ -n "${schema_status}" ]]; then
+    echo "❌ ${SCHEMA_FILE} is out of date. Run: npm run generate:settings-schema"
+    git --no-pager diff -- "${SCHEMA_FILE}" || true
+    git checkout -- "${SCHEMA_FILE}" || true
+    fail
+  fi
 fi
