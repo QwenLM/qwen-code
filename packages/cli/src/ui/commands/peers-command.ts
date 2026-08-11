@@ -42,7 +42,9 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
   const lines = held.map((entry) => {
     const who = sanitizeTerminalText(
       entry.frame.fromName ?? entry.frame.from ?? 'unknown session',
-    );
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
     return (
       `  ${sanitizeTerminalText(shortId(entry.frame.msgId))}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +

@@ -197,6 +197,19 @@ describe('formatHeldList', () => {
     ]);
     expect(out).toContain('first second');
   });
+
+  it('collapses a multi-line sender label onto one line', () => {
+    const out = formatHeldList([
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        fromName: 'app\n  forged entry',
+        content: 'review me',
+      }),
+    ]);
+
+    expect(out).toContain('aaaaaa  app forged entry\n');
+    expect(out).not.toContain('\n  forged entry');
+  });
 });
 
 describe('/peers', () => {

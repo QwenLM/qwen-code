@@ -64,6 +64,22 @@ function writeRaw(socketPath: string, chunks: string[]): Promise<void> {
   });
 }
 
+function encodedFrameWithByteLength(bytes: number, character = 'x'): string {
+  const empty = encodePeerFrame(buildUserFrame({ content: '' }));
+  const overhead = Buffer.byteLength(empty) - 1;
+  const characterBytes = Buffer.byteLength(character);
+  const contentBytes = bytes - overhead;
+  if (contentBytes < 1) {
+    throw new Error('requested frame size cannot be represented');
+  }
+  const content =
+    character.repeat(Math.floor(contentBytes / characterBytes)) +
+    'x'.repeat(contentBytes % characterBytes);
+  const encoded = encodePeerFrame(buildUserFrame({ content }));
+  expect(Buffer.byteLength(encoded) - 1).toBe(bytes);
+  return encoded;
+}
+
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 30));
 }
@@ -319,6 +335,58 @@ describe.skipIf(isWindows)('framing', () => {
     await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'ok' }));
     await settle();
     expect(received).toHaveLength(1);
+  });
+
+  it('accepts a complete frame at the byte limit', async () => {
+    const started = await listen();
+    const atLimit = encodedFrameWithByteLength(MAX_FRAME_BYTES);
+    const after = encodePeerFrame(buildUserFrame({ content: 'after' }));
+
+    await writeRaw(started.socketPath, [atLimit + after]);
+    await settle();
+
+    expect(received).toHaveLength(2);
+    expect(received[1]).toMatchObject({ message: { content: 'after' } });
+  });
+
+  it('measures the frame limit in bytes', async () => {
+    const started = await listen();
+    const overLimit = encodedFrameWithByteLength(MAX_FRAME_BYTES + 2, '界');
+
+    await writeRaw(started.socketPath, [overLimit]);
+    await settle();
+
+    expect(received).toHaveLength(0);
+  });
+
+  it('drops connections beyond the concurrent connection limit', async () => {
+    const started = await listen();
+    const holders = await Promise.all(
+      Array.from(
+        { length: 64 },
+        () =>
+          new Promise<net.Socket>((resolve, reject) => {
+            const socket = net.connect({ path: started.socketPath });
+            socket.once('connect', () => resolve(socket));
+            socket.once('error', reject);
+          }),
+      ),
+    );
+
+    const excess = net.connect({ path: started.socketPath });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('excess connection remained open')),
+        1_000,
+      );
+      excess.once('close', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      excess.once('error', () => {});
+    });
+
+    for (const socket of holders) socket.destroy();
   });
 
   it('does not let a throwing handler take down the server', async () => {

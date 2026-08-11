@@ -34,6 +34,7 @@ const debugLogger = createDebugLogger('PEER_IPC');
 
 const SOCKET_DIR_MODE = 0o700;
 const SOCKET_MODE = 0o600;
+const MAX_CONNECTIONS = 64;
 
 /**
  * How long `close()` waits for a live connection to finish delivering the
@@ -72,17 +73,21 @@ function createLineReader(
   let buffer = '';
   return (chunk: string) => {
     buffer += chunk;
-    if (buffer.length > MAX_FRAME_BYTES) {
-      buffer = '';
-      onOverflow();
-      return;
-    }
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
+      if (Buffer.byteLength(line) > MAX_FRAME_BYTES) {
+        buffer = '';
+        onOverflow();
+        return;
+      }
       if (line.trim().length > 0) onLine(line);
       newline = buffer.indexOf('\n');
+    }
+    if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) {
+      buffer = '';
+      onOverflow();
     }
   };
 }
@@ -169,6 +174,7 @@ export async function startPeerInbox(
       connections.delete(socket);
     });
   });
+  server.maxConnections = MAX_CONNECTIONS;
 
   server.on('error', (error) => {
     debugLogger.error(`peer inbox server error: ${describe(error)}`);
