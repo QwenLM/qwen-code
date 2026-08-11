@@ -882,8 +882,8 @@ export interface ToolExecuteConfirmationDetails {
    * Optional informational warnings to surface in the confirmation dialog,
    * one short string per warning. Currently used to flag commands that
    * contain shell command substitution (`$(...)`, backticks, `<(...)`,
-   * `>(...)`) so the user can review them before approving. Renderers
-   * should display these alongside the command, not as errors.
+   * `>(...)`, or `${parameter@P}`) so the user can review them before
+   * approving. Renderers should display these alongside the command, not as errors.
    */
   warnings?: string[];
 }

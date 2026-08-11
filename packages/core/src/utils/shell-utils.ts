@@ -1532,6 +1532,11 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
+  const skipLineContinuations = (index: number): number => {
+    while (command[index] === '\\' && command[index + 1] === '\n') index += 2;
+    return index;
+  };
+
   const isPromptExpansion = (text: string, openIndex: number): boolean => {
     const close = text.indexOf('}', openIndex + 1);
     if (close < 0) return false;
@@ -1552,7 +1557,7 @@ export function detectCommandSubstitution(command: string): boolean {
     if (index === 0) return true;
 
     const prev = command[index - 1]!;
-    if (prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r') {
+    if (prev === ' ' || prev === '\t' || prev === '\n') {
       return true;
     }
 
@@ -1573,12 +1578,27 @@ export function detectCommandSubstitution(command: string): boolean {
   const parseHeredocOperator = (
     startIndex: number,
   ): { nextIndex: number; heredoc: PendingHeredoc } | null => {
-    // startIndex points at the first '<' of the `<<` operator.
-    if (command[startIndex] !== '<' || command[startIndex + 1] !== '<') {
+    // Bash removes line continuations before recognizing redirections.
+    const secondIndex = skipLineContinuations(startIndex + 1);
+    const afterSecondIndex = skipLineContinuations(secondIndex + 1);
+    let previousIndex = startIndex - 1;
+    while (
+      previousIndex >= 1 &&
+      command[previousIndex] === '\n' &&
+      command[previousIndex - 1] === '\\'
+    ) {
+      previousIndex -= 2;
+    }
+    if (
+      command[startIndex] !== '<' ||
+      command[secondIndex] !== '<' ||
+      command[previousIndex] === '<' ||
+      command[afterSecondIndex] === '<'
+    ) {
       return null;
     }
 
-    let i = startIndex + 2;
+    let i = afterSecondIndex;
     const stripLeadingTabs = command[i] === '-';
     if (stripLeadingTabs) i++;
 
@@ -1614,6 +1634,10 @@ export function detectCommandSubstitution(command: string): boolean {
           continue;
         }
         if (char === '\\') {
+          if (command[i + 1] === '\n') {
+            i += 2;
+            continue;
+          }
           isQuotedDelimiter = true;
           i++;
           if (i >= command.length) break;
@@ -1644,6 +1668,10 @@ export function detectCommandSubstitution(command: string): boolean {
         continue;
       }
       if (char === '\\') {
+        if (command[i + 1] === '\n') {
+          i += 2;
+          continue;
+        }
         // Backslash quoting is supported in double-quoted words. For our
         // purposes, treat it as quoting and include the escaped char as-is.
         isQuotedDelimiter = true;
@@ -1747,7 +1775,12 @@ export function detectCommandSubstitution(command: string): boolean {
         }
 
         if (!heredoc.isQuotedDelimiter) {
-          if (pendingDollarLineContinuation && effectiveLine.startsWith('(')) {
+          if (
+            pendingDollarLineContinuation &&
+            (effectiveLine.startsWith('(') ||
+              (effectiveLine.startsWith('{') &&
+                isPromptExpansion(`$${effectiveLine}`, 1)))
+          ) {
             return { nextIndex: i, hasSubstitution: true };
           }
 
@@ -1870,12 +1903,13 @@ export function detectCommandSubstitution(command: string): boolean {
     }
 
     // Detect heredoc operators (`<<` / `<<-`) only in command-line context.
+    const nextOperatorIndex = skipLineContinuations(i + 1);
     if (
       !inSingleQuotes &&
       !inDoubleQuotes &&
       !inBackticks &&
       char === '<' &&
-      nextChar === '<'
+      command[nextOperatorIndex] === '<'
     ) {
       const parsed = parseHeredocOperator(i);
       if (parsed) {
@@ -1928,7 +1962,8 @@ export function detectCommandSubstitution(command: string): boolean {
 
 /**
  * User-facing warning emitted when a shell-tool invocation contains
- * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`).
  * Shared across the shell-tool and monitor-tool confirmation paths so
  * the wording can't drift between sites — see #4386 review (round 3).
  */

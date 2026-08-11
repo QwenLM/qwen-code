@@ -493,8 +493,8 @@ export class PermissionManager {
    * Resolve 'default' permission to actual permission using AST analysis.
    * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
    *
-   * Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
-   * falls through to 'ask' along with every other non-read-only command, so
+   * Command substitution ($(), ``, <(), >(), ${parameter@P}) is NOT a hard
+   * deny here — it falls through to 'ask' with every other non-read-only command, so
    * the user (or YOLO mode) can decide. The user-facing warning is surfaced
    * by ShellToolInvocation.getConfirmationDetails so the confirmation prompt
    * still flags the substitution clearly. See issue #4093 for why a hard

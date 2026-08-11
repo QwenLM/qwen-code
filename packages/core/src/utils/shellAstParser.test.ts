@@ -55,11 +55,37 @@ describe('isShellCommandReadOnlyAST', () => {
       'echo "$\\\n(touch PWNED)"',
       'echo "${value@P}"',
       'echo "$\\\n{value@P}"',
+      'echo "${one="$"}${two="$one(marker)"}${two@P}"',
     ]) {
       expect(await classifyShellCommandSafety(command)).toBe('unknown');
       expect(
         await classifyShellCommandSafetyInDirectory(command, process.cwd()),
       ).toBe('unknown');
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    }
+
+    expect(await classifyShellCommandSafety("echo '${value@P}'")).toBe(
+      'read-only',
+    );
+    expect(await isShellCommandReadOnlyAST("echo '${value@P}'")).toBe(true);
+  });
+
+  it('fails closed for reviewed quoting and continuation ambiguities', async () => {
+    const commands = [
+      'ls < /dev/null # comment\\\n\\\ntouch marker',
+      'cat <<"E\\\nOF"\nEOF\n$(marker)',
+      "cat <\\\n<EOF\na'\n$(marker)\nEOF",
+      'cat <\\\n<<$(marker)',
+      'echo hi\r# comment $(marker)',
+      `echo $'a\\'b' "\${value@P}"`,
+      `echo "\${a:-"'\${value@P}'"}"`,
+      'echo "${!ref@P}"',
+      `echo "\${values['}']@P}"`,
+      'cat <<EOF\n$\\\n{value@P}\nEOF',
+    ];
+
+    for (const command of commands) {
+      expect(await classifyShellCommandSafety(command)).not.toBe('read-only');
       expect(await isShellCommandReadOnlyAST(command)).toBe(false);
     }
   });
@@ -1113,6 +1139,11 @@ describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
     _setParserFailedForTesting();
     expect(await classifyShellCommandSafety('git status')).toBe('unknown');
     expect(await isShellCommandReadOnlyAST('git status')).toBe(true);
+  });
+
+  it('fails closed for prompt expansion when the parser is unavailable', async () => {
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('echo "${value@P}"')).toBe(false);
   });
 
   it('keeps the Git config gate when the parser is unavailable', async () => {

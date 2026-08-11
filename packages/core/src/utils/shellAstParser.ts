@@ -674,6 +674,7 @@ type SyntaxNode = Parser.SyntaxNode;
 const SHELL_EXPANSION_TYPES = new Set(
   'simple_expansion expansion arithmetic_expansion'.split(' '),
 );
+const COMMENT_TYPES = new Set(['comment']);
 const CHILD_STATEMENT =
   /^(?:pipeline|list|subshell|compound_statement|negated_command)$/;
 /** Collect all descendant nodes of given types. */
@@ -744,6 +745,26 @@ function hasShellExpansion(node: SyntaxNode): boolean {
     (['word', 'concatenation'].includes(node.type) &&
       hasShellPatternExpansion(node.text))
   );
+}
+
+function hasUnsafeParsedSyntax(root: SyntaxNode, command: string): boolean {
+  if (
+    collectDescendants(root, SHELL_EXPANSION_TYPES).some((node) =>
+      node.text.replaceAll('\\\n', '').endsWith('@P}'),
+    )
+  ) {
+    return true;
+  }
+
+  return collectDescendants(root, COMMENT_TYPES).some(
+    (node) =>
+      node.parent?.type !== 'program' || command[node.startIndex - 1] === '\r',
+  );
+}
+
+function hasPromptExpansionText(command: string): boolean {
+  const normalized = command.replaceAll('\\\n', '');
+  return normalized.includes('${') && normalized.includes('@P}');
 }
 
 function mergeSafety(...results: ShellCommandSafety[]): ShellCommandSafety {
@@ -1139,10 +1160,7 @@ function fallbackGitConfigMakesCommandUnsafe(
   return risk.diffExternal || risk.fsmonitor;
 }
 
-async function classifyInternal(
-  command: string,
-  cwd?: string,
-): Promise<Safety> {
+async function classifyParsed(command: string, cwd?: string): Promise<Safety> {
   const tree = await parseShellCommand(command);
   try {
     const root = tree.rootNode;
@@ -1150,6 +1168,9 @@ async function classifyInternal(
     const safety = mergeSafety(
       ...root.namedChildren.map(evaluateStatementSafety),
     );
+    if (hasUnsafeParsedSyntax(root, command)) {
+      return mergeSafety(safety, 'unknown');
+    }
     if (safety !== 'read-only' || !cwd) return safety;
     return localGitConfigMakesCommandUnsafe(root, cwd)
       ? 'unknown'
@@ -1157,6 +1178,21 @@ async function classifyInternal(
   } finally {
     tree.delete();
   }
+}
+
+async function classifyInternal(
+  command: string,
+  cwd?: string,
+): Promise<Safety> {
+  const safety = await classifyParsed(command, cwd);
+  if (!command.includes('\\\n')) return safety;
+  const normalizedSafety = await classifyParsed(
+    command.replaceAll('\\\n', ''),
+    cwd,
+  );
+  return safety === 'read-only' && normalizedSafety !== 'read-only'
+    ? 'unknown'
+    : safety;
 }
 export async function classifyShellCommandSafety(
   command: string,
@@ -1222,6 +1258,7 @@ async function isShellCommandReadOnlyInternal(
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
     return (
+      !hasPromptExpansionText(command) &&
       isShellCommandReadOnly(command) &&
       !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
     );
@@ -1233,6 +1270,7 @@ async function isShellCommandReadOnlyInternal(
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
     return (
+      !hasPromptExpansionText(command) &&
       isShellCommandReadOnly(command) &&
       !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
     );

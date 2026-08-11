@@ -161,6 +161,13 @@ describe('isCommandAllowed', () => {
       expect(detectCommandSubstitution("echo '${value@P}'")).toBe(false);
       expect(detectCommandSubstitution('echo "$\\\n{value@P}"')).toBe(true);
       expect(detectCommandSubstitution('echo $\\\n{value@P}')).toBe(true);
+      expect(detectCommandSubstitution('echo ${value@P}')).toBe(true);
+      expect(detectCommandSubstitution('echo "$\\\n\\\n(marker)"')).toBe(true);
+      expect(
+        detectCommandSubstitution(
+          'echo "${one="$"}${two="$one(marker)"}${two@P}"',
+        ),
+      ).toBe(true);
     });
 
     it('should block command substitution using `$(...)`', async () => {
@@ -266,6 +273,24 @@ describe('isCommandAllowed', () => {
         const result = await isCommandAllowed(cmd, config);
         expect(result.allowed).toBe(false);
         expect(result.reason).toContain('Command substitution');
+      });
+
+      it('detects reviewed continuation and heredoc substitution forms', () => {
+        for (const command of [
+          'cat <<"E\\\nOF"\nEOF\n$(marker)',
+          "cat <\\\n<EOF\na'\n$(marker)\nEOF",
+          'cat <\\\n<<$(marker)',
+          'echo hi\r# comment $(marker)',
+          'cat <<EOF\n$\\\n{value@P}\nEOF',
+        ]) {
+          expect(detectCommandSubstitution(command)).toBe(true);
+        }
+        expect(detectCommandSubstitution('cat <<EOF\n${value@P}\nEOF')).toBe(
+          true,
+        );
+        expect(detectCommandSubstitution("cat <<'EOF'\n${value@P}\nEOF")).toBe(
+          false,
+        );
       });
 
       it('should allow escaped command substitution split by line continuation in an unquoted heredoc body', async () => {
