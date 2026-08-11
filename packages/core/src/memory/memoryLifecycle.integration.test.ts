@@ -229,4 +229,65 @@ describe('managed auto-memory lifecycle integration', () => {
     expect(recall.prompt).toContain('user/');
     expect(recall.prompt).toContain('reference/');
   });
+
+  it('recalls a relevant topic beyond the general 200-document scan cap', async () => {
+    const referenceDir = path.dirname(
+      getAutoMemoryFilePath(projectRoot, 'reference/filler-000.md'),
+    );
+    await fs.mkdir(referenceDir, { recursive: true });
+    await Promise.all(
+      Array.from({ length: 200 }, (_, index) =>
+        fs.writeFile(
+          path.join(
+            referenceDir,
+            `filler-${String(index).padStart(3, '0')}.md`,
+          ),
+          [
+            '---',
+            'type: reference',
+            `name: Filler ${index}`,
+            'description: Unrelated historical note',
+            '---',
+            '',
+            'No matching content.',
+          ].join('\n'),
+          'utf-8',
+        ),
+      ),
+    );
+
+    const targetPath = getAutoMemoryFilePath(
+      projectRoot,
+      'reference/overflow-target.md',
+    );
+    await fs.writeFile(
+      targetPath,
+      [
+        '---',
+        'type: reference',
+        'name: Overflow Zephyr Marker',
+        'description: Unique recall target beyond the general scan cap',
+        '---',
+        '',
+        'The saved codeword is OVERFLOW-ZEPHYR-7040.',
+      ].join('\n'),
+      'utf-8',
+    );
+    await fs.utimes(targetPath, new Date(0), new Date(0));
+
+    const cappedDocs = await scanAutoMemoryTopicDocuments(projectRoot);
+    expect(cappedDocs).toHaveLength(200);
+    expect(cappedDocs.some((doc) => doc.filePath === targetPath)).toBe(false);
+
+    const recall = await resolveRelevantAutoMemoryPromptForQuery(
+      projectRoot,
+      'What is the overflow zephyr codeword?',
+    );
+
+    expect(recall.strategy).toBe('heuristic');
+    expect(recall.selectedDocs.map((doc) => doc.filePath)).toContain(
+      targetPath,
+    );
+    expect(recall.prompt).toContain('OVERFLOW-ZEPHYR-7040');
+  });
 });

@@ -12,19 +12,19 @@ import {
 } from './recall.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 import type { Config } from '../config/config.js';
-import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { scanAllAutoMemoryTopicDocuments } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
   return {
     ...actual,
-    scanAutoMemoryTopicDocuments: vi.fn(),
+    scanAllAutoMemoryTopicDocuments: vi.fn(),
     // Explicit mock — recall now unions user-level docs into the pool, so
     // leaving this on the real implementation would silently fall through
     // to the filesystem (only "works" because the path doesn't exist and
     // listMarkdownFiles swallows ENOENT). Defaults to an empty pool.
-    scanUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
+    scanAllUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -413,7 +413,7 @@ describe('auto-memory relevant recall', () => {
   });
 
   it('uses model-driven selection when config is provided', async () => {
-    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
       docs[0],
     ]);
@@ -431,8 +431,63 @@ describe('auto-memory relevant recall', () => {
     expect(result.prompt).toContain('Reference Memory (reference.md)');
   });
 
+  it('bounds model candidates while retaining lexical and recent documents', async () => {
+    const lexicalDocs = Array.from({ length: 200 }, (_, index) => ({
+      ...memoryDoc(
+        `lexical-${String(index).padStart(3, '0')}.md`,
+        'reference',
+        `Overflow memory ${index}`,
+        'Matching historical context',
+        '',
+      ),
+      mtimeMs: 0,
+    }));
+    const recentDocs = Array.from({ length: 20 }, (_, index) => ({
+      ...memoryDoc(
+        `recent-${String(index).padStart(2, '0')}.md`,
+        'reference',
+        `General memory ${index}`,
+        'Unrelated recent context',
+        '',
+      ),
+      mtimeMs: 20 - index,
+    }));
+    const lexicalTarget = {
+      ...memoryDoc(
+        'overflow-target.md',
+        'reference',
+        'Overflow Zephyr Marker',
+        'Unique semantic target',
+        '',
+      ),
+      mtimeMs: 0,
+    };
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+      ...lexicalDocs,
+      ...recentDocs,
+      lexicalTarget,
+    ]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
+      async (_config, _query, candidates) =>
+        candidates.includes(lexicalTarget) ? [lexicalTarget] : [],
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'find the overflow zephyr marker',
+      { config: {} as Config },
+    );
+
+    const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
+      .mock.calls[0]![2];
+    expect(modelCandidates).toHaveLength(200);
+    expect(modelCandidates[0]).toBe(lexicalTarget);
+    expect(modelCandidates.slice(-20)).toEqual(recentDocs);
+    expect(result.selectedDocs).toEqual([lexicalTarget]);
+  });
+
   it('falls back to heuristic selection when model-driven selection fails', async () => {
-    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
       new Error('selector failed'),
     );
@@ -456,9 +511,15 @@ describe('auto-memory relevant recall', () => {
   });
 
   it('keeps active tool schemas out of heuristic fallback', async () => {
-    vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue(activeToolDocs);
-    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
-      new Error('selector failed'),
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      activeToolDocs,
+    );
+    let modelCandidates: ScannedAutoMemoryDocument[] = [];
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
+      async (_config, _query, candidates) => {
+        modelCandidates = candidates;
+        throw new Error('selector failed');
+      },
     );
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
@@ -470,6 +531,12 @@ describe('auto-memory relevant recall', () => {
       },
     );
 
+    expect(modelCandidates.map((doc) => doc.filePath)).not.toContain(
+      '/tmp/ata-tool.md',
+    );
+    expect(modelCandidates.map((doc) => doc.filePath)).toContain(
+      '/tmp/ata-gotcha.md',
+    );
     expect(result.strategy).toBe('heuristic');
     expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
       '/tmp/ata-tool.md',

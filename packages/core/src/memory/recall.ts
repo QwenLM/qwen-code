@@ -8,8 +8,8 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  scanAutoMemoryTopicDocuments,
-  scanUserAutoMemoryTopicDocuments,
+  scanAllAutoMemoryTopicDocuments,
+  scanAllUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
@@ -19,6 +19,8 @@ import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
 const MAX_HEURISTIC_QUERY_TOKENS = 64;
+const MAX_MODEL_CANDIDATE_DOCS = 200;
+const RECENT_MODEL_CANDIDATE_RESERVE = 20;
 const debugLogger = createDebugLogger('AUTO_MEMORY_RECALL');
 
 const ACTIVE_TOOL_USAGE_MEMORY_MARKERS = [
@@ -221,6 +223,27 @@ export function selectRelevantAutoMemoryDocuments(
     .map(({ doc }) => doc);
 }
 
+function selectModelCandidateDocuments(
+  query: string,
+  docs: ScannedAutoMemoryDocument[],
+  recentTools: readonly string[],
+): ScannedAutoMemoryDocument[] {
+  const eligible = docs.filter(
+    (doc) => !isActiveToolUsageMemory(doc, recentTools),
+  );
+  const lexical = selectRelevantAutoMemoryDocuments(
+    query,
+    eligible,
+    MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE,
+  );
+  const selected = new Set(lexical.map((doc) => doc.filePath));
+  const recent = eligible
+    .filter((doc) => !selected.has(doc.filePath))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, MAX_MODEL_CANDIDATE_DOCS - lexical.length);
+  return [...lexical, ...recent];
+}
+
 function truncateBody(body: string): string {
   const normalized = normalizeBody(body);
   if (normalized.length <= MAX_DOC_BODY_CHARS) {
@@ -299,19 +322,16 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   // recall returns nothing at all for the rest of the session. Project-
   // level scan failures still bubble — they're the only mandatory side.
   const [projectDocs, userDocs] = await Promise.all([
-    scanAutoMemoryTopicDocuments(projectRoot),
-    scanUserAutoMemoryTopicDocuments().catch((error: unknown) => {
+    scanAllAutoMemoryTopicDocuments(projectRoot),
+    scanAllUserAutoMemoryTopicDocuments().catch((error: unknown) => {
       debugLogger.warn(
         `User-level auto-memory scan failed; project-level recall continues: ${error instanceof Error ? error.message : String(error)}`,
       );
       return [];
     }),
   ]);
-  // Project-level docs come first as a soft hint to the model-based
-  // selector and, in the heuristic fallback (`selectRelevantAutoMemoryDocuments`),
-  // as the stable-sort tie-breaker — matching the PR's "project shadows
-  // user" precedence. The model selector ranks by its own judgement so
-  // this ordering is advisory there, not enforced.
+  // Project-level docs come first as the stable tie-break when later ranking
+  // keys match.
   const docs = filterExcludedAutoMemoryDocuments(
     [...projectDocs, ...userDocs],
     options.excludedFilePaths,
@@ -340,10 +360,15 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
 
   if (options.config) {
     try {
+      const modelCandidates = selectModelCandidateDocuments(
+        query,
+        docs,
+        options.recentTools ?? [],
+      );
       const selectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
         options.config,
         query,
-        docs,
+        modelCandidates,
         limit,
         options.recentTools ?? [],
         options.abortSignal,
