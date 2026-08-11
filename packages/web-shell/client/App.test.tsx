@@ -274,6 +274,7 @@ const {
       listScheduledTasks: vi.fn(),
       updateScheduledTask: vi.fn(),
       deleteScheduledTask: vi.fn(),
+      deleteModel: vi.fn().mockResolvedValue(undefined),
     },
     mockMcp: {
       initialize: vi.fn().mockResolvedValue({ accepted: true }),
@@ -363,6 +364,15 @@ const {
       settings: [] as DaemonSettingDescriptor[],
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
+      } | null,
+      latestModelManagement: null as {
+        busy?: boolean;
+        onSelectModel?: (modelId: string) => void;
+        onDeleteModel?: (target: {
+          authType: string;
+          modelId: string;
+          baseUrl?: string;
+        }) => void;
       } | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
@@ -722,8 +732,18 @@ vi.mock('./components/messages/SettingsMessage', async () => {
         language: string,
         scope: 'user' | 'workspace',
       ) => void;
+      modelManagement?: {
+        busy?: boolean;
+        onSelectModel?: (modelId: string) => void;
+        onDeleteModel?: (target: {
+          authType: string;
+          modelId: string;
+          baseUrl?: string;
+        }) => void;
+      };
     }) => {
       testState.latestSettingsState = props.settingsState;
+      testState.latestModelManagement = props.modelManagement ?? null;
       return React.createElement(
         'div',
         { 'data-testid': 'settings-message' },
@@ -4453,6 +4473,7 @@ beforeEach(() => {
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
   testState.latestSettingsState = null;
+  testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   rawEnqueuePrompt.mockClear();
@@ -4556,6 +4577,8 @@ beforeEach(() => {
   mockWorkspaceActions.listScheduledTasks.mockReset();
   mockWorkspaceActions.updateScheduledTask.mockReset();
   mockWorkspaceActions.deleteScheduledTask.mockReset();
+  mockWorkspaceActions.deleteModel.mockReset();
+  mockWorkspaceActions.deleteModel.mockResolvedValue(undefined);
   mockMcp.initialize.mockClear();
   mockMcp.initialize.mockResolvedValue({ accepted: true });
   mockMcp.reloadConfig.mockClear();
@@ -11284,6 +11307,46 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('preserves the turn-error retry while session writes are blocked', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    mockSessionActions.sendPrompt.mockClear();
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-switching',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender({ desiredSessionTargetPending: true });
+    });
+
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="retry"]',
+    );
+    expect(retry).not.toBeNull();
+    act(() => retry?.click());
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    act(() => rerender({ desiredSessionTargetPending: false }));
+    await flush();
+    const unblockedRetry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="retry"]',
+    );
+    expect(unblockedRetry).not.toBeNull();
+    act(() => unblockedRetry?.click());
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
+  });
+
   it('does not settle a turn-error retry into a different workspace', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const retrySend = deferred<void>();
@@ -11835,6 +11898,71 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+  });
+
+  it('clears deferred plan preparation after a same-session reattach', async () => {
+    const approval = deferred<void>();
+    mockSessionActions.setApprovalMode.mockReturnValueOnce(approval.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/plan explain the migration';
+    await clickSubmit(container);
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
+
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      approval.resolve();
+      await approval.promise;
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+  });
+
+  it('does not let an A-to-B-to-A plan completion clear newer preparation', async () => {
+    const firstApproval = deferred<void>();
+    const secondApproval = deferred<void>();
+    mockSessionActions.setApprovalMode
+      .mockReturnValueOnce(firstApproval.promise)
+      .mockReturnValueOnce(secondApproval.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/plan first';
+    await clickSubmit(container);
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-1';
+      rerender();
+    });
+    await flush();
+
+    testState.prompt = '/plan second';
+    await clickSubmit(container);
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
+
+    await act(async () => {
+      firstApproval.resolve();
+      await firstApproval.promise;
+    });
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
+
+    await act(async () => {
+      secondApproval.resolve();
+      await secondApproval.promise;
+    });
     expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
   });
 
@@ -14600,6 +14728,124 @@ describe('App session callbacks', () => {
     ).toBe(true);
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
+  });
+
+  it('clears model selection busy state after a same-session reattach', async () => {
+    const selection = deferred<void>();
+    mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    act(() => testState.latestModelManagement?.onSelectModel?.('qwen-next'));
+    expect(testState.latestModelManagement?.busy).toBe(true);
+
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      selection.resolve();
+      await selection.promise;
+    });
+
+    expect(testState.latestModelManagement?.busy).toBe(false);
+  });
+
+  it('does not let an A-to-B-to-A model completion clear a newer selection', async () => {
+    const firstSelection = deferred<void>();
+    const secondSelection = deferred<void>();
+    mockSessionActions.setModel
+      .mockReturnValueOnce(firstSelection.promise)
+      .mockReturnValueOnce(secondSelection.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() => testState.latestModelManagement?.onSelectModel?.('model-a'));
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-1';
+      rerender();
+    });
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() => testState.latestModelManagement?.onSelectModel?.('model-b'));
+    expect(testState.latestModelManagement?.busy).toBe(true);
+
+    await act(async () => {
+      firstSelection.resolve();
+      await firstSelection.promise;
+    });
+    expect(testState.latestModelManagement?.busy).toBe(true);
+
+    await act(async () => {
+      secondSelection.resolve();
+      await secondSelection.promise;
+    });
+    expect(testState.latestModelManagement?.busy).toBe(false);
+  });
+
+  it('does not let an A-to-B-to-A deletion clear a newer selection', async () => {
+    const deletion = deferred<undefined>();
+    const selection = deferred<void>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-1';
+      rerender();
+    });
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() => testState.latestModelManagement?.onSelectModel?.('model-b'));
+    expect(testState.latestModelManagement?.busy).toBe(true);
+
+    await act(async () => {
+      deletion.resolve(undefined);
+      await deletion.promise;
+    });
+    expect(testState.latestModelManagement?.busy).toBe(true);
+
+    await act(async () => {
+      selection.resolve();
+      await selection.promise;
+    });
+    expect(testState.latestModelManagement?.busy).toBe(false);
   });
 
   it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {

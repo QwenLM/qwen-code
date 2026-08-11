@@ -606,6 +606,28 @@ describe('createDaemonSessionActions', () => {
     expect(beginCrossSessionTransition).toHaveBeenCalledOnce();
   });
 
+  it('does not restart the current session while a target switch is preparing', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const beginCrossSessionTransition = vi.fn(async () => undefined);
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      beginCrossSessionTransition,
+      isCrossSessionTransitionPending: () => true,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+      },
+      session: source,
+    });
+
+    await expect(actions.loadSession('session-a')).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    expect(beginCrossSessionTransition).not.toHaveBeenCalled();
+    expect(pendingSessionLoadRef.current).toBeUndefined();
+    expect(source.detach).not.toHaveBeenCalled();
+  });
+
   it('consumes the controlled origin when a switch uses the legacy path', () => {
     const getTransitionOrigin = vi.fn(() => 'controlled' as const);
     const { actions, pendingSessionLoadRef } = createActionsHarness({
@@ -1307,6 +1329,7 @@ function createActionsHarness(
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
     setSourceBoundOperationInFlight?: ReturnType<typeof vi.fn>;
     isSourceBoundOperationInFlight?: () => boolean;
+    isCrossSessionTransitionPending?: () => boolean;
     setPromptStatus?: ReturnType<typeof vi.fn>;
     hasSessionActivePrompt?: () => boolean;
   } = {},
@@ -1360,6 +1383,7 @@ function createActionsHarness(
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     beginCrossSessionTransition: opts.beginCrossSessionTransition,
+    isCrossSessionTransitionPending: opts.isCrossSessionTransitionPending,
     isSourceBoundOperationInFlight: opts.isSourceBoundOperationInFlight,
     getTransitionOrigin: opts.getTransitionOrigin,
     setSourceBoundOperationInFlight: opts.setSourceBoundOperationInFlight,

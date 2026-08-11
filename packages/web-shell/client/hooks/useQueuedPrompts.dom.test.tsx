@@ -110,6 +110,7 @@ function mount(
       connected,
       writeBlocked: blocked,
       sessionId: activeSessionId,
+      workspaceCwd: '/workspace',
       clientId: 'client-1',
       canMutateMidTurn,
       // This suite pins the legacy local-fallback lifecycle.

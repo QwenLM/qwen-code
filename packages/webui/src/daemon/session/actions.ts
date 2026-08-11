@@ -473,6 +473,18 @@ export function createDaemonSessionActions({
         normalizeWorkspaceIdentity(current.workspaceCwd) !==
           normalizeWorkspaceIdentity(targetWorkspace));
     if (
+      !crossLogicalTarget &&
+      replaySource === undefined &&
+      isCrossSessionTransitionPending()
+    ) {
+      return Promise.reject(
+        new DOMException(
+          'A session switch is still preparing',
+          'InvalidStateError',
+        ),
+      );
+    }
+    if (
       !crossLogicalTarget ||
       replaySource !== undefined ||
       !beginCrossSessionTransition

@@ -4681,7 +4681,11 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
-  useLayoutEffect(() => setIsPreparingPrompt(false), [logicalSessionKey]);
+  const planPreparationTokenRef = useRef(0);
+  useLayoutEffect(() => {
+    planPreparationTokenRef.current += 1;
+    setIsPreparingPrompt(false);
+  }, [logicalSessionKey]);
   const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
     null,
   );
@@ -5353,6 +5357,7 @@ export function App({
     connected,
     writeBlocked: sessionWriteBlocked,
     sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
@@ -5729,7 +5734,11 @@ export function App({
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
   const [modelActionBusy, setModelActionBusy] = useState(false);
-  useEffect(() => setModelActionBusy(false), [logicalSessionKey]);
+  const modelActionTokenRef = useRef(0);
+  useLayoutEffect(() => {
+    modelActionTokenRef.current += 1;
+    setModelActionBusy(false);
+  }, [logicalSessionKey]);
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -8160,6 +8169,9 @@ export function App({
               }
               return true;
             }
+            const planPreparationToken = prompt
+              ? ++planPreparationTokenRef.current
+              : undefined;
             if (prompt) setIsPreparingPrompt(true);
             const owner = sessionOwnerGuard.capture();
             sessionActions
@@ -8181,7 +8193,12 @@ export function App({
                 reportError(error, t('mode.plan'));
               })
               .finally(() => {
-                if (prompt && owner.isCurrent()) setIsPreparingPrompt(false);
+                if (
+                  prompt &&
+                  planPreparationTokenRef.current === planPreparationToken
+                ) {
+                  setIsPreparingPrompt(false);
+                }
               });
             return prompt ? false : true;
           }
@@ -8940,6 +8957,7 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
+    if (sessionWriteBlockedRef.current) return;
     if (
       showRetryHintRef.current &&
       connected &&
@@ -9242,6 +9260,7 @@ export function App({
       // concurrent setModel calls that can resolve out of order and leave a
       // model other than the user's last click active.
       const owner = sessionOwnerGuard.capture();
+      const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
       sessionActions
         .setModel(modelId)
@@ -9263,7 +9282,9 @@ export function App({
           reportError(error, t('model.switch'));
         })
         .finally(() => {
-          if (owner.isCurrent()) setModelActionBusy(false);
+          if (modelActionTokenRef.current === modelActionToken) {
+            setModelActionBusy(false);
+          }
         });
     },
     [
@@ -9279,6 +9300,7 @@ export function App({
 
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
       workspaceActions
         .deleteModel(target)
@@ -9309,7 +9331,11 @@ export function App({
         .catch((error: unknown) => {
           reportError(error, t('settings.models.deleteFailed'));
         })
-        .finally(() => setModelActionBusy(false));
+        .finally(() => {
+          if (modelActionTokenRef.current === modelActionToken) {
+            setModelActionBusy(false);
+          }
+        });
     },
     // Depend on the stable `reload` fn, not the whole providersState object,
     // which useProviders returns fresh each render (would defeat the memo).
