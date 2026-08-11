@@ -421,8 +421,10 @@ export function createProductionDispatch(
           // id directly except the failures whose text must stay
           // upstream-verbatim — the two schema content failures and the two
           // pre-launch rejections — which log the pairing instead (see
-          // `warnTranscriptPairing`); when the run ends after multiple
-          // attempts, the error names every attempt's id.
+          // `warnTranscriptPairing`), and errors rethrown raw from the agent
+          // loop, which name no id and are paired by the catch below; when
+          // the run ends after multiple attempts, the error names every
+          // attempt's id.
           const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
           attemptIds.push(workflowAgentId);
           const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
@@ -456,9 +458,22 @@ export function createProductionDispatch(
       // Earlier attempts already left transcripts on disk; when more than
       // one attempt ran, name every attempt on whatever error terminates
       // the run so no record is left unpairable. A single-attempt failure
-      // already names its own id — or logs it, for the verbatim errors.
+      // usually names its own id — or logs it at the throw site, for the
+      // verbatim errors — but errors rethrown raw from the agent loop
+      // (model-client failures, create / provisioning throws) do neither,
+      // so log the pairing here. These warns ride the debug log file,
+      // which lands on disk only when debug file logging is enabled
+      // (the CLI's `--debug`).
       if (attemptIds.length > 1) {
         appendAttemptDetail(config, err, attemptIds);
+      } else {
+        const id = attemptIds[0]!;
+        const paired =
+          err instanceof Error &&
+          (verbatimTerminalErrors.has(err) || err.message.includes(id));
+        if (!paired) {
+          warnTranscriptPairing(config, id, 'single-attempt terminal failure');
+        }
       }
       throw err;
     }
@@ -820,9 +835,11 @@ async function runOverridePath(
       workflowAgentId,
       'pre-launch failure (remote isolation unavailable)',
     );
-    throw new Error(
+    const err = new Error(
       "agent({isolation:'remote'}) is not available in this build.",
     );
+    verbatimTerminalErrors.add(err);
+    throw err;
   }
 
   const subagentMgr = config.getSubagentManager();
@@ -853,9 +870,11 @@ async function runOverridePath(
         'pre-launch failure (agent type not found)',
       );
       const safeAgentType = sanitizeForErrorMessage(opts.agentType);
-      throw new Error(
+      const err = new Error(
         `agent({agentType}): agent type '${safeAgentType}' not found.`,
       );
+      verbatimTerminalErrors.add(err);
+      throw err;
     }
     baseConfig = resolved;
   } else {
@@ -1186,18 +1205,23 @@ async function runOverridePath(
 /**
  * Terminal errors whose message must remain upstream-verbatim so scripts
  * authored against either runtime can branch on the exact text — the two
- * schema content failures. Marked at the throw site so the multi-attempt
- * id detail is logged instead of appended (see `appendAttemptDetail`).
+ * schema content failures and the two pre-launch rejections. Marked at the
+ * throw site so any id pairing is logged instead of appended (see
+ * `appendAttemptDetail`), and read by the dispatch catch to avoid logging
+ * a pairing the throw site already logged.
  */
 const verbatimTerminalErrors = new WeakSet<object>();
 
 /**
  * Log the id↔transcript pairing for a terminal error whose message cannot
  * carry the attempt's id: the four upstream-verbatim failures (two schema
- * content, two pre-launch) keep their text for user-visible parity, and the
+ * content, two pre-launch) keep their text for user-visible parity, the
  * multi-attempt fallback lands here when the detail cannot be appended in
- * place. The transcript file is named for the id, so this is what lets an
- * operator match such a failure to its record.
+ * place, and the dispatch catch lands here for a single-attempt failure
+ * that names no id. Rides `debugLogger.warn`, which lands on disk only
+ * when debug file logging is enabled (the CLI's `--debug`). The transcript
+ * file is named for the id, so this is what lets an operator match such a
+ * failure to its record.
  */
 function warnTranscriptPairing(
   config: Config,
@@ -1229,8 +1253,9 @@ function warnTranscriptPairing(
  * (marked at the throw site), errors without a writable own `message`
  * (DOMException's is getter-only — forcing the assignment would throw a
  * TypeError and replace the very error the sandbox classifies), and
- * non-Error rejections. The pairing then rides the warn log instead, so no
- * transcript is left orphaned by the skip.
+ * non-Error rejections. The pairing then rides the warn log instead —
+ * which lands on disk only when debug file logging is enabled (the CLI's
+ * `--debug`) — so a default session records no pairing for the skip.
  */
 function appendAttemptDetail(
   config: Config,

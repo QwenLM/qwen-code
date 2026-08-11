@@ -2355,9 +2355,45 @@ describe('createProductionDispatch', () => {
       expect((caught as DOMException).name).toBe('AbortError');
       expect((caught as DOMException).message).toBe('aborted');
       // The multi-attempt pairing was not dropped by the skip — it was
-      // logged instead.
+      // logged instead, naming every attempt's id — derived here from the
+      // transcript file names exactly like the sibling tests.
       const warns = debugLogRecorder.warn.mock.calls.map((c) => String(c[0]));
-      expect(warns.some((w) => w.includes('Attempt ids:'))).toBe(true);
+      const pairingWarn = warns.find((w) => w.includes('Attempt ids:'));
+      expect(pairingWarn).toBeDefined();
+      const files = transcriptFiles();
+      expect(files).toHaveLength(2);
+      for (const file of files) {
+        const id = path.basename(file, '.jsonl').slice('agent-'.length);
+        expect(pairingWarn).toContain(id);
+      }
+    });
+
+    // Errors rethrown raw from the agent loop (the production ERROR path:
+    // AgentHeadless.execute sets terminateMode=ERROR and rethrows) name no
+    // attempt id, and with one attempt nothing else logs the pairing — the
+    // dispatch catch must, or the transcript is orphaned.
+    it('pairs a single-attempt raw-rethrow failure with its transcript in the warn log', async () => {
+      nextExecuteThrow.value = new Error('reasoning-loop boom');
+      try {
+        const dispatch = createProductionDispatch(transcriptConfig());
+        await expect(
+          dispatch('doomed run', { label: 'doomed' }),
+        ).rejects.toThrow(/reasoning-loop boom/);
+
+        const pairing = debugLogRecorder.warn.mock.calls
+          .map((c) => String(c[0]))
+          .find((m) => m.includes('single-attempt terminal failure'));
+        expect(pairing).toBeDefined();
+        const id = pairing!.match(
+          /for (workflow-agent-[0-9a-f]{16}); transcript: /,
+        )?.[1];
+        expect(id).toBeDefined();
+        const files = transcriptFiles();
+        expect(files).toHaveLength(1);
+        expect(path.basename(files[0])).toBe(`agent-${id}.jsonl`);
+      } finally {
+        nextExecuteThrow.value = null;
+      }
     });
 
     // A parent abort ending a mixed retry must name every attempt's id on
@@ -3486,6 +3522,79 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await expect(dispatch('hi', { isolation: 'remote' })).rejects.toThrow(
       /agent\(\{isolation:'remote'\}\) is not available in this build\./,
     );
+  });
+
+  // The pre-launch rejections keep upstream-verbatim text, so their pairing
+  // warn is the only record tying the failure to the seeded transcript —
+  // pin both sites under a transcript-capable config, mirroring the schema
+  // content pairing test.
+  it("pairs the isolation:'remote' pre-launch failure with its transcript in the warn log", async () => {
+    const projectDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'wf-pre-'));
+    try {
+      const { config } = fakeConfigWithMgr({
+        transcript: { projectDir, sessionId: 'sess-prelaunch' },
+        onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('do something', { isolation: 'remote' }),
+      ).rejects.toThrow(/is not available in this build/);
+
+      const pairing = debugLogRecorder.warn.mock.calls
+        .map((c) => String(c[0]))
+        .find((m) =>
+          m.includes('pre-launch failure (remote isolation unavailable)'),
+        );
+      expect(pairing).toBeDefined();
+      const id = pairing!.match(
+        /for (workflow-agent-[0-9a-f]{16}); transcript: /,
+      )?.[1];
+      expect(id).toBeDefined();
+      const transcript = path.join(
+        projectDir,
+        'subagents',
+        'sess-prelaunch',
+        `agent-${id}.jsonl`,
+      );
+      expect(pairing).toContain(transcript);
+      expect(fsSync.existsSync(transcript)).toBe(true);
+    } finally {
+      fsSync.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('pairs the agent-type-not-found pre-launch failure with its transcript in the warn log', async () => {
+    const projectDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'wf-pre-'));
+    try {
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => null,
+        transcript: { projectDir, sessionId: 'sess-prelaunch' },
+        onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('do something', { agentType: 'NotARealAgent' }),
+      ).rejects.toThrow(/agent type 'NotARealAgent' not found/);
+
+      const pairing = debugLogRecorder.warn.mock.calls
+        .map((c) => String(c[0]))
+        .find((m) => m.includes('pre-launch failure (agent type not found)'));
+      expect(pairing).toBeDefined();
+      const id = pairing!.match(
+        /for (workflow-agent-[0-9a-f]{16}); transcript: /,
+      )?.[1];
+      expect(id).toBeDefined();
+      const transcript = path.join(
+        projectDir,
+        'subagents',
+        'sess-prelaunch',
+        `agent-${id}.jsonl`,
+      );
+      expect(pairing).toContain(transcript);
+      expect(fsSync.existsSync(transcript)).toBe(true);
+    } finally {
+      fsSync.rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it('floor disallowedTools always unioned (agentType cannot re-enable them)', async () => {
