@@ -84,12 +84,12 @@ function frame(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
 }
 
 describe('approvalModeClass', () => {
-  it('treats only YOLO as bypass', () => {
+  it('treats AUTO_EDIT and YOLO as bypass', () => {
     expect(approvalModeClass(ApprovalMode.YOLO)).toBe('bypass');
+    expect(approvalModeClass(ApprovalMode.AUTO_EDIT)).toBe('bypass');
     for (const mode of [
       ApprovalMode.PLAN,
       ApprovalMode.DEFAULT,
-      ApprovalMode.AUTO_EDIT,
       ApprovalMode.AUTO,
     ]) {
       expect(approvalModeClass(mode)).toBe('prompting');
@@ -109,6 +109,12 @@ describe('mode parity (no explicit setting)', () => {
     expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
     expect(h.gate.admit(frame())).toBe('accept');
     expect(h.delivered).toHaveLength(3);
+  });
+
+  it('holds messages when AUTO_EDIT can approve edits without prompting', () => {
+    h.setMode(ApprovalMode.AUTO_EDIT);
+    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.delivered).toHaveLength(0);
   });
 
   // `fromMode` is self-asserted and authenticated by nothing, so a sender

@@ -4,8 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { writeTerminalTitleSpy } = vi.hoisted(() => ({
-  writeTerminalTitleSpy: vi.fn(),
+const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
+  vi.hoisted(() => ({
+    writeTerminalTitleSpy: vi.fn(),
+    useWakeRepaintMock: vi.fn(),
+    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+      vi.fn(() => deps),
+    ),
+  }));
+
+vi.mock('./hooks/use-wake-repaint.js', () => ({
+  useWakeRepaint: useWakeRepaintMock,
+}));
+
+vi.mock('./utils/terminal-resize-reflow.js', () => ({
+  buildWakeRepaint: buildWakeRepaintSpy,
 }));
 
 vi.mock('../utils/windowTitle.js', async (importOriginal) => {
@@ -954,7 +967,7 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('refreshStatic skips the physical clear in VP mode (#4891)', () => {
+    it('refreshStatic stays write-free in VP mode for ordinary callers (#8557)', () => {
       const vpSettings = {
         merged: {
           hideTips: false,
@@ -980,11 +993,62 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.refreshStatic();
 
-      // VP mode owns the viewport via the React tree, so refreshStatic must not
-      // emit a physical clear — the resize-settle path (#4891) strands nothing.
+      // Ordinary callers (/clear, model change, Ctrl+O, ...) must not
+      // trigger a physical clear-and-replay in VP: replaying the pre-change
+      // frame would flash stale content. Their refresh comes from the state
+      // change that triggered them; only the wake path repaints physically.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearViewport,
+      );
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
+    });
+
+    // The wake/SIGCONT trigger itself is covered by use-wake-repaint.test.ts
+    // (SIGCONT/heartbeat-gap -> repaint callback); the VP/static selection is
+    // unit-covered by buildWakeRepaint tests. This test locks the AppContainer
+    // call site: the callback handed to the hook must be the wake repaint
+    // (repaintViewport + remount), not refreshStatic or a mis-wired memo.
+    it('wires the wake repaint (not refreshStatic) into useWakeRepaint', async () => {
+      useWakeRepaintMock.mockClear();
+      buildWakeRepaintSpy.mockClear();
+      const repaintSpy = vi.fn();
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          repaintViewport={repaintSpy}
+        />,
+      );
+
+      // Let ink-testing-library's scheduled initial render flush.
+      await Promise.resolve();
+      // The call site must build the wake callback via buildWakeRepaint with
+      // the repaint prop AND the static remount bump in its deps; inline
+      // repaint-only wrappers (the shape that drops the agent-tab <Static>
+      // re-emit) fail these.
+      const deps = buildWakeRepaintSpy.mock.calls.at(-1)?.[0];
+      expect(deps?.['isVP']).toBe(true);
+      expect(deps?.['repaintViewport']).toBe(repaintSpy);
+      expect(typeof deps?.['remountStaticHistory']).toBe('function');
+      const wakeCallback = useWakeRepaintMock.mock.calls.at(-1)?.[0];
+      expect(wakeCallback).toBe(buildWakeRepaintSpy.mock.results.at(-1)?.value);
     });
 
     it('defaults to VP mode when useTerminalBuffer is unset', () => {

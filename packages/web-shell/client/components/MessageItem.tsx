@@ -28,6 +28,8 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   workspaceCwd?: string;
   isLatest?: boolean;
   showRetryHint?: boolean;
@@ -46,6 +48,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onImagePreview,
   workspaceCwd,
   isLatest = false,
   showRetryHint = false,
@@ -71,6 +74,7 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            onImagePreview={onImagePreview}
           />
         );
       case 'assistant':
@@ -264,6 +268,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;

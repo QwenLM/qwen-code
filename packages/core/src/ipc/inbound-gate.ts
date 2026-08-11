@@ -17,14 +17,13 @@
  * cannot do more than the sender could already have done itself.
  *
  *   receiver prompting + anything          → accept
- *   receiver YOLO      + any sender        → hold
+ *   receiver AUTO_EDIT/YOLO + any sender   → hold
  *   receiver mode unknown                  → hold  (fail closed)
  *
  * A prompting receiver can accept freely because every consequential
  * action still faces its own gate; the message is a suggestion, not an
- * execution. A YOLO receiver has no such backstop, so anything it is told
- * to do simply happens — which is why an unverified sender has to be
- * reviewed first.
+ * execution. AUTO_EDIT and YOLO can approve consequential actions without
+ * user confirmation, so an unverified sender has to be reviewed first.
  *
  * And every sender is unverified. The wire's `fromMode` is asserted by
  * whoever wrote the frame and authenticated by nothing, so a YOLO
@@ -71,12 +70,14 @@ export type ModeClass = 'bypass' | 'prompting';
 /**
  * Map an approval mode onto the two classes that matter for parity.
  *
- * Only YOLO is "bypass". AUTO is deliberately "prompting": it does not
- * stop to ask, but every tool call still passes the permission
- * classifier, which sees the full message text.
+ * AUTO_EDIT and YOLO are "bypass" because both can approve consequential
+ * actions without user confirmation. AUTO still passes every tool call
+ * through the permission classifier, which sees the full message text.
  */
 export function approvalModeClass(mode: ApprovalMode): ModeClass {
-  return mode === ApprovalMode.YOLO ? 'bypass' : 'prompting';
+  return mode === ApprovalMode.YOLO || mode === ApprovalMode.AUTO_EDIT
+    ? 'bypass'
+    : 'prompting';
 }
 
 export interface HeldMessage {
