@@ -1245,7 +1245,7 @@ async function pruneSnapshots(
   stats.sort((a, b) => a.mtime - b.mtime);
   const toPrune = stats.slice(0, stats.length - MAX_RETAINED_SNAPSHOTS);
   await Promise.all(
-    toPrune.map((s) => {
+    toPrune.map(async (s) => {
       // Each run also has a sibling `<runId>/journal.jsonl` directory (the
       // resume journal). Removing only the `<runId>.json` snapshot would leave
       // those journal dirs to grow without bound, so prune both together.
@@ -1260,23 +1260,41 @@ async function pruneSnapshots(
       // exactly that one file, never a directory.
       const isRunDir = /^wf_[0-9a-f]+$/.test(runId);
       assertRootUnchanged();
+      // The recursive delete must be authorized by the pruned file itself:
+      // only a well-formed terminal snapshot of the same run proves the
+      // same-stem directory is that run's residue. A malformed file — or one
+      // planted under a stem no generated runId can take — deletes only
+      // itself, never the directory. Validate BEFORE unlinking: the read and
+      // the delete must see the same file.
+      let representsRun = false;
+      if (isRunDir) {
+        try {
+          parseLegacySnapshot(
+            JSON.parse(
+              await readRegularFileNoFollow(
+                `${dir}/${s.f}`,
+                assertRootUnchanged,
+              ),
+            ) as unknown,
+            runId,
+          );
+          representsRun = true;
+        } catch {
+          // Not a valid terminal snapshot of this run — the file alone is
+          // deleted below.
+        }
+      }
+      const unlink = fs
+        .unlink(`${dir}/${s.f}`)
+        .catch((e) => debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`));
+      if (!representsRun) return unlink;
       return Promise.all([
+        unlink,
         fs
-          .unlink(`${dir}/${s.f}`)
+          .rm(`${dir}/${runId}`, { recursive: true, force: true })
           .catch((e) =>
-            debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
+            debugLogger.warn(`prune journal dir failed for ${runId}: ${e}`),
           ),
-        ...(isRunDir
-          ? [
-              fs
-                .rm(`${dir}/${runId}`, { recursive: true, force: true })
-                .catch((e) =>
-                  debugLogger.warn(
-                    `prune journal dir failed for ${runId}: ${e}`,
-                  ),
-                ),
-            ]
-          : []),
       ]);
     }),
   );

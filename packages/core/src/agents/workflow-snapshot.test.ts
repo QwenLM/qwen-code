@@ -342,6 +342,43 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     ).resolves.toBeUndefined();
   });
 
+  // A pruned legacy snapshot authorizes the recursive delete of its
+  // same-stem run dir only when it validates as that run's terminal
+  // snapshot. A malformed file (repo-planted or corrupt) must delete only
+  // itself — never a directory it has not proven it belongs to.
+  it('deletes only the file when a pruned snapshot does not validate for its same-stem run dir', async () => {
+    const config = fakeConfig(projectDir);
+    const dir = config.storage.getWorkflowRunsDir();
+    await fs.mkdir(dir, { recursive: true });
+
+    await fs.mkdir(path.join(dir, 'wf_dead'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'wf_dead', 'manifest.json'),
+      '{"keep":true}',
+      'utf8',
+    );
+    const malformed = path.join(dir, 'wf_dead.json');
+    await fs.writeFile(malformed, '{ not json', 'utf8');
+    await fs.utimes(malformed, new Date(0), new Date(0)); // oldest → pruned
+
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId: `wf_${i.toString(16)}`, startTime: 10_000 + i }),
+      );
+    }
+    // One more write tips the count over the cap and triggers the prune.
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_ff00', startTime: 99_999 }),
+    );
+
+    await expect(fs.access(malformed)).rejects.toThrow();
+    await expect(
+      fs.access(path.join(dir, 'wf_dead', 'manifest.json')),
+    ).resolves.toBeUndefined();
+  });
+
   it.runIf(process.platform !== 'win32')(
     'does not follow a matching run-directory symlink while pruning',
     async () => {
