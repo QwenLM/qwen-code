@@ -1891,6 +1891,10 @@ export function App({
     connection.sessionTransition?.phase === 'queued' ||
     connection.sessionTransition?.phase === 'preparing';
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
+  const sessionWriteBlockGenerationRef = useRef(0);
+  if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
+    sessionWriteBlockGenerationRef.current += 1;
+  }
   sessionWriteBlockedRef.current = sessionWriteBlocked;
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
@@ -4918,6 +4922,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: () => void;
+        onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
@@ -4947,6 +4952,7 @@ export function App({
           previousLastSubmittedSourceVersion;
         retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
         setShowRetryHint(previousShowRetryHint);
+        opts?.onCancelledBeforeAdmission?.();
       };
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
@@ -4962,6 +4968,7 @@ export function App({
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
+        const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
         setIsPreparingPrompt(true);
         try {
           await onSubmitBeforeRef.current({
@@ -4980,6 +4987,7 @@ export function App({
         }
         if (
           sessionWriteBlockedRef.current ||
+          sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
           connectionRef.current.sessionId !== sourceSessionId ||
           getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
           composerSourceVersionRef.current !== sourceVersion
@@ -5325,6 +5333,15 @@ export function App({
             : current,
         );
       },
+      onCancelledBeforeAdmission: () => {
+        if (!retryOwnerIsCurrent()) return;
+        if (
+          getLatestUserBlockId(store.getSnapshot().blocks) === failed.messageId
+        ) {
+          updateFailedPrompt(failed);
+        }
+        setFailedPromptRetry(null);
+      },
     })
       .catch((error: unknown) => {
         if (!retryOwnerIsCurrent()) return;
@@ -5419,6 +5436,7 @@ export function App({
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
+        const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
         onSubmitBeforeRef
           .current({
             sessionId: sourceSessionId,
@@ -5427,6 +5445,7 @@ export function App({
           .then(() => {
             if (
               sessionWriteBlockedRef.current ||
+              sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
               connectionRef.current.sessionId !== sourceSessionId ||
               getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
               composerSourceVersionRef.current !== sourceVersion
@@ -9013,6 +9032,8 @@ export function App({
       const retryText = lastSubmittedPromptRef.current;
       const retryImages = lastSubmittedImagesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
       const retryOwnerIsCurrent = () =>
         composerSourceVersionRef.current === retrySourceVersion &&
         connectionRef.current.sessionId === retrySessionId &&
@@ -9044,6 +9065,12 @@ export function App({
               ? { ...current, admitted: true }
               : current,
           );
+        },
+        onCancelledBeforeAdmission: () => {
+          if (!retryOwnerIsCurrent()) return;
+          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+          setShowRetryHint(previousShowRetryHint);
+          setFailedPromptRetry(null);
         },
       })
         .catch((error: unknown) => {

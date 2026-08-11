@@ -10,10 +10,11 @@ send one cancellation while a transition is preparing.
 
 The WebShell therefore blocks prompt writes as soon as a desired target is
 pending or the daemon transition enters `queued` or `preparing`. A prompt that
-is awaiting an asynchronous host admission hook rechecks this gate before any
-composer commit, follow-up clear, session allocation, send, or enqueue. If the
-gate closes while the hook is pending, the draft and retry state remain owned
-by the source composer.
+is awaiting an asynchronous host admission hook records the write-gate
+generation and rechecks it before any composer commit, follow-up clear, session
+allocation, send, or enqueue. If the gate closes at any point while the hook is
+pending, the draft and retry state remain owned by the source composer even if
+navigation completes or fails before the hook returns.
 
 ## Queued prompts
 
