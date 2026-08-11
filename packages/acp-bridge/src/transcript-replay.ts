@@ -19,10 +19,13 @@ import {
   type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
@@ -55,6 +58,7 @@ export interface TranscriptReplayStateV1 {
   readonly pendingToolCalls: readonly PendingTranscriptToolCall[];
   readonly cumulativeUsage: TranscriptReplayUsageState;
   readonly goalState?: GoalSnapshotV2;
+  readonly goalCause?: GoalStateCause;
 }
 
 export interface TranscriptReplayToolMetadata {
@@ -410,6 +414,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   };
   private finalized = false;
   private goalState: GoalSnapshotV2 | undefined;
+  private goalCause: GoalStateCause | undefined;
 
   constructor(private readonly options: TranscriptReplayMachineOptions) {
     const initialState = parseInitialState(
@@ -418,6 +423,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     );
     this.usage = { ...initialState.cumulativeUsage };
     this.goalState = initialState.goalState;
+    this.goalCause = initialState.goalCause;
     for (const pending of initialState.pendingToolCalls) {
       this.pendingToolCalls.set(pending.callId, pending);
       this.usedToolCallIds.add(pending.callId);
@@ -526,6 +532,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       })),
       cumulativeUsage: { ...this.usage },
       ...(this.goalState ? { goalState: this.goalState } : {}),
+      ...(this.goalCause ? { goalCause: this.goalCause } : {}),
     };
   }
 
@@ -828,11 +835,19 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
+      const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+        cause: payload.cause,
+        previousCause: this.goalCause,
+        previous: this.goalState,
+        next: payload.snapshot,
+      });
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,
       );
       this.goalState = payload.snapshot;
+      this.goalCause = payload.cause;
+      if (bookkeepingOnly) return;
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1140,6 +1155,17 @@ function parseInitialState(
       affectsCompleteness: true,
     });
   }
+  const rawGoalCause = value['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (rawGoalCause !== undefined && !goalCause) {
+    onDiagnostic?.({
+      code: 'invalid_replay_state',
+      severity: 'warning',
+      message: 'Dropped a malformed Goal cause from replay state.',
+      affectsCompleteness: true,
+    });
+  }
   return {
     v: 1,
     pendingToolCalls,
@@ -1152,6 +1178,7 @@ function parseInitialState(
         }
       : emptyUsage(),
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 

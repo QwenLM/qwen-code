@@ -150,6 +150,7 @@ vi.mock('./utils/sandbox.js', () => ({
 
 vi.mock('./utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: vi.fn(),
   writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
 }));
@@ -533,6 +534,176 @@ describe('gemini.tsx main function', () => {
       }
     },
   );
+
+  // Regression for #8653: every daemon-hosted session runs in an ACP child,
+  // so the scrub at that boundary must not silently disappear. The positive
+  // case fails if the call is deleted; the negative cases pin the gate —
+  // only daemon-stamped children (QWEN_CODE_SERVE) scrub, direct editor ACP
+  // integrations and non-ACP launches keep their own loader vars.
+  it.each([
+    ['scrubs for a daemon-spawned child', { acp: true } as CliArgs, '1', true],
+    [
+      'keeps for a direct (editor) ACP child',
+      { acp: true } as CliArgs,
+      '',
+      false,
+    ],
+    [
+      'keeps when the daemon marker is zero',
+      { acp: true } as CliArgs,
+      '0',
+      false,
+    ],
+    [
+      'keeps when the daemon marker is false',
+      { acp: true } as CliArgs,
+      'false',
+      false,
+    ],
+    ['keeps for a non-ACP launch', {} as CliArgs, '', false],
+  ])(
+    'inherited loader env vars past the ACP handoff (%s)',
+    async (_mode, argv, daemonMarker, expectScrubbed) => {
+      vi.stubEnv(
+        'NODE_OPTIONS',
+        '--import file:///other-checkout/register.mjs',
+      );
+      vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      if (daemonMarker !== undefined) {
+        vi.stubEnv('QWEN_CODE_SERVE', daemonMarker);
+      }
+
+      const { parseArguments, loadCliConfig } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue(argv);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      // loadCliConfig is the first expensive call past the relaunch/sandbox
+      // handoff — the scrub must have run by here.
+      vi.mocked(loadCliConfig).mockImplementation(async () => {
+        if (expectScrubbed) {
+          expect(process.env['NODE_OPTIONS']).toBeUndefined();
+          expect(process.env['NODE_PATH']).toBeUndefined();
+        } else {
+          expect(process.env['NODE_OPTIONS']).toBe(
+            '--import file:///other-checkout/register.mjs',
+          );
+        }
+        throw new Error('stop after loader env scrub check');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow(
+          'stop after loader env scrub check',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  // Regression for #8653 (placement): relaunchAppInChildProcess spawns with
+  // {...process.env} captured at call time, so scrubbing BEFORE the handoff
+  // would strip the loader the respawned child still needs to boot. The
+  // scrubbed child re-runs the scrub itself after its own handoff.
+  it('keeps inherited loader env vars present at the relaunch handoff', async () => {
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+      expect(process.env['NODE_OPTIONS']).toBe(
+        '--import file:///other-checkout/register.mjs',
+      );
+      expect(process.env['NODE_PATH']).toBe('/other-checkout/node_modules');
+      throw new Error('stop after loader env handoff check');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow(
+        'stop after loader env handoff check',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
+  // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
+  // stage of a daemon-spawned ACP child must still scrub.
+  it('scrubs inherited loader env vars in the sandboxed ACP stage', async () => {
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+    vi.stubEnv('SANDBOX', 'sandbox-exec');
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+
+    const { parseArguments, loadCliConfig } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockImplementation(async () => {
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['NODE_PATH']).toBeUndefined();
+      throw new Error('stop after sandboxed loader env scrub check');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow(
+        'stop after sandboxed loader env scrub check',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('keeps the external Guard token available to command parsing and scrubs it before settings load', async () => {
     vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');

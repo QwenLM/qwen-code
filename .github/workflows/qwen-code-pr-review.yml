@@ -78,6 +78,15 @@ jobs:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     # Authorization is delegated to the `authorize` job (write+ permission);
     # this `if` only matches the /review command shape.
+    #
+    # The command may be followed by a newline and a body, so the shape match
+    # accepts that — via fromJSON, because expression string literals are NOT
+    # escape-processed: '\n' there is a literal backslash + n, and the branch
+    # written that way never matched anything. fromJSON('"\n"') is JSON, which
+    # IS escape-processed, so it yields a real newline. Both line endings are
+    # listed: the API sends LF, the web UI sends CRLF, and startsWith with an
+    # LF pattern does not match a CRLF body. Measured on a live runner, not
+    # assumed — see the PR that introduced this.
     needs: ['authorize']
     if: |-
       !cancelled() &&
@@ -87,17 +96,20 @@ jobs:
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))) ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n')))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))) ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n')))))
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\r"'))))))
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
@@ -119,7 +131,12 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
+          # Blank line after the marker, or none of the prose below renders. A
+          # line opening with `<!--` starts an HTML block that runs to the line
+          # containing the closing delimiter, and the REST of that line stays
+          # inside it — so gluing the text on shipped it as raw source with a
+          # dead link. Verified against GitHub's own renderer.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
           EXISTING_ACK_ID="$(
             # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
@@ -315,7 +332,8 @@ jobs:
     # review_requested events check the requester and skip delay):
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately
-    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
+    # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches) —
+    # including the fromJSON newline/CR pair, explained there.
     if: |-
       !cancelled() &&
       ((github.event_name == 'workflow_dispatch' &&
@@ -335,19 +353,22 @@ jobs:
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
          startsWith(github.event.comment.body, '@qwen-code /review ') ||
-         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true') ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
          startsWith(github.event.review.body, '@qwen-code /review ') ||
-         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\n"'))) ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', fromJSON('"\r"')))) &&
         needs.authorize.outputs.should_review == 'true'))
     # The per-review budget auto-scales to QWEN_REVIEW_MAX_TIMEOUT_MINUTES
     # for any non-small PR (see "Run review"), and the shared retry budget
@@ -450,7 +471,13 @@ jobs:
           # review" is an explicit ask (authorize write-permission-checks the
           # requester for exactly that action), so it is excluded below.
           AUTO_REVIEW=false
+          # First line only, then drop a trailing CR: comments written in the
+          # GitHub web UI arrive CRLF-terminated, so without this the command
+          # line keeps a `\r`. That rides through word splitting (IFS has no
+          # CR) into tokens like `--timeout=300<CR>`, which then fails the
+          # numeric check for no visible reason.
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
+          TRIGGER_COMMAND="${TRIGGER_COMMAND%$'\r'}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
@@ -1031,6 +1058,17 @@ jobs:
           # would retire a still-accurate badge on a transient classifier
           # failure or a dry run.
           DOCS_ONLY_MEDIUM=""
+          # One implementation for both downgrades' arithmetic: the docs-only
+          # branch and the micro tightening below both halve with the same
+          # 90-minute floor, and two verbatim copies once let a one-sided
+          # divisor edit diverge them silently while the comments still
+          # claimed they matched.
+          halve_budget_floor() {
+            EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
+            if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
+              EFFECTIVE_TIMEOUT_MINUTES=90
+            fi
+          }
           if [ "${AUTO_REVIEW:-false}" = "true" ]; then
             # Fetch + classify through the shared wrapper so this gate and
             # ci.yml's profile gate cannot drift on the classifier's input
@@ -1046,14 +1084,37 @@ jobs:
               DOCS_ONLY_MEDIUM=true
               # Medium measures at one-third to one-half of high, so halve
               # the size-aware budget with a 90-minute floor.
-              EFFECTIVE_TIMEOUT_MINUTES=$(( EFFECTIVE_TIMEOUT_MINUTES / 2 ))
-              if [ "$EFFECTIVE_TIMEOUT_MINUTES" -lt 90 ]; then
-                EFFECTIVE_TIMEOUT_MINUTES=90
-              fi
+              halve_budget_floor
               echo "PR #${PR_NUMBER} is docs-only; automatic review runs at --effort medium (${EFFECTIVE_TIMEOUT_MINUTES}-minute budget)."
             else
               DOCS_ONLY_MEDIUM=false
             fi
+          fi
+          # A micro automatic review — total churn (additions + deletions)
+          # strictly below 25 — keeps its full high-effort posting run: a
+          # medium downgrade would drop the inline comments a source fix
+          # deserves. The threshold is an INDEPENDENT "this is a small PR"
+          # bound, deliberately NOT the skill's SWEEP_FLOOR: the two count
+          # different things (this gate counts churn; the skill weighs raw
+          # unified-diff lines — file/hunk headers and context included), so
+          # a scattered micro diff can still run the sweep and the full
+          # reverse-audit loop. That is fine — the justification is not "the
+          # pipeline shrank" but "churn < 25 bounds the reviewed territory,
+          # and 90 minutes is ample for that territory even on the full
+          # pipeline" (measured: a 23-line PR runs high end to end in ~30
+          # min). What a micro run must not keep is the full 180-minute
+          # small-PR budget when its measured worst case is ~30 minutes:
+          # the same halve-with-floor the docs downgrade uses, so a hung
+          # run dies at the scale of its work.
+          # Skipped when the size lookup failed (an unknown size must not
+          # tighten anything), on explicit runs (their timeout is the
+          # caller's), and for docs-only runs, which are already halved.
+          if [ "${AUTO_REVIEW:-false}" = "true" ] \
+            && [ "$DOCS_ONLY_MEDIUM" != "true" ] \
+            && [ -n "${PR_SIZE_LINES:-}" ] \
+            && [ "$PR_SIZE_LINES" -lt 25 ]; then
+            halve_budget_floor
+            echo "PR #${PR_NUMBER} is a micro diff (${PR_SIZE_LINES} changed lines); the automatic review keeps --effort high and inline posting, with a tightened ${EFFECTIVE_TIMEOUT_MINUTES}-minute budget."
           fi
           echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
 
@@ -1337,7 +1398,7 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           EXPECTED_HEAD_SHA: '${{ steps.review.outputs.expected_head_sha }}'
-          COMPLETION_LINE: "${{ steps.review.outputs.completion_line || '(no relayable \"Review complete:\" line in the run output — see the run log)' }}"
+          COMPLETION_LINE: '${{ steps.review.outputs.completion_line || ''(no relayable "Review complete:" line in the run output — see the run log)'' }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
@@ -1604,6 +1665,8 @@ jobs:
 
   resolve-pr:
     needs: ['authorize']
+    # The /resolve shape match uses the same fromJSON newline/CR pair as
+    # ack-review-request.if, and for the same reason — see the note there.
     if: |-
       !cancelled() &&
       github.repository == 'QwenLM/qwen-code' &&
@@ -1616,7 +1679,8 @@ jobs:
          github.event.issue.state == 'open' &&
          (github.event.comment.body == '@qwen-code /resolve' ||
           startsWith(github.event.comment.body, '@qwen-code /resolve ') ||
-          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', '\n'))))
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\n"'))) ||
+          startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\r"')))))
       )
     # Pinned to an ephemeral hosted runner. The conflict-resolution agent step
     # runs with `sandbox: true`, which on Linux needs docker or podman to launch
