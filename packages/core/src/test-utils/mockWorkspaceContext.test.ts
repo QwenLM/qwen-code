@@ -70,9 +70,7 @@ describe('createMockWorkspaceContext', () => {
       expect(
         workspace.isPathWithinWorkspace(path.join(rootDir, 'missing.txt')),
       ).toBe(true);
-    } finally {
-      rmSync(aliasDir, { force: true });
-      rmSync(rootDir, { recursive: true, force: true });
+      rmSync(aliasDir, { recursive: true, force: true });
     }
   });
 
