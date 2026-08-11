@@ -146,12 +146,17 @@ describe('buildSessionTasksStatus shell tasks', () => {
   it('passes terminal metadata through for tmux-backed tasks', () => {
     const task = serializedShell(
       shellTask({
-        terminal: { socket: 'qwen-serve', tmuxSession: 'qsh-bg_x' },
+        terminal: {
+          socket: 'qwen-serve',
+          tmuxSession: 'qsh-bg_x',
+          paneId: '%1',
+        },
       }),
     );
     expect(task.terminal).toEqual({
       socket: 'qwen-serve',
       tmuxSession: 'qsh-bg_x',
+      paneId: '%1',
     });
   });
 

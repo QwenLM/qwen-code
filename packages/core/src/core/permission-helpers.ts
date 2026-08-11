@@ -43,12 +43,21 @@ export function buildPermissionCheckContext(
   // Monitor command normalization is handled by
   // PermissionManager.normalizePermissionContext — single point of truth.
   const command = rawCommand;
-  const cwd =
+  // tmux carries its working directory under `cwd`, not `directory`;
+  // relative-path rules (including virtual shell ops) must resolve against
+  // whichever key the call uses.
+  const rawDirectory =
     typeof toolParams['directory'] === 'string'
-      ? path.isAbsolute(toolParams['directory'])
-        ? toolParams['directory']
-        : path.resolve(targetDir, toolParams['directory'])
-      : undefined;
+      ? toolParams['directory']
+      : typeof toolParams['cwd'] === 'string'
+        ? toolParams['cwd']
+        : undefined;
+  const cwd =
+    rawDirectory === undefined
+      ? undefined
+      : path.isAbsolute(rawDirectory)
+        ? rawDirectory
+        : path.resolve(targetDir, rawDirectory);
 
   // Extract file path — tools use 'file_path', 'notebook_path', or
   // 'path' (LS / grep / glob).

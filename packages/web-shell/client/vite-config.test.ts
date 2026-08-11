@@ -7,7 +7,10 @@
 import { describe, expect, it } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
-import viteConfig, { QUALIFIED_VOICE_STREAM_PROXY } from '../vite.config';
+import viteConfig, {
+  QUALIFIED_VOICE_STREAM_PROXY,
+  QUALIFIED_TERMINAL_PROXY,
+} from '../vite.config';
 
 function loadConfig(): UserConfig {
   const factory = viteConfig as (env: ConfigEnv) => UserConfig;
@@ -39,19 +42,28 @@ describe('Web Shell Voice development proxy', () => {
     ).toBe(false);
   });
 
-  it('proxies the terminal attach WebSocket with upgrade support', () => {
-    const factory = viteConfig as (env: ConfigEnv) => UserConfig;
-    const config = factory({
-      command: 'serve',
-      mode: 'test',
-      isSsrBuild: false,
-      isPreview: false,
-    });
-    const terminal = config.server?.proxy?.['/terminal'];
+  it('proxies only qualified terminal attach upgrades', () => {
+    const config = loadConfig();
+    const terminal = config.server?.proxy?.[QUALIFIED_TERMINAL_PROXY];
+
     expect(terminal).not.toBeTypeOf('string');
     expect(terminal && typeof terminal !== 'string' ? terminal.ws : false).toBe(
       true,
     );
+    // The attach URL carries the session/task query pair.
+    expect(
+      new RegExp(QUALIFIED_TERMINAL_PROXY).test(
+        '/terminal?sessionId=sess-1&taskId=bg_abc123',
+      ),
+    ).toBe(true);
+    expect(new RegExp(QUALIFIED_TERMINAL_PROXY).test('/terminal')).toBe(true);
+    // The client's own `client/terminal/*` source modules must be served by
+    // vite, not proxied to the daemon.
+    expect(
+      new RegExp(QUALIFIED_TERMINAL_PROXY).test(
+        '/terminal/useTerminalSocket.ts',
+      ),
+    ).toBe(false);
   });
 });
 

@@ -111,6 +111,92 @@ describe('plan-mode shell policy', () => {
     ).resolves.toMatchObject({ classification: 'unknown' });
   });
 
+  it('classifies tmux create commands like shell commands', async () => {
+    await expect(
+      evaluate('git status', {
+        toolName: ToolNames.TMUX,
+        invocationParams: { action: 'create', command: 'git status' },
+      }),
+    ).resolves.toMatchObject({ classification: 'read-only' });
+    await expect(
+      evaluate('touch changed.txt', {
+        toolName: ToolNames.TMUX,
+        invocationParams: { action: 'create', command: 'touch changed.txt' },
+      }),
+    ).resolves.toMatchObject({ classification: 'write' });
+  });
+
+  it('classifies tmux actions without a command by their side effects', async () => {
+    for (const action of ['capture', 'list'] as const) {
+      await expect(
+        evaluate('', {
+          toolName: ToolNames.TMUX,
+          invocationParams: { action, session_id: 'bg_1' },
+        }),
+      ).resolves.toMatchObject({ classification: 'read-only' });
+    }
+    // send types arbitrary keys into a live terminal; kill stops one —
+    // both mutate, so plan mode blocks them like writes.
+    for (const action of ['send', 'kill'] as const) {
+      await expect(
+        evaluate('', {
+          toolName: ToolNames.TMUX,
+          invocationParams: { action, session_id: 'bg_1', keys: 'x' },
+        }),
+      ).resolves.toMatchObject({ classification: 'write' });
+    }
+  });
+
+  it('binds the tmux cwd parameter for plan-shell validation', async () => {
+    let targetDir = '/workspace/one';
+    const config = createConfig({ targetDir: () => targetDir });
+    const signal = new AbortController().signal;
+
+    // Explicit cwd: ambient targetDir changes must not invalidate it.
+    const fixedArgs = {
+      action: 'create',
+      command: 'git status',
+      cwd: '/workspace/fixed',
+    };
+    const fixedDecision = await evaluate('git status', {
+      config,
+      toolName: ToolNames.TMUX,
+      requestArgs: fixedArgs,
+      invocationParams: fixedArgs,
+    });
+    targetDir = '/workspace/two';
+    await expect(
+      validatePlanModeShellContext({
+        config,
+        decision: fixedDecision,
+        requestArgs: fixedArgs,
+        invocationParams: fixedArgs,
+        signal,
+      }),
+    ).resolves.toBeUndefined();
+
+    // Ambient cwd: a targetDir change does invalidate it, proving the
+    // ambient working directory was bound.
+    targetDir = '/workspace/one';
+    const ambientArgs = { action: 'create', command: "python -c 'print(1)'" };
+    const ambientDecision = await evaluate(ambientArgs.command, {
+      config,
+      toolName: ToolNames.TMUX,
+      requestArgs: ambientArgs,
+      invocationParams: ambientArgs,
+    });
+    targetDir = '/workspace/two';
+    await expect(
+      validatePlanModeShellContext({
+        config,
+        decision: ambientDecision,
+        requestArgs: ambientArgs,
+        invocationParams: ambientArgs,
+        signal,
+      }),
+    ).resolves.toBe(STALE_MESSAGE);
+  });
+
   it('does not apply outside Plan mode or to non-shell tools', async () => {
     await expect(
       evaluate('git status', {

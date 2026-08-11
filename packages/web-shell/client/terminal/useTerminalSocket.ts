@@ -110,7 +110,18 @@ export function useTerminalSocket({
   }, []);
 
   useEffect(() => {
-    if (!enabled || !baseUrl || !sessionId || !taskId) return undefined;
+    if (!enabled || !baseUrl || !sessionId || !taskId) {
+      // A previously-established connection was disabled (e.g. the session
+      // id cleared on a daemon disconnect); the prior effect's cleanup has
+      // already closed the socket. Surface the closed state instead of
+      // leaving the panel rendering 'ready', and drop buffered keystrokes
+      // plus the target identity so nothing typed while dead is flushed
+      // into whatever terminal connects next.
+      pendingInputRef.current = [];
+      lastTargetRef.current = undefined;
+      applyStatus('closed');
+      return undefined;
+    }
 
     applyStatus('connecting');
     setErrorMessage(undefined);

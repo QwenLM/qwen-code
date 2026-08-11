@@ -30,6 +30,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { extractCommandRules } from '../utils/shellAstParser.js';
 import {
   tmuxNewSession,
   tmuxGetFirstPaneId,
@@ -127,14 +128,38 @@ class TmuxToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
+    // "Always allow" must never persist a payload-blind grant for the
+    // actions that execute arbitrary input. create scopes its grant to the
+    // command via the same Bash(...) rules the shell tool persists — the
+    // anti-bypass bridge evaluates them against the create call's command.
+    // send's keystrokes cannot be expressed as a safe reusable rule, so it
+    // offers no persisted grant at all. kill/capture do not run arbitrary
+    // input; `tmux(action:<action>)` parses into a toolParamMatcher
+    // evaluated against the call's params, so those rules actually match.
+    let permissionRules: string[];
+    let hideAlwaysAllow = false;
+    if (this.params.action === 'create') {
+      const command = this.params.command ?? '';
+      try {
+        permissionRules = (await extractCommandRules(command)).map(
+          (rule) => `Bash(${rule})`,
+        );
+      } catch {
+        permissionRules = [`Bash(${command})`];
+      }
+    } else if (this.params.action === 'send') {
+      permissionRules = [];
+      hideAlwaysAllow = true;
+    } else {
+      permissionRules = [`tmux(action:${this.params.action})`];
+    }
     const details: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Tmux',
       command: this.getDescription(),
       rootCommand: 'tmux',
-      // `tmux(action:<action>)` parses into a toolParamMatcher evaluated
-      // against the call's params, so per-action allow rules actually match.
-      permissionRules: [`tmux(action:${this.params.action})`],
+      permissionRules,
+      ...(hideAlwaysAllow ? { hideAlwaysAllow: true } : {}),
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
@@ -286,7 +311,7 @@ class TmuxToolInvocation extends BaseToolInvocation<
       startTime: Date.now(),
       abortController: entryAc,
       outputPath,
-      terminal: { socket: TMUX_SERVER_NAME, tmuxSession },
+      terminal: { socket: TMUX_SERVER_NAME, tmuxSession, paneId },
     });
 
     // Settle the registry entry when the pane's process exits. The probe
@@ -384,9 +409,8 @@ class TmuxToolInvocation extends BaseToolInvocation<
         `Terminal session ${entry.shellId} is ${entry.status}; cannot send keys.`,
       );
     }
-    const { socket, tmuxSession } = entry.terminal!;
+    const { socket, paneId } = entry.terminal!;
     try {
-      const paneId = await tmuxGetFirstPaneId(tmuxSession, socket);
       const keys = this.params.keys ?? '';
       if (this.params.literal && this.params.enter) {
         // send-keys -l would print "Enter" literally; send it separately.
@@ -417,9 +441,8 @@ class TmuxToolInvocation extends BaseToolInvocation<
     const found = this.findTerminalTask(this.params.session_id!);
     if ('error' in found) return found.error;
     const { entry } = found;
-    const { socket, tmuxSession } = entry.terminal!;
+    const { socket, paneId } = entry.terminal!;
     try {
-      const paneId = await tmuxGetFirstPaneId(tmuxSession, socket);
       const lines = Math.min(this.params.lines ?? 0, MAX_CAPTURE_LINES);
       const content = await tmuxCapturePaneContent(paneId, socket, {
         includeEscapeCodes: false,

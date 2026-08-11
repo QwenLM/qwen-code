@@ -8469,7 +8469,8 @@ export class Session implements SessionContext {
           const isPlanShellCall =
             isPlanMode &&
             (policyToolName === ToolNames.SHELL ||
-              policyToolName === ToolNames.MONITOR);
+              policyToolName === ToolNames.MONITOR ||
+              policyToolName === ToolNames.TMUX);
 
           if (finalPermission === 'deny') {
             return earlyErrorResponse(
@@ -8485,14 +8486,19 @@ export class Session implements SessionContext {
 
           let planShellAmbientWorkingDirectory: string | undefined;
           if (isPlanShellCall) {
-            const directory = toolParams['directory'];
+            // tmux carries its working directory under `cwd`, not
+            // `directory`; inject the ambient value under the key the
+            // tool actually reads.
+            const directoryKey =
+              policyToolName === ToolNames.TMUX ? 'cwd' : 'directory';
+            const directory = toolParams[directoryKey];
             planShellAmbientWorkingDirectory =
               typeof directory === 'string' && directory.length > 0
                 ? undefined
                 : this.config.getTargetDir();
             invocation.params = {
               ...structuredClone(invocation.params),
-              directory:
+              [directoryKey]:
                 typeof directory === 'string' && directory.length > 0
                   ? directory
                   : planShellAmbientWorkingDirectory,

@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { StrictMode, act } from 'react';
+import { StrictMode, act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toTerminalWebSocketUrl, useTerminalSocket } from './useTerminalSocket';
@@ -385,6 +385,51 @@ describe('useTerminalSocket', () => {
     );
     expect(binary).toHaveLength(0);
     expect(captured.current).not.toBeNull();
+  });
+
+  it('closes and drops buffered input when the connection is disabled', async () => {
+    const captured: { current: HookResult | null } = { current: null };
+    let setSessionId!: (id: string) => void;
+    function Probe() {
+      const [sessionId, updateSessionId] = useState('sess-1');
+      setSessionId = updateSessionId;
+      captured.current = useTerminalSocket({
+        baseUrl: 'http://127.0.0.1:7899',
+        sessionId,
+        taskId: 'bg_abc123',
+        token: 'test-token',
+        onOutput: () => {},
+      });
+      return null;
+    }
+    container = document.createElement('div');
+    root = createRoot(container);
+    act(() => {
+      root!.render(<Probe />);
+    });
+    await flush();
+    const ws = FakeWebSocket.instances[0]!;
+    act(() => ws.emitMessage('{"type":"ready"}'));
+    expect(captured.current!.status).toBe('ready');
+
+    // The owning session id clears (daemon disconnect) while the panel
+    // stays mounted: the dead connection must surface as closed.
+    act(() => setSessionId(''));
+    await flush();
+    expect(captured.current!.status).toBe('closed');
+    expect(ws.readyState).toBe(3);
+
+    // Keystrokes typed while dead are buffered; when the same terminal
+    // reconnects they must NOT be flushed into the fresh socket.
+    act(() => captured.current!.sendInput('stale'));
+    act(() => setSessionId('sess-1'));
+    await flush();
+    const next = FakeWebSocket.instances.at(-1)!;
+    act(() => next.emitMessage('{"type":"ready"}'));
+    const binary = next.sent.filter((d): d is Uint8Array =>
+      ArrayBuffer.isView(d),
+    );
+    expect(binary).toHaveLength(0);
   });
 
   it('survives a socket that throws while sending hello', async () => {

@@ -104,11 +104,17 @@ function appendUnique(values: string[] | undefined, value: string): string[] {
   return values?.includes(value) ? values : [...(values ?? []), value];
 }
 
+function directoryKeyFor(toolName: string): 'cwd' | 'directory' {
+  // tmux carries its working directory under `cwd`, not `directory`.
+  return toolName === ToolNames.TMUX ? 'cwd' : 'directory';
+}
+
 function effectiveWorkingDirectory(
   config: Config,
   invocationParams: Record<string, unknown>,
+  toolName: string,
 ): string {
-  const directory = invocationParams['directory'];
+  const directory = invocationParams[directoryKeyFor(toolName)];
   return typeof directory === 'string' && directory.length > 0
     ? directory
     : config.getTargetDir();
@@ -126,7 +132,8 @@ export async function evaluatePlanModeShellPolicy(input: {
 }): Promise<PlanModeShellDecision> {
   if (
     input.toolName !== ToolNames.SHELL &&
-    input.toolName !== ToolNames.MONITOR
+    input.toolName !== ToolNames.MONITOR &&
+    input.toolName !== ToolNames.TMUX
   ) {
     return { classification: 'not-applicable' };
   }
@@ -146,9 +153,11 @@ export async function evaluatePlanModeShellPolicy(input: {
   permissionContext.cwd = effectiveWorkingDirectory(
     input.config,
     input.invocationParams,
+    input.toolName,
   );
   permissionContext.toolParams = clone(input.invocationParams);
-  const invocationDirectory = input.invocationParams['directory'];
+  const invocationDirectory =
+    input.invocationParams[directoryKeyFor(input.toolName)];
   const ambientWorkingDirectory =
     input.ambientWorkingDirectory ??
     (typeof invocationDirectory !== 'string' || invocationDirectory.length === 0
@@ -163,20 +172,31 @@ export async function evaluatePlanModeShellPolicy(input: {
   };
 
   let classification: ShellCommandSafety;
-  try {
-    classification = await raceWithAbort(
-      () =>
-        permissionContext.cwd
-          ? classifyShellCommandSafetyInDirectory(
-              safetyCommand,
-              permissionContext.cwd,
-            )
-          : classifyShellCommandSafety(safetyCommand),
-      input.signal,
-    );
-  } catch (error) {
-    if (input.signal.aborted) throw error;
-    classification = 'unknown';
+  const tmuxAction =
+    input.toolName === ToolNames.TMUX
+      ? input.invocationParams['action']
+      : undefined;
+  if (typeof tmuxAction === 'string' && tmuxAction !== 'create') {
+    // Only create carries a shell command. capture/list are read-only;
+    // send/kill mutate the terminal, which plan mode blocks like a write.
+    classification =
+      tmuxAction === 'capture' || tmuxAction === 'list' ? 'read-only' : 'write';
+  } else {
+    try {
+      classification = await raceWithAbort(
+        () =>
+          permissionContext.cwd
+            ? classifyShellCommandSafetyInDirectory(
+                safetyCommand,
+                permissionContext.cwd,
+              )
+            : classifyShellCommandSafety(safetyCommand),
+        input.signal,
+      );
+    } catch (error) {
+      if (input.signal.aborted) throw error;
+      classification = 'unknown';
+    }
   }
 
   return {
@@ -209,8 +229,11 @@ export async function validatePlanModeShellContext(input: {
     (decision.snapshot.ambientWorkingDirectory === undefined ||
       input.config.getTargetDir() ===
         decision.snapshot.ambientWorkingDirectory) &&
-    effectiveWorkingDirectory(input.config, input.invocationParams) ===
-      decision.snapshot.permissionContext.cwd &&
+    effectiveWorkingDirectory(
+      input.config,
+      input.invocationParams,
+      decision.snapshot.permissionContext.toolName,
+    ) === decision.snapshot.permissionContext.cwd &&
     isDeepStrictEqual(input.requestArgs, decision.snapshot.requestArgs) &&
     isDeepStrictEqual(
       input.invocationParams,

@@ -43,6 +43,24 @@ describe('buildPermissionCheckContext', () => {
     });
   });
 
+  it('uses the tmux cwd parameter as the permission cwd', () => {
+    expect(
+      buildPermissionCheckContext(
+        'tmux',
+        {
+          action: 'create',
+          command: 'python3 app.py',
+          cwd: '/work/repo',
+        },
+        '/project',
+      ),
+    ).toMatchObject({
+      toolName: 'tmux',
+      command: 'python3 app.py',
+      cwd: '/work/repo',
+    });
+  });
+
   it('returns raw monitor command — normalization is PM responsibility', () => {
     expect(
       buildPermissionCheckContext(

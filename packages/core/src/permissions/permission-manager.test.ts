@@ -1813,6 +1813,115 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('registers explicit deny rules for compound tmux commands', async () => {
+      // hasRelevantRules must split compound commands for tmux too —
+      // otherwise an explicit deny on one segment never registers as
+      // relevant and is silently demoted from deny to ask.
+      expect(
+        pm.hasRelevantRules({
+          toolName: 'tmux',
+          command: 'echo hi && rm -rf x',
+          toolParams: { action: 'create', command: 'echo hi && rm -rf x' },
+        }),
+      ).toBe(true);
+      expect(
+        await pm.evaluate({
+          toolName: 'tmux',
+          command: 'echo hi && rm -rf x',
+          toolParams: { action: 'create', command: 'echo hi && rm -rf x' },
+        }),
+      ).toBe('deny');
+    });
+
+    it('projects Write deny rules onto tmux create payloads', async () => {
+      // The virtual-op layer that maps shell writes onto Write/Edit rules
+      // must cover tmux create too, or deny rules are bypassable by
+      // running the same payload in a terminal.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['WriteFileTool(.env)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'tmux',
+          command: 'echo secret > .env',
+          cwd: '/repo',
+          toolParams: { action: 'create', command: 'echo secret > .env' },
+        }),
+      ).toBe('deny');
+      // Same payload, same verdict as the shell tool.
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo secret > .env',
+          cwd: '/repo',
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves tmux virtual ops against the create cwd, not the CLI cwd', async () => {
+      // `/sub/.env` anchors under projectRoot → /project/sub/.env. The
+      // relative write only hits it when the create's own cwd is honored;
+      // falling back to the CLI cwd (/project) would resolve the write to
+      // /project/.env and silently bypass the deny.
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['WriteFileTool(/sub/.env)'],
+          cwd: '/project',
+          projectRoot: '/project',
+        }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'tmux',
+          command: 'echo secret > .env',
+          cwd: '/project/sub',
+          toolParams: {
+            action: 'create',
+            command: 'echo secret > .env',
+            cwd: '/project/sub',
+          },
+        }),
+      ).toBe('deny');
+      expect(
+        await pm2.evaluate({
+          toolName: 'tmux',
+          command: 'echo secret > .env',
+          cwd: '/project',
+          toolParams: {
+            action: 'create',
+            command: 'echo secret > .env',
+            cwd: '/project',
+          },
+        }),
+      ).toBe('default');
+    });
+
+    it('sees Write deny rules as relevant for tmux even without allow rules', () => {
+      const pm2 = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['WriteFileTool(.env)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm2.initialize();
+      expect(
+        pm2.hasRelevantRules({
+          toolName: 'tmux',
+          command: 'echo secret > .env',
+          cwd: '/repo',
+          toolParams: { action: 'create', command: 'echo secret > .env' },
+        }),
+      ).toBe(true);
+    });
+
     it('resolves default to allow for readonly commands, ask for others', async () => {
       // 'echo' is a readonly command, so it resolves to 'allow'
       expect(
@@ -3430,6 +3539,34 @@ describe('PermissionManager — strip/restore for AUTO mode', () => {
       await pm.evaluate({
         toolName: 'run_shell_command',
         command: 'rm -rf /',
+      }),
+    ).not.toBe('allow');
+  });
+
+  it('strips bare tool-level tmux allow', async () => {
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['tmux'] }),
+    );
+    pm.initialize();
+
+    // Before strip: any tmux payload is auto-allowed.
+    expect(
+      await pm.evaluate({
+        toolName: 'tmux',
+        command: 'rm -rf ~',
+        toolParams: { action: 'create', command: 'rm -rf ~' },
+      }),
+    ).toBe('allow');
+
+    pm.stripDangerousRulesForAutoMode();
+
+    // After strip: the broad grant no longer short-circuits the AUTO
+    // classifier.
+    expect(
+      await pm.evaluate({
+        toolName: 'tmux',
+        command: 'rm -rf ~',
+        toolParams: { action: 'create', command: 'rm -rf ~' },
       }),
     ).not.toBe('allow');
   });

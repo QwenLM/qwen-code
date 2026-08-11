@@ -53,26 +53,35 @@ New tool `tmux` in `packages/core/src/tools/tmux.ts`, following the
 `Kind.Execute`, deferred with a `searchHint`). One tool with an `action`
 parameter keeps the declaration count at one:
 
-| Action    | Params (beyond `action`)                  | Permission | Behavior                                                                                          |
-| --------- | ----------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------- |
-| `create`  | `command`, `cwd?`, `cols?`, `rows?`       | ask        | Creates a detached tmux session on the dedicated socket running `command`; registers a shell task |
-| `send`    | `sessionId`, `keys`, `enter?`, `literal?` | ask        | `tmux send-keys` to the session's pane                                                            |
-| `capture` | `sessionId`, `lines?`                     | allow      | `capture-pane -p` (no escape codes; `-S -<lines>` capped at 2000); plain text to the model        |
-| `list`    | —                                         | allow      | Lists live tmux sessions owned by this registry                                                   |
-| `kill`    | `sessionId`                               | ask        | Kills the tmux session; settles the task as cancelled                                             |
+| Action    | Params (beyond `action`)                   | Permission | Behavior                                                                                          |
+| --------- | ------------------------------------------ | ---------- | ------------------------------------------------------------------------------------------------- |
+| `create`  | `command`, `cwd?`, `cols?`, `rows?`        | ask        | Creates a detached tmux session on the dedicated socket running `command`; registers a shell task |
+| `send`    | `session_id`, `keys`, `enter?`, `literal?` | ask        | `tmux send-keys` to the session's pane                                                            |
+| `capture` | `session_id`, `lines?`                     | allow      | `capture-pane -p` (no escape codes; `-S -<lines>` capped at 2000); plain text to the model        |
+| `list`    | —                                          | allow      | Lists live tmux sessions owned by this registry                                                   |
+| `kill`    | `session_id`                               | ask        | Kills the tmux session; settles the task as cancelled                                             |
 
 Registration touch points (the standard recipe): `ToolNames` /
 `ToolDisplayNames` in `tool-names.ts`, a `registerLazy` entry in
 `Config.createToolRegistry` (config.ts), and `PermissionManager.CORE_TOOLS`
 (permission-manager.ts). `getConfirmationDetails()` returns `type: 'exec'`
-details naming the wrapped tmux command and carries per-action permission
-rules — `Tmux(create)`, `Tmux(send)`, `Tmux(kill)` — so the existing
-"always allow" confirmation flow persists a rule for that action and a long
-drive loop does not re-prompt on every `send`. No session-scoped grant
+details naming the wrapped tmux command and carries payload-scoped
+permission rules so the existing "always allow" confirmation flow persists a
+grant without re-prompting on every call — but never a payload-blind one for
+the actions that execute arbitrary input. `create` persists command-scoped
+`Bash(<command>)` rules (the same shape `shell` persists, evaluated against
+the create command by the anti-bypass bridge); `send` persists nothing (its
+keystrokes cannot be expressed as a safe reusable rule, so it offers no
+"always allow"); `kill` and `capture` persist `tmux(action:<action>)`, which
+parses to a param-matcher on the call's `action`. No session-scoped grant
 mechanism is added. `toAutoClassifierInput()` is overridden so AUTO mode
-sees the action and command. The tool is _not_ added to the plan-mode shell
-whitelist in `coreToolScheduler.ts` — creating or driving a terminal is a
-host mutation and stays gated in plan mode.
+sees the action and command. The tool participates in the plan-mode shell
+policy (`isPlanShellCall` in `coreToolScheduler.ts` and the ACP Session): a
+`create` command is AST-classified like a shell command (state-modifying
+payloads blocked, unknown payloads need one-off approval), `send`/`kill` are
+treated as mutations and blocked, and `capture`/`list` are read-only — so
+creating or driving a terminal stays gated in plan mode even with a
+persisted allow rule.
 
 Availability guards: the tool is always registered (sandbox state is a
 deployment property, not a registration-time one) and fails fast at
@@ -98,8 +107,11 @@ active; `verifyTmux()` (existing, requires tmux ≥ 3.0) runs on `create`.
   and the Web Shell output viewer work as-is. Pipe output carries raw ANSI;
   ANSI stripping moves to read time (`readOutputTail`).
 - `ShellTask` gains one optional field:
-  `terminal?: { socket: string; tmuxSession: string }`. This is the only
-  data-model change.
+  `terminal?: { socket: string; tmuxSession: string; paneId: string }`.
+  `paneId` is the pane the create action spawned the command in; `send` and
+  `capture` target it directly rather than resolving by session name (which
+  would follow the active window once a human attached via the Web Shell
+  switches windows). This is the only data-model change.
 - Pane exit detection polls `tmuxListPanes` (the `remain-on-exit` +
   `#{pane_dead_status}` pattern from `TmuxBackend.pollPaneStatus`) and
   settles the registry entry `completed`/`failed`.

@@ -197,6 +197,13 @@ export interface ShellTask extends TaskBase {
     socket: string;
     /** tmux session name on that socket. */
     tmuxSession: string;
+    /**
+     * The pane the create action spawned the command in. send/capture must
+     * target this pane directly — a session target resolves to the ACTIVE
+     * window's panes, which changes when a human attached via the Web Shell
+     * switches windows.
+     */
+    paneId: string;
   };
   /**
    * @deprecated Use `outputFile`. Kept as a synonym during the back-compat

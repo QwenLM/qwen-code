@@ -2648,7 +2648,8 @@ export class CoreToolScheduler {
           const isPlanShellCall =
             isPlanMode &&
             (canonicalName === ToolNames.SHELL ||
-              canonicalName === ToolNames.MONITOR);
+              canonicalName === ToolNames.MONITOR ||
+              canonicalName === ToolNames.TMUX);
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
           const isEnterPlanModeTool =
             canonicalName === ToolNames.ENTER_PLAN_MODE;
@@ -2738,14 +2739,19 @@ export class CoreToolScheduler {
 
           let planShellAmbientWorkingDirectory: string | undefined;
           if (isPlanShellCall) {
-            const directory = toolParams['directory'];
+            // tmux carries its working directory under `cwd`, not
+            // `directory`; inject the ambient value under the key the
+            // tool actually reads.
+            const directoryKey =
+              canonicalName === ToolNames.TMUX ? 'cwd' : 'directory';
+            const directory = toolParams[directoryKey];
             planShellAmbientWorkingDirectory =
               typeof directory === 'string' && directory.length > 0
                 ? undefined
                 : this.config.getTargetDir();
             invocation.params = {
               ...structuredClone(invocation.params),
-              directory:
+              [directoryKey]:
                 typeof directory === 'string' && directory.length > 0
                   ? directory
                   : planShellAmbientWorkingDirectory,

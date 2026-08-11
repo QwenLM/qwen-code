@@ -46,6 +46,12 @@ const daemonProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 
+// The attach URL is `/terminal?sessionId=…&taskId=…`; a bare `/terminal`
+// prefix would also match this PR's own `client/terminal/*` source modules
+// (e.g. `/terminal/useTerminalSocket.ts`) and proxy them to the daemon,
+// breaking the terminal tab's lazy import chain in dev.
+export const QUALIFIED_TERMINAL_PROXY = '^/terminal(?:\\?.*)?$';
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
@@ -120,7 +126,7 @@ export default defineConfig(({ command }) => ({
       // Live terminal attach is a WebSocket too (`/terminal`, the daemon
       // extra-route); without this entry the dev proxy swallows the upgrade
       // and the terminal panel hangs on 'Connecting…'.
-      '/terminal': { ...daemonProxy, ws: true },
+      [QUALIFIED_TERMINAL_PROXY]: { ...daemonProxy, ws: true },
     },
   },
 }));

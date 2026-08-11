@@ -126,7 +126,11 @@ const TERMINAL_TASK = {
   kind: 'shell',
   id: 'bg_abc123',
   status: 'running',
-  terminal: { socket: 'qwen-serve', tmuxSession: 'qsh-bg_abc123' },
+  terminal: {
+    socket: 'qwen-serve',
+    tmuxSession: 'qsh-bg_abc123',
+    paneId: '%1',
+  },
 };
 
 describe('createTerminalWsConnectionHandler', () => {

@@ -281,6 +281,26 @@ describe('isDangerousBashRule', () => {
         }),
       ).toBe(false);
     });
+
+    it('flags broad tmux allow rules the same way', () => {
+      // tmux create runs an arbitrary shell command; a bare `tmux` allow
+      // rule would auto-execute any payload past the AUTO classifier.
+      expect(
+        isDangerousBashRule({
+          raw: 'tmux',
+          toolName: ToolNames.TMUX,
+        }),
+      ).toBe(true);
+      // The per-action literal rules the tmux tool persists for
+      // non-executing actions are not interpreter grants.
+      expect(
+        isDangerousBashRule({
+          raw: 'tmux(action:kill)',
+          toolName: ToolNames.TMUX,
+          specifier: 'action:kill',
+        }),
+      ).toBe(false);
+    });
   });
 });
 

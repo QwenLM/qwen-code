@@ -35,10 +35,16 @@ describe('TmuxTool validation & permissions', () => {
   let registry: BackgroundShellRegistry;
   let mockConfig: Config;
   let tool: TmuxTool;
+  // validateToolParamValues rejects every action on win32 before the
+  // per-action checks run, so pin a non-Windows platform for the suite —
+  // the behavior tested here is platform-independent and must run on the
+  // Windows CI job too.
+  let platformSpy: ReturnType<typeof vi.spyOn>;
 
   const buildInvocation = (params: TmuxToolParams) => tool.build(params);
 
   beforeEach(() => {
+    platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     vi.clearAllMocks();
     registry = new BackgroundShellRegistry();
     mockConfig = {
@@ -54,6 +60,10 @@ describe('TmuxTool validation & permissions', () => {
       },
     } as unknown as Config;
     tool = new TmuxTool(mockConfig);
+  });
+
+  afterEach(() => {
+    platformSpy.mockRestore();
   });
 
   describe('validation', () => {
@@ -108,16 +118,10 @@ describe('TmuxTool validation & permissions', () => {
     });
 
     it('rejects create on Windows', () => {
-      const platform = vi
-        .spyOn(process, 'platform', 'get')
-        .mockReturnValue('win32');
-      try {
-        expect(() => tool.build({ action: 'create', command: 'x' })).toThrow(
-          /Windows/,
-        );
-      } finally {
-        platform.mockRestore();
-      }
+      platformSpy.mockReturnValue('win32');
+      expect(() => tool.build({ action: 'create', command: 'x' })).toThrow(
+        /Windows/,
+      );
     });
   });
 
@@ -144,8 +148,25 @@ describe('TmuxTool validation & permissions', () => {
       }
     });
 
-    it('exposes per-action permission rules in confirmation details', async () => {
+    it('scopes the create grant to the command via Bash rules', async () => {
       const invocation = buildInvocation({ action: 'create', command: 'x' });
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      expect(details.type).toBe('exec');
+      if (details.type === 'exec') {
+        // The anti-bypass bridge evaluates Bash(...) rules against the
+        // create call's command — a grant for one command must not
+        // auto-approve every later payload.
+        expect(details.permissionRules).toEqual(['Bash(x)']);
+      }
+    });
+
+    it('keeps per-action rules for the non-executing actions', async () => {
+      const invocation = buildInvocation({
+        action: 'kill',
+        session_id: 'bg_1',
+      });
       const details = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
@@ -153,7 +174,25 @@ describe('TmuxTool validation & permissions', () => {
       if (details.type === 'exec') {
         // key:value param-matcher form — parses to a matcher on the call's
         // `action` param, so persisted allow rules actually match.
-        expect(details.permissionRules).toEqual(['tmux(action:create)']);
+        expect(details.permissionRules).toEqual(['tmux(action:kill)']);
+      }
+    });
+
+    it('offers no persisted grant for send', async () => {
+      const invocation = buildInvocation({
+        action: 'send',
+        session_id: 'bg_1',
+        keys: 'x',
+      });
+      const details = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      expect(details.type).toBe('exec');
+      if (details.type === 'exec') {
+        // Keystrokes are arbitrary input; a payload-blind grant would
+        // auto-approve anything typed into the terminal.
+        expect(details.permissionRules).toEqual([]);
+        expect(details.hideAlwaysAllow).toBe(true);
       }
     });
   });
@@ -315,6 +354,7 @@ describe.skipIf(process.platform === 'win32')('TmuxTool', () => {
       expect(entry!.terminal).toEqual({
         socket: TMUX_SERVER_NAME,
         tmuxSession: `qsh-${sessionId}`,
+        paneId: '%1',
       });
       // Output file materialized next to the status sidecar
       expect(fs.existsSync(entry!.outputFile)).toBe(true);
@@ -628,7 +668,7 @@ describe.skipIf(process.platform === 'win32')('TmuxTool', () => {
 
     it('reports a vanished tmux session as a clean error', async () => {
       const { sessionId } = await createSession();
-      mockTmux.tmuxGetFirstPaneId.mockRejectedValue(
+      mockTmux.tmuxCapturePaneContent.mockRejectedValue(
         new Error("can't find session"),
       );
       const invocation = buildInvocation({

@@ -115,10 +115,13 @@ function leadingCommandToken(content: string): string {
  * shell-command runner and should be treated the same as `shell` for the
  * AUTO mode strip — a broad `Monitor(*)` or `Monitor(python *)` allow rule
  * would bypass the classifier just like its `Bash(...)` counterpart.
+ * `tmux` create runs an arbitrary shell command, so a broad bare `tmux`
+ * allow rule would bypass the classifier the same way.
  */
 const SHELL_LIKE_TOOLS: readonly string[] = Object.freeze([
   ToolNames.SHELL,
   ToolNames.MONITOR,
+  ToolNames.TMUX,
 ]);
 
 /**

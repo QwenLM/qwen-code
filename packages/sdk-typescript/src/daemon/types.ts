@@ -2317,6 +2317,8 @@ export interface DaemonSessionShellTaskStatus {
     socket: string;
     /** tmux session name on that socket. */
     tmuxSession: string;
+    /** Pane the terminal's command runs in. */
+    paneId?: string;
   };
 }
 

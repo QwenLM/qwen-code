@@ -39,6 +39,18 @@ import type {
 const debugLogger = createDebugLogger('PERMISSIONS');
 
 /**
+ * Tools whose current invocation executes a shell command payload and
+ * therefore receive shell-style rule treatment (virtual-op projection and
+ * compound-command recursion). tmux qualifies alongside SHELL_TOOL_NAMES
+ * because its create action runs an arbitrary command (matched via
+ * ctx.command); it cannot join SHELL_TOOL_NAMES itself — its specifier kind
+ * must stay `literal` for `tmux(action:…)` rules to parse.
+ */
+function executesShellCommand(toolName: string): boolean {
+  return SHELL_TOOL_NAMES.has(toolName) || toolName === 'tmux';
+}
+
+/**
  * Numeric priority for each PermissionDecision.
  * Higher number = more restrictive. Used to combine decisions by taking
  * the most restrictive result across base rules + virtual shell operations.
@@ -204,7 +216,7 @@ export class PermissionManager {
     // 'default' here means "shell semantics have no opinion" and we still
     // need to consult Bash rules below.
     let virtualDecision: PermissionDecision = 'default';
-    if (command !== undefined && SHELL_TOOL_NAMES.has(toolName)) {
+    if (command !== undefined && executesShellCommand(toolName)) {
       const pathCtx: PathMatchContext | undefined =
         this.config.getProjectRoot && this.config.getCwd
           ? {
@@ -342,7 +354,7 @@ export class PermissionManager {
     // must never downgrade an explicit 'allow' decision from a Bash rule.
     // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
     // should return 'allow', not be downgraded to 'default'.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    if (executesShellCommand(toolName) && command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
       // Use the compound-aware extractor here too so a single
       // `evaluateSingle` call on a segment like
@@ -766,7 +778,7 @@ export class PermissionManager {
     // wrapper unwrapping see the FULL original command. Required so
     // rules like `Write(.qwen/settings.json)` are recognised as relevant
     // for `cd .qwen && bash -lc 'echo > settings.json'`.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    if (executesShellCommand(toolName) && command !== undefined) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
@@ -807,7 +819,7 @@ export class PermissionManager {
       }
     }
 
-    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
+    if (executesShellCommand(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
@@ -869,7 +881,7 @@ export class PermissionManager {
     // ── Cross-command virtual-op pass (shell tools only) ─────────────────
     // See `hasRelevantRules` for the rationale; same cd-tracking and
     // wrapper-unwrapping requirement applies to ask rules.
-    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+    if (executesShellCommand(toolName) && command !== undefined) {
       const cwdForOps = pathCtx?.cwd ?? process.cwd();
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
@@ -905,7 +917,7 @@ export class PermissionManager {
       }
     }
 
-    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
+    if (executesShellCommand(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
