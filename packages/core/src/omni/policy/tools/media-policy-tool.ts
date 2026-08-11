@@ -223,6 +223,17 @@ export abstract class BaseMediaPolicyTool<
   protected override validateToolParamValues(params: TParams): string | null {
     return validateMediaPolicyIoParams(params);
   }
+
+  /**
+   * The other half of the Write/Edit permission posture these tools adopt:
+   * without this override, the AUTO-mode classifier sees the empty-string
+   * sentinel (`Arguments: {}`) and its path-based block rules can never
+   * fire on a model-origin call. Project exactly the fields those rules
+   * key on — the two filesystem paths carry no secrets.
+   */
+  override toAutoClassifierInput(params: TParams): Record<string, unknown> {
+    return { inputPath: params.inputPath, outputDir: params.outputDir };
+  }
 }
 
 /** Shared structural validation for the io params (schema has already
