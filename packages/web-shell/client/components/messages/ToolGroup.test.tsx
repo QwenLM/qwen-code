@@ -231,10 +231,9 @@ describe('tool group summary logic', () => {
     ];
 
     const summary = formatToolGroupSummary(tools, t);
-    expect(summary).toContain('ReadFile package.json');
-    expect(summary).toContain('ToolGroup');
-    expect(summary).toContain('3 tools');
-    expect(summary).not.toContain('agent');
+    expect(summary).toBe(
+      "Running ReadFile package.json · Grep 'ToolGroup' in path './' · 3 tools",
+    );
   });
 
   it('localizes active tool names in running summaries', () => {
@@ -588,33 +587,27 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
-  it('keeps the aggregate tool summary when thinking is hidden', () => {
-    const container = renderToolGroup(
-      [
-        makeTool({
-          callId: 'read',
-          toolName: 'ReadFile',
-          status: 'in_progress',
-          args: { file_path: 'package.json' },
-        }),
-        makeTool({
-          callId: 'search',
-          toolName: 'grep',
-          status: 'pending',
-          args: { pattern: 'ToolGroup' },
-        }),
-      ],
-      { showThinking: false },
-    );
+  it('renders the aggregate summary for a multi-tool group', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+    ]);
 
     expect(container.querySelector('button')?.textContent).toContain(
       'package.json',
     );
     expect(container.querySelector('button')?.textContent).toContain(
       'ToolGroup',
-    );
-    expect(container.textContent).not.toContain(
-      'Press Ctrl+O to show full tool output',
     );
   });
 

@@ -3325,6 +3325,38 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
+  it('stamps serverUpdatedAt on a thought finalized by a tool update', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100_000 }),
+      [
+        {
+          type: 'thought.text.delta',
+          text: 'thinking',
+          serverTimestamp: 1_000,
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'call-1',
+          status: 'in_progress',
+          serverTimestamp: 6_000,
+        },
+      ],
+      { now: 100_000 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'thought',
+      streaming: false,
+      serverTimestamp: 1_000,
+      serverUpdatedAt: 6_000,
+    });
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'tool',
+      serverTimestamp: 6_000,
+      serverUpdatedAt: 6_000,
+    });
+  });
+
   it('uses assistant.done timestamp when the active assistant block has none', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = reduceDaemonTranscriptEvents(

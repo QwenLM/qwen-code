@@ -2117,6 +2117,43 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps the tool server clock when the tool block precedes the permission', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'tc-1', 'completed', 3_000, {
+        toolName: 'run_shell_command',
+        updatedAt: 13_000,
+        serverTimestamp: 5_000,
+        serverUpdatedAt: 15_000,
+      }),
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Allow shell?',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'tc-1',
+          kind: 'execute',
+          toolName: 'run_shell_command',
+          rawInput: { command: 'ls' },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 110_000,
+        createdAt: 110_000,
+        updatedAt: 111_000,
+        resolved: 'selected:proceed_once',
+      },
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [{ callId: 'tc-1', startTime: 5_000, endTime: 15_000 }],
+      },
+    ]);
+  });
+
   it('uses text content as raw output when a tool has no raw output', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('ask-failed', 'ask-call-failed', 'failed', 1, {

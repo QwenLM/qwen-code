@@ -50,6 +50,10 @@ vi.mock('./MessageItem', async () => {
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
           'data-timestamp': message.timestamp,
+          'data-tool-ids':
+            message.role === 'tool_group'
+              ? message.tools.map((tool) => tool.callId).join(',')
+              : undefined,
         },
         sendFailed
           ? React.createElement(
@@ -472,7 +476,9 @@ describe('MessageList — thinking visibility', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
       undefined,
-      { customization: { showThinking: false } },
+      {
+        customization: { showThinking: false, collapseCompletedTurns: false },
+      },
     );
 
     expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
@@ -507,6 +513,11 @@ describe('MessageList — thinking visibility', () => {
         .querySelector('[data-testid="msg-g1"]')
         ?.getAttribute('data-timestamp'),
     ).toBe('1000');
+    expect(
+      container
+        .querySelector('[data-testid="msg-g1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1,call-g2');
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
   });

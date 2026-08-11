@@ -938,7 +938,7 @@ function upsertToolBlock(
   // never points at it. Effective-status keeps the pointer in sync
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
-  clearActiveText(state, event.parentToolCallId);
+  clearActiveText(state, event.parentToolCallId, event);
 }
 
 function discardToolBlock(
@@ -1080,7 +1080,7 @@ function appendShellBlock(
     ...(event.stream ? { stream: event.stream } : {}),
   };
   appendBlock(state, block);
-  clearActiveText(state);
+  clearActiveText(state, undefined, event);
 }
 
 function appendUserShellBlock(
@@ -1125,7 +1125,7 @@ function appendUserShellBlock(
   };
   state.pendingUserShellCommand = undefined;
   appendBlock(state, block);
-  clearActiveText(state);
+  clearActiveText(state, undefined, event);
 }
 
 function upsertPermissionBlock(
@@ -1167,7 +1167,7 @@ function upsertPermissionBlock(
   };
   appendBlock(state, block);
   state.permissionBlockByRequestId[event.requestId] = block.id;
-  clearActiveText(state);
+  clearActiveText(state, undefined, event);
 }
 
 function resolvePermissionBlock(
@@ -1220,7 +1220,7 @@ function resolvePermissionBlock(
   };
   appendBlock(state, block);
   state.permissionBlockByRequestId[event.requestId] = block.id;
-  clearActiveText(state);
+  clearActiveText(state, undefined, event);
 }
 
 function appendStatusBlock(
@@ -1275,7 +1275,7 @@ function appendStatusBlock(
       : {}),
   };
   appendBlock(state, block);
-  if (opts.clearActiveText !== false) clearActiveText(state);
+  if (opts.clearActiveText !== false) clearActiveText(state, undefined, event);
   // Opt-out only protects the streaming assistant/thought block; the user
   // pointer must still reset, otherwise a later mergeable user.text.delta
   // (e.g. a peer client's prompt echo) appends onto the command echo block.
@@ -1299,7 +1299,7 @@ function appendPromptCancelledBlock(
       : {}),
   };
   appendBlock(state, block);
-  clearActiveText(state);
+  clearActiveText(state, undefined, event);
 }
 
 function createTextBlock(
@@ -1623,12 +1623,17 @@ function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {
 function clearActiveText(
   state: DaemonTranscriptState,
   parentToolCallId?: string,
+  event?: DaemonUiEvent,
 ): void {
+  // Terminator events close the streaming block but do not own its content:
+  // stamp the server-time boundary while keeping the block's eventId, which
+  // anchors replay ordering.
+  const stamp = event ? { ...event, eventId: undefined } : undefined;
   if (parentToolCallId) {
-    clearActiveAssistantForParent(state, parentToolCallId);
-    clearActiveThoughtForParent(state, parentToolCallId);
+    clearActiveAssistantForParent(state, parentToolCallId, stamp);
+    clearActiveThoughtForParent(state, parentToolCallId, stamp);
   } else {
-    finishAssistant(state);
+    finishAssistant(state, stamp);
     state.activeUserBlockId = undefined;
   }
 }

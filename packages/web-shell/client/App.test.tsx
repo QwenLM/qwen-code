@@ -4507,7 +4507,9 @@ describe('App thinking visibility', () => {
     });
 
     renderApp();
+    expect(testState.latestShowThinking).toBe(true);
     await toggleThinking();
+    expect(testState.latestShowThinking).toBe(false);
   });
 });
 

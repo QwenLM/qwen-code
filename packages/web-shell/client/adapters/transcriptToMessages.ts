@@ -716,6 +716,9 @@ export function transcriptBlocksToDaemonMessages(
               permissionToolCall.endTime = permBlock.updatedAt;
             }
           }
+          // The existing tool carries its own timing pair (server clock when
+          // available); the placeholder's client-clock createdAt would corrupt it.
+          permissionToolCall.startTime = undefined;
           mergeToolCall(existingPermission, permissionToolCall);
           if (
             isTerminalToolStatus(previousStatus) ||
