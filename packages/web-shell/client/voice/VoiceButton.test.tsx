@@ -696,13 +696,9 @@ describe('VoiceButton', () => {
   it('keeps a quick hold active as a tap', async () => {
     const { root, container } = mount(false);
     await flush();
-    const button = container.querySelector('button');
+    let button = container.querySelector('button');
     if (!button) throw new Error('VoiceButton did not render');
-    pointer(button, 'pointerdown');
-    pointer(button, 'pointerup');
-    click(button);
-
-    expect(mocks.capture.stop).not.toHaveBeenCalled();
+    pointer(button, 'pointerdown', 1, 0, 1_000);
 
     mocks.capture.status = 'recording';
     act(() => {
@@ -714,7 +710,13 @@ describe('VoiceButton', () => {
         />,
       );
     });
-    click(container.querySelector('button')!);
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerup', 1, 0, 1_100);
+    click(button);
+
+    expect(mocks.capture.stop).not.toHaveBeenCalled();
+    click(button);
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 

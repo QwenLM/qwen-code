@@ -3654,9 +3654,11 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({ events });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -3675,6 +3677,7 @@ describe('DaemonSessionProvider', () => {
     expect(events.mock.calls[1]?.[0]).toMatchObject({
       sseConnectReason: 'stream_end',
     });
+    expect(connection?.error).toBeUndefined();
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
