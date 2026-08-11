@@ -1818,6 +1818,38 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // A body run in the current shell inherits the caller's `set -a`, so a
+  // plain assignment there is exported to the following git.
+  it.each([
+    () =>
+      `set -a; f() { GIT_WORK_TREE=${plainOutsidePath}; }; f; git reset --hard`,
+    () => `set -a; GIT_WORK_TREE=${plainOutsidePath}; git reset --hard`,
+    () => `set -a; eval 'GIT_WORK_TREE=${plainOutsidePath}'; git reset --hard`,
+  ])(
+    'carries the caller allexport into a same-shell body %#',
+    async (build) => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('leaves an unexported body assignment alone', async () => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    // No `export`, no `set -a`: bash does not put it in git's environment.
+    for (const command of [
+      `GIT_WORK_TREE=${plainOutsidePath}; git status`,
+      `f() { GIT_WORK_TREE=${plainOutsidePath}; }; f; git status`,
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

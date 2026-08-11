@@ -1780,6 +1780,10 @@ interface EvaluationScope {
   // Names carrying the export attribute, shared with `eval` for the same
   // reason its locals are.
   readonly exportedNames?: Set<string>;
+  // `set -a` state from the enclosing shell — a body run in the current shell
+  // (`eval`, alias, function) inherits it, so a plain assignment there is
+  // exported just as the real shell would.
+  readonly allExport?: boolean;
 }
 
 /**
@@ -1910,7 +1914,7 @@ async function evaluateCommandWithCwd(
   // Assignments this command exported into the environment of everything that
   // runs after them, and whether `set -a` made plain assignments exported.
   const exported: PrefixState = { relocations: [], unresolved: false };
-  let allExport = false;
+  let allExport = scope.allExport ?? false;
   // GIT_* assignments made without `export`. They stay shell-local until a
   // name-only `export GIT_DIR` promotes them into the environment.
   const shellLocals = scope.locals ?? new Map<string, GuardToken>();
@@ -2129,7 +2133,7 @@ async function evaluateCommandWithCwd(
               // and the export attributes; a `sh -c` subprocess inherits only
               // exported ones.
               ...(analysis.propagatesCwd
-                ? { locals: shellLocals, exportedNames }
+                ? { locals: shellLocals, exportedNames, allExport }
                 : {}),
             },
           );
@@ -2369,7 +2373,12 @@ async function evaluateCommandWithCwd(
               entryCwd,
               activeContext(),
               depth + 1,
-              { relink: scope.relink, locals: shellLocals, exportedNames },
+              {
+                relink: scope.relink,
+                locals: shellLocals,
+                exportedNames,
+                allExport,
+              },
             );
             if (nested.denial) {
               return { denial: nested.denial, cwdAfter: trackedCwd };
