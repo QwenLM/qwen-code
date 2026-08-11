@@ -152,9 +152,12 @@ export class SessionRouter {
     if (maxAgeHours !== undefined) {
       const startedAt = this.toStartedAt.get(sessionId);
       // A session with no recorded start (restored from a pre-rotation store)
-      // gets its clock started here rather than rotating immediately.
+      // gets its clock started here rather than rotating immediately. The
+      // stamp is persisted: age-only bounds write nothing per message, so a
+      // memory-only stamp would let restarts re-arm the clock indefinitely.
       if (startedAt === undefined) {
         this.toStartedAt.set(sessionId, Date.now());
+        this.persist();
         return false;
       }
       if (Date.now() - startedAt >= maxAgeHours * 60 * 60 * 1000) return true;

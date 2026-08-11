@@ -1396,6 +1396,49 @@ describe('SessionRouter', () => {
       expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-session');
     });
 
+    it('persists the stamped start of a pre-rotation route across restarts', async () => {
+      vi.useFakeTimers();
+      try {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'routes.json');
+        writePersistedSession(persistPath, 'ch:alice:chat1');
+
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+          recoveryMode: 'lazy',
+        });
+        router.setChannelRotation('ch', { maxAgeHours: 1 });
+        router.restoreRoutes();
+
+        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(
+          'old-session',
+        );
+        const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+        expect(typeof persisted['ch:alice:chat1'].startedAt).toBe('number');
+
+        // The stamp write happens once; later messages stay write-free.
+        mockWriteFileSync.mockClear();
+        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(
+          'old-session',
+        );
+        expect(mockWriteFileSync).not.toHaveBeenCalled();
+
+        // A restart restores the stamped clock instead of re-arming it.
+        vi.advanceTimersByTime(61 * 60 * 1000);
+        const revived = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+          recoveryMode: 'lazy',
+        });
+        revived.setChannelRotation('ch', { maxAgeHours: 1 });
+        revived.restoreRoutes();
+
+        expect(await revived.resolve('ch', 'alice', 'chat1')).not.toBe(
+          'old-session',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('discards the retired session when rotating', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 1 });
