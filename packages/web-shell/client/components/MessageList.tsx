@@ -2733,6 +2733,7 @@ export const MessageList = memo(
     const olderHistoryLoadInFlight = useRef(false);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const didTrackLastUserMsgRef = useRef(false);
@@ -3272,6 +3273,7 @@ export const MessageList = memo(
         const el = getScrollElement();
         if (!el) return;
         if (el.scrollHeight <= el.clientHeight) return;
+        pendingBottomFollowAfterCooldown.current = false;
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
@@ -3284,9 +3286,21 @@ export const MessageList = memo(
         lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
         reportCanScrollToBottom();
         const releaseCooldown = () => {
-          if (scrollCooldownCount.current === gen) {
-            scrollCooldown.current = false;
-          }
+          if (scrollCooldownCount.current !== gen) return;
+          scrollCooldown.current = false;
+          if (!pendingBottomFollowAfterCooldown.current) return;
+          pendingBottomFollowAfterCooldown.current = false;
+          if (catchingUpRef.current || followPausedByUserRef.current) return;
+          const current = getScrollElement();
+          if (!current || current.scrollHeight <= current.clientHeight) return;
+          setShouldFollow(true);
+          current.scrollTop = current.scrollHeight;
+          scheduleScrollOverflowReport();
+          lastScrollTop.current = Math.max(
+            0,
+            current.scrollHeight - current.clientHeight,
+          );
+          reportCanScrollToBottom();
         };
         if (behavior === 'smooth') {
           setTimeout(releaseCooldown, 350);
@@ -3294,7 +3308,12 @@ export const MessageList = memo(
           requestAnimationFrame(releaseCooldown);
         }
       },
-      [getScrollElement, reportCanScrollToBottom, scheduleScrollOverflowReport],
+      [
+        getScrollElement,
+        reportCanScrollToBottom,
+        scheduleScrollOverflowReport,
+        setShouldFollow,
+      ],
     );
 
     const resumeBottomFollow = useCallback(
@@ -3620,7 +3639,19 @@ export const MessageList = memo(
         void loadOlderHistory(true);
       }
       if (scrollCooldown.current) {
+        const userScrolledUp =
+          curr < lastScrollTop.current - 1 &&
+          Date.now() <= userScrollIntentUntil.current &&
+          el.scrollHeight - curr - el.clientHeight >=
+            FOLLOW_BOTTOM_THRESHOLD_PX;
         lastScrollTop.current = curr;
+        if (userScrolledUp) {
+          cancelTranscriptReload();
+          followPausedByUserRef.current = true;
+          pendingBottomFollowAfterCooldown.current = false;
+          setShouldFollow(false);
+          scheduleSessionTimelineRangeUpdate();
+        }
         return;
       }
       scheduleSessionTimelineRangeUpdate();
@@ -3785,6 +3816,9 @@ export const MessageList = memo(
       const observer = new ResizeObserver(() => {
         scheduleScrollOverflowReport();
         loadOlderHistoryIfUnderfilled();
+        if (catchingUpRef.current || followPausedByUserRef.current) return;
+        setShouldFollow(true);
+        scrollToBottom();
       });
       observer.observe(el);
       for (const child of Array.from(el.children)) {
@@ -3811,6 +3845,8 @@ export const MessageList = memo(
       getScrollElement,
       loadOlderHistoryIfUnderfilled,
       scheduleScrollOverflowReport,
+      scrollToBottom,
+      setShouldFollow,
     ]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
@@ -3819,6 +3855,7 @@ export const MessageList = memo(
     useEffect(() => {
       if (messages.length === 0) {
         followPausedByUserRef.current = false;
+        pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
@@ -4212,7 +4249,12 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       if (catchingUp) return;
       const isNewUserMessage = pendingNewUserSmoothScroll.current;
-      if (scrollCooldown.current && !isNewUserMessage) return;
+      if (scrollCooldown.current && !isNewUserMessage) {
+        if (!followPausedByUserRef.current) {
+          pendingBottomFollowAfterCooldown.current = true;
+        }
+        return;
+      }
       // Preserve the new-prompt scroll even if a previous disclosure resize is
       // still settling; it targets the latest virtualizer size from this render.
       if (pendingFollowRecheck.current && !isNewUserMessage) return;
