@@ -25,7 +25,7 @@ graph TB
     S -- no --> G{Persistence gate: over configured threshold + 3k headroom, and not exempt?}
     G -- yes --> F[Full payload persisted to session temp file, mode 0o600]
     G -- no --> B{Per-tool budget declared?}
-    B -- yes --> C[Tool-internal bound, e.g. shell 30k, grep 20k, read-file paging]
+    B -- yes --> C[Scheduler per-tool bound, e.g. grep 20k]
     B -- no --> D[Scheduler gate: global threshold 25k chars + 1000 lines]
     C --> E{Still oversized?}
     D --> E
@@ -35,35 +35,42 @@ graph TB
     I2 --> I[Model recovers full output on demand via read_file]
     H --> J
     I2 --> J
-    J --> K{Assembled string over 2x budget?}
+    J -->|non-sentinel body| K{Assembled string over 2x budget?}
+    J -->|sentinel body (skip)| M[Per-message batch budget 200k across parallel calls]
     K -- yes --> L[Second pass bounds it once more]
-    K -- no --> M[Per-message batch budget 200k across parallel calls]
+    K -- no --> M
     L --> M
     M --> N[Final tool result recorded in history]
 ```
 
 Key properties:
 
-- **Persistence gate first.** `maybePersistLargeToolResult` runs _before_
-  per-tool truncation: any non-exempt result over the configured threshold +
-  3k headroom (default 28k) is persisted and stubbed to a preview right away.
-  Exempt: `read_file`, `read_mcp_resource`, `enter_plan_mode` (self-managed).
-  Consequently, per-tool budgets above 28k (agent 32k, web-search 102k, MCP
-  500k) are second-level bounds — the gate offloads first.
+- **Persistence gate first** (for tools without in-tool truncation).
+  `maybePersistLargeToolResult` runs before the scheduler's per-tool/global
+  truncation: any non-exempt result over the configured threshold + 3k headroom
+  (default 28k) is persisted and stubbed to a preview right away. Exempt:
+  `read_file`, `read_mcp_resource`, `enter_plan_mode` (self-managed).
+  Shell (30k) and MCP (500k) truncate in-tool during `execute()` before the
+  gate sees the result; the sentinel check at entry then routes them past the
+  gate. Consequently, per-tool budgets above 28k (agent 32k, web-search 102k)
+  are second-level bounds — the gate offloads first.
 - **Bounded before history.** Every layer acts before the result is recorded,
   so history never holds an unbounded payload.
 - **Recoverable, never dropped.** Oversized output is persisted to a session
-  temp file (`~/.qwen/tmp/<session-hash>/run_<tool>_<id>.output`) and the
-  retained preview carries a pointer; the model can read the full payload back
-  with `read_file`. Truncation keeps head and tail (`keep: 'both'`) because
-  shell failure summaries appear at the end.
+  temp file: the gate writes `tool-results/<callId>.txt`, while in-tool
+  truncation (shell, MCP) writes `~/.qwen/tmp/<session-hash>/<tool>_<hex>.output`.
+  The retained preview carries a pointer; the model can read the full payload
+  back with `read_file`. Truncation keeps head and tail (`keep: 'both'`)
+  because shell failure summaries appear at the end.
 - **Re-entrancy guard.** A truncated result starts with a sentinel prefix
   (`TOOL_OUTPUT_TRUNCATED_PREFIX`); later passes detect it and skip
   re-truncation, so injected copies of the phrase cannot bypass the budget and
   truncation headers never nest.
 - **Metadata integrity.** PostToolUse/skill metadata and system reminders are
   appended only after the raw body is bounded, then the assembled string is
-  re-checked against a doubled budget.
+  re-checked against a doubled budget — unless the body already carries the
+  truncation sentinel (re-entrancy skip), in which case only the batch budget
+  bounds it.
 - **Batch-level bound.** After all parallel calls in one message complete, the
   aggregate is reduced to `toolOutputBatchBudget` (default 200k chars) by
   offloading the largest results — covering the case where many individually
@@ -101,10 +108,11 @@ unbounded retention or data exposure):
 - Output larger than 50MB: persistence skipped, in-memory truncation still
   bounds the result.
 - Session budget (500MB) exhausted: persistence skipped, same in-memory bound.
-- Truncation/IO error: the successful tool call is never demoted to an error;
-  the bounded head/tail preview is kept with a note that the full output could
-  not be saved, and a warning is logged. In this mode the full payload has no
-  retrievable pointer — the preview is all that survives.
+- Truncation/IO error: the successful tool call is never demoted to an error.
+  On a primary persist failure, the code falls back to `truncateAndSaveToFile`
+  into the project temp dir — the full payload is retained with a `read_file`
+  pointer. Only if the fallback also fails is the result degraded to a
+  pointerless bounded preview with a warning logged.
 
 ## 5. Diagnostics (phase 1 signals)
 
