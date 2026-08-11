@@ -57,7 +57,15 @@ function cli(args, cwd) {
     const child = spawn(process.execPath, [join(here, 'runner.mjs'), ...args], {
       cwd,
     });
-    child.on('close', (code) => resolveExit(code));
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('close', (code) => resolveExit({ code, stdout, stderr }));
   });
 }
 
@@ -297,21 +305,25 @@ async function main() {
 
     check(
       'cli exits 0 for the passing fixture scenario',
-      (await cli(
-        ['--scenario', scenarioPath, '--out', join(work, 'cli-pass')],
-        repoRoot,
-      )) === 0,
+      (
+        await cli(
+          ['--scenario', scenarioPath, '--out', join(work, 'cli-pass')],
+          repoRoot,
+        )
+      ).code === 0,
     );
     check(
       'cli exits 1 when fixed exceeds thresholds',
-      (await cli(
-        ['--scenario', violatesPath, '--out', join(work, 'cli-fail')],
-        repoRoot,
-      )) === 1,
+      (
+        await cli(
+          ['--scenario', violatesPath, '--out', join(work, 'cli-fail')],
+          repoRoot,
+        )
+      ).code === 1,
     );
     check(
       'cli exits 2 for missing arguments',
-      (await cli(['--scenario', scenarioPath], repoRoot)) === 2,
+      (await cli(['--scenario', scenarioPath], repoRoot)).code === 2,
     );
     const overridesDir = join(work, 'cli-overrides');
     await mkdir(overridesDir, { recursive: true });
@@ -336,7 +348,7 @@ async function main() {
     );
     check(
       'cli command overrides run through native PTY capture',
-      overrideCode === 0,
+      overrideCode.code === 0,
     );
     check(
       'cli override outcome is both-pass',
@@ -351,6 +363,69 @@ async function main() {
       overrideBaseSummary.capture.tty?.mode === 'native' &&
         overrideBaseSummary.capture.tty?.allocated === true,
       JSON.stringify(overrideBaseSummary.capture.tty),
+    );
+
+    // Adversarial counterexample: scenario validation saw equal compareParams,
+    // but the overrides diverge. The final resolved argv must be re-validated
+    // after overrides, so the run must abort before anything is captured.
+    const divergentOverride = await cli(
+      [
+        '--scenario',
+        scenarioPath,
+        '--out',
+        join(work, 'cli-override-divergent'),
+        '--base',
+        emitterCmd('--frames 1 --sync'),
+        '--fixed',
+        emitterCmd('--frames 4 --sync'),
+      ],
+      repoRoot,
+    );
+    check(
+      'cli override diverging from compareParams exits 2',
+      divergentOverride.code === 2,
+      `code=${divergentOverride.code} stderr=${divergentOverride.stderr}`,
+    );
+    check(
+      'cli override mismatch names parameter binding on the final argv',
+      divergentOverride.stderr.includes('parameter binding') &&
+        divergentOverride.stderr.includes('"--frames" differs'),
+      divergentOverride.stderr,
+    );
+    check(
+      'cli override mismatch runs nothing',
+      !(await fileExists(
+        join(
+          work,
+          'cli-override-divergent',
+          'stream-redraw',
+          'base',
+          'raw.ansi',
+        ),
+      )),
+    );
+
+    const dimensionOverride = await cli(
+      [
+        '--scenario',
+        scenarioPath,
+        '--out',
+        join(work, 'cli-override-dimension'),
+        '--base',
+        emitterCmd('--frames 3 --sync --rows 99'),
+      ],
+      repoRoot,
+    );
+    check(
+      'cli override with a mismatched terminal-size flag exits 2',
+      dimensionOverride.code === 2,
+      `code=${dimensionOverride.code} stderr=${dimensionOverride.stderr}`,
+    );
+    check(
+      'cli override dimension mismatch names the capture geometry',
+      dimensionOverride.stderr.includes('"--rows" value "99"') &&
+        dimensionOverride.stderr.includes('terminal.rows'),
+      dimensionOverride.stderr,
     );
   } finally {
     await rm(work, { recursive: true, force: true });

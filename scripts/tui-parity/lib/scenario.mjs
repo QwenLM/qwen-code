@@ -113,6 +113,25 @@ export function validateCompareParams(
   }
 }
 
+// Checks only the terminal-size flags present in argv, independent of
+// compareParams. Used to bind override-supplied argv to the capture geometry.
+export function validateTerminalFlags(argv, terminal, label, problems) {
+  for (const [flag, dimension] of Object.entries(TERMINAL_PARAM_TO_DIMENSION)) {
+    for (const value of extractFlagValues(argv, flag)) {
+      if (
+        !/^\d+$/.test(value) ||
+        Number.parseInt(value, 10) !== terminal[dimension]
+      ) {
+        problems.push(
+          `${label}: "${flag}" value "${value}" does not match ` +
+            `terminal.${dimension} (${terminal[dimension]})`,
+        );
+        break;
+      }
+    }
+  }
+}
+
 export function parseSideCommand(name, raw, problems) {
   if (raw === undefined) {
     problems.push(`commands.${name} is required`);

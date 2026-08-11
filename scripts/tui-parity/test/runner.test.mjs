@@ -10,6 +10,7 @@ import {
   runScenarios,
   splitCommandLine,
   evaluateSide,
+  validateFinalParams,
 } from '../runner.mjs';
 import { extractFlagValues, validateScenario } from '../lib/scenario.mjs';
 import { capture, PTY_REFUSAL } from '../lib/capture.mjs';
@@ -457,10 +458,57 @@ test('timeout kill reaches process trees under native PTY capture', async () => 
   assert.equal(alive, false, `grandchild ${grandchildPid} survived the kill`);
 });
 
+// Adversarial counterexample: the main child closes under SIGTERM, which used
+// to cancel the pending SIGKILL escalation. A descendant that ignores SIGTERM
+// and detaches stdio then survived the capture.
+async function expectStubbornDescendantReaped(tty) {
+  const cap = await capture(
+    [process.execPath, EMITTER_PATH, '--stubborn-hang'],
+    {
+      rows: 4,
+      columns: 30,
+      // Generous so slow parallel test-file startups cannot race the
+      // fixture's first write; the escalation behavior itself is unaffected.
+      timeoutMs: 3000,
+      tty,
+    },
+  );
+  assert.equal(cap.timedOut, true);
+  const match = /STUBBORN=(\d+)/.exec(cap.stdoutText);
+  assert.ok(match, `no stubborn pid in capture: ${cap.stdoutText}`);
+  const stubbornPid = Number(match[1]);
+  const deadline = Date.now() + 5000;
+  let alive = true;
+  while (alive && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      process.kill(stubbornPid, 0);
+    } catch {
+      alive = false;
+    }
+  }
+  assert.equal(
+    alive,
+    false,
+    `stubborn descendant ${stubbornPid} survived: SIGKILL escalation was ` +
+      'cancelled when the main child closed',
+  );
+}
+
+test('timeout SIGKILL escalation survives the main child closing (fixture)', async () => {
+  await expectStubbornDescendantReaped('fixture');
+});
+
+test('timeout SIGKILL escalation survives the main child closing (native PTY)', async () => {
+  await expectStubbornDescendantReaped('native');
+});
+
 test('scripted input is delivered to a fixture capture', async () => {
+  // Echo per byte so the assertion does not depend on how the pipe chunks
+  // the two writes together when the child starts slowly.
   const echoCode =
-    "let buf='';process.stdin.on('data',(c)=>{buf+=c.toString();" +
-    "process.stdout.write('ECHO<'+c.toString()+'>');});" +
+    "let buf='';process.stdin.on('data',(c)=>{const s=c.toString();buf+=s;" +
+    "for(const ch of s)process.stdout.write('ECHO<'+ch+'>');});" +
     "process.stdin.on('end',()=>process.stdout.write('DONE<'+buf+'>'));";
   const cap = await capture([process.execPath, '-e', echoCode], {
     rows: 6,
@@ -474,8 +522,11 @@ test('scripted input is delivered to a fixture capture', async () => {
   });
   assert.equal(cap.timedOut, false);
   assert.equal(cap.exitCode, 0, cap.spawnError ?? cap.stdoutText);
-  assert.match(cap.stdoutText, /ECHO<hello>/);
-  assert.match(cap.stdoutText, /ECHO<Q>/);
+  assert.ok(
+    cap.stdoutText.indexOf('ECHO<h>') !== -1 &&
+      cap.stdoutText.indexOf('ECHO<Q>') > cap.stdoutText.indexOf('ECHO<h>'),
+    `input steps arrived out of order or missing: ${cap.stdoutText}`,
+  );
   assert.match(cap.stdoutText, /DONE<helloQ>/);
 });
 
@@ -502,11 +553,31 @@ test('scripted input is delivered through a native PTY', async () => {
   assert.match(cap.stdoutText, /ECHO<Q>/);
 });
 
-test('requireSync fails when only some frames are bracketed', () => {
+test('requireSync measures event-to-sync coverage, not begin counts', () => {
   const cap = { spawned: true, timedOut: false, exitCode: 0 };
   const B = '\x1b[?2026h';
   const E = '\x1b[?2026l';
   const marker = (seq) => `\x1b]697;live-line;${seq}\x07`;
+
+  // Adversarial counterexample: three empty begin/end pairs balance the
+  // stream and match the unique event count, but no marker is inside any
+  // interval. This used to pass the begin-count heuristic.
+  const emptyPairs = analyzeAnsi(
+    `${B}${E}${B}${E}${B}${E}${marker(1)}${marker(2)}${marker(3)}`,
+  );
+  assert.equal(emptyPairs.dec2026.begin, 3);
+  assert.equal(emptyPairs.dec2026.unbalanced, 0);
+  assert.equal(emptyPairs.events.unique, 3);
+  assert.equal(emptyPairs.events.covered, 0);
+  assert.equal(emptyPairs.events.unwrapped, 3);
+  const emptyPairsEval = evaluateSide(emptyPairs, cap, { requireSync: true });
+  assert.equal(emptyPairsEval.verdict, 'fail');
+  assert.ok(
+    emptyPairsEval.reasons.some((reason) => reason.includes('requireSync')),
+    emptyPairsEval.reasons.join('; '),
+  );
+
+  // Partially bracketed frames: markers outside every interval.
   const partial = analyzeAnsi(
     `${B}f1${E}${B}f2${E}f3${marker(1)}${marker(2)}${marker(3)}`,
   );
@@ -516,9 +587,23 @@ test('requireSync fails when only some frames are bracketed', () => {
     partialEval.reasons.some((reason) => reason.includes('requireSync')),
     partialEval.reasons.join('; '),
   );
-  const full = analyzeAnsi(
-    `${B}f1${E}${marker(1)}${B}f2${E}${marker(2)}${B}f3${E}${marker(3)}`,
+
+  // A single marker outside an interval fails even when the rest are covered.
+  const oneOutside = analyzeAnsi(
+    `${B}f1${marker(1)}${E}${B}f2${marker(2)}${E}${marker(3)}`,
   );
+  assert.equal(oneOutside.events.unwrapped, 1);
+  assert.equal(
+    evaluateSide(oneOutside, cap, { requireSync: true }).verdict,
+    'fail',
+  );
+
+  // Markers inside every interval pass.
+  const full = analyzeAnsi(
+    `${B}f1${marker(1)}${E}${B}f2${marker(2)}${E}${B}f3${marker(3)}${E}`,
+  );
+  assert.equal(full.events.covered, 3);
+  assert.equal(full.events.unwrapped, 0);
   assert.equal(evaluateSide(full, cap, { requireSync: true }).verdict, 'pass');
 });
 
@@ -760,4 +845,92 @@ test('rejects malformed compareParams entries', () => {
     () => validateScenario(scenario),
     /compareParams entries must be strings matching --<flag>/,
   );
+});
+
+function scenarioWithCompareParams() {
+  return scenarioFixture({
+    id: 'override-binding',
+    compareParams: ['--frames'],
+    commands: {
+      base: fixtureCommand('--frames', '2'),
+      fixed: fixtureCommand('--frames', '2'),
+    },
+    thresholds: { requireSync: false },
+  });
+}
+
+test('overrides must satisfy compareParams on the final resolved argv', () => {
+  const scenario = validateScenario(scenarioWithCompareParams());
+  assert.throws(
+    () =>
+      validateFinalParams(
+        scenario,
+        { argv: ['node', 'base.mjs', '--frames', '2'] },
+        { argv: ['node', 'fixed.mjs', '--frames', '3'] },
+        { base: true, fixed: true },
+      ),
+    /override\(s\) failed parameter binding on the final resolved argv: compareParams: "--frames" differs between base \(2\) and fixed \(3\)/,
+  );
+});
+
+test('overrides that drop a compareParam are rejected', () => {
+  const scenario = validateScenario(scenarioWithCompareParams());
+  assert.throws(
+    () =>
+      validateFinalParams(
+        scenario,
+        { argv: ['node', 'base.mjs', '--frames', '2'] },
+        { argv: ['node', 'fixed.mjs'] },
+        { fixed: true },
+      ),
+    /compareParams: "--frames" is missing from commands\.fixed/,
+  );
+});
+
+test('overrides must keep terminal-size flags bound to the capture geometry', () => {
+  const scenario = validateScenario(scenarioWithCompareParams());
+  assert.throws(
+    () =>
+      validateFinalParams(
+        scenario,
+        { argv: ['node', 'base.mjs', '--frames', '2', '--rows', '99'] },
+        { argv: ['node', 'fixed.mjs', '--frames', '2'] },
+        { base: true },
+      ),
+    /commands\.base: "--rows" value "99" does not match terminal\.rows \(6\)/,
+  );
+});
+
+test('runScenario rejects divergent overrides before anything runs', async () => {
+  await withWorkdir(async (work) => {
+    const scenario = validateScenario(scenarioWithCompareParams());
+    await assert.rejects(
+      runScenario(scenario, join(work, 'out'), {
+        base: ['node', 'base.mjs', '--frames', '2'],
+        fixed: ['node', 'fixed.mjs', '--frames', '3'],
+      }),
+      /parameter binding/,
+    );
+  });
+});
+
+test('runScenario records which sides were overridden', async () => {
+  await withWorkdir(async (work) => {
+    const scenario = validateScenario(
+      scenarioFixture({
+        id: 'override-record',
+        commands: {
+          base: fixtureCommand('--frames', '1'),
+          fixed: fixtureCommand('--frames', '1'),
+        },
+        thresholds: { requireSync: false },
+      }),
+    );
+    const comparison = await runScenario(scenario, join(work, 'out'), {
+      // A fixture-mode emitter override keeps both sides deterministic.
+      base: [process.execPath, EMITTER_PATH, '--frames', '1'],
+      fixed: undefined,
+    });
+    assert.deepEqual(comparison.overridesApplied, { base: true, fixed: false });
+  });
 });

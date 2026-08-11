@@ -4,6 +4,8 @@ import { createRequire } from 'node:module';
 import process from 'node:process';
 
 const KILL_GRACE_MS = 1000;
+const TREE_VERIFY_ATTEMPTS = 8;
+const TREE_VERIFY_INTERVAL_MS = 250;
 
 // The native PTY backend comes from @lydell/node-pty, a declared repository
 // dependency. TUI_PARITY_NO_PTY=1 forces unavailability to exercise the
@@ -71,6 +73,23 @@ export function capture(command, options = {}) {
       timers.clear();
     };
 
+    // Kill escalation timers survive settle: the main child closing must not
+    // cancel the SIGKILL step, or a descendant that ignores SIGTERM and does
+    // not hold the capture stdio would outlive the capture.
+    const killTimers = new Set();
+    const escalate = (fn, ms) => {
+      const handle = setTimeout(() => {
+        killTimers.delete(handle);
+        fn();
+      }, ms);
+      killTimers.add(handle);
+      return handle;
+    };
+    const cancelEscalation = () => {
+      for (const handle of killTimers) clearTimeout(handle);
+      killTimers.clear();
+    };
+
     const ttyEvidence = {
       mode: tty,
       backend: null,
@@ -94,9 +113,23 @@ export function capture(command, options = {}) {
       tty: ttyEvidence,
     };
     let done = false;
+    let pid;
+    const groupAlive = () => {
+      if (!Number.isInteger(pid)) return false;
+      try {
+        process.kill(-pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const settle = (fields) => {
       done = true;
       clearAllTimers();
+      // A timed-out capture keeps kill escalation pending until the process
+      // group is confirmed gone; only cancel it when nothing is left to kill,
+      // so the SIGKILL step survives the main child closing.
+      if (!groupAlive()) cancelEscalation();
       resolve({ ...result, durationMs: Date.now() - startedAt, ...fields });
     };
 
@@ -160,7 +193,7 @@ export function capture(command, options = {}) {
     }
 
     let timedOut = false;
-    const pid = ptyProc ? ptyProc.pid : child.pid;
+    pid = ptyProc ? ptyProc.pid : child.pid;
     const signalPid = (target, signal) => {
       try {
         process.kill(target, signal);
@@ -184,7 +217,27 @@ export function capture(command, options = {}) {
     later(() => {
       timedOut = true;
       killTree('SIGTERM');
-      later(() => killTree('SIGKILL'), KILL_GRACE_MS);
+      escalate(() => {
+        killTree('SIGKILL');
+        // Explicitly confirm the process group is gone instead of trusting
+        // the main child's exit; a descendant that ignored SIGTERM must not
+        // survive the capture. Bounded so the harness cannot linger.
+        let attemptsLeft = TREE_VERIFY_ATTEMPTS;
+        const verify = () => {
+          if (!groupAlive()) {
+            cancelEscalation();
+            return;
+          }
+          attemptsLeft -= 1;
+          if (attemptsLeft <= 0) {
+            cancelEscalation();
+            return;
+          }
+          killTree('SIGKILL');
+          escalate(verify, TREE_VERIFY_INTERVAL_MS);
+        };
+        escalate(verify, TREE_VERIFY_INTERVAL_MS);
+      }, KILL_GRACE_MS);
     }, timeoutMs);
 
     const writeInput = (index) => {

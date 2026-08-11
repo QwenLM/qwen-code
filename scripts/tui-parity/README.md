@@ -21,7 +21,12 @@ node scripts/tui-parity/runner.mjs \
   This is the real-CLI contract: point base at the Ink build and fixed at the
   OpenTUI build with the same scenario parameters. Overrides always capture
   through a native PTY. Relative `.js/.mjs/.cjs` script paths after `node`
-  resolve against the repository root.
+  resolve against the repository root. The final resolved argv (after any
+  override) is re-validated before anything is captured: declared
+  `compareParams` must be present and equal on both sides, and terminal-size
+  flags must match the capture geometry. A divergent override aborts the run
+  with a parameter-binding error instead of executing under a stale
+  "validated" claim.
 - Base and fixed always share the scenario's terminal size, timeout, stdin
   input, environment, and thresholds. Scenarios that attach per-side
   parameters are rejected. `compareParams` names argv flags whose values are
@@ -97,18 +102,27 @@ Counted from each side's raw stdout:
 - DEC 2026 synchronised-output begin/end (`ESC[?2026h` / `ESC[?2026l`) plus
   an unbalanced count for stray ends and unclosed begins. `requireSync`
   accepts a stream only if at least one begin exists, pairs balance, and —
-  when live-output event markers are measured — the begin sequences cover
-  every unique event; balanced pairs around only some frames therefore fail,
-  so sync claims never outrun measured per-event coverage.
+  when live-output event markers are measured — every marker occurrence was
+  emitted inside an active DEC 2026 interval. Coverage is measured per event,
+  not inferred from counts: empty begin/end pairs that wrap no events and
+  markers emitted outside every interval fail `requireSync` even when the
+  begin count equals the unique event count.
 - Live-output event markers using OSC `697;<id>;<seq>` (BEL or ST
   terminated). A marker whose `(id, seq)` was already seen is a duplicate.
-  Without markers the duplicate count is reported as not measurable.
+  Each marker occurrence is additionally classified as covered (inside an
+  active DEC 2026 interval) or unwrapped (outside every interval), and both
+  counts are reported. Without markers the duplicate count is reported as not
+  measurable.
 - Process exit code, signal, timeout, and duration.
 
 Timeout handling tracks and clears every pending input timer, and kills the
 capture process tree where supported (SIGTERM to the process group, SIGKILL
-after a 1s grace), so a capture cannot linger on delayed input or orphaned
-descendants.
+after a 1s grace). The kill escalation survives the main child closing: the
+SIGKILL step is not cancelled when the captured command exits, and after it
+fires the harness re-probes the process group until it is confirmed gone
+(bounded). A descendant that ignores SIGTERM and detaches stdio therefore
+cannot outlive the capture, and a capture cannot linger on delayed input or
+orphaned descendants.
 
 `proves` and `doesNotProve` are mandatory scenario fields and are copied
 verbatim into every report, so each scenario states what its result does and
@@ -144,6 +158,9 @@ The run passes only on the first two.
   metrics count (`--clears-per-frame`, `--scrollback-clears`, `--dups`,
   `--sync`, `--hang-ms`, `--exit-code`). `--tree-hang` spawns an idle
   grandchild and hangs, to exercise process-tree kill on timeout.
+  `--stubborn-hang` spawns a grandchild that ignores SIGTERM and detaches its
+  stdio, then hangs; it exercises kill escalation that must survive the main
+  child closing.
 - `fixtures/wrappers/pty-launcher.mjs` wraps a command in a PTY, standing in
   for external wrappers in handshake tests.
 - `fixtures/scenarios/stream-redraw.scenario.json` reproduces a failing base
@@ -157,9 +174,15 @@ node scripts/tui-parity/self-test.mjs # full pipeline self-check
 Tests cover the PTY refusal and the native/wrapped happy paths, divergent
 `compareParams` (including `--rows`/`--columns`), per-side parameter
 rejection, and a bounded regression test where `input.delayMs` exceeds
-`timeoutMs`. Fixture results are evidence about the harness and its metrics,
-not about the products. Real-CLI parity claims require running the same
-harness with real base/fixed commands through the native PTY contract.
+`timeoutMs`. They also lock in the three adversarial counterexamples as
+regressions: empty DEC 2026 pairs plus unwrapped event markers can never
+satisfy `requireSync`; a descendant that ignores SIGTERM and detaches stdio
+is still reaped after the main child closes (fixture and native PTY); and a
+`--base`/`--fixed` override that diverges from `compareParams` or the capture
+geometry aborts before anything runs. Fixture results are evidence about the
+harness and its metrics, not about the products. Real-CLI parity claims
+require running the same harness with real base/fixed commands through the
+native PTY contract.
 
 ## Normalization limits
 

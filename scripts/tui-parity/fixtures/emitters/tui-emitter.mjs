@@ -11,8 +11,11 @@
 //   --sync                wrap each frame in DEC 2026 begin/end
 //   --exit-code N         process exit code (default 0)
 //   --hang-ms N           sleep after the last frame before exit (default 0)
-//   --tree-hang           spawn an idle grandchild, print its pid, hang;
-//                         exercises process-tree kill on capture timeout
+//   --tree-hang           spawn an idle grandchild and hang, to exercise
+//                         process-tree kill on capture timeout
+//   --stubborn-hang       spawn a grandchild that ignores SIGTERM and detaches
+//                         stdio, print its pid, then hang; exercises kill
+//                         escalation that must survive the main child closing
 //   --rows N              override $LINES (default 24)
 import { spawn } from 'node:child_process';
 import process from 'node:process';
@@ -29,6 +32,7 @@ function parseArgs(argv) {
     exitCode: 0,
     hangMs: 0,
     treeHang: false,
+    stubbornHang: false,
     rows: null,
   };
   const value = (flag, index) => {
@@ -79,6 +83,9 @@ function parseArgs(argv) {
       case '--tree-hang':
         opts.treeHang = true;
         break;
+      case '--stubborn-hang':
+        opts.stubbornHang = true;
+        break;
       case '--rows':
         opts.rows = value(flag, i);
         i += 1;
@@ -93,7 +100,18 @@ function parseArgs(argv) {
 
 const opts = parseArgs(process.argv.slice(2));
 
-if (opts.treeHang) {
+if (opts.stubbornHang) {
+  // Ignores SIGTERM and detaches stdio, but stays in the capture's process
+  // group, so only a SIGKILL that survives the main child closing can reap it.
+  const stubborn = spawn(
+    process.execPath,
+    ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+    { stdio: 'ignore' },
+  );
+  process.stdout.write(`STUBBORN=${stubborn.pid}\n`);
+  setTimeout(() => {}, 60000);
+  process.exitCode = opts.exitCode;
+} else if (opts.treeHang) {
   const grandchild = spawn(
     process.execPath,
     ['-e', 'setTimeout(() => {}, 60000)'],
@@ -128,10 +146,10 @@ function main(opts) {
       out(`frame=${frame} row=${r}`);
       if (opts.lineErases) out(`\x1b[${opts.elMode}K`);
     }
-    if (opts.sync) out('\x1b[?2026l');
     seq += 1;
     marker(seq);
     for (let d = 0; d < opts.dups; d += 1) marker(seq);
+    if (opts.sync) out('\x1b[?2026l');
   }
   out('\n');
 

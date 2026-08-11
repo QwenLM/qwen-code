@@ -6,7 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { analyzeAnsi } from './lib/ansi-metrics.mjs';
 import { capture } from './lib/capture.mjs';
 import { renderFinalScreen } from './lib/normalize.mjs';
-import { loadScenarios } from './lib/scenario.mjs';
+import {
+  loadScenarios,
+  validateCompareParams,
+  validateTerminalFlags,
+} from './lib/scenario.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -61,6 +65,52 @@ export function splitCommandLine(text) {
   return parts;
 }
 
+// Re-validates the commands that will actually execute, AFTER any
+// --base/--fixed overrides have replaced the scenario commands. Scenario-load
+// validation only saw the original scenario argv; a divergent override would
+// otherwise run while the report still claimed the compareParams were checked.
+// Throws before anything is captured.
+export function validateFinalParams(
+  scenario,
+  baseCommand,
+  fixedCommand,
+  overrides = {},
+) {
+  const problems = [];
+  const compareParams = scenario.compareParams ?? [];
+  const baseArgv = resolveCommand(baseCommand.argv);
+  const fixedArgv = resolveCommand(fixedCommand.argv);
+  if (compareParams.length > 0) {
+    validateCompareParams(
+      compareParams,
+      { argv: baseArgv },
+      { argv: fixedArgv },
+      scenario.terminal,
+      problems,
+    );
+  }
+  validateTerminalFlags(baseArgv, scenario.terminal, 'commands.base', problems);
+  validateTerminalFlags(
+    fixedArgv,
+    scenario.terminal,
+    'commands.fixed',
+    problems,
+  );
+  if (problems.length > 0) {
+    const overridden = ['base', 'fixed']
+      .filter((side) => overrides[side])
+      .map((side) => `--${side}`);
+    const subject =
+      overridden.length > 0
+        ? `${overridden.join(' and ')} override(s)`
+        : 'the final command';
+    throw new Error(
+      `${subject} failed parameter binding on the final resolved argv: ` +
+        problems.join('; '),
+    );
+  }
+}
+
 export const METRIC_VIEWS = {
   fullScreenClears: (met) => met.fullScreenClears.total,
   partialScreenErases: (met) => met.partialScreenErases,
@@ -68,6 +118,7 @@ export const METRIC_VIEWS = {
   dec2026Unbalanced: (met) => met.dec2026.unbalanced,
   duplicateEvents: (met) => met.events.duplicates,
   eventMarkers: (met) => met.events.total,
+  unwrappedEvents: (met) => met.events.unwrapped,
   printableChars: (met) => met.printableChars,
   stdoutBytes: (met) => met.bytes,
 };
@@ -121,15 +172,15 @@ export function evaluateSide(metrics, cap, thresholds = {}) {
         `requireSync: DEC 2026 pairs unbalanced by ${metrics.dec2026.unbalanced}`,
       );
     }
-    if (
-      metrics.events.unique > 0 &&
-      metrics.dec2026.begin < metrics.events.unique
-    ) {
+    // Coverage is measured per event occurrence: a marker only counts as
+    // synced when it was emitted inside an active DEC 2026 interval. Empty
+    // begin/end pairs and unwrapped markers can never prove coverage, even
+    // when the begin count matches the unique event count.
+    if (metrics.events.markersPresent && metrics.events.unwrapped > 0) {
       reasons.push(
-        `requireSync: only ${metrics.dec2026.begin} DEC 2026 begin ` +
-          `sequence(s) for ${metrics.events.unique} unique live-output ` +
-          'event(s); when events are measured, sync brackets must cover ' +
-          'every one of them, so partially bracketed frames fail',
+        `requireSync: ${metrics.events.unwrapped} live-output event ` +
+          'marker(s) were emitted outside any DEC 2026 sync interval; sync ' +
+          'brackets must wrap every measured event',
       );
     }
   }
@@ -141,7 +192,13 @@ export function evaluateSide(metrics, cap, thresholds = {}) {
 
 const PASSING_OUTCOMES = new Set(['base-fails-fixed-passes', 'both-pass']);
 
-export function buildComparison(scenario, base, fixed, generatedAt) {
+export function buildComparison(
+  scenario,
+  base,
+  fixed,
+  generatedAt,
+  overridesApplied = { base: false, fixed: false },
+) {
   const captureOk = (side) => side.capture.spawned && !side.capture.timedOut;
   let outcome;
   if (!captureOk(base) || !captureOk(fixed)) outcome = 'capture-error';
@@ -159,6 +216,7 @@ export function buildComparison(scenario, base, fixed, generatedAt) {
     terminal: scenario.terminal,
     timeoutMs: scenario.timeoutMs,
     compareParams: scenario.compareParams ?? [],
+    overridesApplied,
     commands: { base: base.command, fixed: fixed.command },
     sides: {
       base: summarizeSide(base),
@@ -227,9 +285,19 @@ export function renderReport(comparison) {
   lines.push('');
   lines.push(`- base: \`${c.commands.base.join(' ')}\``);
   lines.push(`- fixed: \`${c.commands.fixed.join(' ')}\``);
+  const overriddenSides = ['base', 'fixed'].filter(
+    (side) => c.overridesApplied?.[side],
+  );
+  if (overriddenSides.length > 0) {
+    lines.push(
+      `- Overrides applied to: ${overriddenSides.join(', ')}. Final resolved ` +
+        'commands were re-validated for compareParams and terminal dimensions ' +
+        'after the override, before capture.',
+    );
+  }
   if (c.compareParams.length > 0) {
     lines.push(
-      `- Declared comparison parameters (validated equal on both sides): ${c.compareParams.join(' ')}`,
+      `- Declared comparison parameters (validated equal on the final commands that ran): ${c.compareParams.join(' ')}`,
     );
   }
   lines.push(
@@ -345,19 +413,15 @@ export async function runScenario(scenario, outDir, overrides = {}) {
   const scenarioDir = join(outDir, scenario.id);
   const generatedAt = new Date().toISOString();
   const wrapOverride = (argv) => (argv ? { argv, pty: 'native' } : undefined);
-  const base = await runSide(
-    scenario,
-    'base',
-    wrapOverride(overrides.base) ?? scenario.commands.base,
-    scenarioDir,
-  );
-  const fixed = await runSide(
-    scenario,
-    'fixed',
-    wrapOverride(overrides.fixed) ?? scenario.commands.fixed,
-    scenarioDir,
-  );
-  const comparison = buildComparison(scenario, base, fixed, generatedAt);
+  const baseCommand = wrapOverride(overrides.base) ?? scenario.commands.base;
+  const fixedCommand = wrapOverride(overrides.fixed) ?? scenario.commands.fixed;
+  validateFinalParams(scenario, baseCommand, fixedCommand, overrides);
+  const base = await runSide(scenario, 'base', baseCommand, scenarioDir);
+  const fixed = await runSide(scenario, 'fixed', fixedCommand, scenarioDir);
+  const comparison = buildComparison(scenario, base, fixed, generatedAt, {
+    base: Boolean(overrides.base),
+    fixed: Boolean(overrides.fixed),
+  });
   await writeFile(
     join(scenarioDir, 'comparison.json'),
     `${JSON.stringify(comparison, null, 2)}\n`,

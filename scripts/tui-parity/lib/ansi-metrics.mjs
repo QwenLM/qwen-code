@@ -21,7 +21,14 @@ export function analyzeAnsi(raw) {
     partialScreenErases: 0,
     lineErases: { toEnd: 0, toStart: 0, whole: 0, total: 0 },
     dec2026: { begin: 0, end: 0, unbalanced: 0 },
-    events: { markersPresent: false, total: 0, unique: 0, duplicates: 0 },
+    events: {
+      markersPresent: false,
+      total: 0,
+      unique: 0,
+      duplicates: 0,
+      covered: 0,
+      unwrapped: 0,
+    },
     cursorMoves: 0,
     sgrChanges: 0,
   };
@@ -129,13 +136,18 @@ export function analyzeAnsi(raw) {
         j += 1;
       }
       i = j;
-      // Private namespace OSC 697;id;seq marks one live-output event.
+      // Private namespace OSC 697;id;seq marks one live-output event. Each
+      // occurrence is classified by whether it landed inside an active DEC
+      // 2026 sync interval, so coverage is measured per event, not inferred
+      // from begin/end counts.
       if (payload.startsWith('697;')) {
         const body = payload.slice(4);
         const sep = body.indexOf(';');
         const id = sep === -1 ? body : body.slice(0, sep);
         const seq = sep === -1 ? '' : body.slice(sep + 1);
         m.events.total += 1;
+        if (syncDepth > 0) m.events.covered += 1;
+        else m.events.unwrapped += 1;
         const key = `${id}\u0000${seq}`;
         if (seenEvents.has(key)) m.events.duplicates += 1;
         else seenEvents.add(key);
