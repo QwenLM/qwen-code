@@ -293,9 +293,14 @@ describe.skipIf(process.platform === 'win32')('TmuxTool', () => {
         'on',
         TMUX_SERVER_NAME,
       );
+      const setOptionOrder =
+        mockTmux.tmuxSetOption.mock.invocationCallOrder[0]!;
       const pipeOrder = mockTmux.tmuxPipePane.mock.invocationCallOrder[0]!;
       const respawnOrder =
         mockTmux.tmuxRespawnPane.mock.invocationCallOrder[0]!;
+      // remain-on-exit AND the pipe must be in place before the command
+      // starts, or the exit status / early output is lost.
+      expect(setOptionOrder).toBeLessThan(respawnOrder);
       expect(pipeOrder).toBeLessThan(respawnOrder);
       expect(mockTmux.tmuxRespawnPane).toHaveBeenCalledWith(
         '%1',
