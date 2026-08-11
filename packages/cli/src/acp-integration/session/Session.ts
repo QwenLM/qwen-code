@@ -2032,7 +2032,18 @@ export class Session implements SessionContext {
         return;
       }
       if (!turn.modelStarted) {
-        await runtime.releaseTurn(turn.turnKey);
+        if (
+          turn.controller.signal.reason === USER_CANCEL_ABORT_REASON &&
+          runtime.getSnapshot().goal?.status === 'active'
+        ) {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: turn.permit.goalId,
+            expectedRevision: turn.permit.revision,
+          });
+        } else {
+          await runtime.releaseTurn(turn.turnKey);
+        }
         return;
       }
 
@@ -3328,12 +3339,14 @@ export class Session implements SessionContext {
     const hadCron = !!this.cronAbortController;
     const hadNotification =
       !!this.notificationAbortController || this.notificationProcessing;
+    const queuedGoalTurns = this.goalQueue.splice(0);
+    const hadQueuedGoalTurn = queuedGoalTurns.length > 0;
 
     if (this.followupAbort) {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (!hadPrompt && !hadCron && !hadNotification) {
+    if (!hadPrompt && !hadCron && !hadNotification && !hadQueuedGoalTurn) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
 
@@ -3342,6 +3355,10 @@ export class Session implements SessionContext {
     if (this.pendingPrompt) {
       this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
       this.pendingPrompt = null;
+    }
+
+    for (const turn of queuedGoalTurns) {
+      turn.controller.abort(USER_CANCEL_ABORT_REASON);
     }
 
     // Cancel any in-progress cron execution
@@ -3358,6 +3375,32 @@ export class Session implements SessionContext {
     }
     this.notificationQueue = [];
     this.notificationProcessing = false;
+
+    const queuedGoalTurn = queuedGoalTurns[0];
+    if (queuedGoalTurn) {
+      try {
+        const runtime = this.config.getGoalRuntime();
+        if (
+          sameGoalPermit(
+            runtime.permitForTurn(queuedGoalTurn.turnKey),
+            queuedGoalTurn.permit,
+          ) &&
+          runtime.getSnapshot().goal?.status === 'active'
+        ) {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: queuedGoalTurn.permit.goalId,
+            expectedRevision: queuedGoalTurn.permit.revision,
+          });
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to pause queued ACP Goal turn: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     this.#activeWorkChanged();
 
     // Stop scheduler and emit exit summary

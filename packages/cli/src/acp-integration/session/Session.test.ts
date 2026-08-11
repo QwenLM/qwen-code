@@ -14338,9 +14338,10 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
-      it('does not count a Goal turn cancelled before the model request', async () => {
-        // `modelStarted` decides whether settlement hands the permit back
-        // (`releaseTurn`) or records an iteration (`finishTurn` / pause).
+      it('pauses without counting a Goal turn cancelled before the model request', async () => {
+        // `modelStarted` decides whether settlement records an iteration.
+        // A user cancel still pauses the Goal before that point; releasing
+        // the permit would mint another continuation and ignore the cancel.
         // Flagging it at the top of the turn made everything between there
         // and the send — prompt assembly, transcript writes, the abort check
         // itself — count as model work, so a cancel landing in that window
@@ -14387,14 +14388,15 @@ describe('Session', () => {
         });
 
         await vi.waitFor(() => {
-          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+          });
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
-        // Nothing ran, so there is nothing to pause the Goal over either.
-        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
-          expect.objectContaining({ action: 'pause' }),
-        );
+        expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalledWith(turnKey);
       });
 
       it('releases a claimed Goal permit when the prompt is cancelled in the claim window', async () => {
@@ -14668,6 +14670,76 @@ describe('Session', () => {
           expect.any(String),
           permit,
         );
+      });
+
+      it('pauses a Goal turn queued behind a cancelled notification', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-cancelled-behind-notification',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+        let releaseNotification!: () => void;
+        const notificationGate = new Promise<void>((resolve) => {
+          releaseNotification = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            (async function* () {
+              await notificationGate;
+              yield* [];
+            })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        const notificationCallback = mockBackgroundTaskRegistry
+          .setNotificationCallback.mock.calls[0]?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+        notificationCallback(
+          'Background task completed.',
+          'background result',
+          { agentId: 'agent-1', status: 'completed' },
+        );
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await Promise.resolve();
+
+        await session.cancelPendingPrompt();
+        releaseNotification();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+          action: 'pause',
+          expectedGoalId: permit.goalId,
+          expectedRevision: permit.revision,
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
       it('admits an ordinary ACP prompt into the active Goal turn', async () => {
