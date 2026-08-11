@@ -3989,9 +3989,10 @@ const SETTINGS_SCHEMA = {
                 default: 7,
                 description:
                   'Days a quarantined invocation directory is kept before ' +
-                  'startup recovery removes it.',
+                  'startup recovery removes it. Must be at least 1; ' +
+                  'non-positive values fall back to the default.',
                 showInDialog: false,
-                jsonSchemaOverride: { type: 'number', minimum: 0, default: 7 },
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 7 },
               },
               maxBytes: {
                 type: 'number',
@@ -4002,11 +4003,12 @@ const SETTINGS_SCHEMA = {
                 description:
                   'Total byte budget for the quarantine directory. Startup ' +
                   'recovery removes oldest entries first until within ' +
-                  'budget. Defaults to 5 GiB.',
+                  'budget. Defaults to 5 GiB. Must be at least 1; ' +
+                  'non-positive values fall back to the default.',
                 showInDialog: false,
                 jsonSchemaOverride: {
                   type: 'number',
-                  minimum: 0,
+                  minimum: 1,
                   default: 5368709120,
                 },
               },

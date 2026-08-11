@@ -3408,15 +3408,15 @@
               "properties": {
                 "retentionDays": {
                   "type": "number",
-                  "minimum": 0,
+                  "minimum": 1,
                   "default": 7,
-                  "description": "Days a quarantined invocation directory is kept before startup recovery removes it."
+                  "description": "Days a quarantined invocation directory is kept before startup recovery removes it. Must be at least 1; non-positive values fall back to the default."
                 },
                 "maxBytes": {
                   "type": "number",
-                  "minimum": 0,
+                  "minimum": 1,
                   "default": 5368709120,
-                  "description": "Total byte budget for the quarantine directory. Startup recovery removes oldest entries first until within budget. Defaults to 5 GiB."
+                  "description": "Total byte budget for the quarantine directory. Startup recovery removes oldest entries first until within budget. Defaults to 5 GiB. Must be at least 1; non-positive values fall back to the default."
                 }
               }
             }
