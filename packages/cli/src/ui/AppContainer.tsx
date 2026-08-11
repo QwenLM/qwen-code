@@ -2475,12 +2475,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       // Mirror the downstream input classification (trim + blank + btw +
       // shell-mode exclusions) so the latch is only consumed by submissions
-      // that actually reach the model.
+      // that actually reach the model. Model-invocable slash commands
+      // (skills, MCP prompts) are expanded into a submit_prompt and sent to
+      // the model, so they consume the latch like plain prompts.
       const trimmedPrompt = userPromptText.trim();
       if (
         trimmedPrompt.length > 0 &&
         !contextFilesAnnouncedRef.current &&
-        !isSlashCommand(trimmedPrompt) &&
+        (!isSlashCommand(trimmedPrompt) ||
+          parseSlashCommand(trimmedPrompt, slashCommands).commandToExecute
+            ?.modelInvocable === true) &&
         !isBtwCommand(trimmedPrompt) &&
         !shellModeActive
       ) {

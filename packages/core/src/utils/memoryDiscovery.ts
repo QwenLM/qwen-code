@@ -370,7 +370,9 @@ export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
   /**
-   * Display paths of the loaded context (memory) files, relative to CWD.
+   * Display paths of the loaded context (memory) files: CWD-relative when
+   * inside the CWD tree, `~/...` shortcuts for files under the user home.
+   * Display-only — do not resolve them against the CWD.
    * Lets callers tell users which files were actually attached (see #5267).
    */
   contextFilePaths: string[];
@@ -543,9 +545,10 @@ export async function loadServerHierarchicalMemory(
       memoryFilenames.has(path.basename(item.filePath)),
     );
     fileCount = memoryItems.length;
-    // Only files whose content actually reached the system prompt count as
-    // "attached" (see hasAttachedContent).
-    contextFilePaths = memoryItems
+    // Announce every file whose content actually reached the system prompt
+    // (see hasAttachedContent) — not just memory-named files — so the list
+    // matches what concatenateInstructions attached.
+    contextFilePaths = contentsWithPaths
       .filter(hasAttachedContent)
       .map((item) =>
         formatContextFileDisplayPath(

@@ -479,6 +479,29 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it('announces extension context files with custom basenames', async () => {
+    const extensionFilePath = await createTestFile(
+      path.join(testRootDir, 'extensions/ext1/system-prompt.md'),
+      'Extension custom context content',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [extensionFilePath],
+      DEFAULT_FOLDER_TRUST,
+    );
+
+    // The file is attached by concatenateInstructions even though its
+    // basename is not a configured memory filename, so it must be announced.
+    expect(result.fileCount).toBe(0);
+    expect(result.memoryContent).toContain('Extension custom context content');
+    expect(result.contextFilePaths).toEqual([
+      path.relative(cwd, extensionFilePath),
+    ]);
+  });
+
   it('counts but does not announce whitespace-only context files', async () => {
     await createTestFile(path.join(cwd, DEFAULT_CONTEXT_FILENAME), '   \n\t ');
 

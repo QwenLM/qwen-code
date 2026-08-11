@@ -81,6 +81,7 @@ import {
   StreamingState,
   ToolCallStatus,
 } from './types.js';
+import { CommandKind } from './commands/types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
 import type { Content } from '@google/genai';
@@ -6269,6 +6270,60 @@ describe('AppContainer State Management', () => {
       });
       expect(announcementCalls(addItem)).toHaveLength(0);
 
+      capturedUIActions.handleFinalSubmit('hello', {
+        submittedPrompt: 'hello',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
+    });
+
+    it('consumes the latch on a model-invocable slash command (skills)', () => {
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: vi.fn(),
+        slashCommands: [
+          {
+            name: 'feat-dev',
+            description: 'Feature development workflow',
+            kind: CommandKind.SKILL,
+            modelInvocable: true,
+            action: vi.fn(),
+          },
+        ],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
+
+      // Skills are expanded into a submit_prompt that reaches the model, so
+      // the announcement must attach to this turn, not a later plain prompt.
+      capturedUIActions.handleFinalSubmit('/feat-dev implement X', {
+        submittedPrompt: '/feat-dev implement X',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
+
+      capturedUIActions.handleFinalSubmit('hello', {
+        submittedPrompt: 'hello',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
+    });
+
+    it('does not consume the latch while shell mode is active', () => {
+      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
+
+      // Shell-mode submissions are intercepted by the shell processor and
+      // never reach the model.
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('ls -la', {
+        submittedPrompt: 'ls -la',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(0);
+
+      act(() => {
+        capturedUIActions.setShellModeActive(false);
+      });
       capturedUIActions.handleFinalSubmit('hello', {
         submittedPrompt: 'hello',
       });
