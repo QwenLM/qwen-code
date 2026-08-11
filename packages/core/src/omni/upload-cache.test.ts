@@ -372,7 +372,7 @@ describe('OmniUploadCache', () => {
       // content must be byte-identical.
       expect(await fs.readFile(file, 'utf8')).toBe(before);
       const names = await fs.readdir(root);
-      expect(names.filter((n) => n.includes('.tmp-'))).toEqual([]);
+      expect(names.filter((n) => n.endsWith('.tmp'))).toEqual([]);
       expect(await cache.get(SHA, 'm')).toBe('oss://bucket/original');
     },
   );

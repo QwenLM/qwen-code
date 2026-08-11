@@ -194,7 +194,7 @@ describe('OmniDegradationCache', () => {
   it('writes atomically: no .tmp litter, 0600 file mode', async () => {
     await cache.put(ORIGINAL, fp, ENTRY);
     const names = await fs.readdir(root);
-    expect(names.filter((n) => n.includes('.tmp-'))).toEqual([]);
+    expect(names.filter((n) => n.endsWith('.tmp'))).toEqual([]);
     if (process.platform !== 'win32') {
       const stat = await fs.stat(path.join(root, 'policy-cache.json'));
       expect(stat.mode & 0o777).toBe(0o600);
