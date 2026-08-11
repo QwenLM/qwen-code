@@ -656,13 +656,17 @@ async function handlePostFileUpload(
     return;
   }
   const { route, fs, basename, resolvedDir } = admission;
-  const body = req.body;
-  const data =
-    body === undefined || body === null ? Buffer.alloc(0) : (body as Buffer);
   const { stem, ext } = splitStemExtension(basename);
   const lease = uploadGateLeases.get(req);
   if (lease) lease.handlerStarted = true;
   try {
+    // A client disconnect during the async admission window lets the body
+    // parser continue with `req.body === undefined`; writing anyway would
+    // publish a phantom 0-byte file nobody requested.
+    if (req.aborted || res.closed) return;
+    const body = req.body;
+    const data =
+      body === undefined || body === null ? Buffer.alloc(0) : (body as Buffer);
     for (let n = 0; n < NUMBERED_CANDIDATE_CAP; n++) {
       const candidateBasename =
         n === 0

@@ -1455,7 +1455,12 @@ export const ChatEditor = memo(
         const files = Array.from(event.dataTransfer.files);
         uploadDragDepthRef.current = 0;
         setUploadDragActive(false);
-        if (disabled) return;
+        if (disabled) {
+          // Cancel the drop itself; otherwise the browser navigates the tab
+          // to the dropped file, tearing down the Web Shell SPA mid-turn.
+          event.preventDefault();
+          return;
+        }
         if (
           !uploadEnabled ||
           files.length === 0 ||

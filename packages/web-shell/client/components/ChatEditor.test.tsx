@@ -106,6 +106,7 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   shellMode: false,
+  onFileUploadRequest: undefined as ((targetDir: string) => void) | undefined,
 }));
 
 // Controllable `useOptionalWorkspace()` value for file-upload gating tests.
@@ -151,90 +152,95 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
     await importOriginal<typeof import('../hooks/useComposerCore')>();
   return {
     ...actual,
-    useComposerCore: () => ({
-      containerRef: React.createRef<HTMLDivElement>(),
-      viewRef: { current: null },
-      mobileComposer: composerCoreState.mobileComposer,
-      focus: composerCoreState.focus,
-      submitText: vi.fn(),
-      clearText: vi.fn(),
-      getText: vi.fn(() => ''),
-      hasInput: vi.fn(() => false),
-      hasAttachments:
-        mockComposerCoreState.pastedImages.length > 0 ||
-        mockComposerCoreState.composerTags.length > 0,
-      hasContent: false,
-      canSubmit: false,
-      pendingImageBatchCount: 0,
-      imageDragActive: false,
-      clearImageDragState: composerCoreState.clearImageDragState,
-      imageTransferHandlers: {
-        onDropCapture: composerCoreState.imageDropCapture,
-      },
-      handle: {
-        focus: vi.fn(),
-        insertText: vi.fn(),
-        setText: vi.fn(),
-        clear: vi.fn(),
-        retryLast: vi.fn(),
-        addTags: vi.fn(),
-        removeInlineTags: vi.fn(),
-        submit: vi.fn(),
-        hasAttachments: () =>
+    useComposerCore: (options?: {
+      onFileUploadRequest?: (targetDir: string) => void;
+    }) => {
+      composerCoreState.onFileUploadRequest = options?.onFileUploadRequest;
+      return {
+        containerRef: React.createRef<HTMLDivElement>(),
+        viewRef: { current: null },
+        mobileComposer: composerCoreState.mobileComposer,
+        focus: composerCoreState.focus,
+        submitText: vi.fn(),
+        clearText: vi.fn(),
+        getText: vi.fn(() => ''),
+        hasInput: vi.fn(() => false),
+        hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
-      },
-      pastedImages: mockComposerCoreState.pastedImages,
-      removeImage: vi.fn(),
-      composerTags: mockComposerCoreState.composerTags,
-      removeTopTag: mockComposerCoreState.removeTopTag,
-      addTags: composerCoreState.addTags,
-      removeInlineTags: vi.fn(),
-      insertText: vi.fn(),
-      setText: vi.fn(),
-      submit: vi.fn(),
-      clear: vi.fn(),
-      retryLast: vi.fn(),
-      replaceEditorText: vi.fn(),
-      shellMode: composerCoreState.shellMode,
-      setShellMode: vi.fn(),
-      toggleShellMode: vi.fn(),
-      currentMode: 'default',
-      sessionName: undefined,
-      searchState: {
-        searchMode: false,
-        searchQuery: '',
-        searchMatches: [],
-        searchActiveIndex: 0,
-        searchInputRef: React.createRef<HTMLInputElement>(),
-        searchUiRef: React.createRef<HTMLDivElement>(),
-        openHistorySearch: composerCoreState.openHistorySearch,
-        closeSearch: vi.fn(),
-        submitSearchMatch: vi.fn(),
-        handleSearchKeyDown: vi.fn(),
-        handleSearchInput: vi.fn(),
-        handleSearchCompositionEnd: vi.fn(),
-      },
-      navigatePrevHistory: vi.fn(),
-      navigateNextHistory: vi.fn(),
-      showShortcutHints: false,
-      followupState: { isVisible: false, suggestion: '' },
-      disabled: false,
-      onAcceptFollowup: vi.fn(),
-      onDismissFollowup: vi.fn(),
-      slashMenu: composerCoreState.slashMenu,
-      closeSlashMenu: composerCoreState.closeSlashMenu,
-      selectSlashCompletion: vi.fn(),
-      acceptSlashCompletion: vi.fn(),
-      atMenu: null,
-      closeAtMenu: vi.fn(),
-      selectAtCompletion: vi.fn(),
-      acceptAtCompletion: vi.fn(),
-      enterAtCategory: vi.fn(),
-      backAtCategories: vi.fn(),
-      updateAtSearch: vi.fn(),
-      selectAtTab: vi.fn(),
-    }),
+        hasContent: false,
+        canSubmit: false,
+        pendingImageBatchCount: 0,
+        imageDragActive: false,
+        clearImageDragState: composerCoreState.clearImageDragState,
+        imageTransferHandlers: {
+          onDropCapture: composerCoreState.imageDropCapture,
+        },
+        handle: {
+          focus: vi.fn(),
+          insertText: vi.fn(),
+          setText: vi.fn(),
+          clear: vi.fn(),
+          retryLast: vi.fn(),
+          addTags: vi.fn(),
+          removeInlineTags: vi.fn(),
+          submit: vi.fn(),
+          hasAttachments: () =>
+            mockComposerCoreState.pastedImages.length > 0 ||
+            mockComposerCoreState.composerTags.length > 0,
+        },
+        pastedImages: mockComposerCoreState.pastedImages,
+        removeImage: vi.fn(),
+        composerTags: mockComposerCoreState.composerTags,
+        removeTopTag: mockComposerCoreState.removeTopTag,
+        addTags: composerCoreState.addTags,
+        removeInlineTags: vi.fn(),
+        insertText: vi.fn(),
+        setText: vi.fn(),
+        submit: vi.fn(),
+        clear: vi.fn(),
+        retryLast: vi.fn(),
+        replaceEditorText: vi.fn(),
+        shellMode: composerCoreState.shellMode,
+        setShellMode: vi.fn(),
+        toggleShellMode: vi.fn(),
+        currentMode: 'default',
+        sessionName: undefined,
+        searchState: {
+          searchMode: false,
+          searchQuery: '',
+          searchMatches: [],
+          searchActiveIndex: 0,
+          searchInputRef: React.createRef<HTMLInputElement>(),
+          searchUiRef: React.createRef<HTMLDivElement>(),
+          openHistorySearch: composerCoreState.openHistorySearch,
+          closeSearch: vi.fn(),
+          submitSearchMatch: vi.fn(),
+          handleSearchKeyDown: vi.fn(),
+          handleSearchInput: vi.fn(),
+          handleSearchCompositionEnd: vi.fn(),
+        },
+        navigatePrevHistory: vi.fn(),
+        navigateNextHistory: vi.fn(),
+        showShortcutHints: false,
+        followupState: { isVisible: false, suggestion: '' },
+        disabled: false,
+        onAcceptFollowup: vi.fn(),
+        onDismissFollowup: vi.fn(),
+        slashMenu: composerCoreState.slashMenu,
+        closeSlashMenu: composerCoreState.closeSlashMenu,
+        selectSlashCompletion: vi.fn(),
+        acceptSlashCompletion: vi.fn(),
+        atMenu: null,
+        closeAtMenu: vi.fn(),
+        selectAtCompletion: vi.fn(),
+        acceptAtCompletion: vi.fn(),
+        enterAtCategory: vi.fn(),
+        backAtCategories: vi.fn(),
+        updateAtSearch: vi.fn(),
+        selectAtTab: vi.fn(),
+      };
+    },
   };
 });
 
@@ -275,6 +281,7 @@ afterEach(() => {
   composerCoreState.imageDropCapture.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -1564,10 +1571,55 @@ describe('ChatEditor file upload gating', () => {
       ['Files'],
       [new File(['abc'], 'report.txt')],
     );
-    expect(drop.defaultPrevented).toBe(false);
+    // Cancelled so the browser cannot navigate to the dropped file, but
+    // nothing is ingested on any lane.
+    expect(drop.defaultPrevented).toBe(true);
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
     expect(composerCoreState.addTags).not.toHaveBeenCalled();
     expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+  });
+
+  it('keeps capability-off file drops on the legacy image lane', () => {
+    const workspace = makeWorkspace([]);
+    uploadWorkspaceState.current = workspace;
+    composerCoreState.imageDropCapture.mockImplementation((event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['x'], 'notes.txt')],
+    );
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(composerCoreState.addTags).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+  });
+
+  it('routes mixed image-and-file drops to the upload path', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [
+        new File(['png'], 'photo.png', { type: 'image/png' }),
+        new File(['csv'], 'data.csv', { type: 'text/csv' }),
+      ],
+    );
+    expect(drop.defaultPrevented).toBe(true);
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-upload-strip]'),
+    ).not.toBeNull();
   });
 
   it('intercepts file drops before the editor and renders status above it', () => {
@@ -1598,6 +1650,71 @@ describe('ChatEditor file upload gating', () => {
     expect(strip).not.toBeNull();
     expect(strip?.nextElementSibling).toBe(surface);
     expect(surface.contains(strip)).toBe(false);
+  });
+
+  it('uploads picker selections into the captured directory and inserts a tag', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'docs/notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'a'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+
+    // The @ panel's Upload item captures the browsed directory, then clicks
+    // the hidden input.
+    act(() => {
+      composerCoreState.onFileUploadRequest?.('docs');
+    });
+    Object.defineProperty(input, 'files', {
+      value: [new File(['abc'], 'notes.txt')],
+      configurable: true,
+    });
+    act(() => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(workspace.client.uploadWorkspaceFile.mock.calls[0][0].path).toBe(
+      'docs/notes.txt',
+    );
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          kind: 'file',
+          value: 'docs/notes.txt',
+        }),
+      ],
+      { placement: 'inline', position: 'end' },
+    );
+  });
+
+  it('ignores picker changes whose captured target no longer matches', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+
+    // The captured key never matches the current target when the picker was
+    // not opened for it (e.g. the workspace switched while the OS picker
+    // was open): the stale-target guard must block the upload.
+    Object.defineProperty(input, 'files', {
+      value: [new File(['abc'], 'notes.txt')],
+      configurable: true,
+    });
+    act(() => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('keeps supported image drops on the image attachment path', () => {

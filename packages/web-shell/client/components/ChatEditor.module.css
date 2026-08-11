@@ -1746,10 +1746,6 @@
     animation: none;
   }
 
-  .uploadRowSpinner {
-    animation: none;
-  }
-
   .sendBtnArmed,
   .sendBtnArmed:not(:disabled) {
     animation: none;
@@ -1981,6 +1977,14 @@
 
 .uploadRowSpinner {
   animation: uploadRowSpin 1s linear infinite;
+}
+
+/* Must follow the base rule: equal-specificity cascade resolves to the
+   last declaration, so an earlier override would stay dead code. */
+@media (prefers-reduced-motion: reduce) {
+  .uploadRowSpinner {
+    animation: none;
+  }
 }
 
 @keyframes uploadRowSpin {

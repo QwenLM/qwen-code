@@ -506,5 +506,62 @@ describe('uploadWorkspaceFile', () => {
       expect(error).toMatchObject({ message: 'detached buffer' });
       expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
     });
+
+    it('detaches the abort listener after a successful upload settles', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+      const ctrl = new AbortController();
+      const removeSpy = vi.spyOn(ctrl.signal, 'removeEventListener');
+
+      const promise = client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data: new Uint8Array([1]),
+        signal: ctrl.signal,
+        onProgress: () => {},
+      });
+      const xhr = FakeXMLHttpRequest.latest!;
+      xhr.status = 201;
+      xhr.responseText = JSON.stringify(uploadResult);
+      xhr.onload?.();
+
+      await expect(promise).resolves.toEqual(uploadResult);
+      expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+    });
+
+    it('rejects a pre-aborted signal before constructing an XHR', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+      const ctrl = new AbortController();
+      ctrl.abort();
+
+      await expect(
+        client.uploadWorkspaceFile({
+          path: 'a.bin',
+          data: new Uint8Array([1]),
+          signal: ctrl.signal,
+          onProgress: () => {},
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(FakeXMLHttpRequest.latest).toBeUndefined();
+    });
+
+    it('rejects a 2xx response with a non-JSON body like the fetch path', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+
+      const promise = client
+        .uploadWorkspaceFile({
+          path: 'a.bin',
+          data: new Uint8Array([1]),
+          onProgress: () => {},
+        })
+        .catch((caught: unknown) => caught);
+      const xhr = FakeXMLHttpRequest.latest!;
+      xhr.status = 200;
+      xhr.responseText = '<html>interstitial</html>';
+      xhr.onload?.();
+
+      const error = await promise;
+      expect(error).toMatchObject({
+        message: expect.stringContaining('invalid upload response body'),
+      });
+    });
   });
 });

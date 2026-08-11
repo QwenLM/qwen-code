@@ -1022,6 +1022,35 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
   });
 
+  it('keeps prefix items for directory queries like @src/', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: 'src',
+      entries: Array.from({ length: 55 }, (_, index) => ({
+        name: `file-${String(index).padStart(2, '0')}.ts`,
+        kind: 'file',
+        ignored: false,
+      })),
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      onUploadRequest: vi.fn(),
+    });
+
+    // The entry query is empty here too, so the provider prepends the same
+    // two prefix items and the menu cap must grant the extra slots.
+    act(() => latest!.refreshForView(makeView('@src/')));
+    await runDebounce();
+
+    expect(latest!.state?.query).toBe('src/');
+    expect(latest!.state?.items).toHaveLength(52);
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    expect(latest!.state?.items[1]?.id).toBe('current:src');
+    expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
+  });
+
   it('keeps built-in providers when custom provider ids collide', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const search = vi.fn().mockResolvedValue([]);

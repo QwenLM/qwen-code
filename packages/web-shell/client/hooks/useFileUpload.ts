@@ -146,6 +146,15 @@ export function useFileUpload(
               if (generationRef.current !== generation) return;
               const progress =
                 event.total > 0 ? Math.min(1, event.loaded / event.total) : 0;
+              const last =
+                uploadsRef.current.find((item) => item.id === id)?.progress ??
+                0;
+              // Chunk arrivals fire tens of sub-percentage events per second;
+              // commit only visible advances (>= 2%) and the final value so
+              // the composer tree does not re-render for every chunk.
+              if (progress < 1 && progress >= last && progress - last < 0.02) {
+                return;
+              }
               patchItem(id, { progress });
             },
           });

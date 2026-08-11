@@ -1970,6 +1970,10 @@ export class DaemonClient {
     const onProgress = req.onProgress;
     return await new Promise<DaemonWorkspaceFileUploadResult>(
       (resolve, reject) => {
+        if (req.signal?.aborted) {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+          return;
+        }
         const xhr = new XMLHttpRequest();
         let abortListener: (() => void) | undefined;
         // Detach the abort listener once the request settles so a long-lived
@@ -1998,6 +2002,12 @@ export class DaemonClient {
             body = xhr.responseText;
           }
           if (xhr.status >= 200 && xhr.status < 300) {
+            // The fetch path rejects non-JSON 2xx bodies (`res.json()`
+            // throws); match it so the two transports fail identically.
+            if (!body || typeof body !== 'object' || !('path' in body)) {
+              reject(new Error(`${label}: invalid upload response body`));
+              return;
+            }
             resolve(body as DaemonWorkspaceFileUploadResult);
             return;
           }
@@ -2020,12 +2030,6 @@ export class DaemonClient {
           reject(new DOMException('The operation was aborted.', 'AbortError'));
         };
         if (req.signal) {
-          if (req.signal.aborted) {
-            reject(
-              new DOMException('The operation was aborted.', 'AbortError'),
-            );
-            return;
-          }
           abortListener = () => xhr.abort();
           req.signal.addEventListener('abort', abortListener, { once: true });
         }

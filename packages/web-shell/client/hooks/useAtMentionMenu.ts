@@ -1215,8 +1215,11 @@ export function useAtMentionMenu({
           }
           setMenu((prev) => {
             if (!prev || prev.level !== 'items') return prev;
+            // The file provider prepends prefix items whenever its entry
+            // query is empty (e.g. `@src/`), not only for `query === ''`;
+            // filtered queries are already capped inside the provider.
             const maxItems =
-              providerId === FILE_PROVIDER_ID && query.length === 0
+              providerId === FILE_PROVIDER_ID
                 ? FILE_ROOT_ITEM_LIMIT
                 : ITEM_LIMIT;
             return {

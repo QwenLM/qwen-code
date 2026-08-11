@@ -86,7 +86,7 @@ async function sendChunkedUpload(
   targetPath: string,
   totalBytes: number,
 ): Promise<{ status: number; body: string }> {
-  const server = app.listen(0);
+  const server = app.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const port = (server.address() as AddressInfo).port;
   try {
@@ -434,6 +434,20 @@ describe('POST /file/upload', () => {
     });
   });
 
+  it('rejects a missing Content-Type with the same 415 envelope', async () => {
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .query({ path: 'a.txt' })
+      .send(Buffer.from('not binary'));
+    expect(res.status).toBe(415);
+    expect(res.body).toMatchObject({
+      errorKind: 'unsupported_media_type',
+      status: 415,
+    });
+  });
+
   it('rejects a missing path with parse_error', async () => {
     const res = await request(h.app)
       .post('/file/upload')
@@ -546,6 +560,23 @@ describe('POST /file/upload', () => {
     ).toBe('orig');
   });
 
+  it('numbers instead of materializing a symlink whose target is absent', async () => {
+    await fsp.symlink(
+      path.join(h.workspace, 'fresh.bin'),
+      path.join(h.workspace, 'link.bin'),
+    );
+    const res = await upload('link.bin').send(Buffer.from('new'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('link (1).bin');
+    // The dangling symlink is untouched and its target was not created.
+    expect(await fsp.readlink(path.join(h.workspace, 'link.bin'))).toBe(
+      path.join(h.workspace, 'fresh.bin'),
+    );
+    await expect(
+      fsp.stat(path.join(h.workspace, 'fresh.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('rejects an escaping symlink at the boundary', async () => {
     const outside = path.join(h.scratch, 'outside.bin');
     await fsp.writeFile(outside, 'external');
@@ -560,6 +591,37 @@ describe('POST /file/upload', () => {
     const res = await upload('no/such/dir/a.txt').send(Buffer.from('x'));
     expect(res.status).toBe(400);
     expect(res.body.errorKind).toBe('parse_error');
+  });
+
+  it('rejects a non-directory parent before buffering', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'x');
+    const res = await upload('file.txt/a.txt').send(Buffer.from('y'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'file.txt'), 'utf-8'),
+    ).toBe('x');
+  });
+
+  it('rejects a ../ boundary escape before buffering', async () => {
+    const res = await upload('../escape.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('path_outside_workspace');
+    await expect(
+      fsp.stat(path.join(h.scratch, 'escape.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a symlinked parent that escapes the workspace', async () => {
+    const outsideDir = path.join(h.scratch, 'outside-dir');
+    await fsp.mkdir(outsideDir);
+    await fsp.symlink(outsideDir, path.join(h.workspace, 'escape-dir'), 'dir');
+    const res = await upload('escape-dir/a.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('symlink_escape');
+    await expect(
+      fsp.stat(path.join(outsideDir, 'a.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('preserves a generation-closed error from the parent stat', async () => {
@@ -597,8 +659,10 @@ describe('POST /file/upload', () => {
     ).toBe('hi');
   });
 
-  it('handles filenames with spaces, non-ASCII, and a literal %', async () => {
-    const name = 'my 数据 %b.txt';
+  it('handles filenames with spaces, non-ASCII, and literal % and #', async () => {
+    // `#` travels as %23 and must survive exactly one server-side decode;
+    // a double decode or raw-query parse would corrupt the name.
+    const name = 'my 数据 %b #1.txt';
     const res = await upload(name).send(Buffer.from('v'));
     expect(res.status).toBe(201);
     expect(res.body.path).toBe(name);
@@ -623,6 +687,17 @@ describe('POST /file/upload', () => {
     const bad = await upload(overCap).send(Buffer.from('x'));
     expect(bad.status).toBe(400);
     expect(bad.body.errorKind).toBe('parse_error');
+  });
+
+  it('returns parse_error when numbering cannot fit the 255-byte cap', async () => {
+    // A 1-byte stem plus a 254-byte extension fills the whole cap, so no
+    // ' (n)' suffix fits and fitFilenameToByteCap's null branch must 400.
+    const name = `a.${'x'.repeat(253)}`;
+    expect(Buffer.byteLength(name, 'utf-8')).toBe(255);
+    await fsp.writeFile(path.join(h.workspace, name), 'orig');
+    const res = await upload(name).send(Buffer.from('new'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
   });
 
   it('rejects an unknown client id before buffering', async () => {
@@ -754,6 +829,131 @@ describe('POST /file/upload', () => {
     expect(res.body.errorKind).toBe('file_already_exists');
   }, 30_000);
 
+  it('publishes no file when the client disconnects during admission', async () => {
+    // Hold the admission parent-stat so the client can disconnect after its
+    // full body was sent: the body parser then skips parsing and continues
+    // with `req.body === undefined`. The handler must not coerce that to an
+    // empty Buffer and publish a phantom 0-byte file nobody requested.
+    const realFactory = createWorkspaceFileSystemFactory({
+      boundWorkspaces: [h.workspace],
+      trusted: true,
+      emit: () => {},
+    });
+    let statCalls = 0;
+    let writeCalls = 0;
+    let releaseStat: () => void = () => {};
+    const statHold = new Promise<void>((resolve) => {
+      releaseStat = resolve;
+    });
+    const hangingFactory = {
+      assertCanWrite: () => {},
+      forRequest: (ctx: { originatorClientId?: string; route: string }) => {
+        const realFs = realFactory.forRequest(ctx);
+        return new Proxy(realFs, {
+          get(target, prop, receiver) {
+            if (prop === 'stat') {
+              return (p: Parameters<typeof realFs.stat>[0]) => {
+                statCalls += 1;
+                return statCalls === 1
+                  ? statHold.then(() => target.stat(p))
+                  : target.stat(p);
+              };
+            }
+            if (prop === 'writeBytesAtomic') {
+              return (
+                p: Parameters<typeof realFs.writeBytesAtomic>[0],
+                data: Buffer,
+              ) => {
+                writeCalls += 1;
+                return target.writeBytesAtomic(p, data);
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      },
+    };
+    const app = createServeApp(
+      { ...baseOpts, workspace: h.workspace, token: 'secret' },
+      undefined,
+      { fsFactory: hangingFactory as never },
+    );
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await new Promise<void>((resolve) => {
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port,
+            method: 'POST',
+            path: '/file/upload?path=photo.jpg',
+            headers: {
+              Host: loopbackHost(),
+              Authorization: 'Bearer secret',
+              'Content-Type': 'application/octet-stream',
+              'Content-Length': '5',
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on('end', resolve);
+            res.on('close', resolve);
+          },
+        );
+        req.on('error', () => {});
+        req.on('close', resolve);
+        req.write('hello');
+        req.end();
+        // Cut the connection while admission is suspended on the held stat.
+        void vi
+          .waitFor(() => {
+            expect(statCalls).toBe(1);
+          })
+          .then(async () => {
+            req.destroy();
+            // Give the server time to process the disconnect (req becomes
+            // aborted / res closed) before admission resumes.
+            await new Promise((r) => setTimeout(r, 100));
+            releaseStat();
+          });
+      });
+      // Let the resumed pipeline reach the aborted-request guard and release
+      // its gate slot before the follow-ups probe the gate.
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Four follow-up uploads through the same app: they succeed only if the
+      // aborted request released its gate slot, and they pin the write count
+      // (a phantom write for photo.jpg would make it five).
+      const followUp = (name: string) =>
+        request(app)
+          .post('/file/upload')
+          .set('Host', loopbackHost())
+          .set('Authorization', 'Bearer secret')
+          .set('Content-Type', 'application/octet-stream')
+          .query({ path: name })
+          .send(Buffer.from('x'));
+      const after = await Promise.all([
+        followUp('f.bin'),
+        followUp('g.bin'),
+        followUp('h.bin'),
+        followUp('i.bin'),
+      ]);
+      for (const res of after) {
+        expect(res.status).toBe(201);
+      }
+      expect(writeCalls).toBe(4);
+      await expect(
+        fsp.stat(path.join(h.workspace, 'photo.jpg')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('frees gate slots when oversized chunked bodies are rejected after admission', async () => {
     // A chunked body carries no Content-Length, so it passes the admission
     // pre-check, acquires a gate slot, and is rejected by the raw parser.
@@ -822,6 +1022,7 @@ describe('POST /file/upload HTTP concurrency gate (end-to-end)', () => {
     const hold = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const writePromises: Array<Promise<unknown>> = [];
     const hangingFactory = {
       assertCanWrite: () => {},
       forRequest: (ctx: { originatorClientId?: string; route: string }) => {
@@ -836,7 +1037,9 @@ describe('POST /file/upload HTTP concurrency gate (end-to-end)', () => {
                 data: Buffer,
               ) => {
                 started += 1;
-                return hold.then(() => target.writeBytesAtomic(p, data));
+                const write = hold.then(() => target.writeBytesAtomic(p, data));
+                writePromises.push(write);
+                return write;
               };
             }
             const value = Reflect.get(target, prop, receiver);
@@ -917,7 +1120,10 @@ describe('POST /file/upload HTTP concurrency gate (end-to-end)', () => {
         expect(res.status).toBe(201);
       }
 
-      // The disconnected a.bin write still completed server-side.
+      // The disconnected a.bin write still completed server-side. Await the
+      // intercepted write itself: the aborted client has no response to
+      // synchronize on, and nothing else orders its rename before this stat.
+      await Promise.all(writePromises);
       expect((await fsp.stat(path.join(wsDir, 'a.bin'))).size).toBe(1);
 
       // All four slots must be free again: four concurrent uploads all

@@ -3759,7 +3759,15 @@ export function useComposerCore(
         const selection = view.state.selection.main;
         const insertAt = appendToEnd ? view.state.doc.length : selection.from;
         const replaceTo = appendToEnd ? view.state.doc.length : selection.to;
-        let at = insertAt;
+        // The mention parser needs a boundary before `@`, so separate an
+        // appended reference from preceding non-whitespace text.
+        const separator =
+          appendToEnd &&
+          view.state.doc.length > 0 &&
+          !/\s/.test(view.state.doc.sliceString(view.state.doc.length - 1))
+            ? ' '
+            : '';
+        let at = insertAt + separator.length;
         const ranges: InlineTagRange[] = [];
         const insert = tags
           .map((tag) => {
@@ -3769,7 +3777,7 @@ export function useComposerCore(
             return tagText;
           })
           .join(' ');
-        const text = insert ? `${insert} ` : '';
+        const text = insert ? `${separator}${insert} ` : '';
         view.dispatch({
           changes: { from: insertAt, to: replaceTo, insert: text },
           effects:
@@ -3781,8 +3789,12 @@ export function useComposerCore(
                   }),
                 )
               : undefined,
-          selection: { anchor: insertAt + text.length },
-          scrollIntoView: true,
+          // End placement serves async completions (uploads): never move the
+          // caret or scroll the viewport while the user types elsewhere.
+          selection: appendToEnd
+            ? undefined
+            : { anchor: insertAt + text.length },
+          scrollIntoView: !appendToEnd,
         });
         // An asynchronous completion (upload) must not steal focus from
         // whatever control the user moved to while it was in flight.

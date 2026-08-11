@@ -1346,8 +1346,10 @@ describe('useComposerCore tags', () => {
     });
 
     const doc = view.state.doc.toString();
-    expect(doc.startsWith('draft text')).toBe(true);
-    expect(doc.endsWith('@orders ')).toBe(true);
+    // A boundary separates the appended reference from the preceding text,
+    // and the caret stays where the user left it (no teleport to doc end).
+    expect(doc).toBe('draft text @orders ');
+    expect(view.state.selection.main.from).toBe(5);
     expect(document.activeElement).toBe(outside);
     outside.remove();
   });

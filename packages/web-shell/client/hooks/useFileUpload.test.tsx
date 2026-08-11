@@ -64,6 +64,7 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.restoreAllMocks();
 });
 
 describe('useFileUpload', () => {
@@ -123,6 +124,66 @@ describe('useFileUpload', () => {
       });
     });
     expect(latest!.uploads.map((u) => u.status)).toEqual(['done', 'done']);
+  });
+
+  it('merges a second batch while the first is still in flight', async () => {
+    const gates: Array<
+      Deferred<{
+        kind: 'file_upload';
+        path: string;
+        sizeBytes: number;
+        hash: `sha256:${string}`;
+      }>
+    > = [];
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(() => {
+        const gate =
+          deferred<
+            Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>
+          >();
+        gates.push(gate as never);
+        return gate.promise;
+      }),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    const onUploaded = vi.fn();
+
+    act(() => {
+      latest!.uploadFiles([makeFile('one.txt')], '.', onUploaded);
+    });
+    expect(latest!.uploads.map((u) => u.status)).toEqual(['uploading']);
+
+    // A second drop while the first upload is still in flight must queue,
+    // not start a second request or stall.
+    act(() => {
+      latest!.uploadFiles([makeFile('two.txt')], '.', onUploaded);
+    });
+    expect(latest!.uploads.map((u) => u.status)).toEqual([
+      'uploading',
+      'pending',
+    ]);
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      gates[0].resolve({
+        kind: 'file_upload',
+        path: 'one.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+    });
+    expect(latest!.uploads.map((u) => u.status)).toEqual(['done', 'uploading']);
+
+    await act(async () => {
+      gates[1].resolve({
+        kind: 'file_upload',
+        path: 'two.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'b'.repeat(64)}`,
+      });
+    });
+    expect(latest!.uploads.map((u) => u.status)).toEqual(['done', 'done']);
+    expect(onUploaded).toHaveBeenCalledTimes(2);
   });
 
   it('rejects an oversized file locally without an HTTP request', async () => {
@@ -187,6 +248,22 @@ describe('useFileUpload', () => {
     expect(latest!.uploads.map((u) => u.status)).toEqual(['error', 'done']);
   });
 
+  it('errors every item with noDaemon when no client is available', async () => {
+    render({ client: undefined, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('a.txt'), makeFile('b.txt')], '.');
+    });
+    await act(async () => {});
+    // Both items settle as errors: dropping the noDaemon guard would throw
+    // on the first item and leave every following item pending forever.
+    expect(latest!.uploads.map((u) => u.status)).toEqual(['error', 'error']);
+    expect(latest!.uploads.map((u) => u.errorCode)).toEqual([
+      'noDaemon',
+      'noDaemon',
+    ]);
+  });
+
   it('passes the file bytes through with no SDK timeout', async () => {
     let captured:
       | Parameters<FileUploadClient['uploadWorkspaceFile']>[0]
@@ -239,6 +316,53 @@ describe('useFileUpload', () => {
     expect(latest!.uploads[0].progress).toBe(0);
     act(() => onProgress!({ loaded: 1, total: 4 }));
     expect(latest!.uploads[0].progress).toBe(0.25);
+
+    await act(async () => {
+      gate.resolve({
+        kind: 'file_upload',
+        path: 'big.bin',
+        sizeBytes: MAX,
+        hash: `sha256:${'d'.repeat(64)}`,
+      });
+    });
+  });
+
+  it('coalesces sub-threshold progress events and always commits the end', async () => {
+    let onProgress:
+      | ((event: { loaded: number; total: number }) => void)
+      | undefined;
+    const gate =
+      deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>();
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn((req) => {
+        onProgress = req.onProgress;
+        return gate.promise;
+      }),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('big.bin', MAX)], '.');
+    });
+    await act(async () => {});
+    const before = latest!.uploads;
+
+    // Ten 0.1% advances are below the 2% commit threshold: no re-render.
+    act(() => {
+      for (let loaded = 1; loaded <= 10; loaded++) {
+        onProgress!({ loaded, total: 1000 });
+      }
+    });
+    expect(latest!.uploads).toBe(before);
+    expect(latest!.uploads[0].progress).toBe(0);
+
+    act(() => onProgress!({ loaded: 30, total: 1000 }));
+    expect(latest!.uploads).not.toBe(before);
+    expect(latest!.uploads[0].progress).toBeCloseTo(0.03);
+
+    // The final value always commits, regardless of the threshold.
+    act(() => onProgress!({ loaded: 1000, total: 1000 }));
+    expect(latest!.uploads[0].progress).toBe(1);
 
     await act(async () => {
       gate.resolve({
@@ -324,6 +448,29 @@ describe('useFileUpload', () => {
       expect(latest!.uploads).toHaveLength(1);
       await act(async () => vi.advanceTimersByTimeAsync(1));
       expect(latest!.uploads).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a failed upload visible until dismissed', async () => {
+    vi.useFakeTimers();
+    try {
+      const client: FileUploadClient = {
+        uploadWorkspaceFile: vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      };
+      render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+      act(() => latest!.uploadFiles([makeFile('bad.txt')], '.'));
+      await act(async () => {});
+      expect(latest!.uploads[0]?.status).toBe('error');
+
+      // Well past the done-row dismiss window: the explanation stays.
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(latest!.uploads).toHaveLength(1);
+      expect(latest!.uploads[0]?.status).toBe('error');
     } finally {
       vi.useRealTimers();
     }
