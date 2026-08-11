@@ -100,8 +100,15 @@ describe('collapseRepetitionDegeneration', () => {
   });
 
   it('requires at least 8 repetitions', () => {
-    const input = '好的，'.repeat(7);
+    // 6-char unit so 7 reps (42 chars) already clear the 24-char span
+    // floor — this pins the rep threshold itself, not the span floor.
+    const input = '好的，收到。'.repeat(7);
     expect(collapseRepetitionDegeneration(input).degenerated).toBe(false);
+    const { text, degenerated } = collapseRepetitionDegeneration(
+      '好的，收到。'.repeat(8),
+    );
+    expect(degenerated).toBe(true);
+    expect(text).toBe('好的，收到。');
   });
 
   it('requires the repeated span to reach 24 chars', () => {
