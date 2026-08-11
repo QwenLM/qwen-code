@@ -69,9 +69,7 @@ export class RemoteSession implements AgentSession, AgentSessionView {
       new Promise<never>((_, reject) => {
         timeout = setTimeout(
           () =>
-            reject(
-              new Error(`Agent "${this.agentId}" did not become ready.`),
-            ),
+            reject(new Error(`Agent "${this.agentId}" did not become ready.`)),
           timeoutMs,
         );
       }),
@@ -86,7 +84,20 @@ export class RemoteSession implements AgentSession, AgentSessionView {
     return this.status;
   }
 
+  /**
+   * One-line failure summary for the status label.
+   *
+   * The supervisor's diagnostic is deliberately multi-line (it carries a log
+   * tail); its first line already names the exit code and the log path, which
+   * is what fits — and what an operator needs — in the composer.
+   */
   getError(): string | undefined {
+    const error = this.error ?? this.snapshot.lastRoundError;
+    return error?.split('\n')[0];
+  }
+
+  /** Full multi-line diagnostic, including any captured subprocess output. */
+  getErrorDetail(): string | undefined {
     return this.error ?? this.snapshot.lastRoundError;
   }
 
@@ -157,7 +168,7 @@ export class RemoteSession implements AgentSession, AgentSessionView {
   }
 
   getLastRoundError(): string | undefined {
-    return this.snapshot.lastRoundError;
+    return this.snapshot.lastRoundError ?? this.error;
   }
 
   getApprovalMode(): ApprovalMode {
@@ -185,13 +196,24 @@ export class RemoteSession implements AgentSession, AgentSessionView {
       return;
     }
     if (event.type === 'state') {
+      // The supervisor attaches the exit code and captured output here; keep it
+      // even when the session is already ready so a mid-run crash stays
+      // explicable in the pane.
+      if (event.lastError) this.error = event.lastError.message;
       this.setStatus(statusFromSupervisor(event.sessionState));
       if (!this.ready && isTerminalSupervisorState(event.sessionState)) {
-        const error = new Error(
-          `Agent "${this.agentId}" exited before becoming ready (${event.sessionState}).`,
+        const reason =
+          event.lastError?.message ??
+          `no diagnostics were reported (state: ${event.sessionState})`;
+        // Only fall back to the wrapper text when the supervisor sent no
+        // diagnostic; otherwise the agent-name prefix would push the exit code
+        // and log path off the end of a one-line status label.
+        this.error ??= reason;
+        this.readyReject(
+          new Error(
+            `Agent "${this.agentId}" exited before becoming ready. ${reason}`,
+          ),
         );
-        this.error = error.message;
-        this.readyReject(error);
       }
       return;
     }
@@ -262,5 +284,11 @@ function statusFromSupervisor(state: AgentViewSessionState): AgentStatus {
       return AgentStatus.CANCELLED;
     case 'failed':
       return AgentStatus.FAILED;
+    default: {
+      // Exhaustive today; a new supervisor state must map explicitly rather
+      // than silently reading as some other status in the UI.
+      const unexpected: never = state;
+      throw new Error(`Unhandled supervisor session state: ${unexpected}`);
+    }
   }
 }

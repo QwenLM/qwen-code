@@ -25,6 +25,8 @@ export interface AgentViewStorePaths {
   daemonDir: string;
   rosterPath: string;
   supervisorPath: string;
+  supervisorLogPath: string;
+  fleetDebugLogPath: string;
   daemonLogPath: string;
   jobsDir: string;
 }
@@ -35,6 +37,7 @@ export interface AgentViewSessionPaths {
   launchPath: string;
   activityPath: string;
   workerPath: string;
+  logPath: string;
   tmpDir: string;
 }
 
@@ -52,6 +55,8 @@ export function getAgentViewStorePaths(
     daemonDir,
     rosterPath: path.join(daemonDir, 'roster.json'),
     supervisorPath: path.join(daemonDir, 'supervisor.json'),
+    supervisorLogPath: path.join(daemonDir, 'supervisor.log'),
+    fleetDebugLogPath: path.join(daemonDir, 'fleet-debug.log'),
     daemonLogPath: path.join(daemonDir, 'daemon.log'),
     jobsDir: path.join(globalDir, 'jobs'),
   };
@@ -69,6 +74,7 @@ export function getAgentViewSessionPaths(
     launchPath: path.join(sessionDir, 'launch.json'),
     activityPath: path.join(sessionDir, 'activity.json'),
     workerPath: path.join(sessionDir, 'worker.json'),
+    logPath: path.join(sessionDir, 'worker.log'),
     tmpDir: path.join(sessionDir, 'tmp'),
   };
 }

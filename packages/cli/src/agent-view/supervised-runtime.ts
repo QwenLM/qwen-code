@@ -22,6 +22,7 @@ import {
   type AgentViewSupervisorClientHandle,
 } from './supervisor-runner.js';
 import { getAgentViewSessionPaths } from './supervisor-store.js';
+import { fleetDebug } from './fleet-debug.js';
 
 export function createSupervisedRuntimeFactory(): AgentRuntimeFactory {
   return () => new SupervisedRuntime();
@@ -74,10 +75,18 @@ class SupervisedRuntime implements AgentRuntime {
         displayName: spec.name,
       });
       dispatched = true;
+      fleetDebug('runtime', 'dispatched, awaiting handshake', {
+        sessionId: spec.agentId,
+      });
       await session.waitUntilReady();
+      fleetDebug('runtime', 'teammate ready', { sessionId: spec.agentId });
       this.sessions.set(spec.agentId, { session, spec });
       return session;
     } catch (error) {
+      fleetDebug('runtime', 'teammate start failed', {
+        sessionId: spec.agentId,
+        error,
+      });
       if (dispatched) {
         await supervisor.kill(spec.agentId).catch(() => {});
         await supervisor.remove(spec.agentId).catch(() => {});
@@ -124,12 +133,9 @@ class SupervisedRuntime implements AgentRuntime {
   }
 
   async answer(agentId: string, decision: ApprovalDecision): Promise<void> {
-    await (await this.supervisor()).answer(
-      agentId,
-      decision.callId,
-      decision.outcome,
-      decision.payload,
-    );
+    await (
+      await this.supervisor()
+    ).answer(agentId, decision.callId, decision.outcome, decision.payload);
   }
 
   async dispose(): Promise<void> {

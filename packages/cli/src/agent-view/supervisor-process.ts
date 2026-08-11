@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  createHash,
-  randomUUID,
-  timingSafeEqual,
-} from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -16,6 +12,7 @@ import * as path from 'node:path';
 import type {
   AgentViewDispatchParams,
   AgentViewDispatchResult,
+  AgentViewLastError,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
   AgentViewWorkerControlEvent,
@@ -44,6 +41,7 @@ import {
   writeAgentViewWorker,
 } from './supervisor-store.js';
 import type { AgentViewSupervisorRequestMap } from './supervisor-client.js';
+import { describeWorkerExit, readFleetLogTail } from './fleet-debug.js';
 
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
@@ -148,9 +146,7 @@ export function createAgentViewSupervisorHandler(
   return new AgentViewSupervisorProcessHandler(options);
 }
 
-class AgentViewSupervisorProcessHandler
-  implements AgentViewSupervisorProcess
-{
+class AgentViewSupervisorProcessHandler implements AgentViewSupervisorProcess {
   private readonly socketPath: string;
   private readonly startedAt = new Date().toISOString();
   private readonly subscribers = new Set<Socket>();
@@ -197,8 +193,7 @@ class AgentViewSupervisorProcessHandler
     if (!params?.cwd) return withViews;
     const cwd = path.resolve(params.cwd);
     return withViews.filter(
-      ({ state }) =>
-        state.projectCwd === cwd || state.activeCwd === cwd,
+      ({ state }) => state.projectCwd === cwd || state.activeCwd === cwd,
     );
   }
 
@@ -449,9 +444,7 @@ class AgentViewSupervisorProcessHandler
     const afterSequence = nonNegativeInteger(raw.afterSequence, 0);
     return {
       sessionId,
-      events: queue.events.filter(
-        (event) => event.sequence > afterSequence,
-      ),
+      events: queue.events.filter((event) => event.sequence > afterSequence),
       nextSequence: queue.nextSequence - 1,
     };
   }
@@ -490,7 +483,8 @@ class AgentViewSupervisorProcessHandler
     params: AgentViewSupervisorRequestMap['answer'],
   ): Promise<{ queued: true; sequence: number }> {
     await this.requireSession(params.sessionId);
-    if (!params.callId) throw new Error('Agent View answer callId is required.');
+    if (!params.callId)
+      throw new Error('Agent View answer callId is required.');
     if (!isAnswerOutcome(params.outcome)) {
       throw new Error('Invalid Agent View answer outcome.');
     }
@@ -683,19 +677,41 @@ class AgentViewSupervisorProcessHandler
         : code === 0
           ? 'completed'
           : 'failed';
-    await this.markSessionExited(sessionId, sessionState);
+    // A worker that dies during startup never reports over the socket, so the
+    // exit code plus its captured output is the only diagnostic that exists.
+    // Attach it here or the leader can only say "did not become ready".
+    const lastError =
+      sessionState === 'failed'
+        ? await this.describeExit(sessionId, code)
+        : undefined;
+    await this.markSessionExited(sessionId, sessionState, lastError);
     this.notifyChanged(sessionId, {
       type: 'state',
       sessionId,
       sessionState,
       ...(state?.activeCwd ? { cwd: state.activeCwd } : {}),
+      ...(lastError ? { lastError } : {}),
     });
     await this.forgetWorker(sessionId);
+  }
+
+  private async describeExit(
+    sessionId: string,
+    code: number | null,
+  ): Promise<AgentViewLastError> {
+    const logPath = getAgentViewSessionPaths(sessionId, this.store).logPath;
+    const tail = await readFleetLogTail(logPath);
+    return {
+      code: 'worker_exited',
+      message: describeWorkerExit(code, logPath, tail),
+      at: this.now(),
+    };
   }
 
   private async markSessionExited(
     sessionId: string,
     sessionState: 'completed' | 'stopped' | 'failed',
+    lastError?: AgentViewLastError,
   ): Promise<void> {
     const state = await readAgentViewSessionState(sessionId, this.store);
     if (!state) return;
@@ -705,6 +721,7 @@ class AgentViewSupervisorProcessHandler
         sessionState,
         processState: 'exited',
         updatedAt: this.now(),
+        ...(lastError ? { lastError } : {}),
       },
       this.store,
     );
@@ -715,21 +732,31 @@ class AgentViewSupervisorProcessHandler
     const state = await readAgentViewSessionState(sessionId, this.store);
     if (!state) return;
     const now = this.now();
+    const lastError: AgentViewLastError = {
+      code: 'worker_spawn_failed',
+      message: error instanceof Error ? error.message : String(error),
+      at: now,
+    };
     await writeAgentViewSessionState(
       {
         ...state,
         sessionState: 'failed',
         processState: 'exited',
         updatedAt: now,
-        lastError: {
-          code: 'worker_spawn_failed',
-          message: error instanceof Error ? error.message : String(error),
-          at: now,
-        },
+        lastError,
       },
       this.store,
     );
-    this.notifyChanged(sessionId);
+    // Spawn failures never produce a worker, so nothing else will ever emit a
+    // terminal event for this session; the leader would otherwise wait out the
+    // full readiness timeout for a failure already known here.
+    this.notifyChanged(sessionId, {
+      type: 'state',
+      sessionId,
+      sessionState: 'failed',
+      ...(state.activeCwd ? { cwd: state.activeCwd } : {}),
+      lastError,
+    });
   }
 
   private async forgetWorker(sessionId: string): Promise<void> {
@@ -800,7 +827,10 @@ function normalizeDispatchParams(
   if (!path.isAbsolute(params.specPath)) {
     throw new Error('Agent View specPath must be absolute.');
   }
-  if (!path.isAbsolute(params.projectCwd) || !path.isAbsolute(params.activeCwd)) {
+  if (
+    !path.isAbsolute(params.projectCwd) ||
+    !path.isAbsolute(params.activeCwd)
+  ) {
     throw new Error('Agent View working directories must be absolute.');
   }
   return {
@@ -812,7 +842,9 @@ function normalizeDispatchParams(
   };
 }
 
-function normalizeWorkerEvent(event: AgentViewWorkerEvent): AgentViewWorkerEvent {
+function normalizeWorkerEvent(
+  event: AgentViewWorkerEvent,
+): AgentViewWorkerEvent {
   normalizeSessionId(event.sessionId);
   return event;
 }
@@ -842,7 +874,10 @@ function sessionStateFromAgentStatus(
   }
 }
 
-function nonNegativeInteger(value: number | undefined, fallback: number): number {
+function nonNegativeInteger(
+  value: number | undefined,
+  fallback: number,
+): number {
   return Number.isSafeInteger(value) && value! >= 0 ? value! : fallback;
 }
 

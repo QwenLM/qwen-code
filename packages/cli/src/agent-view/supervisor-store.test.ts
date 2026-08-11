@@ -84,6 +84,8 @@ describe('agent view supervisor store', () => {
       daemonDir: path.join(tempDir, 'daemon'),
       rosterPath: path.join(tempDir, 'daemon', 'roster.json'),
       supervisorPath: path.join(tempDir, 'daemon', 'supervisor.json'),
+      supervisorLogPath: path.join(tempDir, 'daemon', 'supervisor.log'),
+      fleetDebugLogPath: path.join(tempDir, 'daemon', 'fleet-debug.log'),
       daemonLogPath: path.join(tempDir, 'daemon', 'daemon.log'),
       jobsDir: path.join(tempDir, 'jobs'),
     });
@@ -95,6 +97,7 @@ describe('agent view supervisor store', () => {
       launchPath: path.join(tempDir, 'jobs', 'id', 'launch.json'),
       activityPath: path.join(tempDir, 'jobs', 'id', 'activity.json'),
       workerPath: path.join(tempDir, 'jobs', 'id', 'worker.json'),
+      logPath: path.join(tempDir, 'jobs', 'id', 'worker.log'),
       tmpDir: path.join(tempDir, 'jobs', 'id', 'tmp'),
     });
   });

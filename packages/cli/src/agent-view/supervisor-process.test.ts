@@ -236,10 +236,12 @@ describe('createAgentViewSupervisorHandler', () => {
       text: 'second',
     });
     expect(
-      (handler.workerControl!({
-        sessionId: 'worker-1',
-        afterSequence: 0,
-      }) as AgentViewWorkerControlResult).events,
+      (
+        handler.workerControl!({
+          sessionId: 'worker-1',
+          afterSequence: 0,
+        }) as AgentViewWorkerControlResult
+      ).events,
     ).toMatchObject([
       { sequence: 1, turnId: 'turn-1', text: 'first' },
       { sequence: 2, turnId: 'turn-2', text: 'second' },
@@ -315,6 +317,57 @@ describe('createAgentViewSupervisorHandler', () => {
         token: workerToken,
       }),
     ).toBe(false);
+  });
+
+  it('records the exit code and captured output when a worker dies', async () => {
+    const globalDir = await makeGlobalDir();
+    const logPath = getAgentViewSessionPaths('worker-dead', {
+      globalDir,
+    }).logPath;
+    await fs.mkdir(path.dirname(logPath), { recursive: true });
+    await fs.writeFile(
+      logPath,
+      '[fleet:teammate] fatal: Error: no auth configured\n',
+    );
+
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      spawnWorker: async () => ({ pid: 43, onExit: (listener) => listener(7) }),
+    });
+
+    await handler.dispatch!({
+      sessionId: 'worker-dead',
+      specPath: path.join(globalDir, 'spec.json'),
+      projectCwd: globalDir,
+      activeCwd: globalDir,
+    });
+
+    const [snapshot] = (await handler.list()) as AgentViewSessionSnapshot[];
+    expect(snapshot?.state.sessionState).toBe('failed');
+    // Without these three the leader can only say "did not become ready".
+    expect(snapshot?.state.lastError?.code).toBe('worker_exited');
+    expect(snapshot?.state.lastError?.message).toContain('exit code 7');
+    expect(snapshot?.state.lastError?.message).toContain(logPath);
+    expect(snapshot?.state.lastError?.message).toContain('no auth configured');
+  });
+
+  it('does not attach an exit diagnostic to a clean or requested stop', async () => {
+    const globalDir = await makeGlobalDir();
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      spawnWorker: async () => ({ pid: 44, onExit: (listener) => listener(0) }),
+    });
+
+    await handler.dispatch!({
+      sessionId: 'worker-clean',
+      specPath: path.join(globalDir, 'spec.json'),
+      projectCwd: globalDir,
+      activeCwd: globalDir,
+    });
+
+    const [snapshot] = (await handler.list()) as AgentViewSessionSnapshot[];
+    expect(snapshot?.state.sessionState).toBe('completed');
+    expect(snapshot?.state.lastError).toBeUndefined();
   });
 
   it('does not request shutdown when there are no sessions', async () => {

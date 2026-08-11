@@ -28,6 +28,7 @@ import {
 import { loadSettings } from '../config/settings.js';
 import { initializeApp } from '../core/initializer.js';
 import { callAgentViewSupervisor } from './supervisor-client.js';
+import { fleetDebug } from './fleet-debug.js';
 import {
   QWEN_FLEET_SUPERVISOR_SOCKET_ENV,
   QWEN_FLEET_WORKER_SPEC_PATH_ENV,
@@ -46,10 +47,33 @@ const MAX_FLEET_LIVE_OUTPUT_CHARS = 4096;
 const MAX_FLEET_SNAPSHOT_BYTES = 512 * 1024;
 
 export async function runFleetTeammate(): Promise<void> {
+  try {
+    await runFleetTeammateSession();
+  } catch (error) {
+    // Covers the pre-flight steps (env, spec validation) that run before the
+    // session's own handler. Same reasoning: no terminal, so an unwritten
+    // reason is a lost reason.
+    process.stderr.write(
+      `[fleet:teammate] fatal: ${
+        error instanceof Error ? (error.stack ?? error.message) : String(error)
+      }\n`,
+    );
+    throw error;
+  }
+}
+
+async function runFleetTeammateSession(): Promise<void> {
   const socketPath = takeRequiredEnv(QWEN_FLEET_SUPERVISOR_SOCKET_ENV);
   const token = takeRequiredEnv(QWEN_FLEET_WORKER_TOKEN_ENV);
   const specPath = takeRequiredEnv(QWEN_FLEET_WORKER_SPEC_PATH_ENV);
+  fleetDebug('teammate', 'entrypoint reached', { socket: socketPath });
   const spec = await readSpec(specPath);
+  fleetDebug('teammate', 'spec loaded', {
+    sessionId: spec.agentId,
+    team: spec.teamId,
+    cwd: spec.cwd,
+    readOnly: spec.readOnly ?? false,
+  });
   consumeTeammateIdentityFromEnv(createTeammateIdentityEnv(spec.identity));
 
   const originalArgv = process.argv;
@@ -60,6 +84,7 @@ export async function runFleetTeammate(): Promise<void> {
   try {
     const settings = loadSettings(spec.cwd);
     const argv = await parseArguments();
+    fleetDebug('teammate', 'settings parsed');
     const workerConfig = await loadCliConfig(
       settings.merged,
       { ...argv, promptInteractive: 'fleet-worker' },
@@ -72,13 +97,24 @@ export async function runFleetTeammate(): Promise<void> {
       buildDisabledSkillNamesProvider(settings),
     );
     config = workerConfig;
+    fleetDebug('teammate', 'cli config loaded', {
+      model: workerConfig.getModel?.(),
+    });
+    // initializeApp resolves auth. It is the most common place for a teammate
+    // to die before it can report anything over the socket, so it gets its own
+    // breadcrumb on each side.
     await initializeApp(workerConfig, settings);
+    fleetDebug('teammate', 'auth/app initialized');
     await workerConfig.initialize();
     await workerConfig.waitForMcpReady();
+    fleetDebug('teammate', 'config initialized, mcp ready');
 
     const workerRuntime = new InProcessRuntime(workerConfig);
     runtime = workerRuntime;
     const session = await workerRuntime.start(spec);
+    fleetDebug('teammate', 'session started', {
+      status: session.getStatus(),
+    });
     const view = session as typeof session & AgentSessionView;
     let finished = false;
     let postQueue = Promise.resolve();
@@ -264,6 +300,7 @@ export async function runFleetTeammate(): Promise<void> {
         cwd: view.workingDir,
       }).catch(() => {});
     }
+    fleetDebug('teammate', 'run loop exited', { stopped });
   } finally {
     process.argv = originalArgv;
     await runtime?.dispose().catch(() => {});
@@ -411,6 +448,12 @@ function supervisorState(status: AgentStatus): AgentViewSessionState {
       return 'failed';
     case AgentStatus.CANCELLED:
       return 'stopped';
+    default: {
+      // Exhaustive today; a new agent status must map explicitly rather than
+      // being reported to the supervisor as the wrong session state.
+      const unexpected: never = status;
+      throw new Error(`Unhandled agent status: ${unexpected}`);
+    }
   }
 }
 

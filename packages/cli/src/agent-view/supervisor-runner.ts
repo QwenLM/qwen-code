@@ -37,15 +37,16 @@ import {
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
-import type { AgentViewSupervisorHibernationPolicy } from './supervisor-process.js';
-import type { AgentViewWorkerSpawner } from './supervisor-process.js';
+import type { AgentViewSupervisorHibernationPolicy , AgentViewWorkerSpawner } from './supervisor-process.js';
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
 import {
+  getAgentViewSessionPaths,
   getAgentViewStorePaths,
   readAgentViewSupervisor,
   writeAgentViewSupervisor,
 } from './supervisor-store.js';
 import { buildCurrentQwenCliArgv } from './current-cli-argv.js';
+import { closeFleetLogFd, fleetDebug, openFleetLogFd } from './fleet-debug.js';
 
 export const INTERNAL_AGENT_VIEW_SUPERVISOR_ARG =
   '--internal-agent-view-supervisor';
@@ -353,15 +354,10 @@ function createSupervisorHandle(
         ...(onError ? { onError } : {}),
       }),
     dispatch: (params: AgentViewDispatchParams) =>
-      callAgentViewSupervisor(
-        socketPath,
-        'dispatch',
-        params,
-        {
-          ...authOptions,
-          timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
-        },
-      ),
+      callAgentViewSupervisor(socketPath, 'dispatch', params, {
+        ...authOptions,
+        timeoutMs: LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS,
+      }),
     adopt: (params) =>
       callAgentViewSupervisor(socketPath, 'adopt', params, {
         ...authOptions,
@@ -379,12 +375,7 @@ function createSupervisorHandle(
         authOptions,
       ),
     cancel: (sessionId: string) =>
-      callAgentViewSupervisor(
-        socketPath,
-        'cancel',
-        { sessionId },
-        authOptions,
-      ),
+      callAgentViewSupervisor(socketPath, 'cancel', { sessionId }, authOptions),
     answer: (
       sessionId: string,
       callId: string,
@@ -607,31 +598,61 @@ async function readSupervisorAuthToken(
 
 function defaultSpawnSupervisor(args: readonly string[]): ChildProcess {
   const argv = buildCurrentQwenCliArgv(args);
-  return spawn(argv[0]!, argv.slice(1), {
-    detached: true,
-    stdio: 'ignore',
-    env: {
-      ...sanitizeChildEnv(process.env),
-      QWEN_CODE_NO_RELAUNCH: '1',
-    },
+  // The supervisor is detached from the leader's terminal, so its output has
+  // nowhere to go but a file. Without this a supervisor that dies during
+  // startup is completely silent.
+  const logFd = openFleetLogFd(getAgentViewStorePaths().supervisorLogPath, {
+    role: 'supervisor',
+    argv: argv.join(' '),
   });
+  try {
+    return spawn(argv[0]!, argv.slice(1), {
+      detached: true,
+      stdio: logFd === undefined ? 'ignore' : ['ignore', logFd, logFd],
+      env: {
+        ...sanitizeChildEnv(process.env),
+        QWEN_CODE_NO_RELAUNCH: '1',
+      },
+    });
+  } finally {
+    closeFleetLogFd(logFd);
+  }
 }
 
 function defaultSpawnWorker(socketPath: string): AgentViewWorkerSpawner {
   return async ({ params, workerToken }) => {
     const argv = buildCurrentQwenCliArgv([INTERNAL_FLEET_TEAMMATE_ARG]);
-    const child = spawn(argv[0]!, argv.slice(1), {
+    const logPath = getAgentViewSessionPaths(params.sessionId).logPath;
+    // Same reasoning as the supervisor: the leader owns the TUI, so a teammate
+    // that fails before it can reach the socket can only report through here.
+    const logFd = openFleetLogFd(logPath, {
+      role: 'teammate',
+      sessionId: params.sessionId,
       cwd: params.activeCwd,
-      stdio: 'ignore',
-      env: {
-        ...sanitizeChildEnv(process.env),
-        QWEN_CODE_NO_RELAUNCH: '1',
-        [QWEN_FLEET_SUPERVISOR_SOCKET_ENV]: socketPath,
-        [QWEN_FLEET_WORKER_TOKEN_ENV]: workerToken,
-        [QWEN_FLEET_WORKER_SPEC_PATH_ENV]: params.specPath,
-      },
+      argv: argv.join(' '),
     });
+    let child: ChildProcess;
+    try {
+      child = spawn(argv[0]!, argv.slice(1), {
+        cwd: params.activeCwd,
+        stdio: logFd === undefined ? 'ignore' : ['ignore', logFd, logFd],
+        env: {
+          ...sanitizeChildEnv(process.env),
+          QWEN_CODE_NO_RELAUNCH: '1',
+          [QWEN_FLEET_SUPERVISOR_SOCKET_ENV]: socketPath,
+          [QWEN_FLEET_WORKER_TOKEN_ENV]: workerToken,
+          [QWEN_FLEET_WORKER_SPEC_PATH_ENV]: params.specPath,
+        },
+      });
+    } finally {
+      closeFleetLogFd(logFd);
+    }
     await waitForChildSpawn(child);
+    fleetDebug('runtime', 'teammate spawned', {
+      sessionId: params.sessionId,
+      pid: child.pid,
+      log: logPath,
+    });
     return {
       pid: child.pid,
       stop: () => terminateWorker(child, false),

@@ -43,12 +43,21 @@ vi.mock('../HistoryItemDisplay.js', () => ({
 }));
 
 describe('canShowFleetGrid', () => {
-  it('requires two teammates and enough room for every pane', () => {
+  it('requires at least one teammate and enough room for every pane', () => {
     expect(canShowFleetGrid(120, 24, 2)).toBe(true);
-    expect(canShowFleetGrid(120, 24, 1)).toBe(false);
     expect(canShowFleetGrid(80, 24, 2)).toBe(false);
     expect(canShowFleetGrid(120, 15, 2)).toBe(false);
     expect(canShowFleetGrid(120, 24, 3)).toBe(true);
+  });
+
+  it('shows leader beside a single teammate, the smallest debug scenario', () => {
+    expect(canShowFleetGrid(120, 24, 1)).toBe(true);
+    expect(canShowFleetGrid(120, 24, 0)).toBe(false);
+  });
+
+  it('still falls back to tabs when a single pane cannot fit', () => {
+    expect(canShowFleetGrid(80, 24, 1)).toBe(false);
+    expect(canShowFleetGrid(120, 4, 1)).toBe(false);
   });
 });
 

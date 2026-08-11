@@ -47,14 +47,14 @@ export function canShowFleetGrid(
   height: number,
   teammateCount: number,
 ): boolean {
-  const visibleTeammates = Math.min(
-    teammateCount,
-    MAX_FLEET_GRID_TEAMMATES,
-  );
+  const visibleTeammates = Math.min(teammateCount, MAX_FLEET_GRID_TEAMMATES);
   const leaderWidth = Math.floor(width * LEADER_WIDTH_RATIO);
   const teammateWidth = width - leaderWidth;
+  // One teammate is enough: leader-beside-teammate is the smallest scenario
+  // that shows the Fleet side by side, and it is the one to reach for when
+  // debugging. Requiring two made the simplest case fall back to tabs.
   return (
-    visibleTeammates >= 2 &&
+    visibleTeammates >= 1 &&
     leaderWidth >= MIN_PANE_COLUMNS &&
     teammateWidth >= MIN_PANE_COLUMNS &&
     height >= visibleTeammates * MIN_PANE_ROWS

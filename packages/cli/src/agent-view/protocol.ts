@@ -14,10 +14,8 @@ import type {
 
 export const AGENT_VIEW_PROTOCOL_VERSION = 2;
 export const QWEN_FLEET_WORKER_TOKEN_ENV = 'QWEN_FLEET_WORKER_TOKEN';
-export const QWEN_FLEET_WORKER_SPEC_PATH_ENV =
-  'QWEN_FLEET_WORKER_SPEC_PATH';
-export const QWEN_FLEET_SUPERVISOR_SOCKET_ENV =
-  'QWEN_FLEET_SUPERVISOR_SOCKET';
+export const QWEN_FLEET_WORKER_SPEC_PATH_ENV = 'QWEN_FLEET_WORKER_SPEC_PATH';
+export const QWEN_FLEET_SUPERVISOR_SOCKET_ENV = 'QWEN_FLEET_SUPERVISOR_SOCKET';
 
 export type AgentViewOwnership =
   | 'unmanaged'
@@ -220,6 +218,12 @@ export type AgentViewWorkerEvent =
       summary?: string;
       waitingFor?: string;
       lastResult?: string;
+      /**
+       * Why the session reached a failed/stopped state. Set by the supervisor
+       * when it observes a worker exit, so the leader can report the exit code
+       * and captured output instead of a bare "did not become ready".
+       */
+      lastError?: AgentViewLastError;
       at?: string;
     }
   | ({
