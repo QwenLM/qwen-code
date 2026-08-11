@@ -149,7 +149,7 @@ describe('tool group summary logic', () => {
 
     expect(hasActiveAgents(tools)).toBe(true);
     expect(getActiveTool(tools).callId).toBe('active');
-    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
   });
 
   it('uses a static summary when only background agents remain active', () => {
@@ -182,7 +182,7 @@ describe('tool group summary logic', () => {
       }),
     ];
 
-    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
   });
 
   it('describes every active foreground tool until all tools finish', () => {
@@ -205,7 +205,7 @@ describe('tool group summary logic', () => {
     const summary = formatToolGroupSummary(tools, t);
     expect(summary).toContain('ReadFile package.json');
     expect(summary).toContain('ToolGroup');
-    expect(summary).toContain('2 tools');
+    expect(summary).toContain('3 tools');
   });
 
   it('excludes a running background agent from a multi-tool summary', () => {
@@ -233,7 +233,7 @@ describe('tool group summary logic', () => {
     const summary = formatToolGroupSummary(tools, t);
     expect(summary).toContain('ReadFile package.json');
     expect(summary).toContain('ToolGroup');
-    expect(summary).toContain('2 tools');
+    expect(summary).toContain('3 tools');
     expect(summary).not.toContain('agent');
   });
 
@@ -625,8 +625,11 @@ describe('tool row rendering', () => {
       makeTool({ callId: 'done', status: 'completed' }),
     ]);
 
-    expect(container.querySelector('button')?.textContent).toContain('5s');
-    now.mockRestore();
+    try {
+      expect(container.querySelector('button')?.textContent).toContain('5s');
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('shows stable elapsed time from persisted tool timestamps', () => {

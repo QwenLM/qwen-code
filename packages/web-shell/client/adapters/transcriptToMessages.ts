@@ -119,7 +119,9 @@ function applyBackgroundAgentTaskUpdate(
 ): void {
   if (!update) return;
   const hasServerPair =
-    block.serverTimestamp !== undefined && update.serverEndTime !== undefined;
+    block.serverTimestamp !== undefined &&
+    update.serverEndTime !== undefined &&
+    update.serverEndTime > block.serverTimestamp;
   tool.startTime = hasServerPair ? block.serverTimestamp : block.createdAt;
   tool.endTime = hasServerPair ? update.serverEndTime : update.clientEndTime;
   switch (update.status) {
@@ -941,6 +943,7 @@ function mergeToolCall(
   target.toolName = source.toolName ?? target.toolName;
   target.kind = source.kind ?? target.kind;
   target.content = source.content ?? target.content;
+  target.startTime = source.startTime ?? target.startTime;
   target.endTime = source.endTime ?? target.endTime;
   target.rawOutput = source.rawOutput ?? target.rawOutput;
   target.args = source.args ?? target.args;

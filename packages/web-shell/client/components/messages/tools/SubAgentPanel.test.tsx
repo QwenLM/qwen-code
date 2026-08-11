@@ -11,7 +11,10 @@ import { formatTimestamp } from '../../MessageTimestamp';
 // unit test.
 vi.mock('../../../App', async () => {
   const { createContext } = await import('react');
-  return { TodoTimelineContext: createContext(new Map()) };
+  return {
+    TodoTimelineContext: createContext(new Map()),
+    TodoDetailContext: createContext(new Map()),
+  };
 });
 
 const { SubAgentPanel } = await import('./SubAgentPanel');

@@ -613,7 +613,7 @@ export function formatToolGroupSummary(
     );
     return t('toolGroup.running', {
       name: activeSummaries.join(' · '),
-      count: foregroundActiveTools.length,
+      count: tools.length,
       duration: duration ?? '',
     });
   }

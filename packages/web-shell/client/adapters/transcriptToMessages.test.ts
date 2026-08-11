@@ -316,6 +316,79 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('uses the daemon clock pair for replayed background agent notifications', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 100_000, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+        serverTimestamp: 5_000,
+      }),
+      textBlock(
+        'agent-terminal',
+        'user',
+        'background agent finished',
+        200_000,
+        false,
+        {
+          serverTimestamp: 15_000,
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'completed',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call', startTime: 5_000, endTime: 15_000 }],
+    });
+  });
+
+  it('falls back to client timing when a notification repeats the start stamp', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 100_000, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+        serverTimestamp: 5_000,
+        updatedAt: 150_000,
+      }),
+      textBlock(
+        'agent-terminal',
+        'user',
+        'background agent finished',
+        200_000,
+        false,
+        {
+          serverTimestamp: 5_000,
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'completed',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call', startTime: 100_000, endTime: 200_000 }],
+    });
+  });
+
   it('does not apply a non-agent background notification to an agent tool', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-block', 'agent-call', 'completed', 1, {
@@ -2003,6 +2076,43 @@ describe('transcriptBlocksToDaemonMessages', () => {
               'User has provided the following answers:\n\n**姓名**: 张三',
           },
         ],
+      },
+    ]);
+  });
+
+  it('keeps merged permission placeholders on the tool server clock', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Allow shell?',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'tc-1',
+          kind: 'execute',
+          toolName: 'run_shell_command',
+          rawInput: { command: 'ls' },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 1_000,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+        resolved: 'selected:proceed_once',
+      },
+      toolBlock('tool-1', 'tc-1', 'completed', 3_000, {
+        toolName: 'run_shell_command',
+        updatedAt: 13_000,
+        serverTimestamp: 5_000,
+        serverUpdatedAt: 15_000,
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [{ callId: 'tc-1', startTime: 5_000, endTime: 15_000 }],
       },
     ]);
   });
