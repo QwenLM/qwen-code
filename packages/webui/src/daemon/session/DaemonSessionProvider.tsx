@@ -3469,6 +3469,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         if (
           intent.resultSuperseded === true ||
           latest?.key !== intent.key ||
+          latest.lifecycle !== intent.lifecycle ||
           latest.environmentGeneration !== intent.environmentGeneration
         ) {
           retireAttachment(candidate, intent);
