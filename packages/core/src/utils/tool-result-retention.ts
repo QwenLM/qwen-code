@@ -5,10 +5,14 @@
  */
 
 import type { Content } from '@google/genai';
+import {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  estimatePartChars,
+} from '../services/compactionInputSlimming.js';
 
-// Matches the shell tool's per-tool output budget introduced by the layered
-// tool-output truncation work; results retained above this size are the ones
-// most likely to tax every later turn in a long session.
+// Fallback oversized budget for tool results whose producing tool declares no
+// `maxOutputChars` (or when no budget resolver is supplied). Aligned with the
+// shell tool's budget — the widest budget among the core built-in tools.
 export const OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS = 30_000;
 
 export interface ToolResultRetentionStats {
@@ -18,19 +22,33 @@ export interface ToolResultRetentionStats {
   totalChars: number;
   /** Character size of the single largest retained tool result. */
   largestResultChars: number;
-  /** Tool results retained above `oversizedThresholdChars`. */
+  /** Tool results retained above their producing tool's output budget. */
   oversizedResultCount: number;
+  /** Fallback budget applied when a tool declares none. */
   oversizedThresholdChars: number;
 }
 
 export interface AnalyzeToolResultRetentionOptions {
+  /** Fallback budget for tools that declare no `maxOutputChars`. */
   thresholdChars?: number;
+  /**
+   * Resolves the declared output budget of the tool that produced a result
+   * (by its `functionResponse.name`), mirroring the scheduler's per-tool
+   * limits. A result is oversized only if it exceeds its own tool's budget,
+   * so compliant results from high-budget tools (e.g. MCP) are never flagged.
+   */
+  resolveToolBudgetChars?: (toolName: string) => number | undefined;
 }
 
 /**
  * Computes aggregate size/count signals for tool results retained in a
  * conversation history. Deliberately reports sizes and counts only — never
  * content — so the output is safe to paste into bug reports.
+ *
+ * Sizes reuse `estimatePartChars`, the same model the compression pipeline
+ * uses, so both agree about the same history (string outputs are measured as
+ * raw chars — no JSON-escaping inflation — and nested media parts are billed
+ * at the image token estimate instead of their base64 length).
  */
 export function analyzeToolResultRetention(
   history: Content[],
@@ -49,40 +67,26 @@ export function analyzeToolResultRetention(
 
   for (const content of history) {
     for (const part of content.parts ?? []) {
-      const functionResponse = part.functionResponse;
-      if (!functionResponse) {
+      if (!part.functionResponse) {
         continue;
       }
 
-      const chars = measureToolResultChars(functionResponse.response);
+      const chars = estimatePartChars(part, DEFAULT_IMAGE_TOKEN_ESTIMATE);
       stats.toolResultCount += 1;
       stats.totalChars += chars;
       if (chars > stats.largestResultChars) {
         stats.largestResultChars = chars;
       }
-      if (chars > thresholdChars) {
+
+      const budget =
+        options.resolveToolBudgetChars?.(part.functionResponse.name ?? '') ??
+        thresholdChars;
+      // Budgets of `Infinity` (self-managed tools like read-file) never trip.
+      if (Number.isFinite(budget) && chars > budget) {
         stats.oversizedResultCount += 1;
       }
     }
   }
 
   return stats;
-}
-
-// Approximates the retained size of a tool result by serializing its response
-// payload. `response` is the only field that can grow unboundedly; name/id
-// are small identifiers that don't need to be counted.
-function measureToolResultChars(
-  response: Record<string, unknown> | undefined,
-): number {
-  if (!response) {
-    return 0;
-  }
-  try {
-    return JSON.stringify(response).length;
-  } catch {
-    // Circular or non-serializable payloads can't be measured precisely;
-    // report zero rather than throwing from a diagnostic path.
-    return 0;
-  }
 }

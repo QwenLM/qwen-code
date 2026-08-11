@@ -27,10 +27,13 @@ import { t } from '../../i18n/index.js';
 import {
   collectMemoryDiagnostics,
   analyzeToolResultRetention,
+  createDebugLogger,
   type MemoryDiagnostics,
   type ToolResultRetentionStats,
 } from '@qwen-code/qwen-code-core';
 import { formatMemoryUsage } from '../utils/formatters.js';
+
+const debugLogger = createDebugLogger('DOCTOR_MEMORY');
 
 const MEMORY_SUBCOMMAND = 'memory';
 const CPU_PROFILE_SUBCOMMAND = 'cpu-profile';
@@ -343,7 +346,14 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
           ? ('warning' as const)
           : ('info' as const),
       content: tokens.includes('--json')
-        ? JSON.stringify({ ...diagnostics, toolResultRetention }, null, 2)
+        ? JSON.stringify(
+            {
+              ...diagnostics,
+              ...(toolResultRetention ? { toolResultRetention } : {}),
+            },
+            null,
+            2,
+          )
         : formatCoreDiagnostics(diagnostics) +
           (toolResultRetention
             ? `\n\n${formatToolResultRetention(toolResultRetention)}`
@@ -450,7 +460,7 @@ function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
 // ---------------------------------------------------------------------------
 
 interface ToolResultRetentionReport extends ToolResultRetentionStats {
-  /** UI history items whose rendered text exceeds the oversized threshold. */
+  /** Tool outputs rendered in UI history above their tool's budget. */
   largeOutputsInUIHistory: number;
   /** Whether oversized results in live history are fed to compression input. */
   presentInCompressionInput: boolean;
@@ -460,30 +470,50 @@ function collectToolResultRetention(
   context: CommandContext,
 ): ToolResultRetentionReport | null {
   try {
-    const history = context.services.config
-      ?.getGeminiClient()
-      ?.getHistoryShallow();
+    const config = context.services.config;
+    const history = config?.getGeminiClient()?.getHistoryShallow();
     if (!history) {
       return null;
     }
-    const stats = analyzeToolResultRetention(history);
+    const stats = analyzeToolResultRetention(history, {
+      // Compare each result against its own tool's declared budget (mirroring
+      // the scheduler), so compliant high-budget results (e.g. MCP) are not
+      // flagged as oversized.
+      resolveToolBudgetChars: (name) =>
+        config?.getToolRegistry?.()?.getTool(name)?.maxOutputChars,
+    });
     const threshold = stats.oversizedThresholdChars;
-    const largeOutputsInUIHistory = (context.ui.history ?? []).filter(
-      (item) =>
-        'text' in item &&
-        typeof item.text === 'string' &&
-        item.text.length > threshold,
-    ).length;
+    // Tool outputs live in `tool_group` items as `tools[].resultDisplay`
+    // strings; scanning top-level text items would count model responses.
+    let largeOutputsInUIHistory = 0;
+    for (const item of context.ui.history ?? []) {
+      if (item.type !== 'tool_group') {
+        continue;
+      }
+      for (const tool of item.tools) {
+        if (
+          typeof tool.resultDisplay === 'string' &&
+          tool.resultDisplay.length > threshold
+        ) {
+          largeOutputsInUIHistory += 1;
+        }
+      }
+    }
     return {
       ...stats,
       largeOutputsInUIHistory,
-      // Compression reads the live history by reference (getHistoryShallow),
-      // so any oversized result is part of the compression input without an
-      // additional retained copy.
+      // Derived assumption: compression reads the live history by reference
+      // (getHistoryShallow; see chatCompressionService). If compression input
+      // assembly ever changes to copy or filter history, this derivation must
+      // be revisited.
       presentInCompressionInput: stats.oversizedResultCount > 0,
     };
-  } catch {
-    // Diagnostics must never break /doctor memory; degrade to "unavailable".
+  } catch (error) {
+    // Diagnostics must never break /doctor memory; degrade to "unavailable",
+    // but leave a greppable trace so a silently dying section is debuggable.
+    debugLogger.warn(
+      `Tool result retention diagnostics unavailable: ${formatErrorMessage(error)}`,
+    );
     return null;
   }
 }
@@ -494,8 +524,8 @@ function formatToolResultRetention(stats: ToolResultRetentionReport): string {
     `  Tool results in history: ${stats.toolResultCount}`,
     `  Total retained: ${stats.totalChars} chars`,
     `  Largest result: ${stats.largestResultChars} chars`,
-    `  Oversized results (> ${stats.oversizedThresholdChars} chars): ${stats.oversizedResultCount}`,
-    `  Oversized also in UI history (> ${stats.oversizedThresholdChars} chars): ${stats.largeOutputsInUIHistory} item(s)`,
+    `  Oversized results (above tool budget): ${stats.oversizedResultCount}`,
+    `  Oversized also rendered in UI history: ${stats.largeOutputsInUIHistory} item(s)`,
     `  Oversized also in compression input: ${stats.presentInCompressionInput ? 'yes (shared by reference, no extra copy)' : 'no'}`,
   ];
   if (stats.oversizedResultCount > 0) {

@@ -812,6 +812,7 @@ describe('doctorCommand', () => {
     function contextWithHistory(
       history: Content[],
       uiHistory: CommandContext['ui']['history'] = [],
+      options: { historyThrows?: boolean } = {},
     ): CommandContext {
       return createMockCommandContext({
         executionMode: 'non_interactive',
@@ -820,7 +821,17 @@ describe('doctorCommand', () => {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
             getGeminiClient: () => ({
-              getHistoryShallow: () => history,
+              getHistoryShallow: () => {
+                if (options.historyThrows) {
+                  throw new Error('history unavailable');
+                }
+                return history;
+              },
+            }),
+            getToolRegistry: () => ({
+              // Mirrors ShellTool.maxOutputChars.
+              getTool: (name: string) =>
+                name === 'shell' ? { maxOutputChars: 30_000 } : undefined,
             }),
           },
         },
@@ -841,9 +852,9 @@ describe('doctorCommand', () => {
       const content = result?.type === 'message' ? result.content : '';
       expect(content).toContain('Tool result retention');
       expect(content).toContain('Tool results in history: 2');
-      expect(content).toContain('Oversized results (> 30000 chars): 1');
+      expect(content).toContain('Oversized results (above tool budget): 1');
       expect(content).toContain(
-        'Oversized also in UI history (> 30000 chars): 0 item(s)',
+        'Oversized also rendered in UI history: 0 item(s)',
       );
       expect(content).toContain(
         'Oversized also in compression input: yes (shared by reference, no extra copy)',
@@ -851,10 +862,17 @@ describe('doctorCommand', () => {
       expect(content).toContain('/compress can reclaim space');
     });
 
-    it('should detect large outputs duplicated in UI history', async () => {
+    it('should detect tool outputs rendered in UI history', async () => {
       const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [
+            { resultDisplay: 'y'.repeat(35_000) },
+            { resultDisplay: 'small' },
+          ],
+        },
+        // Model responses must not be counted as tool-output duplication.
         { type: 'gemini', text: 'z'.repeat(35_000) },
-        { type: 'info', text: 'short note' },
       ] as unknown as CommandContext['ui']['history'];
 
       const result = await getMemoryCommand().action!(
@@ -864,7 +882,7 @@ describe('doctorCommand', () => {
 
       const content = result?.type === 'message' ? result.content : '';
       expect(content).toContain(
-        'Oversized also in UI history (> 30000 chars): 1 item(s)',
+        'Oversized also rendered in UI history: 1 item(s)',
       );
     });
 
@@ -887,6 +905,34 @@ describe('doctorCommand', () => {
       expect(
         parsed.toolResultRetention?.['largestResultChars'],
       ).toBeGreaterThan(40_000);
+    });
+
+    it('should omit toolResultRetention from --json when history is unavailable', async () => {
+      const result = await getMemoryCommand().action!(
+        createMockCommandContext({
+          executionMode: 'non_interactive',
+          ui: {
+            addItem: vi.fn(),
+            setPendingItem: vi.fn(),
+          },
+        } as unknown as CommandContext),
+        '--json',
+      );
+
+      const parsed = JSON.parse(
+        result?.type === 'message' ? result.content : '{}',
+      ) as Record<string, unknown>;
+      expect(parsed).not.toHaveProperty('toolResultRetention');
+    });
+
+    it('should omit the retention section when reading history throws', async () => {
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, [], { historyThrows: true }),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).not.toContain('Tool result retention');
     });
 
     it('should include retention stats in the interactive memory report', async () => {

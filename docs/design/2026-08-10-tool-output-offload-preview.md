@@ -91,19 +91,28 @@ unbounded retention or data exposure):
   bounds the result.
 - Session budget (500MB) exhausted: persistence skipped, same in-memory bound.
 - Truncation/IO error: the successful tool call is never demoted to an error;
-  the original content is kept and a warning is logged.
+  the bounded head/tail preview is kept with a note that the full output could
+  not be saved, and a warning is logged. In this mode the full payload has no
+  retrievable pointer — the preview is all that survives.
 
 ## 5. Diagnostics (phase 1 signals)
 
 `/doctor memory` now reports, live and by reference (no history clone):
 
-- Tool results in history, total retained chars, largest result.
-- Oversized results, counted against a 30k threshold aligned with the widest
-  legal per-tool channel (shell). Any retained result above it means a layer
-  was bypassed — the counter doubles as a regression alarm.
-- Whether oversized outputs are also present in UI history (rendered text
-  items) and in compression input (yes by construction, but compression reads
-  history by reference via `getHistoryShallow`, so no extra copy is held).
+- Tool results in history, total retained chars, largest result. Sizes reuse
+  the compression pipeline's `estimatePartChars` model, so string outputs are
+  measured as raw chars (no JSON-escaping inflation) and nested media parts
+  are billed at the image token estimate.
+- Oversized results, counted against each result's own tool budget (resolved
+  from the tool registry by `functionResponse.name`, mirroring the scheduler;
+  fallback 30k for tools declaring none). A compliant result from a
+  high-budget tool (e.g. MCP at 500k) is never flagged; a retained result
+  above its budget means a truncation layer was bypassed — the counter doubles
+  as a regression alarm.
+- Whether oversized outputs are also rendered in UI history (scanned in
+  `tool_group` items' `resultDisplay`) and in compression input (yes by
+  construction, but compression reads history by reference via
+  `getHistoryShallow`, so no extra copy is held).
 
 ## 6. Alternatives Considered
 
