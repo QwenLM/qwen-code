@@ -6107,13 +6107,18 @@ async function runQwenServeImpl(
         daemonLog,
       )
     : undefined;
+  const deferredDaemonAuth = bearerAuth(opts.token);
+  const deferredWebBridgeAuth = bearerAuth(webBridgeToken);
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
       waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
       startRuntime: () => startRuntimeForRequest?.() ?? false,
       runtimeReady,
-      authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+      authenticateDeferredRuntimeRequest: (req, res, next) =>
+        /^\/(?:status|command)\/?$/i.test(req.path)
+          ? deferredWebBridgeAuth(req, res, next)
+          : deferredDaemonAuth(req, res, next),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
       // The runtime app serves these before bearerAuth; a browser navigation
       // cannot attach the bearer header, so the cold gate must let them

@@ -398,6 +398,9 @@ describe('CDP bridge', () => {
       type: 'cdp_detach',
       reason: 'canceled_by_user',
     });
+    await expect(
+      bridge.withCdpTab(7, async () => undefined),
+    ).resolves.toBeUndefined();
   });
 
   it('releases an attachment that finishes after shutdown', async () => {

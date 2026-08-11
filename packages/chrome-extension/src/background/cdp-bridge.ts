@@ -181,6 +181,7 @@ function onDebuggerDetach(
   for (const listener of directDetachListeners) listener(source.tabId);
   if (activeSend && source.tabId === rawTabId) {
     activeSend({ type: 'cdp_detach', reason: reason || 'target_closed' });
+    activeSend = null;
     rawTabId = null;
   }
   if (attachedTabIds.size === 0) teardownAttachments();

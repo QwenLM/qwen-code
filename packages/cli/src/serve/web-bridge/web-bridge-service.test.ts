@@ -432,8 +432,10 @@ describe('WebBridgeService', () => {
         await expect(readFile(filePath, 'utf8')).resolves.toBe(
           'artifact bytes',
         );
-        expect((await stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
-        expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+        if (process.platform !== 'win32') {
+          expect((await stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
+          expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+        }
       } finally {
         if (filePath) {
           await rm(path.dirname(filePath), { force: true, recursive: true });

@@ -130,6 +130,9 @@ async function navigate(args: Args): Promise<unknown> {
       resolveLoaded = resolve;
     });
     let reloadFrom: { frameId: string; loaderId: string } | undefined;
+    let directNavigationStarted = false;
+    let directNavigationFrameId: string | undefined;
+    let latestDirectLoader: { frameId: string; loaderId: string } | undefined;
     let nextReloadLoader: { frameId: string; loaderId: string } | undefined;
     let resolveNextReloadLoader!: (value: {
       frameId: string;
@@ -152,26 +155,25 @@ async function navigate(args: Args): Promise<unknown> {
         if (key === expectedLifecycle) resolveLoaded();
         return;
       }
-      if (
-        method !== 'Page.frameNavigated' ||
-        reloadFrom === undefined ||
-        nextReloadLoader !== undefined
-      ) {
-        return;
-      }
+      if (method !== 'Page.frameNavigated') return;
       const frame = record(params['frame']);
       const frameId = string(frame['id']);
       const loaderId = string(frame['loaderId']);
+      if (frame['parentId'] !== undefined || loaderId === undefined) return;
       if (
-        frame['parentId'] !== undefined ||
-        frameId !== reloadFrom.frameId ||
-        loaderId === undefined ||
-        loaderId === reloadFrom.loaderId
+        reloadFrom !== undefined &&
+        nextReloadLoader === undefined &&
+        frameId === reloadFrom.frameId &&
+        loaderId !== reloadFrom.loaderId
       ) {
-        return;
+        nextReloadLoader = { frameId, loaderId };
+        resolveNextReloadLoader(nextReloadLoader);
       }
-      nextReloadLoader = { frameId, loaderId };
-      resolveNextReloadLoader(nextReloadLoader);
+      if (!directNavigationStarted || frameId === undefined) return;
+      latestDirectLoader = { frameId, loaderId };
+      if (frameId !== directNavigationFrameId) return;
+      expectedLifecycle = JSON.stringify([frameId, loaderId]);
+      if (loadedLifecycles.has(expectedLifecycle)) resolveLoaded();
     });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let timedOut: Promise<never> | undefined;
@@ -212,6 +214,7 @@ async function navigate(args: Args): Promise<unknown> {
         ]);
       } else {
         refsByTab.delete(currentTabId);
+        directNavigationStarted = true;
         const result = record(await send('Page.navigate', { url }));
         const errorText = string(result['errorText']);
         if (errorText) throw new Error(`navigate: ${errorText}`);
@@ -221,7 +224,11 @@ async function navigate(args: Args): Promise<unknown> {
         if (frameId === undefined) {
           throw new Error('navigate: Page.navigate returned no frame');
         }
-        target = { frameId, loaderId };
+        directNavigationFrameId = frameId;
+        target =
+          latestDirectLoader?.frameId === frameId
+            ? latestDirectLoader
+            : { frameId, loaderId };
       }
       expectedLifecycle = JSON.stringify([target.frameId, target.loaderId]);
       if (loadedLifecycles.has(expectedLifecycle)) resolveLoaded();

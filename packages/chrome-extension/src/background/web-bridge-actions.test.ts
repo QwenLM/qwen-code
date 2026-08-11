@@ -270,6 +270,42 @@ describe('WebBridge actions', () => {
     expect(cdp.unsubscribe).toHaveBeenCalledOnce();
   });
 
+  it('follows a redirect loader reported before Page.navigate returns', async () => {
+    let resolveNavigate:
+      | ((value: { frameId: string; loaderId: string }) => void)
+      | undefined;
+    cdp.send.mockImplementation(async (method: string) =>
+      method === 'Page.navigate'
+        ? new Promise<{ frameId: string; loaderId: string }>((resolve) => {
+            resolveNavigate = resolve;
+          })
+        : {},
+    );
+    const { executeWebBridgeAction } = await loadActions();
+    const pending = executeWebBridgeAction('navigate', {
+      url: 'https://example.test/redirect',
+      _tabId: 17,
+    });
+
+    await vi.waitFor(() => expect(resolveNavigate).toBeDefined());
+    const listener = cdp.listeners[0];
+    expect(listener).toBeDefined();
+    if (!listener) throw new Error('lifecycle listener was not installed');
+    listener(
+      'Page.frameNavigated',
+      { frame: { id: 'frame-1', loaderId: 'loader-2' } },
+      17,
+    );
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'loader-2' },
+      17,
+    );
+    resolveNavigate?.({ frameId: 'frame-1', loaderId: 'loader-1' });
+
+    await expect(pending).resolves.toMatchObject({ frameId: 'frame-1' });
+  });
+
   it('waits for a same-URL reload to finish loading', async () => {
     cdp.send.mockImplementation(async (method: string) =>
       method === 'Page.getFrameTree'
