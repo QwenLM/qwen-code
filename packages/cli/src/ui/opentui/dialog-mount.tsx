@@ -1,0 +1,329 @@
+/* eslint-disable react/no-unknown-property */
+/** @jsxImportSource @opentui/react */
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Mounts the active OpenTUI dialog (R2 product integration). The dispatcher
+ * resolves dialog requests onto a `MountedDialog`; the backend renders this
+ * component in place of the idle prompt area and hands it the live config /
+ * settings / command registry. Close, cancel and result flows route back to
+ * the backend through `onClose` / `onNavigate` / `notify`.
+ */
+
+import { useMemo, useRef, useState } from 'react';
+import { useKeyboard } from '@opentui/react';
+import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import type { SlashCommand } from '../commands/types.js';
+import { themeManager } from '../themes/theme-manager.js';
+import { toOriginalKey } from './key-map.js';
+import type { MountedDialog } from './command-bridge.js';
+import { HelpOverlay, helpScrollMax } from './help-overlay.js';
+import {
+  buildHelpCommandsLines,
+  buildHelpCustomCommandLines,
+  HELP_TABS,
+  type HelpTab,
+} from './help-content.js';
+import { OpenTuiThemeDialog } from './dialogs-theme.js';
+import { OpenTuiSettingsDialog } from './dialogs-settings.js';
+import { OpenTuiModelDialog, type ModelDialogMode } from './dialogs-model.js';
+import { OpenTuiPermissionsDialog } from './dialogs-permissions.js';
+import {
+  EXTENSIONS_TABS,
+  OpenTuiExtensionsDialog,
+} from './dialogs-extensions.js';
+import { OpenTuiMcpDialog } from './dialogs-mcp.js';
+import {
+  addPermissionRule,
+  applyModelSelection,
+  applyThemeSelection,
+  buildExtensionRows,
+  buildMcpServers,
+  buildModelEntries,
+  buildPermissionsData,
+  deletePermissionRule,
+  getMcpServerTools,
+} from './dialog-data.js';
+
+export interface OpenTuiDialogMountProps {
+  dialog: MountedDialog;
+  config?: Config;
+  settings: LoadedSettings;
+  /** The real interactive command registry (help overlay content). */
+  commands: readonly SlashCommand[];
+  onClose: () => void;
+  /** Switch the mounted dialog (settings → theme/model sub-dialogs). */
+  onNavigate: (dialog: MountedDialog) => void;
+  /** Append a command-style message to the chat history. */
+  notify: (text: string) => void;
+  onApprovalModeChanged: (mode: ApprovalMode) => void;
+}
+
+function HelpDialogHost(props: {
+  commands: readonly SlashCommand[];
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<HelpTab>('general');
+  const [scroll, setScroll] = useState(0);
+  useKeyboard((key) => {
+    const original = toOriginalKey(key);
+    if (original.name === 'escape') {
+      props.onClose();
+      return;
+    }
+    if (original.name === 'tab') {
+      const order = HELP_TABS.map(({ tab: helpTab }) => helpTab);
+      const index = order.indexOf(tab);
+      const next =
+        (index + (original.shift ? -1 : 1) + order.length) % order.length;
+      setTab(order[next] ?? 'general');
+      setScroll(0);
+      return;
+    }
+    if (tab === 'general') return;
+    const lines =
+      tab === 'commands'
+        ? buildHelpCommandsLines(props.commands)
+        : buildHelpCustomCommandLines(props.commands);
+    const maxScroll = helpScrollMax(lines);
+    if (original.name === 'up') setScroll((s) => Math.max(0, s - 1));
+    if (original.name === 'down') setScroll((s) => Math.min(maxScroll, s + 1));
+  });
+  return <HelpOverlay commands={props.commands} tab={tab} scroll={scroll} />;
+}
+
+function ThemeDialogHost(props: {
+  settings: LoadedSettings;
+  onClose: () => void;
+  notify: (text: string) => void;
+}) {
+  // Parity of useThemeCommand: Esc cancels and restores the pre-dialog theme.
+  const themeBeforeOpen = useRef(themeManager.getActiveTheme().name);
+  return (
+    <OpenTuiThemeDialog
+      settings={props.settings}
+      onSelect={(themeName, scope) => {
+        if (themeName === undefined) {
+          themeManager.setActiveTheme(themeBeforeOpen.current);
+          props.onClose();
+          return;
+        }
+        const result = applyThemeSelection(props.settings, themeName, scope);
+        if (result.error) {
+          props.notify(result.error);
+        } else if (result.applied) {
+          props.notify(`Theme set to ${result.applied}.`);
+        }
+        props.onClose();
+      }}
+      onHighlight={(themeName) => {
+        themeManager.setActiveTheme(themeName);
+      }}
+    />
+  );
+}
+
+function SettingsDialogHost(props: {
+  config?: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+  onNavigate: (dialog: MountedDialog) => void;
+  notify: (text: string) => void;
+  onApprovalModeChanged: (mode: ApprovalMode) => void;
+}) {
+  return (
+    <OpenTuiSettingsDialog
+      settings={props.settings}
+      config={props.config}
+      onSelect={(settingName) => {
+        if (settingName === undefined) {
+          props.onClose();
+          return;
+        }
+        if (settingName === 'ui.theme') {
+          props.onNavigate({ dialog: 'theme' });
+          return;
+        }
+        if (settingName === 'fastModel') {
+          props.onNavigate({ dialog: 'model', mode: 'fast' });
+          return;
+        }
+        if (settingName === 'visionModel') {
+          props.onNavigate({ dialog: 'model', mode: 'vision' });
+          return;
+        }
+        if (settingName === 'general.preferredEditor') {
+          props.notify(
+            "The 'editor' dialog is not yet available in the OpenTUI renderer.",
+          );
+        }
+        props.onClose();
+      }}
+      onRestartRequest={() => process.exit(0)}
+      onSettingApplied={(key, value) => {
+        if (key === 'tools.approvalMode') {
+          const mode = value as ApprovalMode;
+          props.config?.setApprovalMode(mode);
+          props.onApprovalModeChanged(mode);
+        }
+      }}
+    />
+  );
+}
+
+function ModelDialogHost(props: {
+  mode: ModelDialogMode;
+  persistScope?: 'workspace' | 'user';
+  config?: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+  notify: (text: string) => void;
+}) {
+  const entries = useMemo(
+    () => buildModelEntries(props.config, props.mode),
+    [props.config, props.mode],
+  );
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  return (
+    <OpenTuiModelDialog
+      entries={entries}
+      mode={props.mode}
+      authType={props.config?.getAuthType()}
+      persistScope={props.persistScope}
+      errorMessage={errorMessage}
+      onSelect={(selectionKey) => {
+        setErrorMessage(null);
+        void applyModelSelection({
+          config: props.config,
+          settings: props.settings,
+          entries,
+          mode: props.mode,
+          selectionKey,
+          ...(props.persistScope ? { persistScope: props.persistScope } : {}),
+        }).then((outcome) => {
+          if (!outcome.ok) {
+            // Validation/runtime switch failed: keep the dialog open and show
+            // the error, exactly like the ink ModelDialog (never persist).
+            setErrorMessage(outcome.error);
+            return;
+          }
+          if (outcome.message) {
+            props.notify(outcome.message);
+          }
+          props.onClose();
+        });
+      }}
+      onClose={props.onClose}
+    />
+  );
+}
+
+function PermissionsDialogHost(props: {
+  config?: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+}) {
+  const [refreshKey, setRefreshKey] = useState(0);
+  const data = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    refreshKey; // nonce: re-read rules/directories after every mutation
+    return buildPermissionsData(props.config);
+  }, [props.config, refreshKey]);
+  const workspace = props.config?.getWorkspaceContext();
+  return (
+    <OpenTuiPermissionsDialog
+      rules={data.rules}
+      directories={data.directories}
+      initialDirectories={data.initialDirectories}
+      onAddRule={(ruleText, type, scope) => {
+        addPermissionRule(props.config, props.settings, ruleText, type, scope);
+        setRefreshKey((key) => key + 1);
+      }}
+      onDeleteRule={(raw, type) => {
+        deletePermissionRule(props.config, props.settings, raw, type);
+        setRefreshKey((key) => key + 1);
+      }}
+      onAddDirectory={(resolvedDir) => {
+        workspace?.addDirectory(resolvedDir);
+        setRefreshKey((key) => key + 1);
+      }}
+      onRemoveDirectory={(dir) => {
+        workspace?.removeDirectory(dir);
+        setRefreshKey((key) => key + 1);
+      }}
+      onExit={props.onClose}
+    />
+  );
+}
+
+export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
+  const { dialog, config, settings, commands, onClose, onNavigate, notify } =
+    props;
+  return (
+    <box
+      flexDirection="column"
+      marginLeft={1}
+      marginRight={1}
+      marginTop={1}
+      flexShrink={0}
+    >
+      {dialog.dialog === 'help' && (
+        <HelpDialogHost commands={commands} onClose={onClose} />
+      )}
+      {dialog.dialog === 'theme' && (
+        <ThemeDialogHost
+          settings={settings}
+          onClose={onClose}
+          notify={notify}
+        />
+      )}
+      {dialog.dialog === 'settings' && (
+        <SettingsDialogHost
+          config={config}
+          settings={settings}
+          onClose={onClose}
+          onNavigate={onNavigate}
+          notify={notify}
+          onApprovalModeChanged={props.onApprovalModeChanged}
+        />
+      )}
+      {dialog.dialog === 'model' && (
+        <ModelDialogHost
+          mode={dialog.mode}
+          persistScope={dialog.persistScope}
+          config={config}
+          settings={settings}
+          onClose={onClose}
+          notify={notify}
+        />
+      )}
+      {dialog.dialog === 'permissions' && (
+        <PermissionsDialogHost
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'extensions_manage' && (
+        <OpenTuiExtensionsDialog
+          onClose={onClose}
+          rowsByTab={{
+            [EXTENSIONS_TABS.INSTALLED]: buildExtensionRows(config),
+          }}
+        />
+      )}
+      {dialog.dialog === 'mcp' && (
+        <OpenTuiMcpDialog
+          servers={buildMcpServers(config)}
+          getServerTools={(server) => getMcpServerTools(config, server.name)}
+          onClose={onClose}
+        />
+      )}
+    </box>
+  );
+}

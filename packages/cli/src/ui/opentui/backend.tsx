@@ -17,7 +17,7 @@ import {
   useSelectionHandler,
   useTerminalDimensions,
 } from '@opentui/react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { copyText } from './clipboard.js';
 import { buildScenario, TOKEN_INTERVAL_MS } from './stream-script.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -29,11 +29,25 @@ import {
   type LivePhase,
   type LiveToolItem,
 } from './live-session-model.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
+import type { PartListUnion } from '@google/genai';
 import { livePromptEvents } from './live-session.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import { isSlashCommandInput } from './slash-dispatch.js';
-import { commandRouteFor } from './commands-registry.js';
+import {
+  createOpenTuiSlashDispatcher,
+  type OpenTuiSlashDispatcher,
+} from './commands-dispatch.js';
+import { OpenTuiSlashGateway, type SlashSettlement } from './slash-gateway.js';
+import {
+  createBackendCommandHost,
+  resolveDispatchOutcome,
+  type BackendAction,
+  type MountedDialog,
+} from './command-bridge.js';
+import { OpenTuiDialogMount } from './dialog-mount.js';
+import { loadSettings } from '../../config/settings.js';
+import type { SlashCommand } from '../commands/types.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -295,6 +309,22 @@ function App({
   const [streaming, setStreaming] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [, setThemeTick] = useState(0);
+  const [dialog, setDialog] = useState<MountedDialog | null>(null);
+  const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode | undefined>(
+    () => config?.getApprovalMode(),
+  );
+  // A slash command is running (dispatcher.setIsProcessing parity); gates Esc
+  // to dispatcher.cancel() and concurrent command submission.
+  const [commandProcessing, setCommandProcessing] = useState(false);
+  const commandProcessingRef = useRef(false);
+
+  // The real settings stack (the opentui entry only receives `config`),
+  // feeding the command services and the settings/theme/permissions dialogs.
+  const settings = useMemo(
+    () => loadSettings(config?.getWorkingDir() ?? process.cwd()),
+    [config],
+  );
 
   // Live light/dark theme switching (OSC 10/11 + mode 2031 updates).
   useEffect(() => {
@@ -373,6 +403,65 @@ function App({
     }, TOKEN_INTERVAL_MS);
   }, [applyEvent]);
 
+  // ── real command stack (R2): dispatcher + host over the live history ────
+  const streamingRef = useRef(false);
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
+
+  const dispatcherRef = useRef<OpenTuiSlashDispatcher | null>(null);
+  const gatewayRef = useRef<OpenTuiSlashGateway | null>(null);
+  if (!gatewayRef.current) gatewayRef.current = new OpenTuiSlashGateway();
+  const gateway = gatewayRef.current;
+  const host = useMemo(
+    () =>
+      createBackendCommandHost({
+        applyEvent,
+        clearItems: () => setItems([]),
+        isIdle: () => !streamingRef.current,
+        setProcessing: (processing) => {
+          commandProcessingRef.current = processing;
+          setCommandProcessing(processing);
+        },
+        reloadCommands: () =>
+          void dispatcherRef.current
+            ?.loadCommands()
+            .then(() => setCommands(dispatcherRef.current?.commands ?? [])),
+      }),
+    [applyEvent],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    createOpenTuiSlashDispatcher(host, {
+      config: config ?? null,
+      settings,
+      logger: null,
+    })
+      .then((dispatcher) => {
+        if (cancelled) return;
+        dispatcherRef.current = dispatcher;
+        gateway.attach(dispatcher);
+        setCommands(dispatcher.commands);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // Surface the failure (and let the gateway reject later slash input)
+        // instead of letting '/help' fall through to the model.
+        gateway.failInit(err);
+        applyEvent({
+          type: 'text',
+          delta: `[command stack] initialization failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+        applyEvent({ type: 'done' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [host, config, settings, gateway, applyEvent]);
+
   // Real event source (P1d seam) if provided; scripted demo only when there is
   // no live config (qwen2-demo). With a live config, replay the resumed
   // session (--resume / --continue) through resume-session and then wait for
@@ -435,66 +524,156 @@ function App({
     .filter((i) => i.kind === 'user')
     .map((i) => (i.kind === 'user' ? i.text : ''));
 
-  const submitText = useCallback(
-    (raw: string) => {
-      const text = raw.trim();
-      if (!text) return;
-      applyEvent({ type: 'user', text });
-      // Slash-command routing (parity with the 67-command registry).
-      if (isSlashCommandInput(text)) {
-        const name = text.replace(/^[/?]/, '').split(/\s/)[0] ?? '';
-        const route = commandRouteFor(name);
-        if (name === 'clear') {
-          setItems([]);
+  const startLiveTurn = useCallback(
+    (
+      content: PartListUnion,
+      options?: {
+        modelOverride?: string;
+        onComplete?: () => Promise<void>;
+      },
+    ) => {
+      if (!config) return;
+      // Live client wiring: submit to the real agent loop; Esc aborts via the
+      // AbortController whose signal reaches client.sendMessageStream.
+      liveAbortRef.current?.abort();
+      const controller = new AbortController();
+      liveAbortRef.current = controller;
+      setStreaming(true);
+      (async () => {
+        try {
+          for await (const ev of livePromptEvents(
+            config,
+            content,
+            controller.signal,
+            options?.modelOverride
+              ? { modelOverride: options.modelOverride }
+              : undefined,
+          ))
+            applyEvent(ev);
+          // The turn completed: fire the submit_prompt callback (e.g. skill
+          // completion hooks). ink logs failures to the debug logger.
+          if (options?.onComplete) {
+            void options.onComplete().catch(() => {});
+          }
+        } catch (err) {
+          if (!controller.signal.aborted) {
+            applyEvent({
+              type: 'text',
+              delta: `\n[live error] ${String(err)}`,
+            });
+          }
+          setItems((prev) =>
+            settleOpenTools(
+              prev,
+              controller.signal.aborted ? 'interrupted' : 'error',
+            ),
+          );
+        } finally {
+          if (liveAbortRef.current === controller) liveAbortRef.current = null;
+          setStreaming(false);
+        }
+      })();
+    },
+    [config, applyEvent],
+  );
+
+  const applySlashAction = useCallback(
+    (action: BackendAction) => {
+      switch (action.kind) {
+        case 'passthrough':
+          return;
+        case 'handled':
+          // Command output already reached the history through the host; close
+          // the streaming text block it produced.
+          applyEvent({ type: 'done' });
+          return;
+        case 'dialog':
+          if (action.resolution.kind === 'mount') {
+            setDialog(action.resolution.dialog);
+          } else {
+            applyEvent({ type: 'text', delta: action.resolution.message });
+            applyEvent({ type: 'done' });
+          }
+          return;
+        case 'submit': {
+          if (
+            typeof action.content === 'string' &&
+            action.content.trim().length === 0
+          ) {
+            applyEvent({ type: 'done' });
+            return;
+          }
+          if (!config) {
+            applyEvent({
+              type: 'text',
+              delta:
+                'Model submission requires a live client, which is not available in demo mode.',
+            });
+            applyEvent({ type: 'done' });
+            return;
+          }
+          startLiveTurn(action.content, {
+            ...(action.modelOverride
+              ? { modelOverride: action.modelOverride }
+              : {}),
+            ...(action.onComplete ? { onComplete: action.onComplete } : {}),
+          });
           return;
         }
-        applyEvent({
-          type: 'text',
-          delta: route
-            ? `/${name} → routed (results: ${route.results.join(',')})`
-            : `unknown command: /${name}`,
-        });
-        return;
+        case 'quit':
+          applyEvent({ type: 'done' });
+          renderer.destroy();
+          setTimeout(() => process.exit(0), 100);
+          return;
+        case 'unsupported':
+          applyEvent({ type: 'text', delta: action.message });
+          applyEvent({ type: 'done' });
+          return;
       }
-      if (config) {
-        // Live client wiring: submit to the real agent loop; Esc aborts via the
-        // AbortController whose signal reaches client.sendMessageStream.
-        liveAbortRef.current?.abort();
-        const controller = new AbortController();
-        liveAbortRef.current = controller;
-        setStreaming(true);
-        (async () => {
-          try {
-            for await (const ev of livePromptEvents(
-              config,
-              text,
-              controller.signal,
-            ))
-              applyEvent(ev);
-          } catch (err) {
-            if (!controller.signal.aborted) {
-              applyEvent({
-                type: 'text',
-                delta: `\n[live error] ${String(err)}`,
-              });
-            }
-            setItems((prev) =>
-              settleOpenTools(
-                prev,
-                controller.signal.aborted ? 'interrupted' : 'error',
-              ),
-            );
-          } finally {
-            if (liveAbortRef.current === controller)
-              liveAbortRef.current = null;
-            setStreaming(false);
-          }
-        })();
-        return;
-      }
-      startStream(); // scripted: every submission replays the scenario
     },
-    [startStream, config, applyEvent],
+    [applyEvent, config, renderer, startLiveTurn],
+  );
+
+  const submitText = useCallback(
+    (raw: string) => {
+      void (async () => {
+        const text = raw.trim();
+        if (!text) return;
+        // Slash commands run through the real command stack behind the
+        // gateway: queued until the dispatcher is ready, rejected while one
+        // is already running, never silently misrouted to the model.
+        if (isSlashCommandInput(text)) {
+          let settlement: SlashSettlement;
+          try {
+            settlement = await gateway.dispatch(text);
+          } catch (err) {
+            applyEvent({
+              type: 'text',
+              delta: `[command error] ${err instanceof Error ? err.message : String(err)}`,
+            });
+            applyEvent({ type: 'done' });
+            return;
+          }
+          if (settlement.kind === 'rejected') {
+            applyEvent({ type: 'text', delta: settlement.reason });
+            applyEvent({ type: 'done' });
+            return;
+          }
+          const action = resolveDispatchOutcome(settlement.outcome);
+          if (action.kind !== 'passthrough') {
+            applySlashAction(action);
+            return;
+          }
+        }
+        applyEvent({ type: 'user', text });
+        if (config) {
+          startLiveTurn(text);
+          return;
+        }
+        startStream(); // scripted: every submission replays the scenario
+      })();
+    },
+    [applyEvent, applySlashAction, config, gateway, startLiveTurn, startStream],
   );
 
   const banner = buildBanner(config, width);
@@ -564,12 +743,31 @@ function App({
         <box height={1} />
       </scrollbox>
 
+      {/* active dialog (help/theme/settings/model/permissions/…) */}
+      {dialog && (
+        <OpenTuiDialogMount
+          dialog={dialog}
+          config={config}
+          settings={settings}
+          commands={commands}
+          onClose={() => setDialog(null)}
+          onNavigate={setDialog}
+          notify={(text) => {
+            applyEvent({ type: 'text', delta: text });
+            applyEvent({ type: 'done' });
+          }}
+          onApprovalModeChanged={setApprovalMode}
+        />
+      )}
+
       {/* status bar */}
       <box paddingLeft={1} paddingRight={1}>
         <text fg={C.dim}>
           {streaming
             ? `${nextSpinner()} streaming… (${PHASE_LABEL[phase]}) (Esc interrupt · Ctrl+C quit)`
-            : `ready · click cards to expand · drag text to copy · wheel to scroll (Ctrl+C quit)`}
+            : commandProcessing
+              ? `${nextSpinner()} running command… (Esc cancel · Ctrl+C quit)`
+              : `ready · click cards to expand · drag text to copy · wheel to scroll (Ctrl+C quit)`}
           {toast ? `   ${toast}` : ''}
         </text>
       </box>
@@ -584,14 +782,22 @@ function App({
         <OpenTuiInputPrompt
           onSubmit={submitText}
           userMessages={userPrompts}
-          streaming={streaming}
+          config={config}
+          approvalMode={approvalMode}
+          streaming={streaming || commandProcessing}
           onInterrupt={() => {
+            // Esc while a slash command runs cancels it (dispatcher.cancel);
+            // otherwise it interrupts the live model turn.
+            if (commandProcessingRef.current) {
+              gateway.cancel();
+              return;
+            }
             liveAbortRef.current?.abort();
             liveAbortRef.current = null;
             setStreaming(false);
           }}
           placeholder="Ask anything… (Enter submits, Shift+Enter for newline)"
-          focus
+          focus={!dialog}
         />
       </box>
     </box>

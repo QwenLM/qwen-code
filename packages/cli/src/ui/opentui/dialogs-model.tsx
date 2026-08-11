@@ -22,7 +22,11 @@ import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
-import type { InputModalities, AuthType } from '@qwen-code/qwen-code-core';
+import type {
+  InputModalities,
+  AuthType,
+  AvailableModel,
+} from '@qwen-code/qwen-code-core';
 import {
   DialogFrame,
   DialogSelect,
@@ -106,6 +110,37 @@ export function parseModelSelectionKey(key: string): {
   return { authType, modelId: rest };
 }
 
+/**
+ * Parity of `encodeAuxModelSelector` in ModelDialog.tsx: encode a selection
+ * key into the `authType:modelId` form persisted for the fast/vision auxiliary
+ * models (baseUrl discarded). Handles the three selection-key shapes.
+ */
+export function encodeAuxModelSelector(selected: string): string {
+  if (selected.includes('::')) {
+    const parsed = parseModelSelectionKey(selected);
+    return `${parsed.authType}:${parsed.modelId}`;
+  }
+  if (selected.startsWith('$runtime|')) {
+    const parts = selected.split('|');
+    return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
+  }
+  return selected;
+}
+
+/**
+ * Parity of `encodeVisionModelSelector` in ModelDialog.tsx: keep the selected
+ * row's baseUrl when present (so same-provider same-id endpoints stay
+ * distinct), otherwise fall back to the aux encoding.
+ */
+export function encodeVisionModelSelector(selected: string): string {
+  if (!selected.includes('::')) {
+    return encodeAuxModelSelector(selected);
+  }
+  const parsed = parseModelSelectionKey(selected);
+  const selector = `${parsed.authType}:${parsed.modelId}`;
+  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
+}
+
 /** Parity of the ModelDialog title line. */
 export function modelDialogTitle(
   mode: ModelDialogMode,
@@ -144,6 +179,8 @@ export interface OpenTuiModelEntry extends DialogListItem<string> {
   contextWindowSize?: number;
   baseUrl?: string;
   envKey?: string;
+  /** The registry entry behind this row (selection-time validation parity). */
+  model?: AvailableModel;
 }
 
 /** Plain-text row title (colors are applied at render time). */

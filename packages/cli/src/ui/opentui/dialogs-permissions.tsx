@@ -186,7 +186,11 @@ export interface OpenTuiPermissionsDialogProps {
   rules: readonly PermissionRuleEntry[];
   directories: readonly string[];
   initialDirectories: readonly string[];
-  onAddRule: (ruleText: string, scope: SettingScope) => void;
+  onAddRule: (
+    ruleText: string,
+    type: PermissionRuleEntry['type'],
+    scope: SettingScope,
+  ) => void;
   onDeleteRule: (raw: string, type: PermissionRuleEntry['type']) => void;
   onAddDirectory: (resolvedDir: string) => void;
   onRemoveDirectory: (dir: string) => void;
@@ -292,7 +296,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     focused: view === 'add-rule-scope',
     numbers: true,
     onSelect: (scope) => {
-      onAddRule(pendingRuleText, scope);
+      onAddRule(
+        pendingRuleText,
+        activeTab.id as PermissionRuleEntry['type'],
+        scope,
+      );
       setPendingRuleText('');
       setView('rule-list');
     },
