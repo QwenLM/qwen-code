@@ -128,7 +128,46 @@ describe('parseChannelConfig', () => {
         token: 't',
         sessionRotation: { maxTurns: 0 },
       }),
-    ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive number');
+    ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive integer');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxAgeHours: -1 },
+      }),
+    ).rejects.toThrow(
+      '"sessionRotation.maxAgeHours" must be a positive number',
+    );
+  });
+
+  it('throws when maxTurns is fractional', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxTurns: 0.5 },
+      }),
+    ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive integer');
+  });
+
+  it('accepts a fractional maxAgeHours', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+      sessionRotation: { maxAgeHours: 0.5 },
+    });
+
+    expect(result['sessionRotation']).toEqual({ maxAgeHours: 0.5 });
+  });
+
+  it('throws on unknown sessionRotation keys instead of dropping them', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxTurn: 200 },
+      }),
+    ).rejects.toThrow('"sessionRotation.maxTurn"');
   });
 
   it('treats an explicit null sessionRotation as unset', async () => {

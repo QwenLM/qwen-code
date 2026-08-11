@@ -84,7 +84,11 @@ export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
-export { SessionRouter, isValidRotationBound } from './SessionRouter.js';
+export {
+  SessionRouter,
+  isValidRotationBound,
+  isValidTurnCount,
+} from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,

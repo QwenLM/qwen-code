@@ -8,6 +8,10 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
 import {
+  isValidRotationBound,
+  isValidTurnCount,
+} from '@qwen-code/channel-base';
+import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
@@ -192,15 +196,19 @@ function assertSharedField(key: string, value: unknown): boolean {
     return true;
   }
   if (key === 'sessionRotation') {
+    // The config parser treats an explicit null as "unset"; agree here so a
+    // hand-cleared settings.json survives a later full-replace upsert.
+    if (value === null) return true;
     if (!isRecord(value)) {
       throw invalidConfig(`Channel field "${key}" must be an object.`);
     }
     for (const [nestedKey, nestedValue] of Object.entries(value)) {
       const validBound =
-        (nestedKey === 'maxTurns' || nestedKey === 'maxAgeHours') &&
-        typeof nestedValue === 'number' &&
-        Number.isFinite(nestedValue) &&
-        nestedValue > 0;
+        nestedKey === 'maxTurns'
+          ? isValidTurnCount(nestedValue)
+          : nestedKey === 'maxAgeHours'
+            ? isValidRotationBound(nestedValue)
+            : false;
       if (!validBound) {
         throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
       }

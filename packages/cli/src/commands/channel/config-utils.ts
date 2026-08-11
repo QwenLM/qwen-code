@@ -4,7 +4,10 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
-import { isValidRotationBound } from '@qwen-code/channel-base';
+import {
+  isValidRotationBound,
+  isValidTurnCount,
+} from '@qwen-code/channel-base';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -186,19 +189,28 @@ function parseSessionRotationConfig(
   if (raw === undefined || raw === null) return undefined;
   const parsed = requireObjectField(channelName, 'sessionRotation', raw);
 
-  const bound = (field: 'maxTurns' | 'maxAgeHours'): number | undefined => {
-    const value = parsed[field];
-    if (value === undefined) return undefined;
-    if (!isValidRotationBound(value)) {
+  // Reject unknown keys loudly: a typo'd bound (say "maxTurn") must not
+  // silently disable rotation — the exact failure mode rotation prevents.
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'maxTurns' && key !== 'maxAgeHours') {
       throw new Error(
-        `Channel "${channelName}" field "sessionRotation.${field}" must be a positive number.`,
+        `Channel "${channelName}" field "sessionRotation.${key}" is not a valid sessionRotation key.`,
       );
     }
-    return value;
-  };
+  }
 
-  const maxTurns = bound('maxTurns');
-  const maxAgeHours = bound('maxAgeHours');
+  const maxTurns = parsed['maxTurns'];
+  if (maxTurns !== undefined && !isValidTurnCount(maxTurns)) {
+    throw new Error(
+      `Channel "${channelName}" field "sessionRotation.maxTurns" must be a positive integer.`,
+    );
+  }
+  const maxAgeHours = parsed['maxAgeHours'];
+  if (maxAgeHours !== undefined && !isValidRotationBound(maxAgeHours)) {
+    throw new Error(
+      `Channel "${channelName}" field "sessionRotation.maxAgeHours" must be a positive number.`,
+    );
+  }
   if (maxTurns === undefined && maxAgeHours === undefined) return undefined;
   return {
     ...(maxTurns !== undefined ? { maxTurns } : {}),

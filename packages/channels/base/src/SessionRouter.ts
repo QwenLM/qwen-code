@@ -59,6 +59,7 @@ export class SessionRouter {
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
   private toTurns: Map<string, number> = new Map(); // session ID → messages routed
   private toStartedAt: Map<string, number> = new Map(); // session ID → epoch ms
+  private sessionRoutingLeases: Map<string, number> = new Map(); // session ID → routed-but-unsettled messages
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
@@ -121,7 +122,9 @@ export class SessionRouter {
     channelName: string,
     rotation: SessionRotationConfig | undefined,
   ): void {
-    const maxTurns = normalizeRotationBound(rotation?.maxTurns);
+    const maxTurns = isValidTurnCount(rotation?.maxTurns)
+      ? rotation.maxTurns
+      : undefined;
     const maxAgeHours = normalizeRotationBound(rotation?.maxAgeHours);
     if (maxTurns === undefined && maxAgeHours === undefined) {
       this.channelRotations.delete(channelName);
@@ -205,10 +208,14 @@ export class SessionRouter {
     key: string,
     sessionId: string,
     channelName: string,
+    target: SessionTarget | undefined,
   ): void {
-    const target = this.getTarget(sessionId);
     this.invalidateRouteOperation(key);
     this.deleteByKey(key);
+    // Persist the retirement now: if the successor creation fails before its
+    // own persist, a restart must not restore the stale route and re-fire the
+    // whole rotation (a second notice and discard for what was one rotation).
+    this.persist();
     process.stderr.write(
       `[SessionRouter] Rotated session for key ${sanitizeLogText(key, 256)} on ${sanitizeLogText(channelName, 128)}: ` +
         `${sanitizeLogText(sessionId, 128)} reached its configured limit; ` +
@@ -234,6 +241,34 @@ export class SessionRouter {
     return checker ? checker(sessionId) : false;
   }
 
+  private leaseSession(sessionId: string): void {
+    this.sessionRoutingLeases.set(
+      sessionId,
+      (this.sessionRoutingLeases.get(sessionId) ?? 0) + 1,
+    );
+  }
+
+  private hasRoutingLease(sessionId: string): boolean {
+    return (this.sessionRoutingLeases.get(sessionId) ?? 0) > 0;
+  }
+
+  /**
+   * Release the routing lease resolve() took when handing out `sessionId`.
+   * Call exactly once per successful resolve: when the routed message is
+   * enqueued as a turn, or when it settles without one (buffered, handled as
+   * a shell command). Rotation defers while a lease is held, so a session is
+   * never retired out from under a message that resolved it but has not yet
+   * registered its turn.
+   */
+  releaseRoutingLease(sessionId: string): void {
+    const leases = this.sessionRoutingLeases.get(sessionId) ?? 0;
+    if (leases <= 1) {
+      this.sessionRoutingLeases.delete(sessionId);
+    } else {
+      this.sessionRoutingLeases.set(sessionId, leases - 1);
+    }
+  }
+
   /**
    * Counting turns costs a persist per message, and only the turns bound ever
    * reads the counter, so channels without maxTurns opt out of both.
@@ -242,6 +277,21 @@ export class SessionRouter {
     const rotation = this.channelRotations.get(channelName);
     if (rotation?.maxTurns === undefined) return;
     this.toTurns.set(sessionId, (this.toTurns.get(sessionId) ?? 0) + 1);
+    this.persist();
+  }
+
+  /**
+   * Reverse countTurn for a routed message that was buffered instead of
+   * becoming a turn (collect mode): the drain re-enters and counts the
+   * coalesced message, so the buffered routing must not also count. Never
+   * drops below the seed value of one while the session exists.
+   */
+  uncountTurn(channelName: string, sessionId: string): void {
+    const rotation = this.channelRotations.get(channelName);
+    if (rotation?.maxTurns === undefined) return;
+    const turns = this.toTurns.get(sessionId);
+    if (turns === undefined || turns <= 1) return;
+    this.toTurns.set(sessionId, turns - 1);
     this.persist();
   }
 
@@ -305,22 +355,32 @@ export class SessionRouter {
       // while a creation is in flight on this key: invalidating it would fail
       // the concurrent message instead of rotating it, and the bound is just as
       // well enforced on the next one. Deferred while the outgoing session
-      // still has a turn running or queued: retiring it then would auto-cancel
-      // its pending approvals, drop its late output, and let the successor turn
-      // run concurrently in the same chat — so the bound is enforced on the
-      // next message instead.
+      // still has a turn running or queued, or while a routed message has not
+      // settled yet (a resolve whose turn is registered only in a later
+      // microtask): retiring it then would discard a session a concurrent
+      // message is about to prompt, or auto-cancel its pending approvals and
+      // drop its late output — so the bound is enforced on the next message
+      // instead.
       if (
         existing &&
         !this.creatingSessions.has(key) &&
         !this.isSessionActive(channelName, existing) &&
+        !this.hasRoutingLease(existing) &&
         this.shouldRotate(channelName, existing)
       ) {
-        this.rotateRoute(key, existing, channelName);
+        this.rotateRoute(key, existing, channelName, {
+          channelName: input.channelName,
+          senderId: input.senderId,
+          chatId: input.chatId,
+          threadId: input.threadId,
+          isGroup: input.isGroup,
+        });
         existing = undefined;
       }
       if (existing && this.isLive(existing)) {
         this.promoteTargetToGroup(existing, isGroup);
         this.countTurn(channelName, existing);
+        this.leaseSession(existing);
         return existing;
       }
 
@@ -336,6 +396,7 @@ export class SessionRouter {
           }
           this.promoteTargetToGroup(sessionId, isGroup);
           this.countTurn(channelName, sessionId);
+          this.leaseSession(sessionId);
           return sessionId;
         } catch (error) {
           if (creating.invalidationError) {
@@ -375,6 +436,7 @@ export class SessionRouter {
           throw error;
         }
         this.promoteTargetToGroup(sessionId, isGroup);
+        this.leaseSession(sessionId);
         return sessionId;
       } finally {
         if (this.creatingSessions.get(key) === operation) {
@@ -645,6 +707,7 @@ export class SessionRouter {
     }
     this.toTurns.delete(sessionId);
     this.toStartedAt.delete(sessionId);
+    this.sessionRoutingLeases.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
@@ -677,6 +740,7 @@ export class SessionRouter {
     this.toCwd.delete(sessionId);
     this.toTurns.delete(sessionId);
     this.toStartedAt.delete(sessionId);
+    this.sessionRoutingLeases.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     return sessionId;
   }
@@ -845,6 +909,7 @@ export class SessionRouter {
     this.toCwd.clear();
     this.toTurns.clear();
     this.toStartedAt.clear();
+    this.sessionRoutingLeases.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
@@ -947,8 +1012,9 @@ export class SessionRouter {
       entry['sessionId'].length > 0 &&
       typeof entry['cwd'] === 'string' &&
       entry['cwd'].length > 0 &&
-      isOptionalFiniteNumber(entry['turns']) &&
-      isOptionalFiniteNumber(entry['startedAt']) &&
+      (entry['turns'] === undefined || isValidTurnCount(entry['turns'])) &&
+      (entry['startedAt'] === undefined ||
+        isValidRotationBound(entry['startedAt'])) &&
       typeof typedTarget['channelName'] === 'string' &&
       typeof typedTarget['senderId'] === 'string' &&
       typeof typedTarget['chatId'] === 'string' &&
@@ -1158,12 +1224,6 @@ export class SessionRouter {
   }
 }
 
-function isOptionalFiniteNumber(value: unknown): boolean {
-  return (
-    value === undefined || (typeof value === 'number' && Number.isFinite(value))
-  );
-}
-
 /**
  * The single definition of a valid rotation bound, shared by parse-time
  * validation (fail loudly) and the router (defensively drop). A bound is only
@@ -1172,6 +1232,17 @@ function isOptionalFiniteNumber(value: unknown): boolean {
  */
 export function isValidRotationBound(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/**
+ * The single definition of a valid turn-count value, shared by parse-time
+ * validation, the settings store, and the persisted-entry gate: turns are
+ * whole messages, so a bound (or a restored counter) must be a positive
+ * integer. Fractional values would rotate from the second message on (0 < x
+ * <= 1) or silently act as their ceiling (x > 1).
+ */
+export function isValidTurnCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
 function normalizeRotationBound(value: unknown): number | undefined {

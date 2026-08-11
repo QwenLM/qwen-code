@@ -1289,11 +1289,25 @@ describe('SessionRouter', () => {
   });
 
   describe('session rotation', () => {
+    /**
+     * Emulate the channel contract: every message resolve() hands out
+     * releases its routing lease once settled (its turn was enqueued, or it
+     * exited without one). Rotation defers while a lease is held.
+     */
+    async function routed(
+      router: SessionRouter,
+      ...args: Parameters<SessionRouter['resolve']>
+    ): Promise<string> {
+      const sessionId = await router.resolve(...args);
+      router.releaseRoutingLease(sessionId);
+      return sessionId;
+    }
+
     it('keeps reusing the session when no rotation is configured', async () => {
       const router = new SessionRouter(bridge, '/tmp');
-      const first = await router.resolve('ch', 'alice', 'chat1');
+      const first = await routed(router, 'ch', 'alice', 'chat1');
       for (let index = 0; index < 20; index++) {
-        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
       }
     });
 
@@ -1301,34 +1315,34 @@ describe('SessionRouter', () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 3 });
 
-      const first = await router.resolve('ch', 'alice', 'chat1');
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
 
-      const rotated = await router.resolve('ch', 'alice', 'chat1');
+      const rotated = await routed(router, 'ch', 'alice', 'chat1');
       expect(rotated).not.toBe(first);
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(rotated);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(rotated);
     });
 
     it('rotates only the route that hit the bound', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 2 });
 
-      const busy = await router.resolve('ch', 'alice', 'chat1');
-      const quiet = await router.resolve('ch', 'bob', 'chat2');
-      await router.resolve('ch', 'alice', 'chat1');
+      const busy = await routed(router, 'ch', 'alice', 'chat1');
+      const quiet = await routed(router, 'ch', 'bob', 'chat2');
+      await routed(router, 'ch', 'alice', 'chat1');
 
-      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(busy);
-      expect(await router.resolve('ch', 'bob', 'chat2')).toBe(quiet);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(busy);
+      expect(await routed(router, 'ch', 'bob', 'chat2')).toBe(quiet);
     });
 
     it('does not rotate a channel that has no bound configured', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('bounded', { maxTurns: 2 });
 
-      const unbounded = await router.resolve('other', 'alice', 'chat1');
+      const unbounded = await routed(router, 'other', 'alice', 'chat1');
       for (let index = 0; index < 5; index++) {
-        expect(await router.resolve('other', 'alice', 'chat1')).toBe(unbounded);
+        expect(await routed(router, 'other', 'alice', 'chat1')).toBe(unbounded);
       }
     });
 
@@ -1338,12 +1352,12 @@ describe('SessionRouter', () => {
         const router = new SessionRouter(bridge, '/tmp');
         router.setChannelRotation('ch', { maxAgeHours: 2 });
 
-        const first = await router.resolve('ch', 'alice', 'chat1');
+        const first = await routed(router, 'ch', 'alice', 'chat1');
         vi.advanceTimersByTime(90 * 60 * 1000);
-        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
 
         vi.advanceTimersByTime(31 * 60 * 1000);
-        expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(first);
+        expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
       } finally {
         vi.useRealTimers();
       }
@@ -1353,8 +1367,8 @@ describe('SessionRouter', () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 0, maxAgeHours: -1 });
 
-      const first = await router.resolve('ch', 'alice', 'chat1');
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
     });
 
     it('persists turn counts so a restart cannot reset the bound', async () => {
@@ -1364,8 +1378,8 @@ describe('SessionRouter', () => {
 
       const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
       router.setChannelRotation('ch', { maxTurns: 3 });
-      const first = await router.resolve('ch', 'alice', 'chat1');
-      await router.resolve('ch', 'alice', 'chat1');
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
 
       const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
       expect(persisted['ch:alice:chat1'].turns).toBe(2);
@@ -1376,8 +1390,8 @@ describe('SessionRouter', () => {
       revived.setChannelRotation('ch', { maxTurns: 3 });
       revived.restoreRoutes();
 
-      expect(await revived.resolve('ch', 'alice', 'chat1')).toBe(first);
-      expect(await revived.resolve('ch', 'alice', 'chat1')).not.toBe(first);
+      expect(await routed(revived, 'ch', 'alice', 'chat1')).toBe(first);
+      expect(await routed(revived, 'ch', 'alice', 'chat1')).not.toBe(first);
     });
 
     it('accepts route stores written before rotation existed', async () => {
@@ -1393,7 +1407,7 @@ describe('SessionRouter', () => {
 
       expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 0 });
       // No recorded start: the clock starts now rather than rotating on sight.
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-session');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe('old-session');
     });
 
     it('persists the stamped start of a pre-rotation route across restarts', async () => {
@@ -1410,7 +1424,7 @@ describe('SessionRouter', () => {
         router.setChannelRotation('ch', { maxAgeHours: 1 });
         router.restoreRoutes();
 
-        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(
           'old-session',
         );
         const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
@@ -1418,7 +1432,7 @@ describe('SessionRouter', () => {
 
         // The stamp write happens once; later messages stay write-free.
         mockWriteFileSync.mockClear();
-        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(
           'old-session',
         );
         expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -1431,7 +1445,7 @@ describe('SessionRouter', () => {
         revived.setChannelRotation('ch', { maxAgeHours: 1 });
         revived.restoreRoutes();
 
-        expect(await revived.resolve('ch', 'alice', 'chat1')).not.toBe(
+        expect(await routed(revived, 'ch', 'alice', 'chat1')).not.toBe(
           'old-session',
         );
       } finally {
@@ -1442,9 +1456,9 @@ describe('SessionRouter', () => {
     it('discards the retired session when rotating', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 1 });
-      const first = await router.resolve('ch', 'alice', 'chat1');
+      const first = await routed(router, 'ch', 'alice', 'chat1');
 
-      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(first);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
       await drainMicrotasks();
 
       expect(bridge.discardSession).toHaveBeenCalledWith(first);
@@ -1461,8 +1475,8 @@ describe('SessionRouter', () => {
         rotated.push({ sessionId, target });
       });
 
-      const first = await router.resolve('ch', 'alice', 'chat1');
-      await router.resolve('ch', 'alice', 'chat1');
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
 
       expect(rotated).toEqual([
         {
@@ -1485,8 +1499,8 @@ describe('SessionRouter', () => {
       const unsubscribe = router.onSessionRotated(listener);
       unsubscribe();
 
-      await router.resolve('ch', 'alice', 'chat1');
-      await router.resolve('ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
 
       expect(listener).not.toHaveBeenCalled();
     });
@@ -1497,30 +1511,150 @@ describe('SessionRouter', () => {
       let busy = true;
       router.setSessionActivityChecker('ch', () => busy);
 
-      const first = await router.resolve('ch', 'alice', 'chat1');
+      const first = await routed(router, 'ch', 'alice', 'chat1');
       // At the bound but mid-turn: the route stays and nothing is discarded.
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
       expect(bridge.discardSession).not.toHaveBeenCalled();
 
       busy = false;
-      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(first);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
       await drainMicrotasks();
       expect(bridge.discardSession).toHaveBeenCalledWith(first);
+    });
+
+    it('defers rotation while a routed message has not settled yet', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 1 });
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+
+      // The second message rotates, and its routing lease stays held while
+      // the message is still between resolve() and turn registration.
+      const second = await router.resolve('ch', 'alice', 'chat1');
+      expect(second).not.toBe(first);
+
+      // A third message must not rotate the successor out from under the
+      // second: the second resolved it and is about to prompt it.
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(second);
+      expect(bridge.discardSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).toHaveBeenCalledWith(first);
+
+      router.releaseRoutingLease(second);
+      router.releaseRoutingLease(second);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(second);
+      await drainMicrotasks();
+      expect(bridge.discardSession).toHaveBeenCalledWith(second);
+    });
+
+    it('does not rotate a route while its reload is in flight', async () => {
+      vi.useFakeTimers();
+      try {
+        const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+        tempDirs.push(dir);
+        const persistPath = join(dir, 'routes.json');
+        writeFileSync(
+          persistPath,
+          JSON.stringify({
+            'ch:alice:chat1': {
+              sessionId: 'old-session',
+              target: {
+                channelName: 'ch',
+                senderId: 'alice',
+                chatId: 'chat1',
+              },
+              cwd: '/tmp',
+              startedAt: Date.now(),
+            },
+          }),
+        );
+        const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+          recoveryMode: 'lazy',
+        });
+        router.setChannelRotation('ch', { maxAgeHours: 1 });
+        let releaseLoad!: (sessionId: string) => void;
+        (bridge.loadSession as ReturnType<typeof vi.fn>).mockReturnValue(
+          new Promise<string>((resolve) => {
+            releaseLoad = resolve;
+          }),
+        );
+        router.restoreRoutes();
+
+        // The first resolve starts the reload; once the age bound passes
+        // mid-reload, a second resolve must wait for the reload instead of
+        // rotating (which would invalidate the concurrent message).
+        const first = router.resolve('ch', 'alice', 'chat1');
+        await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
+        const second = router.resolve('ch', 'alice', 'chat1');
+        releaseLoad('reloaded-session');
+
+        expect(await first).toBe('reloaded-session');
+        expect(await second).toBe('reloaded-session');
+        expect(bridge.discardSession).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops deferring rotation once the activity checker is unregistered', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 1 });
+      router.setSessionActivityChecker('ch', () => true);
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      // The checker reports the session as active forever, so the bound
+      // never fires while it is registered.
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
+
+      router.setSessionActivityChecker('ch', undefined);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
+    });
+
+    it('restores rotation counters in eager recovery', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 2,
+            startedAt: Date.now(),
+          },
+        }),
+      );
+      // Default (eager) recovery: channel start uses restoreSessions().
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+
+      await router.restoreSessions();
+
+      // Carried turns (2) plus this message reach the bound: next rotates.
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe('old-session');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
+        'old-session',
+      );
     });
 
     it('clears a bound when the channel re-registers without one', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 2 });
-      const first = await router.resolve('ch', 'alice', 'chat1');
-      await router.resolve('ch', 'alice', 'chat1'); // turns: 2, at the bound
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1'); // turns: 2, at the bound
 
       router.setChannelRotation('ch', undefined);
       for (let index = 0; index < 3; index++) {
-        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
       }
 
       router.setChannelRotation('ch', { maxTurns: 0 }); // normalized away
-      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
     });
 
     it('carries counters over an ID-changing reload', async () => {
@@ -1552,10 +1686,49 @@ describe('SessionRouter', () => {
       );
       router.restoreRoutes();
 
-      const carried = await router.resolve('ch', 'alice', 'chat1');
+      const carried = await routed(router, 'ch', 'alice', 'chat1');
       expect(carried).toBe('reloaded-session');
       // Carried turns (2) plus this message reach the bound: next rotates.
-      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(carried);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(carried);
+    });
+
+    it('carries the start stamp over an ID-changing reload', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const stamp = Date.now() - 30 * 60 * 1000;
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 1,
+            startedAt: stamp,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+      router.setChannelRotation('ch', { maxAgeHours: 24 });
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'reloaded-session',
+      );
+      router.restoreRoutes();
+
+      await router.resolve('ch', 'alice', 'chat1');
+
+      // Without the carry-over the reload would re-stamp 'now', silently
+      // re-arming the age clock on every restart that mints a fresh ID.
+      expect(rotationCounters(router).toStartedAt.get('reloaded-session')).toBe(
+        stamp,
+      );
     });
 
     it('counts messages that waited on an in-flight creation', async () => {
@@ -1573,10 +1746,12 @@ describe('SessionRouter', () => {
       releaseCreation('busy-session');
 
       expect(await creator).toBe('busy-session');
+      router.releaseRoutingLease('busy-session');
       expect(await waiter).toBe('busy-session');
+      router.releaseRoutingLease('busy-session');
 
       // Creator and waiter both counted: the next message hits the bound.
-      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
         'busy-session',
       );
     });
@@ -1588,17 +1763,19 @@ describe('SessionRouter', () => {
       const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
       router.setChannelRotation('ch', { maxTurns: 2 });
 
-      const first = await router.resolve('ch', 'alice', 'chat1');
+      const first = await routed(router, 'ch', 'alice', 'chat1');
       expect(mockWriteFileSync).toHaveBeenCalledTimes(1); // creation = turn 1
       mockWriteFileSync.mockClear();
 
-      await router.resolve('ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
       expect(mockWriteFileSync).toHaveBeenCalledTimes(1); // counter update
       mockWriteFileSync.mockClear();
 
-      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(first);
-      // Rotation itself does not persist; the replacement creation does.
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
+      // Rotation persists the retirement so a failed successor creation
+      // cannot re-fire it after a restart; the successor creation persists
+      // again.
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(2);
 
       const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
       expect(persisted['ch:alice:chat1'].turns).toBe(1);
@@ -1611,18 +1788,47 @@ describe('SessionRouter', () => {
       const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
       router.setChannelRotation('ch', { maxAgeHours: 24 });
 
-      await router.resolve('ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
       expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
       mockWriteFileSync.mockClear();
 
-      await router.resolve('ch', 'alice', 'chat1');
+      await routed(router, 'ch', 'alice', 'chat1');
       expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('drops persisted entries with impossible rotation counters', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const entry = {
+        sessionId: 'old-session',
+        target: {
+          channelName: 'ch',
+          senderId: 'alice',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+      };
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': { ...entry, turns: -3 },
+          'ch:bob:chat2': { ...entry, sessionId: 's2', turns: 0.5 },
+          'ch:carol:chat3': { ...entry, sessionId: 's3', startedAt: 0 },
+          'ch:dave:chat4': { ...entry, sessionId: 's4', turns: 2 },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+
+      expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 3 });
     });
 
     it('drops counters when a session is removed by ID', async () => {
       const router = new SessionRouter(bridge, '/tmp');
-      router.setChannelRotation('ch', { maxTurns: 5 });
-      const sessionId = await router.resolve('ch', 'alice', 'chat1');
+      router.setChannelRotation('ch', { maxTurns: 5, maxAgeHours: 24 });
+      const sessionId = await routed(router, 'ch', 'alice', 'chat1');
 
       router.removeSessionId(sessionId);
 
@@ -1632,8 +1838,8 @@ describe('SessionRouter', () => {
 
     it('drops counters when a route is removed by key', async () => {
       const router = new SessionRouter(bridge, '/tmp');
-      router.setChannelRotation('ch', { maxTurns: 5 });
-      await router.resolve('ch', 'alice', 'chat1');
+      router.setChannelRotation('ch', { maxTurns: 5, maxAgeHours: 24 });
+      await routed(router, 'ch', 'alice', 'chat1');
 
       router.removeSession('ch', 'alice', 'chat1');
 
@@ -1643,8 +1849,8 @@ describe('SessionRouter', () => {
 
     it('clears counters on dispose', async () => {
       const router = new SessionRouter(bridge, '/tmp');
-      router.setChannelRotation('ch', { maxTurns: 5 });
-      await router.resolve('ch', 'alice', 'chat1');
+      router.setChannelRotation('ch', { maxTurns: 5, maxAgeHours: 24 });
+      await routed(router, 'ch', 'alice', 'chat1');
 
       router.dispose();
 
@@ -1652,7 +1858,6 @@ describe('SessionRouter', () => {
       expect(rotationCounters(router).toStartedAt.size).toBe(0);
     });
   });
-
   describe('clearAll', () => {
     it('clears all in-memory state', async () => {
       const router = new SessionRouter(bridge, '/tmp');

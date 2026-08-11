@@ -2295,6 +2295,7 @@ export abstract class ChannelBase {
   private purgeSessionState(sessionId: string): void {
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
+    this.sessionQueues.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
 
@@ -2325,6 +2326,9 @@ export abstract class ChannelBase {
   }
 
   private trackSessionTurn(sessionId: string, turn: Promise<unknown>): void {
+    // The turn is now registered: release resolve()'s routing lease and let
+    // the pending-turn count carry the rotation deferral from here.
+    this.router.releaseRoutingLease(sessionId);
     this.sessionPendingTurns.set(
       sessionId,
       (this.sessionPendingTurns.get(sessionId) ?? 0) + 1,
@@ -5188,6 +5192,9 @@ export abstract class ChannelBase {
       const cmd = bangText.slice(1).trim();
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
+        // No turn will start for this message, but the shell command still
+        // runs on the resolved session: hold resolve()'s routing lease until
+        // it settles so a rotation cannot discard the session mid-command.
         try {
           const result = await bridgeShellCommand(sessionId, cmd);
           const longestRun = Math.max(
@@ -5216,6 +5223,8 @@ export abstract class ChannelBase {
             envelope.threadId,
             `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
           );
+        } finally {
+          this.router.releaseRoutingLease(sessionId);
         }
         return;
       }
@@ -5365,6 +5374,12 @@ export abstract class ChannelBase {
               `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
             );
           }
+          // The buffered message becomes part of the coalesced drain turn, not
+          // a turn of its own: undo the resolve-time count (the drain counts
+          // the coalesced message) and release the routing lease (no turn
+          // will register for this routing).
+          this.router.uncountTurn(this.name, sessionId);
+          this.router.releaseRoutingLease(sessionId);
           return;
         }
         case 'steer': {

@@ -12380,6 +12380,192 @@ describe('ChannelBase', () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
       ).not.toBe(sessionId);
     });
+
+    it('does not rotate a session out from under a message between resolve and its turn', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      let releaseShell!: (result: { output: string; exitCode: number }) => void;
+      const shellCommand = vi.fn().mockReturnValue(
+        new Promise<{ output: string; exitCode: number }>((resolve) => {
+          releaseShell = resolve;
+        }),
+      );
+      (bridge as unknown as Record<string, unknown>)['shellCommand'] =
+        shellCommand;
+
+      // The bang message resolves the session (rotating the spent one) and
+      // stays mid-shell-command: it holds the session without a tracked turn.
+      const bangTurn = ch.handleInbound(envelope({ text: '!hang' }));
+      await vi.waitFor(() => expect(shellCommand).toHaveBeenCalledTimes(1));
+      const shelledSessionId = shellCommand.mock.calls[0]![0] as string;
+      expect(shelledSessionId).not.toBe(retiredId);
+
+      // A message at the bound must not retire the shelled session.
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(shelledSessionId);
+      expect(bridge.discardSession).not.toHaveBeenCalledWith(shelledSessionId);
+
+      releaseShell({ output: 'ok', exitCode: 0 });
+      await bangTurn;
+    });
+
+    it('collect: buffered messages count once against maxTurns', async () => {
+      let settleFirst!: (value: string) => void;
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return new Promise<string>((resolve) => {
+            settleFirst = resolve;
+          });
+        }
+        return Promise.resolve('response');
+      });
+
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { dispatchMode: 'collect' } },
+        sessionRotation: { maxTurns: 3 },
+      });
+
+      const groupMsg = (text: string): Envelope =>
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'g1',
+          text,
+        });
+
+      const first = ch.handleInbound(groupMsg('first'));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // These buffer behind the running turn and must not consume the bound:
+      // the drain coalesces them into a single counted turn.
+      await ch.handleInbound(groupMsg('second'));
+      await ch.handleInbound(groupMsg('third'));
+
+      settleFirst('done');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      // The session has carried two turns (first + coalesced), not four:
+      // the third real turn still reuses it, and only the next rotates.
+      await ch.handleInbound(groupMsg('fourth'));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).toBe(sessionId);
+      await ch.handleInbound(groupMsg('fifth'));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[3]![0],
+      ).not.toBe(sessionId);
+    });
+
+    it('rotation on one channel does not notify another sharing the router', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const channelA = new TestChannel(
+        'chan-a',
+        defaultConfig({ sessionRotation: { maxTurns: 1 } }),
+        bridge,
+        { router },
+      );
+      const channelB = new TestChannel('chan-b', defaultConfig(), bridge, {
+        router,
+      });
+
+      await channelA.handleInbound(envelope({ text: 'first' }));
+      channelA.sent = [];
+      await channelA.handleInbound(envelope({ text: 'second' }));
+
+      expect(channelA.sent.some((m) => m.text.includes('rotated'))).toBe(true);
+      expect(channelB.sent).toEqual([]);
+    });
+
+    it('purges the session queue on rotation and on session death', async () => {
+      const queueKeys = (ch: TestChannel): string[] => [
+        ...(
+          ch as unknown as { sessionQueues: Map<string, unknown> }
+        ).sessionQueues.keys(),
+      ];
+
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      expect(queueKeys(ch)).toContain(retiredId);
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(queueKeys(ch)).not.toContain(retiredId);
+
+      const nextId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]![0] as string;
+      ch.onSessionDied(nextId);
+      expect(queueKeys(ch)).not.toContain(nextId);
+    });
+
+    it('defers rotation while a loop turn is still running', async () => {
+      const ch = createChannel({
+        sessionRotation: { maxTurns: 1 },
+        dispatchMode: 'followup',
+      });
+      ch.proactiveSupported = true;
+      let settleLoop!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleLoop = resolve;
+        }),
+      );
+
+      const job: ChannelLoop = {
+        id: 'loop-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+
+      const loopRun = ch.runLoopPrompt(job);
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // An inbound message on the loop's route is at the bound but must
+      // queue behind the running loop turn instead of retiring the session.
+      const inbound = ch.handleInbound(envelope({ text: 'while looping' }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).not.toHaveBeenCalled();
+
+      settleLoop('done');
+      await loopRun;
+      await inbound;
+
+      // The deferred message reused the loop's session ...
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      // ... and the next message rotates it.
+      await ch.handleInbound(envelope({ text: 'after' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+    });
   });
 
   describe('session routing', () => {

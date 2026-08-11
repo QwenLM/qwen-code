@@ -453,6 +453,17 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
     },
     {
+      label: 'sessionRotation with a fractional maxTurns',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 2.5 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
       label: 'sessionRotation not an object',
       config: {
         type: 'management-validation-test',
@@ -521,6 +532,24 @@ describe('WorkspaceChannelSettingsStore', () => {
       identity: { id: 'ops', displayName: 'Ops' },
       sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
     });
+  });
+
+  it('accepts an explicit null sessionRotation as unset', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: null,
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    });
+
+    expect(next.channels['bot']!['sessionRotation']).toBeNull();
   });
 
   it('accepts string-list and record descriptor fields', async () => {

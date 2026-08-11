@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import type {
   ChannelAgentBridge,
-  ChannelConfig,
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 import { isValidChatId, DeliveryError } from './QQChannel.js';
@@ -192,7 +191,6 @@ describe('session persistence paths', () => {
   function makeChannel(
     name: string,
     options?: QQChannelOptions,
-    configOverrides: Partial<ChannelConfig> = {},
   ): QQChannelInstance {
     return new QQChannel(
       name,
@@ -208,7 +206,6 @@ describe('session persistence paths', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
-        ...configOverrides,
       },
       {} as unknown as ChannelAgentBridge,
       options,
