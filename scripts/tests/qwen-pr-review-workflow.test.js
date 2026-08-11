@@ -26,6 +26,10 @@ const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
   'utf8',
 );
+const workflowsDir = '.github/workflows';
+const workflowFiles = readdirSync(workflowsDir).filter((f) =>
+  /\.ya?ml$/.test(f),
+);
 
 function runReviewStep() {
   const doc = parse(workflow);
@@ -54,7 +58,7 @@ function retryLoopSource() {
 
 // Drive the extracted loop with a stub qwen whose stream-json `result` event is
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
-function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
+function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'review-retry-'));
   try {
     const bin = join(dir, 'bin');
@@ -71,9 +75,21 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
     // timeout: record the per-attempt duration (`$2`, e.g. `10800s`) so tests
     // can assert the budget each attempt was given, then drop
     // `--kill-after=Xs` and that duration and exec the rest.
+    // `timeout_kill` dies before the agent ever runs; `timeout_partial_line`
+    // lets it stream first and only then reports 124, which is what a real
+    // `--kill-after` SIGKILL looks like: output already on stdout, cut off
+    // mid-line.
     write(
       'timeout',
-      '#!/bin/bash\necho "$2" >> "$DUR"\nif [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi\nshift\nshift\nexec "$@"\n',
+      [
+        '#!/bin/bash',
+        'echo "$2" >> "$DUR"',
+        'if [ "${SCENARIO:-}" = "timeout_kill" ]; then exit 124; fi',
+        'shift',
+        'shift',
+        'if [ "${SCENARIO:-}" = "timeout_partial_line" ]; then "$@"; exit 124; fi',
+        'exec "$@"',
+      ].join('\n') + '\n',
     );
     write('sleep', '#!/bin/bash\nexit 0\n');
     write(
@@ -97,6 +113,13 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
         '  success_mentions_api_error) PAD=$(printf "x%.0s" $(seq 1 600)); r success false "This PR detects the [API Error: ...] pattern and routes to retry. quota and rate.?limit keywords cover the common messages. ${PAD} Review complete: COMMENT posted (0 Critical, 1 Suggestion inline)." ;;',
         '  success_quotes_status_code) PAD=$(printf "x%.0s" $(seq 1 700)); r success false "This PR adds retry for [API Error: 429 quota exceeded] and similar. ${PAD} Verdict: COMMENT, 0 Critical." ;;',
         '  success_ends_with_bracket) r success false "Review of [API Error: 429 quota exhausted] handling. Checklist: - [x]" ;;',
+        // A transcript that quotes a file containing a workflow command. The
+        // real case: reviewing a PR that touches actions/setup-node, the agent
+        // read that action's main.ts, which contains `##[add-matcher]...`.
+        '  workflow_command) printf \'{"type":"assistant","content":"90-    const matchersPath = ...\\n91-    core.info(`##[add-matcher]${path.join(matchersPath, \\x27tsc.json\\x27)}`);"}\\n\'; r success false "Review complete: COMMENT posted (0 Critical)." ;;',
+        // Killed mid-write: the last line reaches stdout WITHOUT its newline,
+        // so whatever the step prints next lands on the same line.
+        '  timeout_partial_line) printf \'{"type":"assistant","content":"90-    core.info(`##[add-matcher]x`);"}\\n{"type":"assistant","content":"91- trunc\' ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -106,7 +129,7 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
     const harness = [
       'set -euo pipefail',
       `QWEN_TIMEOUT=${timeoutMinutes}; MODEL_ARGS=(--model x); PROMPT="/review x"`,
-      `LOG_PATH="${join(dir, 'log')}"`,
+      `LOG_PATH="${logPath ?? join(dir, 'log')}"`,
       `GITHUB_OUTPUT="${join(dir, 'gho')}"; GITHUB_STEP_SUMMARY="${join(dir, 'gss')}"`,
       ': > "$GITHUB_OUTPUT"; : > "$GITHUB_STEP_SUMMARY"',
       'fail(){ echo "FAIL kind=[${3:-}] reason=[$1]"; exit "${2:-1}"; }',
@@ -140,6 +163,9 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
       .map((d) => Number.parseInt(d, 10));
     return {
       line,
+      // The whole transcript, so the stop-commands bracket around the agent
+      // can be checked in the order the runner would see it.
+      raw: stdout,
       attempts: Number(readFileSync(attemptFile, 'utf8').trim()),
       durations,
     };
@@ -147,6 +173,131 @@ function runScenario(scenario, { timeoutMinutes = 180 } = {}) {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe('qwen pr review workflow-command containment', () => {
+  // The agent streams its whole transcript to stdout and the runner scans every
+  // line for workflow commands, so a tool result that quotes a file containing
+  // one gets EXECUTED. Observed on run 31167034020 (PR #8681): the agent read
+  // actions/setup-node's main.ts, whose `core.info(\`##[add-matcher]...\`)`
+  // made the runner take the rest of the JSON line as a matcher path — three
+  // `Unable to process command` errors and 1h37m of review work discarded.
+  // The runner matches `::cmd::` at the start of a line only, so both ends of
+  // the bracket are located as WHOLE lines — a resume glued onto a partial
+  // transcript line is inert text, and finding it by substring would report a
+  // bracket the runner never closed.
+  const bracketOf = (raw) => {
+    const lines = raw.split('\n');
+    const stopIdx = lines.findIndex((l) => l.startsWith('::stop-commands::'));
+    const token =
+      stopIdx === -1
+        ? undefined
+        : lines[stopIdx].slice('::stop-commands::'.length);
+    return {
+      token,
+      lines,
+      stopAt: stopIdx === -1 ? -1 : raw.indexOf(lines[stopIdx]),
+      resumeAt: token ? raw.indexOf(`\n::${token}::\n`) : -1,
+    };
+  };
+
+  it('brackets the agent transcript so a quoted command is inert', () => {
+    const r = runScenario('workflow_command');
+    // The review still succeeds — containment must not change the outcome.
+    expect(r.line).toContain('OK outcome=success');
+
+    const { token, stopAt, resumeAt } = bracketOf(r.raw);
+    expect(token).toBeTruthy();
+    // A fixed token could be re-enabled by anything the agent chose to print.
+    expect(token).not.toBe('stop-commands');
+    expect(token.length).toBeGreaterThan(16);
+
+    // The dangerous line must land strictly INSIDE the bracket.
+    const injected = r.raw.indexOf('##[add-matcher]');
+    expect(injected).toBeGreaterThan(stopAt);
+    expect(resumeAt).toBeGreaterThan(injected);
+  });
+
+  it('resumes command parsing on every agent outcome', () => {
+    // Left off, the rest of the job goes silent: its own ::error:: and the
+    // fallback comment's diagnostics would stop reaching the log — turning one
+    // broken review into an unexplained one. The failure paths are the ones
+    // that matter, since they are what still needs to report.
+    for (const scenario of ['success', 'hardexit', 'timeout_kill']) {
+      const { token, resumeAt } = bracketOf(runScenario(scenario).raw);
+      expect(token, scenario).toBeTruthy();
+      expect(resumeAt, scenario).toBeGreaterThan(-1);
+    }
+  });
+
+  it('resumes on its own line when the agent is killed mid-write', () => {
+    // `--kill-after` SIGKILLs the agent, so its last stream-json line can reach
+    // stdout without a trailing newline. An `echo`d resume would be appended to
+    // that fragment, where the runner never sees it at a line start: parsing
+    // stays off for the remainder of the job — losing the retry `::warning::`
+    // and every later diagnostic — on the exact path the guard exists for.
+    const r = runScenario('timeout_partial_line');
+    expect(r.line).toContain('FAIL kind=[timeout]');
+
+    const { token, lines } = bracketOf(r.raw);
+    expect(token).toBeTruthy();
+    // The agent's truncated line really is truncated, or this proves nothing.
+    expect(lines.some((l) => l.endsWith('"91- trunc'))).toBe(true);
+    expect(lines).toContain(`::${token}::`);
+  });
+
+  it('resumes command parsing when the log write fails', () => {
+    // The tee-failure branch returns before every other check, so a resume
+    // relocated past it would leave parsing off exactly when the step still has
+    // to report why it failed.
+    const r = runScenario('success', {
+      logPath: join(sep, 'nonexistent-qwen-review-dir', 'log'),
+    });
+    expect(r.line).toContain('Failed to write qwen review log');
+    const { token, resumeAt } = bracketOf(r.raw);
+    expect(token).toBeTruthy();
+    expect(resumeAt).toBeGreaterThan(-1);
+  });
+
+  it('opens a fresh bracket for every attempt', () => {
+    // Hoisting the stop echo and token out of `run_review_once` would still
+    // pass every single-attempt test, but attempt 2 would then run unbracketed
+    // under a token the runner has already consumed.
+    const r = runScenario('transient_then_success');
+    expect(r.attempts).toBe(2);
+    const tokens = r.raw
+      .split('\n')
+      .filter((l) => l.startsWith('::stop-commands::'))
+      .map((l) => l.slice('::stop-commands::'.length));
+    expect(tokens).toHaveLength(2);
+    // Per-attempt randomness: a reused token is one the transcript has already
+    // had the chance to print.
+    expect(new Set(tokens).size).toBe(2);
+    for (const t of tokens) {
+      expect(r.raw.split('\n')).toContain(`::${t}::`);
+    }
+  });
+
+  it('reads the agent exit status before resuming', () => {
+    // `echo` clobbers PIPESTATUS, so a resume placed before the capture would
+    // read the echo's status instead of the agent's and report every timeout
+    // or crash as a clean run. Pinned on the source because the symptom is a
+    // silent misclassification, not a failure.
+    const run = runReviewStep();
+    const capture = run.indexOf('local ps=("${PIPESTATUS[@]}")');
+    const resume = run.indexOf('printf \'\\n::%s::\\n\' "$stop_token"');
+    const stop = run.indexOf('echo "::stop-commands::${stop_token}"');
+    const agent = run.indexOf('--output-format stream-json');
+    // Every anchor is asserted present: `indexOf` returns -1 when a line is
+    // deleted or reworded, and -1 satisfies every ordering comparison below.
+    expect(capture).toBeGreaterThan(-1);
+    expect(resume).toBeGreaterThan(-1);
+    expect(stop).toBeGreaterThan(-1);
+    expect(agent).toBeGreaterThan(-1);
+    expect(resume).toBeGreaterThan(capture);
+    // And the stop must come before the agent it is meant to contain.
+    expect(stop).toBeLessThan(agent);
+  });
+});
 
 describe('qwen pr review transient retry', () => {
   it('does not retry a clean success', () => {
@@ -1230,5 +1381,1139 @@ describe('capture-tools step wiring', () => {
       doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
         .QWEN_REVIEW_ASSETS_REPO,
     ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
+  });
+});
+
+describe('docs-only medium gate', () => {
+  // The downgrade logic is inline bash in two steps; these tests extract and
+  // EXECUTE the load-bearing fragments (prompt branch, timeout floor, the
+  // completion-line allowlist) rather than asserting on their text, because
+  // the surviving mutations are behavioral: swapping the if/elif order makes
+  // parse-args force high effort back on AND post inline comments while the
+  // relay still claims medium posted nothing; flipping the floor comparison
+  // caps every size-tiered docs run at 90 minutes.
+  const run = (() => {
+    const doc = parse(workflow);
+    return doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').run;
+  })();
+
+  function promptBranchSource() {
+    const start = run.indexOf('PROMPT="/review ${REVIEW_URL}"');
+    expect(start).toBeGreaterThan(-1);
+    const end = run.indexOf('\nfi', start) + '\nfi'.length;
+    return run.slice(start, end);
+  }
+
+  function buildPrompt({ docsOnlyMedium, reviewMode }) {
+    const script = [
+      'set -euo pipefail',
+      'REVIEW_URL="https://x/pull/1"',
+      `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
+      `REVIEW_MODE=${reviewMode}`,
+      promptBranchSource(),
+      'printf "%s" "$PROMPT"',
+    ].join('\n');
+    return execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+  }
+
+  it('emits --effort medium INSTEAD OF --comment on the docs-only path', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'true',
+      reviewMode: 'comment',
+    });
+    expect(prompt).toContain('--effort medium');
+    expect(prompt).not.toContain('--comment');
+  });
+
+  it('keeps --comment on the non-docs comment path', () => {
+    const prompt = buildPrompt({
+      docsOnlyMedium: 'false',
+      reviewMode: 'comment',
+    });
+    expect(prompt).toContain('--comment');
+    expect(prompt).not.toContain('--effort');
+  });
+
+  function floorSource() {
+    // The arithmetic lives in ONE function shared by the docs-only branch
+    // and the micro tightening; extract the definition plus one call, so
+    // these cases execute the same implementation both branches run.
+    const start = run.indexOf('halve_budget_floor() {');
+    const endAnchor = '\n}';
+    const end = run.indexOf(endAnchor, start) + endAnchor.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return `${run.slice(start, end)}\nhalve_budget_floor`;
+  }
+
+  it.each([
+    [360, 180],
+    [180, 90],
+    [100, 90],
+  ])(
+    'halves the size-aware budget with a 90-minute floor (%i → %i)',
+    (input, want) => {
+      const script = [
+        'set -euo pipefail',
+        `EFFECTIVE_TIMEOUT_MINUTES=${input}`,
+        floorSource(),
+        'printf "%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
+      ].join('\n');
+      expect(execFileSync('bash', ['-c', script], { encoding: 'utf8' })).toBe(
+        String(want),
+      );
+    },
+  );
+
+  function completionBlockSource() {
+    const anchor = run.indexOf('machine-readable completion contract');
+    expect(anchor).toBeGreaterThan(-1);
+    const start = run.lastIndexOf(
+      'if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then',
+      anchor,
+    );
+    // Base indentation is stripped by the YAML parser: the block's outer `fi`
+    // sits at column 0, its inner allowlist `fi` at two spaces — so `\nfi`
+    // uniquely anchors the outer close.
+    const end = run.indexOf('\nfi', anchor) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function relayLine(resultText) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-completion-'));
+    try {
+      const gho = join(dir, 'gho');
+      writeFileSync(gho, '');
+      const script = [
+        'set -euo pipefail',
+        'DOCS_ONLY_MEDIUM=true',
+        'PR_NUMBER=123',
+        `GITHUB_OUTPUT="${gho}"`,
+        `RESULT_TEXT=$(cat "${join(dir, 'result')}")`,
+        completionBlockSource(),
+      ].join('\n');
+      writeFileSync(join(dir, 'result'), resultText);
+      execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+      return readFileSync(gho, 'utf8').trim();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('relays only the not-posted disposition shape', () => {
+    expect(
+      relayLine(
+        'prose...\nReview complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)',
+      ),
+    ).toBe(
+      'completion_line=Review complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)',
+    );
+  });
+
+  it.each([
+    // The measured phantom: a posted-form disposition on a path that never posts.
+    'Review complete: pr-123 — APPROVE posted',
+    'Review complete: pr-123 — COMMENT posted (0 Critical, 1 Suggestion inline)',
+    // Reworded/missing completion lines.
+    'The review finished fine, trust me.',
+    '',
+  ])('falls back to the neutral non-scrapable form for %j', (text) => {
+    const line = relayLine(text);
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+    // The fallback must never mint the reserved machine prefix.
+    expect(line).not.toContain('completion_line=Review complete:');
+  });
+
+  it('accepts the Request-changes disposition a Critical-finding medium run emits', () => {
+    // compose-review caps only Approve at medium: a verified Critical still
+    // yields Request changes, and that is exactly the outcome the relay must
+    // not swallow into the neutral fallback.
+    const line =
+      'Review complete: pr-123 — Request changes, not posted (1 Critical, 0 Suggestion)';
+    expect(relayLine(`prose...\n${line}`)).toBe(`completion_line=${line}`);
+  });
+
+  it('relays the LAST completion line, not a stale or injected earlier one', () => {
+    const stale =
+      'Review complete: pr-123 — Comment, not posted (9 Critical, 9 Suggestion)';
+    const valid =
+      'Review complete: pr-123 — Comment, not posted (0 Critical, 2 Suggestion)';
+    expect(relayLine(`${stale}\nmore prose\n${valid}`)).toBe(
+      `completion_line=${valid}`,
+    );
+  });
+
+  it('rejects the Approve verdict medium can never produce', () => {
+    // Widening the alternation to include Approve must turn this red: an
+    // injection-steered approval must not be republished under the bot's name.
+    const line = relayLine(
+      'Review complete: pr-123 — Approve, not posted (0 Critical, 0 Suggestion)',
+    );
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+  });
+
+  it("rejects another PR's completion line (target binding)", () => {
+    const line = relayLine(
+      'Review complete: pr-999 — Comment, not posted (0 Critical, 2 Suggestion)',
+    );
+    expect(line.startsWith('completion_line=(no relayable')).toBe(true);
+  });
+
+  it('classifies review_requested as an explicit ask, never automatic', () => {
+    const doc = parse(workflow);
+    const context = doc.jobs['review-pr'].steps.find((s) => s.id === 'context');
+    // One assignment site, guarded on both the event and the action.
+    expect(context.run.match(/AUTO_REVIEW=true/g)).toHaveLength(1);
+    // The false DEFAULT is load-bearing too: without it, dispatch,
+    // issue-comment and review-comment triggers inherit whatever the
+    // environment carries and can enter the automatic downgrade path.
+    expect(context.run.match(/AUTO_REVIEW=false/g)).toHaveLength(1);
+    expect(context.run.indexOf('AUTO_REVIEW=false')).toBeLessThan(
+      context.run.indexOf('AUTO_REVIEW=true'),
+    );
+    // Both halves of the guard: the event must be pull_request_target AND the
+    // action must not be review_requested. Pinning only the action half let a
+    // deleted event condition survive — the branch is shared with
+    // pull_request_review(_comment), whose actions are never review_requested,
+    // so a review-body `@qwen-code /review` would have downgraded silently.
+    expect(context.run).toMatch(
+      /= "pull_request_target" \] &&\s*\n\s*\[ "\$\{\{ github\.event\.action \}\}" != "review_requested" \]; then\s*\n\s*AUTO_REVIEW=true/,
+    );
+  });
+
+  it('pins the relay marker producer↔filter contract, author-scoped', () => {
+    // Producer side: the marker literal as the relay step actually posts it.
+    const doc = parse(workflow);
+    const relay = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    const m = relay.run.match(/<!-- qwen-review docs-only-medium -->/);
+    expect(m).not.toBeNull();
+    // Filter side: every autofix exclusion of that marker must carry the
+    // author scope ($rb) — a human quoting the marker stays actionable —
+    // and all six inline copies in qwen-autofix.yml must be present.
+    const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+    const scoped =
+      autofix.match(
+        /\(\.user\.login \/\/ ""\) == \$rb\)\) and \(\(\.body \/\/ ""\) \| test\("<!-- qwen-review docs-only-medium "\)\)\) \| not\)/g,
+      ) ?? [];
+    expect(scoped.length).toBeGreaterThanOrEqual(6);
+    // No body-only exclusion of the marker may survive anywhere: every
+    // marker test must carry the author scope, and a filter missing
+    // `| not` inverts to keep ONLY the badge — it then drops out of the
+    // scoped count above, so either mutant fails this pin.
+    const markerTests =
+      autofix.match(/test\("<!-- qwen-review docs-only-medium "\)/g) ?? [];
+    expect(markerTests.length).toBe(scoped.length);
+  });
+
+  it('routes classification through the shared classify-pr-profile wrapper', () => {
+    // Both this gate and ci.yml must consume the classifier via the shared
+    // script so its input contract lives in one place.
+    expect(run).toContain('.github/scripts/ci/classify-pr-profile.sh');
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    expect(ci).toContain('.github/scripts/ci/classify-pr-profile.sh');
+    expect(ci).not.toContain(
+      "--jq '.[] | {filename, status, previous_filename}'",
+    );
+  });
+});
+
+describe('docs-only gate and relay, executed', () => {
+  // R2-4 / R3-4: the classification gate and the relay step are the feature's
+  // two integration boundaries; both are executed here with stubbed
+  // executables rather than asserted as text, because the probed mutants
+  // (flipped PATCH/POST branch, swapped exit-code handling, inverted
+  // docs_only comparison) all stayed green under text-only assertions.
+  const doc = parse(workflow);
+  const runStep = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  ).run;
+  const relayRun = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Report docs-only medium outcome',
+  ).run;
+
+  function gateSource() {
+    const start = runStep.indexOf('DOCS_ONLY_MEDIUM=""');
+    const endAnchor =
+      'echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"';
+    const end = runStep.indexOf(endAnchor) + endAnchor.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return runStep.slice(start, end);
+  }
+
+  function runGate({ autoReview, wrapper, prSizeLines, timeoutMinutes }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-gate-'));
+    try {
+      const stub = join(dir, '.github/scripts/ci');
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
+      chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
+      const gho = join(dir, 'gho');
+      writeFileSync(gho, '');
+      const script = [
+        'set -euo pipefail',
+        `AUTO_REVIEW=${autoReview}`,
+        'REPO=o/r',
+        'PR_NUMBER=42',
+        `EFFECTIVE_TIMEOUT_MINUTES=${timeoutMinutes ?? 360}`,
+        ...(prSizeLines === undefined ? [] : [`PR_SIZE_LINES=${prSizeLines}`]),
+        `GITHUB_OUTPUT="${gho}"`,
+        gateSource(),
+        'printf "timeout=%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: dir,
+      });
+      return { stdout, output: readFileSync(gho, 'utf8').trim() };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('downgrades and halves the budget when the classifier says docs_only', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it("tightens a micro diff's budget without touching its effort or posting", () => {
+    // Below the independent churn bound (25 changed lines — NOT the skill's
+    // SWEEP_FLOOR, which weighs source/unified-diff lines) the automatic run
+    // keeps --effort high and its inline comments — only the kill switch
+    // halves, to the same 90-minute floor the docs downgrade uses.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 24,
+      timeoutMinutes: 180,
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('micro diff (24 changed lines)');
+    expect(r.stdout).toContain('keeps --effort high');
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('micro tightening floors at 90 minutes', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 10,
+      timeoutMinutes: 100,
+    });
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('twenty-five changed lines is not micro — the boundary of the churn bound', () => {
+    // The 25 is an independent "small PR" churn bound (NOT the skill's
+    // SWEEP_FLOOR — the two measures differ, so a scattered micro diff may
+    // still run the sweep); the tightening is justified by "90 min is ample
+    // for churn < 25 work", not by the pipeline shrinking. 25 itself must
+    // not tighten.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 25,
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('both downgrades share one halve-with-floor implementation', () => {
+    // Two verbatim copies once let a one-sided divisor edit diverge micro
+    // runs from docs-only runs while the comments claimed they matched —
+    // probe: a / 2 → / 3 mutant survived every test because both micro
+    // inputs land on the floor under any divisor ≥ 2. One named function,
+    // called from both branches, makes the invariant structural.
+    const gate = gateSource();
+    expect(gate.match(/halve_budget_floor\(\)/g)).toHaveLength(1);
+    expect(gate.match(/halve_budget_floor$/gm)).toHaveLength(2);
+    expect(
+      gate.match(
+        /EFFECTIVE_TIMEOUT_MINUTES=\$\(\( EFFECTIVE_TIMEOUT_MINUTES \/ 2 \)\)/g,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('a docs-only micro diff is halved once, by the docs gate, not twice', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+      prSizeLines: 10,
+      timeoutMinutes: 360,
+    });
+    expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+    expect(r.stdout).not.toContain('micro diff');
+  });
+
+  it('a manually requested review is never tightened, whatever its size', () => {
+    // Production-reachable: an @qwen-code /review comment without --timeout
+    // populates PR_SIZE_LINES but is not an automatic review — its budget
+    // is the caller's. A mutant dropping the AUTO_REVIEW guard survived the
+    // suite until this pin.
+    const r = runGate({
+      autoReview: 'false',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 10,
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('a failed docs classification still tightens a micro automatic run', () => {
+    // DOCS_ONLY_MEDIUM stays '' when the classifier fails; the micro guard
+    // keys on != "true", not = "false" — a mutant conflating the two kept
+    // 180 on exactly the runs the tightening exists for.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\nexit 2\n',
+      prSizeLines: 10,
+      timeoutMinutes: 180,
+    });
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('micro diff (10 changed lines)');
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('an unknown size never tightens — and neither does an explicit run', () => {
+    // PR_SIZE_LINES is unset when the size lookup failed or when the caller
+    // passed --timeout (the size block is skipped); both must keep the
+    // budget they have.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('keeps the full review for a full classification', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('falls back to the full review when the wrapper fails', () => {
+    const r = runGate({ autoReview: 'true', wrapper: '#!/bin/bash\nexit 2\n' });
+    // Empty, not 'false': a failed classification is 'never determined', and
+    // the supersede step must not read it as a positive determination.
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('could not classify');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('keeps the full review for github_ci_only (CI helpers are executable)', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho github_ci_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  it('never classifies on an explicit (non-automatic) run', () => {
+    const r = runGate({
+      autoReview: 'false',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+    });
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('timeout=360');
+  });
+
+  function runRelay({ scenario }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-relay-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const write = (name, body) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "$*" >> "$CALLS"',
+          // The head-binding guard runs BEFORE the upsert attempts: pr view
+          // succeeds even in all-fail so that scenario still exercises the
+          // retry loop, while moved-head/closed-pr exercise the guard.
+          'case "$*" in',
+          '  "pr view"*)',
+          '    if [ "$SCENARIO" = "moved-head" ]; then printf "OPEN\\tdeadbeef\\n";',
+          '    elif [ "$SCENARIO" = "closed-pr" ]; then printf "MERGED\\tabc123\\n";',
+          '    else printf "OPEN\\tabc123\\n"; fi',
+          '    exit 0 ;;',
+          'esac',
+          'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
+          'case "$*" in',
+          '  "api user"*) echo \'{"login":"relay-bot"}\' | jq -r .login; exit 0 ;;',
+          '  *"--method GET"*)',
+          '    if [ "$SCENARIO" = "existing" ]; then',
+          '      echo \'[{"id":777,"user":{"login":"relay-bot"},"body":"<!-- qwen-review docs-only-medium --> old"}]\'',
+          '    else echo "[]"; fi ;;',
+          '  *) : ;;',
+          'esac',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      const script = [
+        'set -euo pipefail',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        `RUNNER_TEMP="${dir}"`,
+        'EXPECTED_HEAD_SHA=abc123',
+        'COMPLETION_LINE="Review complete: pr-42 — Comment, not posted (0 Critical, 1 Suggestion)"',
+        'RUN_URL=https://x',
+        relayRun,
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          SCENARIO: scenario,
+          CALLS: calls,
+        },
+      });
+      return { stdout, calls: readFileSync(calls, 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('POSTs a fresh relay comment when none exists', () => {
+    const r = runRelay({ scenario: 'fresh' });
+    expect(r.stdout).toContain('relayed to PR #42');
+    expect(r.calls).toContain('api repos/o/r/issues/42/comments -f');
+    expect(r.calls).not.toContain('--method PATCH');
+    // The POSTed body must carry the marker — it is the dedup key both the
+    // upsert lookup and the supersede step match on; a body without it makes
+    // every push stack a new badge and supersede match nothing.
+    expect(r.calls).toContain('<!-- qwen-review docs-only-medium -->');
+    // The badge is bound to the reviewed head: a later push must never be
+    // described by an earlier revision's outcome.
+    expect(r.calls).toContain('Reviewed head: `abc123`');
+  });
+
+  it('PATCHes the existing bot-authored relay comment', () => {
+    const r = runRelay({ scenario: 'existing' });
+    expect(r.stdout).toContain('relayed to PR #42');
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/777',
+    );
+  });
+
+  it('warns and exits 0 when every attempt fails', () => {
+    const r = runRelay({ scenario: 'all-fail' });
+    expect(r.stdout).toContain('::warning::');
+    expect(r.stdout).toContain('the review itself succeeded');
+  });
+
+  it('skips the relay when the head moved before the write', () => {
+    const r = runRelay({ scenario: 'moved-head' });
+    expect(r.stdout).toContain('moved from abc123 to deadbeef');
+    expect(r.calls).not.toContain('api repos/o/r/issues/42/comments');
+  });
+
+  it('skips the relay when the PR closed before the write', () => {
+    const r = runRelay({ scenario: 'closed-pr' });
+    expect(r.stdout).toContain('is MERGED');
+    expect(r.calls).not.toContain('api repos/o/r/issues/42/comments');
+  });
+
+  function normalizedIf(step) {
+    return step.if.replace(/\s+/g, ' ').trim();
+  }
+
+  it('pins the relay if: as the exact reviewed conjunction', () => {
+    // Full-string pin, not substrings: deleting or weakening any conjunct —
+    // or re-grouping them — edits this string, so every truth-table mutant
+    // reduces to a red test here without an Actions-expression evaluator.
+    const doc2 = parse(workflow);
+    const relay = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    expect(normalizedIf(relay)).toBe(
+      "steps.context.outputs.should_run == 'true' && " +
+        "steps.review.outcome == 'success' && " +
+        "steps.review.outputs.review_completed == 'true' && " +
+        "steps.review.outputs.docs_only_medium == 'true' && " +
+        "steps.context.outputs.pr_number != ''",
+    );
+  });
+
+  it('pins the supersede if: including the OR grouping of its three paths', () => {
+    const doc2 = parse(workflow);
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    expect(normalizedIf(supersede)).toBe(
+      '!cancelled() && ' +
+        "steps.context.outputs.should_run == 'true' && " +
+        "steps.context.outputs.pr_number != '' && " +
+        "( steps.review.outputs.docs_only_medium == 'false' || " +
+        "( steps.context.outputs.auto_review == 'false' && " +
+        "steps.context.outputs.review_mode == 'comment' && " +
+        "steps.review.outputs.review_completed == 'true' ) || " +
+        "( failure() && steps.review.outputs.docs_only_medium == 'true' ) )",
+    );
+  });
+
+  it('pins the review_completed wiring end to end', () => {
+    // The state/head guards exit 0 without running the review; the relay
+    // must require the dedicated output, and the run step must emit it
+    // AFTER those guards — a hoisted emit would open the relay gate for a
+    // closed/stale PR whose review never ran (position pinned below). The
+    // supersede step deliberately does NOT require it: a failed full review
+    // still owes the badge correction, gated on docs_only_medium == 'false'
+    // (empty on runs that failed before classifying).
+    const emitAt = runStep.indexOf('echo "review_completed=true"');
+    expect(emitAt).toBeGreaterThan(-1);
+    expect(emitAt).toBeGreaterThan(
+      runStep.indexOf('if [ "$PR_STATE" != "OPEN" ]'),
+    );
+    expect(emitAt).toBeGreaterThan(
+      runStep.indexOf('Skipping stale review run'),
+    );
+    const doc2 = parse(workflow);
+    const relay = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report docs-only medium outcome',
+    );
+    expect(relay.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    // Path (1): a POSITIVE not-docs-only determination (three-valued output;
+    // empty = never determined) — deliberately without review success.
+    expect(supersede.if).toContain(
+      "steps.review.outputs.docs_only_medium == 'false'",
+    );
+    // Path (2): an explicit comment-mode review that completed (the badge's
+    // CTA); a dispatch dry-run retires nothing.
+    expect(supersede.if).toContain(
+      "steps.context.outputs.auto_review == 'false'",
+    );
+    expect(supersede.if).toContain(
+      "steps.context.outputs.review_mode == 'comment'",
+    );
+    expect(supersede.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    expect(supersede.if).toContain('!cancelled()');
+  });
+
+  it('pins the supersede invocation shape (update-only, shared marker)', () => {
+    const doc2 = parse(workflow);
+    for (const name of [
+      'Report docs-only medium outcome',
+      'Supersede stale docs-only badge',
+    ]) {
+      const step = doc2.jobs['review-pr'].steps.find((s) => s.name === name);
+      // One marker definition serving both the body and the lookup argument.
+      expect(step.run).toContain(
+        "MARKER='<!-- qwen-review docs-only-medium -->'",
+      );
+      expect(step.run).toContain('"$MARKER"');
+    }
+    const supersede = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Supersede stale docs-only badge',
+    );
+    expect(supersede.run).toContain('--update-only');
+  });
+
+  it('pins the auto_review output→env wiring at both links', () => {
+    const doc2 = parse(workflow);
+    const context = doc2.jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    );
+    expect(context.run).toContain('echo "auto_review=$AUTO_REVIEW"');
+    const review = doc2.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(review.env.AUTO_REVIEW).toBe(
+      '${{ steps.context.outputs.auto_review }}',
+    );
+  });
+});
+
+describe('supersede step and ci.yml rc-handling, executed', () => {
+  const doc = parse(workflow);
+  const supersedeRun = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Supersede stale docs-only badge',
+  ).run;
+
+  function runSupersede({
+    scenario,
+    docsOnlyMedium = 'false',
+    reviewCompleted = 'true',
+    expectedHeadSha = 'abc123',
+  }) {
+    const dir = mkdtempSync(join(tmpdir(), 'docs-supersede-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const calls = join(dir, 'calls');
+      writeFileSync(calls, '');
+      const write = (name, body) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write(
+        'gh',
+        [
+          '#!/bin/bash',
+          'echo "$*" >> "$CALLS"',
+          // The head-binding guard runs BEFORE the upsert attempts: pr view
+          // succeeds even in all-fail so that scenario still exercises the
+          // retry loop.
+          'case "$*" in',
+          '  "pr view"*)',
+          '    if [ "$SCENARIO" = "moved-head" ]; then printf "OPEN\\tdeadbeef\\n";',
+          '    elif [ "$SCENARIO" = "closed-pr" ]; then printf "MERGED\\tabc123\\n";',
+          '    else printf "OPEN\\tabc123\\n"; fi',
+          '    exit 0 ;;',
+          'esac',
+          'if [ "$SCENARIO" = "all-fail" ]; then exit 1; fi',
+          'case "$*" in',
+          '  "api user"*) echo bot ;;',
+          '  *"--method GET"*)',
+          '    echo \'[{"id":31,"user":{"login":"bot"},"body":"<!-- qwen-review docs-only-medium --> badge"}]\' ;;',
+          '  *) : ;;',
+          'esac',
+          'exit 0',
+        ].join('\n') + '\n',
+      );
+      const script = [
+        'set -euo pipefail',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        `RUNNER_TEMP="${dir}"`,
+        `EXPECTED_HEAD_SHA=${expectedHeadSha}`,
+        `DOCS_ONLY_MEDIUM=${docsOnlyMedium}`,
+        `REVIEW_COMPLETED=${reviewCompleted}`,
+        'RUN_URL=https://x',
+        supersedeRun,
+        'echo "STEP_EXIT_OK"',
+      ].join('\n');
+      const stdout = execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          SCENARIO: scenario,
+          CALLS: calls,
+        },
+      });
+      return { stdout, calls: readFileSync(calls, 'utf8') };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('supersedes an existing bot-authored badge (PATCH, update-only)', () => {
+    const r = runSupersede({ scenario: 'existing' });
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/31',
+    );
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+    // Cause-neutral retired wording: it must hold even when an explicit full
+    // review completes on the SAME head the badge describes, so it may not
+    // claim the badge described an earlier revision.
+    expect(r.calls).toContain('(superseded)');
+    expect(r.calls).toContain(
+      'no longer reflects the current review state of this PR',
+    );
+    expect(r.calls).not.toContain('earlier docs-only revision');
+  });
+
+  it('updates the badge to a failure notice when a docs-only review failed', () => {
+    // The relay only runs on success; without this path the badge would keep
+    // quoting the previous revision's outcome for a head whose own run died.
+    const r = runSupersede({
+      scenario: 'existing',
+      docsOnlyMedium: 'true',
+      reviewCompleted: '',
+    });
+    expect(r.calls).toContain(
+      'api --method PATCH repos/o/r/issues/comments/31',
+    );
+    expect(r.calls).toContain('did not complete');
+    expect(r.calls).toContain('abc123');
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  it('skips the badge update when the head moved before the write', () => {
+    const r = runSupersede({ scenario: 'moved-head' });
+    expect(r.stdout).toContain('moved from abc123 to deadbeef');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('skips the badge update when the PR closed before the write', () => {
+    const r = runSupersede({ scenario: 'closed-pr' });
+    expect(r.stdout).toContain('is MERGED');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('skips the badge update when the reviewed head SHA is unknown', () => {
+    // A run that failed before "Run review" emitted the SHA has nothing to
+    // bind to — a badge is never updated on ignorance.
+    const r = runSupersede({ scenario: 'existing', expectedHeadSha: '' });
+    expect(r.stdout).toContain('reviewed head SHA is unknown');
+    expect(r.calls).not.toContain('--method PATCH');
+  });
+
+  it('warns and exits 0 when every supersede attempt fails', () => {
+    // The never-fail guard is load-bearing: a failing step here would trip
+    // the post-failure fallback into announcing a review failure that never
+    // happened (the same phantom the relay guard prevents).
+    const r = runSupersede({ scenario: 'all-fail' });
+    expect(r.stdout).toContain('::warning::Could not supersede');
+    expect(r.stdout).toContain('STEP_EXIT_OK');
+  });
+
+  function ciRcFragment() {
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    const ciDoc = parse(ci);
+    let run;
+    for (const job of Object.values(ciDoc.jobs)) {
+      for (const step of job.steps ?? []) {
+        if ((step.run ?? '').includes('classify-pr-profile.sh')) run = step.run;
+      }
+    }
+    expect(run).toBeTruthy();
+    const start = run.indexOf('set +e');
+    expect(start).toBeGreaterThan(-1);
+    const indent = run.slice(run.lastIndexOf('\n', start) + 1, start);
+    const end = run.indexOf(`\n${indent}fi`, start) + `\n${indent}fi`.length;
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function runCiFragment(wrapper) {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-rc-'));
+    try {
+      const stub = join(dir, '.github/scripts/ci');
+      mkdirSync(stub, { recursive: true });
+      writeFileSync(join(stub, 'classify-pr-profile.sh'), wrapper);
+      chmodSync(join(stub, 'classify-pr-profile.sh'), 0o755);
+      const script = [
+        'set -euo pipefail',
+        'profile=full',
+        'GITHUB_REPOSITORY=o/r',
+        'PR_NUMBER=42',
+        ciRcFragment(),
+        'printf "profile=%s" "$profile"',
+      ].join('\n');
+      return execFileSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        cwd: dir,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('ci.yml consumes the wrapper result on success', () => {
+    expect(runCiFragment('#!/bin/bash\necho docs_only\n')).toContain(
+      'profile=docs_only',
+    );
+  });
+
+  it.each([
+    ['#!/bin/bash\nexit 2\n', 'Unable to list PR changed files'],
+    ['#!/bin/bash\nexit 3\n', 'classifier exited non-zero'],
+  ])('ci.yml falls back to full on wrapper failure (%#)', (wrapper, note) => {
+    // The probed mutant (deleting the rc handling) leaves profile EMPTY on
+    // failure — no downstream matrix bucket matches empty, and a broken PR
+    // would pass CI with zero tests run.
+    const out = runCiFragment(wrapper);
+    expect(out).toContain(note);
+    expect(out).toContain('profile=full');
+  });
+});
+
+describe('upstream-timeout headroom (PR 8507 incident)', () => {
+  // Three knobs, three failure modes: the SDK request timeout covers
+  // connect+TTFB (three ~120s internal retries produced the 483s visible
+  // abort on a small turn), the idle window covers a stalled generation
+  // (the 17-agent fan-out on a ~1.27M-token context), and the lifetime cap
+  // must exceed the idle window or a single legitimate gap trips the
+  // drip-feed guard first. All three ride step env on 'Run review':
+  // QWEN_CODE_API_TIMEOUT_MS outranks settings in model-config resolution
+  // (so no settings.json write is needed) and step env outranks any stray
+  // runner-level env of the same name.
+  const doc = parse(workflow);
+  const env = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  ).env;
+
+  it('raises the SDK request timeout via QWEN_CODE_API_TIMEOUT_MS', () => {
+    expect(env.QWEN_CODE_API_TIMEOUT_MS).toBe('600000');
+  });
+
+  it('raises the stream guards with lifetime strictly above idle', () => {
+    expect(env.QWEN_STREAM_IDLE_TIMEOUT_MS).toBe('600000');
+    expect(env.QWEN_STREAM_MAX_LIFETIME_MS).toBe('1800000');
+    expect(Number(env.QWEN_STREAM_MAX_LIFETIME_MS)).toBeGreaterThan(
+      Number(env.QWEN_STREAM_IDLE_TIMEOUT_MS),
+    );
+  });
+});
+
+describe('workflow expression length', () => {
+  // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
+  // and GitHub caps a single expression at 21000 characters. Blowing that cap
+  // does not fail a job — it makes the whole workflow file *invalid*, so no
+  // event triggers it at all and no run is even created for the ones that
+  // matter. That is how every automatic review and every `@qwen-code /review`
+  // in this repository silently stopped for ~12h on 2026-08-07: #8648 pushed
+  // the "Run review" body from 17705 to 22282 characters, and from that merge
+  // onward the only runs left were startup failures reading
+  // `Invalid workflow file: … (Line: 751, Col: 14): Exceeded max expression
+  // length 21000` (e.g. run 31239579253). CI stayed green the whole time — no
+  // test covered this, which is why it is covered here.
+  const LIMIT = 21000;
+
+  it('keeps every templated run block under the limit', () => {
+    expect(workflowFiles.length).toBeGreaterThan(0);
+    const over = [];
+    for (const file of workflowFiles) {
+      const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
+      for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+        for (const step of job?.steps ?? []) {
+          const body = step?.run;
+          if (typeof body !== 'string' || !body.includes('${{')) continue;
+          if (body.length > LIMIT) {
+            over.push(
+              `${file} › ${jobId} › ${step.name}: ${body.length} chars`,
+            );
+          }
+        }
+      }
+    }
+    expect(over).toEqual([]);
+  });
+
+  it('keeps the review script free of ${{ }} so its length cannot break it', () => {
+    // This one body is ~24000 characters — already past the limit — so it stays
+    // valid only while nothing templates it. Every context value it needs is
+    // passed through the step's `env:` instead. A single `${{ }}` added back
+    // here takes the entire workflow down, which the test above would also
+    // catch; this asserts the actual invariant a contributor has to preserve.
+    expect(runReviewStep()).not.toContain('${{');
+  });
+});
+
+describe('command shape matching', () => {
+  // A comment may be `@qwen-code /review` followed by a newline and a body.
+  // The `if`s tried to accept that with format('…{0}', '\n'), but expression
+  // string literals are NOT escape-processed: that '\n' is a literal
+  // backslash + n, so the branch matched nothing and every multi-line command
+  // was silently ignored — no run, no feedback. Measured on a live runner:
+  //   startsWith(<LF body>, format('…{0}', '\n'))            => false
+  //   startsWith(<LF body>, format('…{0}', fromJSON('"\n"'))) => true
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\n"'))) => false
+  //   startsWith(<CRLF body>, format('…{0}', fromJSON('"\r"'))) => true
+  // Hence fromJSON (JSON *is* escape-processed) and both line endings: the
+  // REST API sends LF, the web UI sends CRLF.
+  const doc = parse(workflow);
+  const ifs = Object.entries(doc.jobs)
+    .filter(([, job]) => typeof job?.if === 'string')
+    .map(([id, job]) => [id, job.if]);
+
+  it('never matches a command shape with a non-escaped literal newline', () => {
+    const broken = ifs.filter(([, cond]) => /'\\[nr]'/.test(cond));
+    expect(broken.map(([id]) => id)).toEqual([]);
+  });
+
+  it('accepts both LF and CRLF after the command in every shape match', () => {
+    // `authorize` deliberately matches only a loose prefix — it is a filter to
+    // avoid spawning a job per comment, and delegates the exact shape to the
+    // downstream jobs. Jobs that do the shape match are the ones that use
+    // format('@qwen-code /<cmd>{0}', …), so key off that.
+    const withShape = ifs.filter(([, cond]) =>
+      cond.includes("format('@qwen-code /"),
+    );
+    expect(withShape.length).toBeGreaterThan(0);
+    const missing = [];
+    for (const [id, cond] of withShape) {
+      for (const cmd of ['review', 'resolve']) {
+        // Only check commands this job actually matches on.
+        if (!cond.includes(`format('@qwen-code /${cmd}{0}'`)) continue;
+        const lf = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\n"'))`,
+        );
+        const cr = cond.includes(
+          `format('@qwen-code /${cmd}{0}', fromJSON('"\\r"'))`,
+        );
+        if (!lf || !cr) missing.push(`${id}/${cmd} (LF:${lf} CR:${cr})`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('strips a trailing CR before parsing command tokens', () => {
+    // Word splitting uses IFS, which has no CR, so a CRLF comment would carry
+    // `\r` into tokens like `--timeout=300` and fail the numeric check.
+    // The command is parsed in "Resolve PR context", not in "Run review".
+    const run = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.id === 'context',
+    ).run;
+    const firstLine = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_BODY%%$\'\\n\'*}"',
+    );
+    const stripCr = run.indexOf(
+      'TRIGGER_COMMAND="${TRIGGER_COMMAND%$\'\\r\'}"',
+    );
+    expect(firstLine).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(-1);
+    expect(stripCr).toBeGreaterThan(firstLine);
+  });
+});
+
+describe('bot comment markers', () => {
+  // A line that opens with `<!--` starts an HTML block, and that block runs to
+  // the line holding the closing delimiter INCLUSIVE — the rest of that line
+  // stays inside it and is never parsed as Markdown. The queued-ack comment
+  // glued its prose straight onto the marker and reached every PR as raw
+  // source with a dead link. Measured through GitHub's own renderer
+  // (POST /markdown, mode=gfm): marker+text -> 0 <a>/0 <em>; marker+"\n"+text
+  // and marker+"\n\n"+text -> 1 <a>/1 <em>.
+  //
+  // The rule keys off ONE thing: a marker that opens a string literal, and
+  // what remains inside that literal after it. That is what distinguishes
+  // BUILDING a comment body from merely REFERENCING a marker — `jq
+  // contains("<!-- m -->")` and `printf '<!-- m -->' "$VAR"` leave nothing
+  // after the marker and are fine, while `="<!-- m -->prose"` does not. The
+  // scan is bounded to the marker's physical line: a glued body is by
+  // definition on that line, and searching past it would couple the guard to
+  // unrelated quotes elsewhere in the file — a doc example quoting an unclosed
+  // `--body "<!-- m -->` would break the moment any later line gained a `"`.
+  //
+  // Known gaps, stated rather than papered over: bodies split across printf
+  // arguments (`printf '%s%s' '<!-- m -->' 'prose'`) — detecting them means
+  // modelling which literal is the format string, and every cheap
+  // approximation flagged the legitimate `printf '<!-- m -->' "$VAR"` form;
+  // bodies assembled across statements or files (one `echo` per line into a
+  // `--body-file`); markers at physical line start (heredocs, YAML block
+  // scalars); markers mid-literal that only land at a rendered line start
+  // after `\n` expansion (`printf 'x\n<!-- m -->prose'`); multi-line literals
+  // whose closing quote sits on a later line; a line-wrapped printf whose
+  // format opens with the marker (the `\n` exemption reads one physical
+  // line); continuations after a marker-ending literal other than an
+  // adjacent quoted literal or bare `$(…)` — `$VAR` expansion, unquoted
+  // words, `$'…'` literals, backtick substitution, backslash-newline, and
+  // text after the closing `)` of a wrapping subshell assignment
+  // (`BODY="$(printf '<!-- m -->')prose"`); closing that shape needs a
+  // subshell discriminator that false-positives on legitimate jq
+  // `contains("<!-- … -->"))` references inside `$(…)` assignments;
+  // trailing end-of-line comments — the `#` skip only fires when the
+  // comment OPENS the physical line, so a glued marker quoted in a
+  // trailing comment is still flagged; YAML double-quoted scalars
+  // (`body: "<!-- m -->\nprose"`) — YAML expands `\n`, but the scanner
+  // cannot cheaply tell a YAML scalar from a shell literal where `\n`
+  // stays literal; and marker-headed bodies built outside
+  // `.github/workflows` — the `.github/scripts/*.mjs` comment builders
+  // (template literals and pushed marker lines) are not scanned. All are
+  // latent — nothing glues a marker today.
+
+  it('never glues prose onto a comment marker, in any workflow', () => {
+    expect(workflowFiles.length).toBeGreaterThan(0);
+    const offenders = [];
+    for (const file of workflowFiles) {
+      const text = readFileSync(join(workflowsDir, file), 'utf8');
+      // The class excludes `\n` so a `<!--` inside a nearby comment cannot
+      // let one match span lines, swallow the real marker, and get discarded
+      // by the comment skip below — the guard would then pass with the very
+      // regression present. `>` stays allowed inside a marker (lazy match to
+      // the first `-->` on the line) so arrow-style markers are covered too.
+      const re = /<!--[^\n]*?-->/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const lineStart = text.lastIndexOf('\n', m.index) + 1;
+        const prefix = text.slice(lineStart, m.index);
+        // Prose in a YAML or shell comment never reaches a comment body.
+        if (/^\s*#/.test(prefix)) continue;
+        const quote = m.index === lineStart ? null : text[m.index - 1];
+        // Only a marker that OPENS a string literal can be building a body.
+        if (quote !== "'" && quote !== '"') continue;
+        const rest = text.slice(m.index + m[0].length);
+        const lineEnd = rest.indexOf('\n');
+        const line = lineEnd === -1 ? rest : rest.slice(0, lineEnd);
+        const end = line.indexOf(quote);
+        // No closing quote on this line means either the marker ends the line
+        // inside a multi-line literal (a real newline separates the body,
+        // which renders) or the quote is prose in a doc example — neither
+        // glues anything ON the marker's line.
+        if (end === -1) continue;
+        let glued = line.slice(0, end);
+        if (glued === '') {
+          // The literal ended at the marker — but an adjacent literal on the
+          // same line concatenates onto it at runtime, and so does an
+          // unquoted `$(…)` (its output is invisible to this scan).
+          const after = line.slice(end + 1);
+          if (after[0] === "'" || after[0] === '"') {
+            const q2 = after[0];
+            const e2 = after.slice(1).indexOf(q2);
+            glued = e2 === -1 ? '' : after.slice(1, 1 + e2);
+          } else if (after[0] === '$' && after[1] === '(') {
+            glued = after;
+          }
+        }
+        if (glued === '') continue;
+        // The two-character `\n` escape separates only where the shell
+        // expands it: a printf format string or ANSI-C `$'…'` opened at the
+        // END of the prefix — an unrelated printf earlier on the same line
+        // must not bless a plain double-quoted assignment, where `\n` stays
+        // a literal backslash-n and the prose stays on the marker's line.
+        if (
+          glued.startsWith('\\n') &&
+          /printf\s+(?:-\S+\s+(?:\S+\s+)?|--\s+)?['"]$|\$'$/.test(prefix)
+        ) {
+          continue;
+        }
+        offenders.push(
+          `${file}: ${text.slice(m.index, m.index + 56).split('\n')[0]}`,
+        );
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('pins the workflow-run URL into the ack printf', () => {
+    // bash printf with a leftover argument and no conversion spec exits 0
+    // under `set -euo pipefail` and emits `[workflow run]()`, so nothing
+    // else catches a dropped `%s` or `"$RUN_URL"` on the ack line. Assert
+    // the link shape, not bare co-existence: a `%s` displaced out of the
+    // parens keeps both pieces on the line and re-ships the dead link.
+    const ackLine = workflow
+      .split('\n')
+      .find(
+        (l) => l.includes('printf') && l.includes('<!-- qwen-review-ack -->'),
+      );
+    expect(ackLine).toBeDefined();
+    expect(ackLine).toContain('[workflow run](%s)');
+    expect(ackLine).toContain('"$RUN_URL"');
   });
 });

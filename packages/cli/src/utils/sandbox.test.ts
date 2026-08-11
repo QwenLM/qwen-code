@@ -202,6 +202,8 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
         QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
+        QWEN_CODE_SERVE: '1',
+        QWEN_CODE_DESKTOP: '1',
       }),
     ).toEqual([
       '--env',
@@ -210,6 +212,10 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_CUSTOM_SANDBOX_IMAGE=example.com/qwen:1.0.0',
       '--env',
       'QWEN_CODE_HOST_UPDATE_RELAUNCH=false',
+      '--env',
+      'QWEN_CODE_SERVE=1',
+      '--env',
+      'QWEN_CODE_DESKTOP=1',
     ]);
   });
 });

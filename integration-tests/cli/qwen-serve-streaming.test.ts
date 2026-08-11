@@ -9,7 +9,7 @@
  *
  * These tests fire real daemon prompts and observe the resulting SSE stream,
  * but the model side is backed by a local OpenAI-compatible fake server so
- * the suite can run without API keys. They cover three flows that unit tests
+ * the suite can run without API keys. They cover five flows that unit tests
  * can't fully exercise:
  *
  *   1. Real `qwen --acp` child crash → daemon publishes `session_died`,
@@ -24,16 +24,37 @@
  *   4. An admitted prompt keeps running with no SSE subscriber while the Todo
  *      Stop Guard performs its bounded continuations; a later subscriber
  *      replays each discrete status event.
+ *   5. A same-host ACP child reads text outside the workspace only after the
+ *      daemon permission request is approved, and never returns the content
+ *      after rejection.
+ *   6. Built-in text writes approved by the tool permission layer can commit
+ *      outside the workspace without falling back to shell, while rejection
+ *      still prevents the final ACP write and YOLO needs no second prompt.
  *
  */
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
+import {
+  isNonBlockingAccepted,
+  type NonBlockingPromptAccepted,
+} from '@qwen-code/sdk/daemon';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -41,6 +62,7 @@ import {
 } from '../fake-openai-server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, '../..');
 // Match the rest of the integration suite: prefer `TEST_CLI_PATH`
 // from `globalSetup.ts` (root `dist/cli.js` bundle), fall back to
 // the per-package output for direct vitest invocations. See the same
@@ -71,14 +93,78 @@ const SKIP =
   );
 const describePOSIX = SKIP ? describe.skip : describe;
 
+// The base only has to sit outside both the workspace and the `/tmp` local-read
+// root, so the test reads a genuinely external path. The real `$HOME` is
+// excluded deliberately: cleanup lives in `afterAll`, so a Ctrl-C, `--bail`, or
+// CI timeout leaks the fixture dir. `/var/tmp` leaks the same way — the leak is
+// relocated somewhere harmless, not eliminated.
+function findExternalReadBase(): string | undefined {
+  if (SKIP) return undefined;
+  const candidates = [
+    // Escape hatch for images where /var/tmp is absent or read-only.
+    process.env['QWEN_TEST_EXTERNAL_READ_BASE'],
+    '/var/tmp',
+  ].filter((value): value is string => Boolean(value));
+  // Carry each rejection reason into the diagnostics below. A bare `catch {}`
+  // here cannot tell "no /var/tmp on this image" (expected) from a bug in this
+  // function (not expected), and the latter reads as a green skip.
+  const rejections: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const resolved = realpathSync(candidate);
+      accessSync(resolved, constants.W_OK);
+      if (
+        isPathWithinRoot(resolved, realpathSync('/tmp')) ||
+        isPathWithinRoot(resolved, realpathSync(REPO_ROOT))
+      ) {
+        rejections.push(`${candidate}: inside the /tmp read root or the repo`);
+        continue;
+      }
+      return resolved;
+    } catch (error) {
+      rejections.push(`${candidate}: ${error}`);
+    }
+  }
+  // Skipping is acceptable on a developer box, but on CI a silently disabled
+  // security regression test is indistinguishable from a passing one. Fail
+  // loudly instead and let the operator point QWEN_TEST_EXTERNAL_READ_BASE at
+  // a writable directory outside both the workspace and the /tmp read root.
+  const diagnostics = `no usable external-read fixture base (${rejections.join('; ')})`;
+  if (process.env['CI']) {
+    throw new Error(
+      `${diagnostics}. Set QWEN_TEST_EXTERNAL_READ_BASE to a writable ` +
+        'directory outside the repo and outside /tmp.',
+    );
+  }
+  console.warn(
+    `[qwen-serve-streaming] skipping external read tests: ${diagnostics}`,
+  );
+  return undefined;
+}
+
+const externalReadBase = findExternalReadBase();
+
+function asAccepted(
+  result: Awaited<ReturnType<DaemonClient['promptNonBlocking']>>,
+): NonBlockingPromptAccepted | undefined {
+  return isNonBlockingAccepted(result) ? result : undefined;
+}
+
 let daemon: ChildProcess;
 let port = 0;
 let base = '';
 let client: DaemonClient;
 let fakeServer: FakeOpenAIServer;
 let homeDir = '';
+let externalReadDir = '';
 let workspaceDir = '';
 let pendingWritePath = '';
+let pendingReadPath = '';
+let pendingReadMarker = '';
+let pendingReadSentinel = '';
+let pendingExternalWritePath = '';
+let pendingExternalWriteMarker = '';
+let pendingExternalWriteSentinel = '';
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -119,9 +205,63 @@ beforeAll(async () => {
       };
     }
 
+    if (
+      pendingExternalWritePath &&
+      pendingExternalWriteMarker &&
+      messages.includes(pendingExternalWriteMarker)
+    ) {
+      if (!hasToolResult) {
+        return {
+          toolCalls: [
+            fakeToolCall('write_file', {
+              file_path: pendingExternalWritePath,
+              content: pendingExternalWriteSentinel,
+            }),
+          ],
+        };
+      }
+      return { content: 'external write completed' };
+    }
+
+    if (
+      pendingReadPath &&
+      pendingReadMarker &&
+      messages.includes(pendingReadMarker)
+    ) {
+      if (!hasToolResult) {
+        return {
+          toolCalls: [
+            fakeToolCall('read_file', {
+              file_path: pendingReadPath,
+            }),
+          ],
+        };
+      }
+
+      return {
+        content: messages.includes(pendingReadSentinel)
+          ? `external read observed: ${pendingReadSentinel}`
+          : 'external read content not observed',
+      };
+    }
+
     return { content: 'fake response complete' };
   });
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-home-'));
+  if (externalReadBase) {
+    let candidateDir = '';
+    try {
+      candidateDir = mkdtempSync(
+        path.join(externalReadBase, '.qwen-serve-external-read-'),
+      );
+      externalReadDir = realpathSync(candidateDir);
+    } catch {
+      if (candidateDir) {
+        rmSync(candidateDir, { recursive: true, force: true });
+      }
+      externalReadDir = '';
+    }
+  }
   const qwenHome = path.join(homeDir, '.qwen');
   mkdirSync(qwenHome, { recursive: true });
   writeFileSync(
@@ -168,6 +308,7 @@ beforeAll(async () => {
         ),
         HOME: homeDir,
         QWEN_HOME: path.join(homeDir, '.qwen'),
+        QWEN_ACP_LOCAL_READ_ROOTS: '',
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
         OPENAI_API_KEY: 'fake-key',
@@ -214,6 +355,9 @@ afterAll(async () => {
   await fakeServer?.close();
   if (homeDir) {
     rmSync(homeDir, { recursive: true, force: true });
+  }
+  if (externalReadDir) {
+    rmSync(externalReadDir, { recursive: true, force: true });
   }
   if (workspaceDir) {
     rmSync(workspaceDir, { recursive: true, force: true });
@@ -452,6 +596,319 @@ describePOSIX('qwen serve — multi-client first-responder permission', () => {
   }, 90_000);
 });
 
+describePOSIX('qwen serve — same-host external text reads', () => {
+  async function runExternalRead(
+    decision: 'allow_once' | 'reject_once',
+  ): Promise<void> {
+    const suffix = `${decision}-${Date.now()}`;
+    const marker = `external-read-${suffix}`;
+    const sentinel = `external-read-sentinel-${suffix}`;
+    const externalPath = path.join(externalReadDir, 'outside-workspace.txt');
+    writeFileSync(externalPath, sentinel);
+    pendingReadPath = externalPath;
+    pendingReadMarker = marker;
+    pendingReadSentinel = sentinel;
+
+    const session = await client.createOrAttachSession({
+      // The daemon is bound to `workspaceDir` by `beforeAll`, so any other
+      // value is rejected with 400 Workspace mismatch. The read under test is
+      // external because `externalReadDir` sits outside this workspace, not
+      // because the session claims a wider one.
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(session.sessionId, 'default');
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_complete' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+    const findReadPermission = () =>
+      events.find((event) => {
+        if (event.type !== 'permission_request') return false;
+        const data = event.data as {
+          toolCall?: {
+            rawInput?: { file_path?: string };
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.toolCall?._meta?.toolName === 'read_file' &&
+          data.toolCall.rawInput?.file_path === externalPath
+        );
+      });
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      promptId = accepted.promptId;
+
+      await expect.poll(findReadPermission, { timeout: 30_000 }).toBeDefined();
+      const permission = findReadPermission();
+      const permissionData = permission!.data as {
+        requestId: string;
+        options: Array<{ optionId: string; kind: string }>;
+      };
+      const optionId = permissionData.options.find(
+        (option) => option.kind === decision,
+      )?.optionId;
+      expect(optionId).toBeDefined();
+      expect(
+        await client.respondToPermission(permissionData.requestId, {
+          outcome: { outcome: 'selected', optionId: optionId! },
+        }),
+      ).toBe(true);
+
+      await expect
+        .poll(
+          () =>
+            events.some((event) => {
+              const data = event.data as { promptId?: string } | undefined;
+              return (
+                event.type === 'turn_complete' && data?.promptId === promptId
+              );
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter((messages) => messages.includes(marker));
+
+      const serializedEvents = JSON.stringify(events);
+      if (decision === 'allow_once') {
+        expect(modelRequests.length).toBeGreaterThanOrEqual(2);
+        expect(
+          modelRequests.some((messages) => messages.includes(sentinel)),
+        ).toBe(true);
+        expect(serializedEvents).toContain(
+          `external read observed: ${sentinel}`,
+        );
+      } else {
+        expect(modelRequests).toHaveLength(1);
+        expect(
+          modelRequests.every((messages) => !messages.includes(sentinel)),
+        ).toBe(true);
+        expect(
+          events.some((event) => {
+            if (event.type !== 'session_update') return false;
+            const data = event.data as {
+              update?: { sessionUpdate?: string; status?: string };
+            };
+            return (
+              data.update?.sessionUpdate === 'tool_call_update' &&
+              data.update.status === 'failed'
+            );
+          }),
+        ).toBe(true);
+        // The failed `tool_call_update` above and the sentinel absence below
+        // carry the whole meaning. Asserting the user-facing rejection copy
+        // would fail on a wording change or a non-English locale for reasons
+        // unrelated to the capability under test.
+        expect(serializedEvents).not.toContain(sentinel);
+      }
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      ac.abort();
+      await subscriber;
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      pendingReadPath = '';
+      pendingReadMarker = '';
+      pendingReadSentinel = '';
+      rmSync(externalPath, { force: true });
+    }
+  }
+
+  it('returns approved content and withholds rejected content', async (ctx) => {
+    if (!externalReadDir) {
+      ctx.skip('no writable fixture root outside the workspace and /tmp');
+    }
+    await runExternalRead('allow_once');
+    await runExternalRead('reject_once');
+  }, 150_000);
+});
+
+describePOSIX('qwen serve — same-host external built-in text writes', () => {
+  async function runExternalWrite(
+    mode: 'allow_once' | 'reject_once' | 'yolo',
+  ): Promise<void> {
+    const suffix = `${mode}-${Date.now()}`;
+    const marker = `external-write-${suffix}`;
+    const sentinel = `external-write-sentinel-${suffix}`;
+    const externalPath = path.join(externalReadDir, `${suffix}.txt`);
+    pendingExternalWritePath = externalPath;
+    pendingExternalWriteMarker = marker;
+    pendingExternalWriteSentinel = sentinel;
+
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(
+      session.sessionId,
+      mode === 'yolo' ? 'yolo' : 'default',
+    );
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_complete' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+    const findWritePermission = () =>
+      events.find((event) => {
+        if (event.type !== 'permission_request') return false;
+        const data = event.data as {
+          toolCall?: {
+            rawInput?: { file_path?: string };
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.toolCall?._meta?.toolName === 'write_file' &&
+          data.toolCall.rawInput?.file_path === externalPath
+        );
+      });
+    const hasToolStatus = (status: 'completed' | 'failed') =>
+      events.some((event) => {
+        if (event.type !== 'session_update') return false;
+        const data = event.data as {
+          update?: {
+            sessionUpdate?: string;
+            status?: string;
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.update?.sessionUpdate === 'tool_call_update' &&
+          data.update._meta?.toolName === 'write_file' &&
+          data.update.status === status
+        );
+      });
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      promptId = accepted.promptId;
+
+      if (mode !== 'yolo') {
+        await expect
+          .poll(findWritePermission, { timeout: 30_000 })
+          .toBeDefined();
+        const permission = findWritePermission();
+        const permissionData = permission!.data as {
+          requestId: string;
+          options: Array<{ optionId: string; kind: string }>;
+        };
+        const optionId = permissionData.options.find(
+          (option) => option.kind === mode,
+        )?.optionId;
+        expect(optionId).toBeDefined();
+        expect(
+          await client.respondToPermission(permissionData.requestId, {
+            outcome: { outcome: 'selected', optionId: optionId! },
+          }),
+        ).toBe(true);
+      }
+
+      await expect
+        .poll(
+          () =>
+            events.some((event) => {
+              const data = event.data as { promptId?: string } | undefined;
+              return (
+                event.type === 'turn_complete' && data?.promptId === promptId
+              );
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter((messages) => messages.includes(marker));
+      const serializedEvents = JSON.stringify(events);
+
+      if (mode === 'reject_once') {
+        expect(modelRequests).toHaveLength(1);
+        expect(existsSync(externalPath)).toBe(false);
+        expect(hasToolStatus('failed')).toBe(true);
+      } else {
+        expect(modelRequests.length).toBeGreaterThanOrEqual(2);
+        expect(readFileSync(externalPath, 'utf8')).toBe(sentinel);
+        expect(hasToolStatus('completed')).toBe(true);
+      }
+      if (mode === 'yolo') {
+        expect(
+          events.some((event) => event.type === 'permission_request'),
+        ).toBe(false);
+      }
+      expect(serializedEvents).not.toContain('"toolName":"shell"');
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      ac.abort();
+      await subscriber;
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      pendingExternalWritePath = '';
+      pendingExternalWriteMarker = '';
+      pendingExternalWriteSentinel = '';
+      rmSync(externalPath, { force: true });
+    }
+  }
+
+  it('closes approve/reject/YOLO write authorization without shell fallback', async (ctx) => {
+    if (!externalReadDir) {
+      ctx.skip('no writable fixture root outside the workspace and /tmp');
+    }
+    await runExternalWrite('allow_once');
+    await runExternalWrite('reject_once');
+    await runExternalWrite('yolo');
+  }, 180_000);
+});
+
 describePOSIX('qwen serve — Last-Event-ID resume', () => {
   it('reconnect with Last-Event-ID:N yields events with id > N', async () => {
     const session = await client.createOrAttachSession({
@@ -505,11 +962,13 @@ describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
     });
     const requestStart = fakeServer.requests.length;
     const guardMarker = `todo-guard-e2e-${requestStart}`;
-    const accepted = await client.promptNonBlocking(session.sessionId, {
-      prompt: [{ type: 'text', text: guardMarker }],
-    });
-    expect('promptId' in accepted).toBe(true);
-    if (!('promptId' in accepted)) return;
+    const accepted = asAccepted(
+      await client.promptNonBlocking(session.sessionId, {
+        prompt: [{ type: 'text', text: guardMarker }],
+      }),
+    );
+    expect(accepted).toBeDefined();
+    if (!accepted) return;
 
     await expect
       .poll(
