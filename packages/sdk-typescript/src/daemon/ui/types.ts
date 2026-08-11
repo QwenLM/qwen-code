@@ -273,11 +273,37 @@ export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {
   modelId: string;
 }
 
+/**
+ * Why the normalizer produced a `debug` projection instead of a typed event.
+ *
+ * `unrecognized_*` means the daemon sent a frame this normalizer has no case
+ * for — expected whenever the daemon runs ahead of the client, and the payload
+ * is developer diagnostics rather than conversation content. `malformed_*`
+ * means a frame the normalizer *does* know arrived with an unusable payload,
+ * which signals an actual defect.
+ *
+ * Renderers should branch on this instead of pattern-matching the debug text:
+ * client-dispatched debug events (e.g. Web Shell's model-switch summary) carry
+ * no `debugReason` at all and must keep rendering.
+ */
+export const DAEMON_UI_DEBUG_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+  'malformed_payload',
+] as const;
+
+export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
+
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   type: 'status' | 'debug';
   text: string;
   source?: string;
   data?: unknown;
+  /**
+   * Set only on normalizer-produced `debug` events. Absent on `status` events
+   * and on debug events dispatched by clients themselves.
+   */
+  debugReason?: DaemonUiDebugReason;
   /**
    * Client-dispatch opt-out: `false` inserts the status block without
    * finalizing the active assistant/thought block, so read-only command
@@ -914,6 +940,8 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   errorKind?: DaemonErrorKind;
   source?: string;
   data?: unknown;
+  /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */
+  debugReason?: DaemonUiDebugReason;
 }
 
 export interface DaemonPromptCancelledTranscriptBlock

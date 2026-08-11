@@ -29,6 +29,7 @@ interface RegisterCapabilitiesRoutesDeps {
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
+  sessionRestoreTimeoutMs: number;
   languageCodes: string[];
 }
 
@@ -68,6 +69,7 @@ export function registerCapabilitiesRoutes(
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
+        sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
         ...(multiWorkspace
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(

@@ -27,6 +27,9 @@
  *   5. A same-host ACP child reads text outside the workspace only after the
  *      daemon permission request is approved, and never returns the content
  *      after rejection.
+ *   6. Built-in text writes approved by the tool permission layer can commit
+ *      outside the workspace without falling back to shell, while rejection
+ *      still prevents the final ACP write and YOLO needs no second prompt.
  *
  */
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
@@ -35,6 +38,8 @@ import {
   constants,
   mkdirSync,
   mkdtempSync,
+  existsSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -46,6 +51,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
+import {
+  isNonBlockingAccepted,
+  type NonBlockingPromptAccepted,
+} from '@qwen-code/sdk/daemon';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -135,6 +144,12 @@ function findExternalReadBase(): string | undefined {
 
 const externalReadBase = findExternalReadBase();
 
+function asAccepted(
+  result: Awaited<ReturnType<DaemonClient['promptNonBlocking']>>,
+): NonBlockingPromptAccepted | undefined {
+  return isNonBlockingAccepted(result) ? result : undefined;
+}
+
 let daemon: ChildProcess;
 let port = 0;
 let base = '';
@@ -147,6 +162,9 @@ let pendingWritePath = '';
 let pendingReadPath = '';
 let pendingReadMarker = '';
 let pendingReadSentinel = '';
+let pendingExternalWritePath = '';
+let pendingExternalWriteMarker = '';
+let pendingExternalWriteSentinel = '';
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -185,6 +203,24 @@ beforeAll(async () => {
           }),
         ],
       };
+    }
+
+    if (
+      pendingExternalWritePath &&
+      pendingExternalWriteMarker &&
+      messages.includes(pendingExternalWriteMarker)
+    ) {
+      if (!hasToolResult) {
+        return {
+          toolCalls: [
+            fakeToolCall('write_file', {
+              file_path: pendingExternalWritePath,
+              content: pendingExternalWriteSentinel,
+            }),
+          ],
+        };
+      }
+      return { content: 'external write completed' };
     }
 
     if (
@@ -619,11 +655,13 @@ describePOSIX('qwen serve — same-host external text reads', () => {
     const requestStart = fakeServer.requests.length;
     try {
       await new Promise((resolve) => setTimeout(resolve, 200));
-      const accepted = await client.promptNonBlocking(session.sessionId, {
-        prompt: [{ type: 'text', text: marker }],
-      });
-      expect('promptId' in accepted).toBe(true);
-      if (!('promptId' in accepted)) return;
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
       promptId = accepted.promptId;
 
       await expect.poll(findReadPermission, { timeout: 30_000 }).toBeDefined();
@@ -713,6 +751,164 @@ describePOSIX('qwen serve — same-host external text reads', () => {
   }, 150_000);
 });
 
+describePOSIX('qwen serve — same-host external built-in text writes', () => {
+  async function runExternalWrite(
+    mode: 'allow_once' | 'reject_once' | 'yolo',
+  ): Promise<void> {
+    const suffix = `${mode}-${Date.now()}`;
+    const marker = `external-write-${suffix}`;
+    const sentinel = `external-write-sentinel-${suffix}`;
+    const externalPath = path.join(externalReadDir, `${suffix}.txt`);
+    pendingExternalWritePath = externalPath;
+    pendingExternalWriteMarker = marker;
+    pendingExternalWriteSentinel = sentinel;
+
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(
+      session.sessionId,
+      mode === 'yolo' ? 'yolo' : 'default',
+    );
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_complete' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+    const findWritePermission = () =>
+      events.find((event) => {
+        if (event.type !== 'permission_request') return false;
+        const data = event.data as {
+          toolCall?: {
+            rawInput?: { file_path?: string };
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.toolCall?._meta?.toolName === 'write_file' &&
+          data.toolCall.rawInput?.file_path === externalPath
+        );
+      });
+    const hasToolStatus = (status: 'completed' | 'failed') =>
+      events.some((event) => {
+        if (event.type !== 'session_update') return false;
+        const data = event.data as {
+          update?: {
+            sessionUpdate?: string;
+            status?: string;
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.update?.sessionUpdate === 'tool_call_update' &&
+          data.update._meta?.toolName === 'write_file' &&
+          data.update.status === status
+        );
+      });
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      promptId = accepted.promptId;
+
+      if (mode !== 'yolo') {
+        await expect
+          .poll(findWritePermission, { timeout: 30_000 })
+          .toBeDefined();
+        const permission = findWritePermission();
+        const permissionData = permission!.data as {
+          requestId: string;
+          options: Array<{ optionId: string; kind: string }>;
+        };
+        const optionId = permissionData.options.find(
+          (option) => option.kind === mode,
+        )?.optionId;
+        expect(optionId).toBeDefined();
+        expect(
+          await client.respondToPermission(permissionData.requestId, {
+            outcome: { outcome: 'selected', optionId: optionId! },
+          }),
+        ).toBe(true);
+      }
+
+      await expect
+        .poll(
+          () =>
+            events.some((event) => {
+              const data = event.data as { promptId?: string } | undefined;
+              return (
+                event.type === 'turn_complete' && data?.promptId === promptId
+              );
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter((messages) => messages.includes(marker));
+      const serializedEvents = JSON.stringify(events);
+
+      if (mode === 'reject_once') {
+        expect(modelRequests).toHaveLength(1);
+        expect(existsSync(externalPath)).toBe(false);
+        expect(hasToolStatus('failed')).toBe(true);
+      } else {
+        expect(modelRequests.length).toBeGreaterThanOrEqual(2);
+        expect(readFileSync(externalPath, 'utf8')).toBe(sentinel);
+        expect(hasToolStatus('completed')).toBe(true);
+      }
+      if (mode === 'yolo') {
+        expect(
+          events.some((event) => event.type === 'permission_request'),
+        ).toBe(false);
+      }
+      expect(serializedEvents).not.toContain('"toolName":"shell"');
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      ac.abort();
+      await subscriber;
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      pendingExternalWritePath = '';
+      pendingExternalWriteMarker = '';
+      pendingExternalWriteSentinel = '';
+      rmSync(externalPath, { force: true });
+    }
+  }
+
+  it('closes approve/reject/YOLO write authorization without shell fallback', async (ctx) => {
+    if (!externalReadDir) {
+      ctx.skip('no writable fixture root outside the workspace and /tmp');
+    }
+    await runExternalWrite('allow_once');
+    await runExternalWrite('reject_once');
+    await runExternalWrite('yolo');
+  }, 180_000);
+});
+
 describePOSIX('qwen serve — Last-Event-ID resume', () => {
   it('reconnect with Last-Event-ID:N yields events with id > N', async () => {
     const session = await client.createOrAttachSession({
@@ -766,11 +962,13 @@ describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
     });
     const requestStart = fakeServer.requests.length;
     const guardMarker = `todo-guard-e2e-${requestStart}`;
-    const accepted = await client.promptNonBlocking(session.sessionId, {
-      prompt: [{ type: 'text', text: guardMarker }],
-    });
-    expect('promptId' in accepted).toBe(true);
-    if (!('promptId' in accepted)) return;
+    const accepted = asAccepted(
+      await client.promptNonBlocking(session.sessionId, {
+        prompt: [{ type: 'text', text: guardMarker }],
+      }),
+    );
+    expect(accepted).toBeDefined();
+    if (!accepted) return;
 
     await expect
       .poll(
