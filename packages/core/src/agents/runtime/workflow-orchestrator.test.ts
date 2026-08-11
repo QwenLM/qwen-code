@@ -128,6 +128,29 @@ vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
   };
 });
 
+// The transcript-pairing warns are the only record some terminal failures
+// leave of their attempt id (the verbatim errors cannot carry it in the
+// message), so the pairing tests capture them directly instead of enabling
+// the debug log file.
+const debugLogRecorder = vi.hoisted(() => ({
+  warn: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      isEnabled: () => true,
+      debug: () => {},
+      info: () => {},
+      warn: (...args: unknown[]) => debugLogRecorder.warn(...args),
+      error: () => {},
+    }),
+  };
+});
+
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
     create: async (
@@ -1701,6 +1724,7 @@ describe('createProductionDispatch', () => {
     nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
     nextExecuteHook.value = undefined;
+    debugLogRecorder.warn.mockClear();
   });
 
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
@@ -1791,8 +1815,8 @@ describe('createProductionDispatch', () => {
             _subagentConfig: unknown,
             _runtimeContext: unknown,
             options?: { eventEmitter?: unknown },
-          ) => ({
-            subagent: {
+          ) =>
+            makeStubSubagent({
               execute: async () => {
                 const ee = options?.eventEmitter as
                   | AgentEventEmitter
@@ -1826,12 +1850,9 @@ describe('createProductionDispatch', () => {
                   timestamp: Date.now(),
                 });
               },
-              getFinalText: () => 'override-output',
-              getTerminateMode: () => nextTerminateMode.value,
-              getExecutionSummary: () => ({ outputTokens: 0 }),
-            },
-            dispose: async () => {},
-          }),
+              finalText: () => 'override-output',
+              terminateMode: () => nextTerminateMode.value,
+            }),
         }),
       } as unknown as Config;
     }
@@ -1854,6 +1875,9 @@ describe('createProductionDispatch', () => {
       expect(first['agentId']).toBe(created[0]!.agentId);
       expect(first['agentName']).toBe('reviewer');
       expect(first['sessionId']).toBe(SESSION);
+      // Provenance: readers of the shared subagents directory — the
+      // /review coverage gate — filter workflow dispatches on this field.
+      expect(first['agentKind']).toBe('workflow');
       // The audit annotations the feature exists to carry — un-pinned, a
       // rebuild of the attach options could drop them without a red test.
       expect(first['cwd']).toBe(projectDir);
@@ -2244,6 +2268,150 @@ describe('createProductionDispatch', () => {
       const files = transcriptFiles();
       expect(files).toHaveLength(1);
       expect(recordsOf(files[0])[0]['gitBranch']).toBe('wf-fixture-branch');
+    });
+
+    // A padded label must not make the transcript name disagree with the
+    // run's own displayed name — the dispatch trims once at the top and
+    // every surface (launch name, transcript agentName) reads the same
+    // normalized value.
+    it('trims the label once so every surface shows the same name', async () => {
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('padded', { label: ' reviewer ' });
+
+      expect(created[0]!.name).toBe('reviewer');
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['agentName']).toBe('reviewer');
+    });
+
+    it('maps an empty-after-trim label to the default name everywhere', async () => {
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('blank', { label: ' ' });
+
+      expect(created[0]!.name).toBe('workflow-agent');
+      expect(recordsOf(transcriptFiles()[0])[0]['agentName']).toBe(
+        'workflow-agent',
+      );
+    });
+
+    // agentType is resolved RAW, exactly the way the Agent tool resolves
+    // subagent_type — a padded model-authored name is not a definition.
+    // Both launch paths must agree on the same input.
+    it('does not trim a padded agentType (Agent-tool parity)', async () => {
+      const config = overrideTranscriptConfig((name) =>
+        name.toLowerCase() === 'explore' ? 'Explore' : null,
+      );
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('find foo', { agentType: ' Explore ' }),
+      ).rejects.toThrow(/agent type ' Explore ' not found/);
+
+      // The transcript records what was attempted, untrimmed.
+      expect(recordsOf(transcriptFiles()[0])[0]['agentName']).toBe(' Explore ');
+    });
+
+    // DOMException's `message` is getter-only — the attempt-id append must
+    // SKIP it rather than force an assignment that throws a TypeError and
+    // replaces the very error the sandbox classifies by `name ===
+    // 'AbortError'`. The pairing rides the warn log instead.
+    it('preserves a DOMException terminal error and pairs by warn instead', async () => {
+      let attempt = 0;
+      const boom = new DOMException('aborted', 'AbortError');
+      nextExecuteHook.value = async (emitter, signal) => {
+        attempt += 1;
+        if (attempt === 1) {
+          nextTerminateMode.value = 'CANCELLED';
+          emitter.emit(AgentEventType.ROUND_START, {
+            subagentId: 'workflow-agent',
+            round: 1,
+            promptId: 'prompt-1',
+            timestamp: Date.now(),
+          });
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted) {
+              resolve();
+              return;
+            }
+            signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+          return;
+        }
+        throw boom;
+      };
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      let caught: unknown;
+      try {
+        await dispatch('stall then abort', { label: 's', stallMs: 20 });
+      } catch (error) {
+        caught = error;
+      }
+
+      // Identity AND text intact — the rethrow is the same object, not a
+      // TypeError from a forced assignment and not a rewrap.
+      expect(caught).toBe(boom);
+      expect((caught as DOMException).name).toBe('AbortError');
+      expect((caught as DOMException).message).toBe('aborted');
+      // The multi-attempt pairing was not dropped by the skip — it was
+      // logged instead.
+      const warns = debugLogRecorder.warn.mock.calls.map((c) => String(c[0]));
+      expect(warns.some((w) => w.includes('Attempt ids:'))).toBe(true);
+    });
+
+    // A parent abort ending a mixed retry must name every attempt's id on
+    // the propagated error, so both transcripts stay pairable (this case
+    // lived in workflow-stall.test.ts while the decoration was an option
+    // of runStallResilient; the decoration now belongs to the dispatch).
+    it('names every attempt id when a parent abort ends a mixed retry', async () => {
+      let attempt = 0;
+      let sawSecondAttempt!: () => void;
+      const secondAttempt = new Promise<void>((resolve) => {
+        sawSecondAttempt = resolve;
+      });
+      nextExecuteHook.value = async (emitter, signal) => {
+        attempt += 1;
+        if (attempt === 2) sawSecondAttempt();
+        nextTerminateMode.value = 'CANCELLED';
+        emitter.emit(AgentEventType.ROUND_START, {
+          subagentId: 'workflow-agent',
+          round: 1,
+          promptId: 'prompt-1',
+          timestamp: Date.now(),
+        });
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+      };
+
+      const parent = new AbortController();
+      const dispatch = createProductionDispatch(
+        transcriptConfig(),
+        parent.signal,
+      );
+      const run = dispatch('cancel mid-retry', { label: 'c', stallMs: 20 });
+      await secondAttempt;
+      parent.abort('user-cancel');
+      let caught: unknown;
+      try {
+        await run;
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(attempt).toBe(2);
+      expect(String(caught)).toContain('CANCELLED');
+      const files = transcriptFiles();
+      expect(files).toHaveLength(2);
+      for (const file of files) {
+        const id = path.basename(file, '.jsonl').slice('agent-'.length);
+        expect(String(caught)).toContain(id);
+      }
     });
   });
 
@@ -3018,11 +3186,50 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
 // each test wires a fake Config whose `getSubagentManager()` returns a
 // stub matching just enough surface (findSubagentByName +
 // createAgentHeadless) for the path under test.
+// The minimal subagent surface the override path consumes after
+// createAgentHeadless returns. Both override-path fixtures build theirs
+// through this helper, so when the production path starts reading a new
+// method off the subagent it lands in ONE place instead of two stubs
+// drifting apart (the surface already grew once under review pressure,
+// when getExecutionSummary was added).
+function makeStubSubagent(behaviour: {
+  execute: (ctx: unknown, signal?: AbortSignal) => Promise<void>;
+  finalText: () => string;
+  terminateMode: () => unknown;
+  outputTokens?: () => number;
+  onDispose?: () => void;
+}): {
+  subagent: {
+    execute: (ctx: unknown, signal?: AbortSignal) => Promise<void>;
+    getFinalText: () => string;
+    getTerminateMode: () => unknown;
+    getExecutionSummary: () => { outputTokens: number };
+  };
+  dispose: () => Promise<void>;
+} {
+  return {
+    subagent: {
+      execute: behaviour.execute,
+      getFinalText: behaviour.finalText,
+      getTerminateMode: behaviour.terminateMode,
+      // R1 (#1): production dispatch reads this in reportTokens regardless
+      // of terminate mode — every stub must expose it.
+      getExecutionSummary: () => ({
+        outputTokens: behaviour.outputTokens?.() ?? 0,
+      }),
+    },
+    dispose: async () => {
+      behaviour.onDispose?.();
+    },
+  };
+}
+
 describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', () => {
   // Reset GitWorktreeService stub state between tests so an override set
   // by one test does not bleed into the next (mockImplementation is
   // persistent; the per-test overrides below rely on a clean baseline).
   beforeEach(async () => {
+    debugLogRecorder.warn.mockClear();
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
     );
@@ -3068,7 +3275,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       runWithEmitter?: (emitter: {
         emit(event: string, payload: unknown): void;
       }) => void;
+      // When set, execute() waits for the abort signal instead of returning
+      // — the stall-watchdog tests need an attempt that hangs.
+      waitForSignal?: boolean;
     }>;
+    // Transcript accessors the dispatch's attach reads; absent on most
+    // override-path tests, where attach is swallowed by design.
+    transcript?: { projectDir: string; sessionId: string };
   }): {
     config: Config;
     calls: StubSubagentCall[];
@@ -3091,9 +3304,17 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
-      getTargetDir: () => '/fake/repo',
-      getSessionId: () => 'sess_fake_test_id',
+      getTargetDir: () => opts.transcript?.projectDir ?? '/fake/repo',
+      getSessionId: () => opts.transcript?.sessionId ?? 'sess_fake_test_id',
       getWorktreeSymlinkDirectories: () => [],
+      // Transcript attach accessors — present only for the pairing tests.
+      ...(opts.transcript
+        ? {
+            storage: { getProjectDir: () => opts.transcript!.projectDir },
+            getProjectRoot: () => opts.transcript!.projectDir,
+            getCliVersion: () => '0.0.0-test',
+          }
+        : {}),
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
         createAgentHeadless: async (
@@ -3118,54 +3339,47 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               | { on(event: string, cb: (payload: unknown) => void): void }
               | undefined,
           );
-          const finalText = outcome.finalText;
-          const terminateMode = outcome.terminateMode;
-          return {
-            subagent: {
-              execute: async (
-                _ctx: unknown,
-                signal?: AbortSignal,
-              ): Promise<void> => {
-                const { getCurrentAgentId } = await import(
-                  './agent-context.js'
+          return makeStubSubagent({
+            execute: async (
+              _ctx: unknown,
+              signal?: AbortSignal,
+            ): Promise<void> => {
+              const { getCurrentAgentId } = await import('./agent-context.js');
+              call.executeAgentId = getCurrentAgentId();
+              if (outcome.runWithEmitter && options?.eventEmitter) {
+                outcome.runWithEmitter(
+                  options.eventEmitter as {
+                    emit(event: string, payload: unknown): void;
+                  },
                 );
-                call.executeAgentId = getCurrentAgentId();
-                if (outcome.runWithEmitter && options?.eventEmitter) {
-                  outcome.runWithEmitter(
-                    options.eventEmitter as {
-                      emit(event: string, payload: unknown): void;
-                    },
-                  );
-                }
-                // R3 (wenshao #6): honor `nextExecuteThrow` on the
-                // override-path stub too, so the override-path sibling
-                // of the throw-path test (test name "R3 #6: override-
-                // path records tokens...") can reproduce the real
-                // AgentHeadless.execute() throw against the override
-                // dispatch site.
-                if (nextExecuteThrow.value) {
-                  throw nextExecuteThrow.value;
-                }
-                // Honor signal abort if it fires.
-                if (signal?.aborted) return;
-              },
-              getFinalText: () => finalText,
-              getTerminateMode: () => terminateMode,
-              // R1 (#1): expose `getExecutionSummary` on the override-
-              // path subagent stub. Production dispatch reads it in
-              // `reportTokens` regardless of terminate mode, so the
-              // schema-mode early return (Critical #1) and the
-              // schema-mode failure paths (Critical #3) both need
-              // this surface. Defaults to 0; tests that observe
-              // budget-recording set `nextOutputTokens.value` first.
-              getExecutionSummary: () => ({
-                outputTokens: nextOutputTokens.value,
-              }),
+              }
+              // R3 (wenshao #6): honor `nextExecuteThrow` on the
+              // override-path stub too, so the override-path sibling
+              // of the throw-path test (test name "R3 #6: override-
+              // path records tokens...") can reproduce the real
+              // AgentHeadless.execute() throw against the override
+              // dispatch site.
+              if (nextExecuteThrow.value) {
+                throw nextExecuteThrow.value;
+              }
+              if (outcome.waitForSignal && signal) {
+                await new Promise<void>((resolve) => {
+                  if (signal.aborted) return resolve();
+                  signal.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  });
+                });
+              }
+              // Honor signal abort if it fires.
+              if (signal?.aborted) return;
             },
-            dispose: async () => {
+            finalText: () => outcome.finalText,
+            terminateMode: () => outcome.terminateMode,
+            outputTokens: () => nextOutputTokens.value,
+            onDispose: () => {
               disposed += 1;
             },
-          };
+          });
         },
       }),
     } as unknown as Config;
@@ -3476,6 +3690,127 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     ).rejects.toThrow(
       /subagent completed without calling structured_output \(no validation attempt — model produced plain-text content\)\./,
     );
+  });
+
+  // The verbatim schema content errors cannot carry the attempt id in the
+  // message — the pairing warn is the only record of it, so it must
+  // actually name the id and the transcript path (with a transcript-capable
+  // config; the default fakeConfigWithMgr only reaches the path-less catch
+  // branch).
+  it('pairs the verbatim schema content failure with its transcript in the warn log', async () => {
+    const projectDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'wf-pair-'));
+    try {
+      const { config } = fakeConfigWithMgr({
+        transcript: { projectDir, sessionId: 'sess-pair' },
+        onCreate: async () => ({
+          finalText: 'plain-text answer the script will discard',
+          terminateMode: 'GOAL',
+        }),
+      });
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('extract', { schema: { type: 'object' } }),
+      ).rejects.toThrow(/no validation attempt/);
+
+      const pairing = debugLogRecorder.warn.mock.calls
+        .map((c) => String(c[0]))
+        .find((m) => m.includes('schema content failure'));
+      expect(pairing).toBeDefined();
+      const id = pairing!.match(
+        /for (workflow-agent-[0-9a-f]{16}); transcript: /,
+      )?.[1];
+      expect(id).toBeDefined();
+      const transcript = path.join(
+        projectDir,
+        'subagents',
+        'sess-pair',
+        `agent-${id}.jsonl`,
+      );
+      expect(pairing).toContain(transcript);
+      expect(fsSync.existsSync(transcript)).toBe(true);
+    } finally {
+      fsSync.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  // A mixed retry whose second attempt ends in a verbatim schema content
+  // failure must NOT gain the attempt-id suffix — upstream's exact string
+  // is what scripts branch on. The multi-attempt pairing rides the warn
+  // log instead of the message.
+  it('keeps the verbatim schema content error verbatim across a stall retry', async () => {
+    let attempt = 0;
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          return {
+            finalText: '',
+            terminateMode: 'CANCELLED',
+            waitForSignal: true,
+            runWithEmitter: (emitter) => {
+              // Arm the stall watchdog, then hang until it aborts.
+              emitter.emit(AgentEventType.ROUND_START, {
+                subagentId: 'sub',
+                round: 1,
+                promptId: 'prompt-1',
+                timestamp: Date.now(),
+              });
+            },
+          };
+        }
+        return {
+          finalText: '',
+          terminateMode: 'CANCELLED',
+          runWithEmitter: (emitter) => {
+            for (let i = 1; i <= 3; i++) {
+              emitter.emit('tool_call', {
+                subagentId: 'sub',
+                round: i,
+                callId: `c${i}`,
+                name: 'structured_output',
+                args: { bad: 'shape' },
+                description: '',
+                isOutputMarkdown: false,
+                timestamp: i,
+              });
+              emitter.emit('tool_result', {
+                subagentId: 'sub',
+                round: i,
+                callId: `c${i}`,
+                name: 'structured_output',
+                success: false,
+                error: 'validation failed',
+                responseParts: [],
+                resultDisplay: '',
+                durationMs: 1,
+                timestamp: i,
+              });
+            }
+          },
+        };
+      },
+    });
+    const dispatch = createProductionDispatch(config);
+    let caught: unknown;
+    try {
+      await dispatch('extract', {
+        schema: { type: 'object' },
+        stallMs: 20,
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(attempt).toBe(2);
+    // Verbatim-equality preserved: no ' Attempt ids: ...' suffix.
+    expect((caught as Error).message).toBe(
+      'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
+    );
+    // The pairing the message cannot carry was logged instead.
+    const warns = debugLogRecorder.warn.mock.calls.map((c) => String(c[0]));
+    expect(
+      warns.some((w) => w.includes('terminal error cannot carry attempt ids')),
+    ).toBe(true);
   });
 
   it('schema-mode attaches an event emitter to the subagent', async () => {

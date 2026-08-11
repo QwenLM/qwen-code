@@ -287,6 +287,13 @@ export interface AttachJsonlOptions {
   agentId: string;
   /** Display name (subagent type), e.g. "explore". */
   agentName?: string;
+  /**
+   * Launch path provenance, stamped on every record — see
+   * `ChatRecord.agentKind`. Workflow dispatches pass `'workflow'` so
+   * readers of the shared subagents directory can tell them apart from
+   * Agent-tool launches.
+   */
+  agentKind?: 'workflow';
   /** UI hint. */
   agentColor?: string;
   /** Parent user-session UUID — recorded as `sessionId` on every record. */
@@ -397,6 +404,7 @@ export function attachJsonlTranscriptWriter(
     agentId: options.agentId,
     agentName: options.agentName,
     agentColor: options.agentColor,
+    agentKind: options.agentKind,
     isSidechain: true,
   });
 

@@ -363,6 +363,14 @@ export interface ChatRecord {
   agentId?: string;
   /** Display name for the subagent (e.g. "Explore"). */
   agentName?: string;
+  /**
+   * Launch path that produced this subagent transcript, when it was not
+   * the Agent tool. `'workflow'` marks workflow `agent()` dispatches, which
+   * share `<projectDir>/subagents/<sessionId>/` with Agent-tool launches;
+   * readers of that directory (e.g. the /review coverage gate) filter on it
+   * to tell the two populations apart.
+   */
+  agentKind?: 'workflow';
   /** UI hint for tools rendering subagent transcripts. */
   agentColor?: string;
   /** True for records produced by a subagent (a sidechain off the parent session). */

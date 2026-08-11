@@ -168,9 +168,20 @@ function transcript(
      * credit narrows to its ranged reads.
      */
     range?: [number, number];
+    /**
+     * Launch-path provenance stamped on the records — `workflow` for a
+     * workflow agent() dispatch, which shares this directory but is not an
+     * agent this review launched.
+     */
+    agentKind?: string;
   } = {},
 ): void {
-  const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
+  const base = {
+    agentId: id,
+    agentName: 'general-purpose',
+    sessionId: 'S1',
+    ...(opts.agentKind ? { agentKind: opts.agentKind } : {}),
+  };
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
   ].map((m) => m[1]);
@@ -431,6 +442,56 @@ describe('coverage — from the harness, not from the caller', () => {
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.idleAgents).toEqual(['chunk 1']);
     expect(r.ok).toBe(false);
+  });
+
+  it('ignores workflow-dispatch transcripts, however they read', () => {
+    // Workflow agent() dispatches write their transcripts into this same
+    // directory. A pre-launch failure or an abandoned attempt leaves a
+    // seed-only record — zero tool calls — that used to be classified idle
+    // BEFORE the "not launched by this review" escape could see it, failing
+    // a compliant review. Provenance, not prompt shape, decides.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    // Seed-only: the prompt carries no diff path.
+    transcript('workflow-agent-deadbeef01', 'review the widget cache', {
+      calls: 0,
+      agentKind: 'workflow',
+    });
+    // Prompt that happens to name the diff — `given` would be true, and
+    // zero tool calls would read as an idled review agent.
+    transcript('workflow-agent-deadbeef02', `read ${DIFF} and summarize`, {
+      calls: 0,
+      agentKind: 'workflow',
+    });
+    // Prompt that happens to say `chunk 1 of 2` — would otherwise be
+    // adopted as that chunk's agent and reported blind.
+    transcript('workflow-agent-deadbeef03', 'chunk 1 of 2 of my own work', {
+      calls: 0,
+      agentKind: 'workflow',
+    });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.ok).toBe(true);
+    expect(r.idleAgents).toEqual([]);
+    expect(r.blindAgents).toEqual([]);
+    // The foreign records do not even count as agents of this review:
+    // the two chunk agents plus the roster's test-matrix stand-in, and
+    // none of the three workflow transcripts.
+    expect(r.agents).toBe(3);
+  });
+
+  it('skips zero-tool-call records this review never launched', () => {
+    // The "not launched" escape runs BEFORE the idle classification: a
+    // foreign record with no diff in its prompt owes the review nothing,
+    // whatever it did or did not call — including agents the review's own
+    // agents spawned.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2 });
+    transcript('nested-spawn', 'check the build logs', { calls: 0 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.ok).toBe(true);
+    expect(r.idleAgents).toEqual([]);
   });
 
   it('names a blind launch as itself — the prompt is the defect, not the agent', () => {

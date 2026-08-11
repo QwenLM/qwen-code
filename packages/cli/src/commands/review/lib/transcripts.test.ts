@@ -135,6 +135,28 @@ describe('readTranscripts — defensive parsing', () => {
     expect(recs[0].launchPrompt).toBe('chunk 1 of 1');
   });
 
+  it('reads the launch-path provenance stamped on the records', () => {
+    // Workflow agent() dispatches share this directory with Agent-tool
+    // launches; readers filter on the stamped field, so the parse must
+    // surface it.
+    const b = {
+      agentId: 'workflow-agent-deadbeef',
+      agentName: 'workflow-agent',
+      agentKind: 'workflow',
+      sessionId: 'S1',
+    };
+    file(
+      'agent-workflow-agent-deadbeef.jsonl',
+      JSON.stringify({
+        ...b,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'do the thing' }] },
+      }) + '\n',
+    );
+    const [rec] = readTranscripts(undefined, ENV);
+    expect(rec.agentKind).toBe('workflow');
+  });
+
   it('counts only successful tool calls', () => {
     const b = { agentId: 'a1', agentName: 'general-purpose', sessionId: 'S1' };
     const call = {

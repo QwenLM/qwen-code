@@ -221,77 +221,10 @@ describe('runStallResilient', () => {
     expect(String(caught)).toMatch(/MAX_TURNS/);
   });
 
-  it('appends abandonedDetail to a non-stall failure after a stalled attempt', async () => {
-    let calls = 0;
-    const attemptFn = async (
-      signal: AbortSignal,
-      emitter: AgentEventEmitter,
-    ): Promise<string> => {
-      calls += 1;
-      if (calls === 1) {
-        emitter.emit(AgentEventType.ROUND_START, {} as never);
-        await new Promise<void>((resolve) => {
-          if (signal.aborted) return resolve();
-          signal.addEventListener('abort', () => resolve(), { once: true });
-        });
-        throw new Error('attempt 1: did not complete (CANCELLED).');
-      }
-      throw new Error('attempt 2: did not complete (MAX_TURNS).');
-    };
-    let caught: unknown;
-    try {
-      await runStallResilient(attemptFn, {
-        stallMs: 5,
-        abandonedDetail: () => 'Attempt ids: a1, a2.',
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(calls).toBe(2);
-    // The rethrown error keeps its own text and gains the attempt ids, so
-    // the earlier attempt's transcript stays pairable with the failure.
-    expect(String(caught)).toContain('MAX_TURNS');
-    expect(String(caught)).toContain('Attempt ids: a1, a2.');
-  });
-
-  it('appends abandonedDetail on parent abort after a stalled attempt', async () => {
-    const parent = new AbortController();
-    let calls = 0;
-    let sawSecondAttempt!: () => void;
-    const secondAttempt = new Promise<void>((resolve) => {
-      sawSecondAttempt = resolve;
-    });
-    const attemptFn = async (
-      signal: AbortSignal,
-      emitter: AgentEventEmitter,
-    ): Promise<string> => {
-      calls += 1;
-      if (calls === 2) sawSecondAttempt();
-      emitter.emit(AgentEventType.ROUND_START, {} as never);
-      await new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve();
-        signal.addEventListener('abort', () => resolve(), { once: true });
-      });
-      throw new Error(`attempt ${calls}: did not complete (CANCELLED).`);
-    };
-    const run = runStallResilient(attemptFn, {
-      stallMs: 50,
-      signal: parent.signal,
-      abandonedDetail: () => 'Attempt ids: a1, a2.',
-    });
-    // Let attempt 1 stall + retry, then cancel during attempt 2.
-    await secondAttempt;
-    parent.abort('user-cancel');
-    let caught: unknown;
-    try {
-      await run;
-    } catch (e) {
-      caught = e;
-    }
-    expect(calls).toBe(2);
-    expect(String(caught)).toContain('attempt 2');
-    expect(String(caught)).toContain('Attempt ids: a1, a2.');
-  });
+  // The attempt-id pairing the run leaves beside its transcripts is applied
+  // by the PRODUCTION DISPATCH (createProductionDispatch), not by this
+  // generic retry wrapper — see the transcript suite in
+  // workflow-orchestrator.test.ts for those cases.
 
   it('does NOT retry on parent abort (propagates)', async () => {
     const parent = new AbortController();

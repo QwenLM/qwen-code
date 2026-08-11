@@ -380,7 +380,16 @@ export function coverageFromTranscripts(
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
   const { plan, mtimeMs } = readPlan(planPath);
-  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute).filter(
+    // Workflow `agent()` dispatches write their transcripts into this same
+    // directory, but they are not agents this review launched. A seed-only
+    // workflow record made zero tool calls and would be classified idle
+    // before the "not launched by this review" escape below could see it,
+    // and a workflow prompt that happens to say `chunk N of M` would be
+    // adopted as that chunk's agent. Provenance, not prompt shape, decides
+    // whose evidence this gate reads.
+    (rec) => rec.agentKind !== 'workflow',
+  );
   const built = readRecordedPrompts(planPath);
 
   const blindAgents: string[] = [];
@@ -565,6 +574,16 @@ export function coverageFromTranscripts(
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
 
+    // Not a diff reader, and not required to be. Two review agents legitimately
+    // never open the diff — Build & Test runs the build, Issue Fidelity reads the
+    // issue — and the session's transcript directory also holds agents this review
+    // did not launch, including ones its own agents spawned. None of them owes the
+    // diff anything; none of them may be credited with having read it either.
+    // Runs BEFORE the idle check, on purpose: a zero-tool-call record this
+    // review never launched is not a review agent that idled, and classifying
+    // it as one is how a foreign transcript fails a compliant review.
+    if (!given) continue;
+
     // Did it work? Zero successful tool calls means it read nothing — whatever
     // its prose says. This is checked BEFORE the Uncoverable claim below, and the
     // order is load-bearing: `Uncoverable: chunk N` is a line the prompt hands the
@@ -575,13 +594,6 @@ export function coverageFromTranscripts(
       if (!superseded(rec, chunk)) idleAgents.push(name);
       continue;
     }
-
-    // Not a diff reader, and not required to be. Two review agents legitimately
-    // never open the diff — Build & Test runs the build, Issue Fidelity reads the
-    // issue — and the session's transcript directory also holds agents this review
-    // did not launch, including ones its own agents spawned. None of them owes the
-    // diff anything; none of them may be credited with having read it either.
-    if (!given) continue;
 
     // The prompt the CLI built for this chunk, against the prompt the harness
     // recorded the agent being launched with. Nothing else in the run can see the
@@ -1327,7 +1339,12 @@ export function verificationGaps(
   env: NodeJS.ProcessEnv = process.env,
 ): VerificationReport {
   const { plan, mtimeMs } = readPlan(planPath);
-  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  // Same provenance fence as coverageFromTranscripts: workflow dispatches
+  // share the transcript directory but are not agents this review launched,
+  // so they neither satisfy a delivery floor nor count against it.
+  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute).filter(
+    (rec) => rec.agentKind !== 'workflow',
+  );
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];
   const remediation: string[] = [];

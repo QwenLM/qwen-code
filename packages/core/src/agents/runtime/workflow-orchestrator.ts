@@ -387,7 +387,18 @@ export function createProductionDispatch(
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
   bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
 ): WorkflowAgentDispatch {
-  return async (prompt, opts) => {
+  return async (prompt, rawOpts) => {
+    // Normalize the script-chosen label ONCE and hand the trimmed value to
+    // every surface that shows it — the fast-path agent name, the override
+    // path's ephemeral config, the stall/abandoned error, and the
+    // transcript's `agentName`. A padded label must not make the transcript
+    // name disagree with the run's own displayed name; an empty-after-trim
+    // label becomes `undefined` so every `?? 'workflow-agent'` fallback
+    // agrees too.
+    const opts =
+      typeof rawOpts.label === 'string'
+        ? { ...rawOpts, label: rawOpts.label.trim() || undefined }
+        : rawOpts;
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
     // AgentEventEmitter; it chains the caller's `signal` into the
@@ -400,50 +411,57 @@ export function createProductionDispatch(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
     const attemptIds: string[] = [];
-    return runStallResilient(
-      async (attemptSignal, emitter) => {
-        // Minted here rather than inside the dispatch so this attempt's
-        // transcript is named for the same id the dispatch reports in its
-        // terminal errors — and so the writer is attached to the emitter
-        // BEFORE any agent event can fire on it. Terminal errors name this
-        // id directly except the two upstream-verbatim schema content
-        // failures, which log it instead (see runOverridePath); when the
-        // run ends after multiple attempts, the error names every attempt's
-        // id.
-        const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
-        attemptIds.push(workflowAgentId);
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
-        const { detach: detachTranscript, resolvedSubagent } =
-          await attachDispatchTranscript(
-            config,
-            workflowAgentId,
-            prompt,
-            opts,
-            emitter,
-          );
-        try {
-          return await runSingleDispatch(
-            config,
-            prompt,
-            opts,
-            attemptSignal,
-            emitter,
-            workflowAgentId,
-            resolvedSubagent,
-            onTokens,
-          );
-        } finally {
-          detachTranscript();
-          cleanupApprovalBridge?.();
-        }
-      },
-      {
-        stallMs,
-        signal,
-        label: typeof opts.label === 'string' ? opts.label : undefined,
-        abandonedDetail: () => `Attempt ids: ${attemptIds.join(', ')}.`,
-      },
-    );
+    try {
+      return await runStallResilient(
+        async (attemptSignal, emitter) => {
+          // Minted here rather than inside the dispatch so this attempt's
+          // transcript is named for the same id the dispatch reports in its
+          // terminal errors — and so the writer is attached to the emitter
+          // BEFORE any agent event can fire on it. Terminal errors name this
+          // id directly except the failures whose text must stay
+          // upstream-verbatim — the two schema content failures and the two
+          // pre-launch rejections — which log the pairing instead (see
+          // `warnTranscriptPairing`); when the run ends after multiple
+          // attempts, the error names every attempt's id.
+          const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+          attemptIds.push(workflowAgentId);
+          const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+          const { detach: detachTranscript, resolvedSubagent } =
+            await attachDispatchTranscript(
+              config,
+              workflowAgentId,
+              prompt,
+              opts,
+              emitter,
+            );
+          try {
+            return await runSingleDispatch(
+              config,
+              prompt,
+              opts,
+              attemptSignal,
+              emitter,
+              workflowAgentId,
+              resolvedSubagent,
+              onTokens,
+            );
+          } finally {
+            detachTranscript();
+            cleanupApprovalBridge?.();
+          }
+        },
+        { stallMs, signal, label: opts.label },
+      );
+    } catch (err) {
+      // Earlier attempts already left transcripts on disk; when more than
+      // one attempt ran, name every attempt on whatever error terminates
+      // the run so no record is left unpairable. A single-attempt failure
+      // already names its own id — or logs it, for the verbatim errors.
+      if (attemptIds.length > 1) {
+        appendAttemptDetail(config, err, attemptIds);
+      }
+      throw err;
+    }
   };
 }
 
@@ -476,9 +494,14 @@ export function createProductionDispatch(
  * Best-effort by construction. A transcript is audit metadata; an unwritable
  * or full disk must not fail a dispatch that would otherwise have succeeded,
  * so both the attach and the returned cleanup swallow their errors. The
- * writer itself opens its fd lazily, but the seeded launch-prompt record is
- * written at attach time, so every dispatched prompt materializes its file
- * immediately — including dispatches that fail before the agent launches.
+ * writer opens its fd lazily, and the seeded launch-prompt record is written
+ * at attach time — so a dispatch with a NON-EMPTY prompt materializes its
+ * file immediately, including dispatches that fail before the agent
+ * launches. Two cases leave an attempt id with no file: an empty prompt
+ * seeds nothing (the writer skips empty text), and an unwritable transcript
+ * directory degrades to a failed open the attach never learns about.
+ * Terminal errors may therefore name attempt ids whose record did not
+ * materialize; an id still keys whatever file DOES exist.
  */
 async function attachDispatchTranscript(
   config: Config,
@@ -507,9 +530,11 @@ async function attachDispatchTranscript(
     // shows in progress output, so a reader matching a transcript to a line
     // of the script has the same name in both places. `agentType` is the
     // fallback that still says something; the constant is the last resort.
-    const label = typeof opts.label === 'string' ? opts.label.trim() : '';
-    const agentType =
-      typeof opts.agentType === 'string' ? opts.agentType.trim() : '';
+    // Both arrive normalized (label trimmed by the dispatch closure) or raw —
+    // `agentType` is deliberately NOT trimmed so it resolves exactly the way
+    // the Agent tool resolves it.
+    const label = typeof opts.label === 'string' ? opts.label : '';
+    const agentType = typeof opts.agentType === 'string' ? opts.agentType : '';
     let agentName: string;
     if (label) {
       agentName = label;
@@ -530,6 +555,10 @@ async function attachDispatchTranscript(
       {
         agentId: workflowAgentId,
         agentName,
+        // Provenance for readers of the shared subagents directory — the
+        // /review coverage gate filters on it so a workflow dispatch is
+        // never judged as an agent the review launched.
+        agentKind: 'workflow',
         sessionId,
         cwd: projectRoot,
         version: config.getCliVersion() || 'unknown',
@@ -784,7 +813,13 @@ async function runOverridePath(
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
     // Match for parity so scripts written against either runtime see the
-    // same text and can branch on it.
+    // same text and can branch on it. The transcript seed is already on
+    // disk at this point, so log the pairing — the message stays verbatim.
+    warnTranscriptPairing(
+      config,
+      workflowAgentId,
+      'pre-launch failure (remote isolation unavailable)',
+    );
     throw new Error(
       "agent({isolation:'remote'}) is not available in this build.",
     );
@@ -794,25 +829,30 @@ async function runOverridePath(
   let baseConfig: SubagentConfig;
 
   if (opts.agentType !== undefined) {
-    // Trim to match the transcript attach's resolution: a padded
-    // model-authored agentType must resolve the same definition in both
-    // places, or the transcript records a canonical launch that the raw
-    // string then fails to find.
-    const agentType = opts.agentType.trim();
+    // Resolved RAW — no trim — exactly the way the Agent tool resolves
+    // `subagent_type`, so both launch paths agree on the same input. The
+    // transcript attach resolved the same raw string for `agentName`.
     const resolved =
-      resolvedSubagent ?? (await subagentMgr.findSubagentByName(agentType));
+      resolvedSubagent ??
+      (await subagentMgr.findSubagentByName(opts.agentType));
     if (!resolved) {
       // Error message verbatim from upstream Claude Code 2.1.168 strings:
       // "agent({agentType}): agent type '{name}' not found". Match for
       // user-visible parity so scripts authored against either runtime see
-      // the same error text.
+      // the same error text. The transcript seed is already on disk, so
+      // log the pairing — the message stays verbatim.
       //
       // SECURITY (P3 R2 self-review): sanitize the agentType before
       // interpolation. The string is model-authored; an attacker model
       // could embed CRLF / control characters that fragment the error
       // message in logs / display / OTLP traces. Replace control chars
       // with a single space so the error stays single-line.
-      const safeAgentType = sanitizeForErrorMessage(agentType);
+      warnTranscriptPairing(
+        config,
+        workflowAgentId,
+        'pre-launch failure (agent type not found)',
+      );
+      const safeAgentType = sanitizeForErrorMessage(opts.agentType);
       throw new Error(
         `agent({agentType}): agent type '${safeAgentType}' not found.`,
       );
@@ -1054,16 +1094,28 @@ async function runOverridePath(
         // factually correct only for (b).
         if (schemaState.attempts > 2) {
           // Error message verbatim from upstream Claude Code 2.1.168 strings.
-          warnSchemaContentFailure(config, workflowAgentId);
-          throw new Error(
+          warnTranscriptPairing(
+            config,
+            workflowAgentId,
+            'schema content failure',
+          );
+          const err = new Error(
             'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
           );
+          verbatimTerminalErrors.add(err);
+          throw err;
         }
-        warnSchemaContentFailure(config, workflowAgentId);
-        throw new Error(
+        warnTranscriptPairing(
+          config,
+          workflowAgentId,
+          'schema content failure',
+        );
+        const err = new Error(
           'subagent completed without calling structured_output ' +
             '(no validation attempt — model produced plain-text content).',
         );
+        verbatimTerminalErrors.add(err);
+        throw err;
       }
 
       // Non-schema mode.
@@ -1132,14 +1184,25 @@ async function runOverridePath(
 }
 
 /**
- * The two schema content failures keep upstream-verbatim error text for
- * user-visible parity, so they cannot carry the attempt's id in the message
- * itself. Log the pairing instead — the transcript file is named for the id,
- * so this is what lets an operator match the failure to its record.
+ * Terminal errors whose message must remain upstream-verbatim so scripts
+ * authored against either runtime can branch on the exact text — the two
+ * schema content failures. Marked at the throw site so the multi-attempt
+ * id detail is logged instead of appended (see `appendAttemptDetail`).
  */
-function warnSchemaContentFailure(
+const verbatimTerminalErrors = new WeakSet<object>();
+
+/**
+ * Log the id↔transcript pairing for a terminal error whose message cannot
+ * carry the attempt's id: the four upstream-verbatim failures (two schema
+ * content, two pre-launch) keep their text for user-visible parity, and the
+ * multi-attempt fallback lands here when the detail cannot be appended in
+ * place. The transcript file is named for the id, so this is what lets an
+ * operator match such a failure to its record.
+ */
+function warnTranscriptPairing(
   config: Config,
   workflowAgentId: string,
+  reason: string,
 ): void {
   let transcript = '(path unavailable)';
   try {
@@ -1153,8 +1216,40 @@ function warnSchemaContentFailure(
     // terminal error this warn accompanies.
   }
   debugLogger.warn(
-    `[workflow] schema content failure for ${workflowAgentId}; ` +
-      `transcript: ${transcript}`,
+    `[workflow] ${reason} for ${workflowAgentId}; transcript: ${transcript}`,
+  );
+}
+
+/**
+ * Name every attempt's id on the run's terminating error, in place.
+ * Mutation (not a rewrap) preserves error identity — the sandbox classifies
+ * cancellations by `name === 'AbortError'`.
+ *
+ * The append is skipped for errors whose text must stay upstream-verbatim
+ * (marked at the throw site), errors without a writable own `message`
+ * (DOMException's is getter-only — forcing the assignment would throw a
+ * TypeError and replace the very error the sandbox classifies), and
+ * non-Error rejections. The pairing then rides the warn log instead, so no
+ * transcript is left orphaned by the skip.
+ */
+function appendAttemptDetail(
+  config: Config,
+  err: unknown,
+  attemptIds: string[],
+): void {
+  const detail = `Attempt ids: ${attemptIds.join(', ')}.`;
+  if (
+    err instanceof Error &&
+    !verbatimTerminalErrors.has(err) &&
+    Object.getOwnPropertyDescriptor(err, 'message')?.writable
+  ) {
+    err.message = `${err.message} ${detail}`;
+    return;
+  }
+  warnTranscriptPairing(
+    config,
+    attemptIds[attemptIds.length - 1]!,
+    `terminal error cannot carry attempt ids — ${detail}`,
   );
 }
 

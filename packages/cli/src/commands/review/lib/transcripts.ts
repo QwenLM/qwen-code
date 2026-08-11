@@ -45,6 +45,12 @@ import { join } from 'node:path';
 export interface AgentRecord {
   agentId: string;
   agentName: string;
+  /**
+   * Launch-path provenance stamped on the records, when present.
+   * `'workflow'` marks a workflow `agent()` dispatch — a transcript that
+   * shares this directory but is not an agent the review launched.
+   */
+  agentKind?: string;
   /** The prompt the agent was launched with — the transcript's first record. */
   launchPrompt: string;
   /** Tool calls that came back without an error. */
@@ -211,6 +217,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
 
   let agentId = '';
   let agentName = '';
+  let agentKind = '';
   let launchPrompt = '';
   let finalText = '';
   let successfulToolCalls = 0;
@@ -244,6 +251,9 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       agentId = rec['agentId'];
     if (!agentName && typeof rec['agentName'] === 'string') {
       agentName = rec['agentName'];
+    }
+    if (!agentKind && typeof rec['agentKind'] === 'string') {
+      agentKind = rec['agentKind'];
     }
 
     const type = rec['type'];
@@ -325,6 +335,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   return {
     agentId,
     agentName,
+    ...(agentKind ? { agentKind } : {}),
     launchPrompt,
     successfulToolCalls,
     diffToolCalls,

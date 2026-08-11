@@ -199,14 +199,6 @@ export interface RunStallResilientOptions {
   signal?: AbortSignal;
   /** For the abandoned-error message. */
   label?: string;
-  /**
-   * Optional detail appended to whatever error terminates the run once more
-   * than one attempt has left a transcript — the all-stall abandoned error,
-   * and any non-stall failure or parent abort that ends a mixed retry. The
-   * production dispatch names every attempt's agent id here so the
-   * per-attempt transcripts it leaves behind stay pairable with the error.
-   */
-  abandonedDetail?: () => string | undefined;
 }
 
 /**
@@ -223,7 +215,7 @@ export async function runStallResilient<T>(
   attemptFn: StallAttemptFn<T>,
   opts: RunStallResilientOptions,
 ): Promise<T> {
-  const { stallMs, signal, label, abandonedDetail } = opts;
+  const { stallMs, signal, label } = opts;
 
   // Watchdog disabled: single raw attempt, parent signal threaded straight
   // through (no per-attempt controller needed).
@@ -252,16 +244,8 @@ export async function runStallResilient<T>(
     try {
       return await attemptFn(controller.signal, emitter);
     } catch (err) {
-      // Earlier attempts already left transcripts on disk; when more than one
-      // attempt ran, name every attempt on whatever error terminates the run
-      // so no record is left unpairable. The all-stall path below builds its
-      // own message with the same detail.
-      const mixedRetryDetail = attempt > 1 ? abandonedDetail?.() : undefined;
       // Parent abort takes priority — never retry a user/wall-clock cancel.
-      if (signal?.aborted) {
-        appendAttemptDetail(err, mixedRetryDetail);
-        throw err;
-      }
+      if (signal?.aborted) throw err;
       // A stall manifests as the attempt's "did not complete (CANCELLED)"
       // throw; the watchdog flag is the authoritative signal that WE aborted.
       if (watchdog.stalled() && attempt < MAX_STALL_ATTEMPTS) {
@@ -272,14 +256,11 @@ export async function runStallResilient<T>(
         continue;
       }
       if (watchdog.stalled()) {
-        const detail = abandonedDetail?.();
         throw new Error(
           `agent "${label ?? 'workflow-agent'}" stalled on all ` +
-            `${MAX_STALL_ATTEMPTS} attempts (no progress for ${stallMs}ms each).` +
-            (detail ? ` ${detail}` : ''),
+            `${MAX_STALL_ATTEMPTS} attempts (no progress for ${stallMs}ms each).`,
         );
       }
-      appendAttemptDetail(err, mixedRetryDetail);
       throw err;
     } finally {
       watchdog.dispose();
@@ -288,16 +269,4 @@ export async function runStallResilient<T>(
       }
     }
   }
-}
-
-/**
- * Append the shared detail to a terminating error in place. Mutation (not a
- * rewrap) preserves error identity — the sandbox classifies cancellations by
- * `name === 'AbortError'`. Errors without a writable own `message`
- * (DOMException's is getter-only) pass through unchanged.
- */
-function appendAttemptDetail(err: unknown, detail: string | undefined): void {
-  if (!detail || !(err instanceof Error)) return;
-  if (!Object.getOwnPropertyDescriptor(err, 'message')?.writable) return;
-  err.message = `${err.message} ${detail}`;
 }
