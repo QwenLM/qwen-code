@@ -7045,35 +7045,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               }
             }
           }
-          // When the last active prompt settles, atomically move ordinary
-          // daemon-owned messages into the normal FIFO before releasing this
-          // prompt's slot. Queue-only callers take back messages that missed
-          // the final drain so they can preserve their own turn semantics.
-          if (
+          const shouldSettleMidTurnQueue =
             entry.pendingPromptCount === 1 &&
             !entry.closing &&
-            byId.get(entry.sessionId) === entry
-          ) {
-            for (const message of entry.midTurnMessageQueue.splice(0)) {
-              if (message.queueOnly) {
-                try {
-                  message.onSettledWithoutDrain?.();
-                } catch (error) {
-                  writeStderrLine(
-                    `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to hand undrained queue-only message ${JSON.stringify(message.messageId)} back to its caller: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
-                  );
-                }
-                continue;
-              }
-              promoteMidTurnMessage(
-                entry,
-                message.messageId,
-                message.text,
-                message.originatorClientId,
-              );
-            }
-          }
+            byId.get(entry.sessionId) === entry;
+          const undrainedMessages = shouldSettleMidTurnQueue
+            ? entry.midTurnMessageQueue.splice(0)
+            : [];
+          // Release the old turn before handing back queue-only messages. Its
+          // caller synchronously reserves the next FIFO slot, then ordinary
+          // promotions follow it without exposing the fallback as queued.
           releasePromptSlot();
+          for (const message of undrainedMessages) {
+            if (message.queueOnly) {
+              try {
+                message.onSettledWithoutDrain?.();
+              } catch (error) {
+                writeStderrLine(
+                  `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to hand undrained queue-only message ${JSON.stringify(message.messageId)} back to its caller: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+                );
+              }
+              continue;
+            }
+            promoteMidTurnMessage(
+              entry,
+              message.messageId,
+              message.text,
+              message.originatorClientId,
+            );
+          }
           // DAEMON-005: deferred close-on-prompt-complete. Lives here (not
           // in `promptPromise.finally`) so the terminal broadcast — the
           // `result.then` registered above on this same promise — runs

@@ -387,13 +387,26 @@ export function useQueuedPrompts({
       let next = current.filter(
         (prompt) =>
           !(
-            prompt.midTurnState !== undefined &&
+            (prompt.midTurnState !== undefined ||
+              prompt.admissionOutcome === 'unknown') &&
             prompt.midTurnMessageId !== undefined &&
             !prompt.isEditing &&
             !prompt.isRemoving &&
             (settledIds.has(prompt.midTurnMessageId) ||
               (applyPromoted && promotedIds.has(prompt.midTurnMessageId)))
           ),
+      );
+      next = next.map((prompt) =>
+        prompt.admissionOutcome === 'unknown' &&
+        prompt.midTurnMessageId !== undefined &&
+        waitingIds.has(prompt.midTurnMessageId)
+          ? {
+              ...prompt,
+              midTurnState: 'queued',
+              admissionOutcome: undefined,
+              payloadAvailable: undefined,
+            }
+          : prompt,
       );
       if (next.length !== current.length) {
         const retainedIds = new Set(next.map((prompt) => prompt.id));
@@ -1049,7 +1062,29 @@ export function useQueuedPrompts({
             }
             const snapshot = await reconcileMidTurnMessages(targetSessionId);
             if (!snapshot) {
-              reportError(error, t('queue.queueFailed'));
+              if (
+                !queuedPromptsRef.current.some(
+                  (prompt) =>
+                    prompt.midTurnMessageId === midTurnMessageId ||
+                    prompt.serverPromptId === midTurnMessageId,
+                )
+              ) {
+                const next = [
+                  ...queuedPromptsRef.current,
+                  {
+                    id: nextQueuedPromptIdRef.current++,
+                    sessionId: targetSessionId,
+                    text: trimmed,
+                    midTurnMessageId,
+                    admissionOutcome: 'unknown' as const,
+                    payloadCompleteness: 'complete' as const,
+                    payloadAvailable: true,
+                  },
+                ];
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+              }
+              reportError(error, t('queue.admissionUnknown'));
               return;
             }
             const known =
@@ -1524,6 +1559,9 @@ export function useQueuedPrompts({
         return false;
       }
       if (ownerTokenRef.current !== ownerToken) return false;
+      if (target.midTurnMessageId) {
+        completionCallbacksRef.current.delete(target.midTurnMessageId);
+      }
       const next = queuedPromptsRef.current.map((prompt) =>
         prompt.id === id
           ? {

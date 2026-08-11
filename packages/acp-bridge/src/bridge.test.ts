@@ -22929,6 +22929,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     });
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const events: BridgeEvent[] = [];
+    const collecting = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      })) {
+        events.push(event);
+      }
+    })();
     let fallback: Promise<unknown> | undefined;
     const onSettledWithoutDrain = vi.fn(() => {
       fallback = bridge.sendPrompt(
@@ -22938,7 +22947,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
           prompt: [{ type: 'text', text: 'steer busy' }],
         },
         undefined,
-        { promptId: 'steer-next', clientId: session.clientId },
+        { promptId: 'steer-next' },
       );
     });
     const prompt = bridge
@@ -22952,20 +22961,18 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         { clientId: session.clientId },
       )
       .catch(() => {});
-    await new Promise((r) => setTimeout(r, 10));
+    await vi.waitFor(() => expect(prompts).toEqual(['go']));
 
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
         'steer busy',
-        { clientId: session.clientId },
+        undefined,
         'steer-busy',
         { queueOnly: true, onSettledWithoutDrain },
       ),
     ).toEqual({ accepted: true, messageId: 'steer-busy' });
-    expect(bridge.getMidTurnMessages(session.sessionId).messages).toEqual([
-      { messageId: 'steer-busy', text: 'steer busy' },
-    ]);
+    expect(bridge.getMidTurnMessages(session.sessionId).messages).toEqual([]);
     expect(
       bridge.enqueueMidTurnMessage(
         session.sessionId,
@@ -22990,6 +22997,28 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(
       bridge.getMidTurnMessages(session.sessionId).promotedMessageIds,
     ).toEqual(['ordinary-after-steering']);
+    expect(
+      events.filter(
+        (event) =>
+          (event.type === 'pending_prompt_added' ||
+            event.type === 'pending_prompt_started') &&
+          event.promptId === 'steer-next',
+      ),
+    ).toEqual([]);
+    const steeringUserEvents = events.filter(
+      (event) =>
+        event.type === 'session_update' &&
+        event.promptId === 'steer-next' &&
+        (event.data as { update?: { sessionUpdate?: string } }).update
+          ?.sessionUpdate === 'user_message_chunk',
+    );
+    expect(steeringUserEvents).toHaveLength(1);
+    expect(steeringUserEvents[0]).toMatchObject({
+      data: { update: { content: { text: 'steer busy' } } },
+    });
+    expect(steeringUserEvents[0]?.originatorClientId).toBeUndefined();
+    abort.abort();
+    await collecting;
     await bridge.shutdown();
   });
 

@@ -531,7 +531,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('does not restore text when both admission and reconciliation are ambiguous', async () => {
+  it('retains an unknown row when admission and reconciliation both fail', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
       new Error('response lost'),
     );
@@ -547,6 +547,74 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(harness.reportError).toHaveBeenCalledTimes(1);
       expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'possibly accepted',
+          midTurnMessageId: messageId,
+          admissionOutcome: 'unknown',
+          payloadAvailable: true,
+        }),
+      ]);
+
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [{ messageId, text: 'possibly accepted' }],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      });
+      await harness.render({ streamingState: 'responding', connected: false });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(harness.result().queuedPrompts).toEqual([
+        expect.objectContaining({
+          text: 'possibly accepted',
+          midTurnMessageId: messageId,
+          midTurnState: 'queued',
+          admissionOutcome: undefined,
+        }),
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores an unknown mid-turn payload without later completing it', async () => {
+    const onComplete = vi.fn();
+    sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
+      new Error('response lost'),
+    );
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue(undefined);
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('recover me', undefined, onComplete);
+      });
+      const row = harness.result().queuedPrompts[0]!;
+      const messageId = row.midTurnMessageId!;
+      await act(async () => {
+        expect(harness.result().restoreUnknownQueuedPrompt(row.id)).toBe(true);
+      });
+      expect(harness.editor.setText).toHaveBeenCalledWith('recover me');
+
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: [messageId],
+        promotedMessageIds: [],
+      });
+      await harness.render({ streamingState: 'responding', connected: false });
+      await harness.render({ streamingState: 'responding', connected: true });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(onComplete).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }
