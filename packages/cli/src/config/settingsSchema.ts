@@ -1602,7 +1602,7 @@ const SETTINGS_SCHEMA = {
         default: DEFAULT_OPENAI_LOG_RETENTION_DAYS,
         minimum: 0,
         description:
-          'Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Log files older than this are removed by an interactive-session background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour). For a custom openAILoggingDir, configure this at user or system scope; workspace-scoped retention is skipped because one directory can be shared by multiple workspaces.',
+          'Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Completed background housekeeping passes run at most once per day in interactive, headless, stream-json SDK, and ACP sessions. Short-lived non-interactive processes make best-effort progress, while persistent processes scan to completion. Set to 0 for minimum retention (~1 hour). For a custom openAILoggingDir, configure this at user or system scope; workspace-scoped retention is skipped because one directory can be shared by multiple workspaces.',
         showInDialog: false,
       },
       generationConfig: {
