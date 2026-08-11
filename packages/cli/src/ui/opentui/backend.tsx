@@ -255,6 +255,32 @@ function AssistantMessage(props: {
 // app
 // ---------------------------------------------------------------------------
 
+const LOGO = '▄▀▀▀▀▄';
+
+/** Original-style header banner. Stable: depends only on config/width, so it
+ *  does not re-render on streaming; resize re-renders without flicker via the
+ *  erase-free painter. */
+function buildBanner(config: Config | undefined, width: number) {
+  const version = 'v0.21.7';
+  const m = (
+    config as (Config & { getModel?: () => unknown }) | undefined
+  )?.getModel?.();
+  const model =
+    (typeof m === 'string' ? m : (m as { id?: string } | undefined)?.id) ??
+    'qwen';
+  const cwd = process.cwd().split('/').slice(-2).join('/');
+  const cols = Math.max(width - 2, 1);
+  return (
+    <box flexDirection="column" marginLeft={1} marginRight={1} flexShrink={0}>
+      <text fg={C.accent}>
+        {LOGO} Qwen Code {version}
+      </text>
+      <text fg={C.dim}>{'model: ' + model + '   ' + cwd}</text>
+      <text fg={C.dim}>{'─'.repeat(cols)}</text>
+    </box>
+  );
+}
+
 function App({
   events,
   config,
@@ -471,8 +497,11 @@ function App({
     [startStream, config, applyEvent],
   );
 
+  const banner = buildBanner(config, width);
+
   return (
     <box flexDirection="column" width={width} height="100%">
+      {banner}
       {/* chat viewport — replaces qwen-code VP mode */}
       <scrollbox
         flexGrow={1}
