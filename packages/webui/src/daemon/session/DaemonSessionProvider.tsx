@@ -688,6 +688,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreSessionId !== undefined &&
       restoreSessionId === sessionRef.current?.sessionId &&
       sessionRef.current === skipNextCleanupDetachSessionRef.current;
+    const effectPendingSessionLoad = pendingSessionLoadRef.current;
     let runnerSession = sessionRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
@@ -810,7 +811,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         | Awaited<ReturnType<DaemonClient['capabilities']>>
         | undefined;
       let reconnectSessionId = restoreSessionId;
-      let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
+      let shouldCreateFreshSession =
+        !manualSessionClearRef.current &&
+        !restoreSessionId &&
+        newSessionNonce > 0;
       let reconnectAttempt = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
@@ -1570,11 +1574,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     },
               );
               let nextCheckpoint: DaemonTranscriptState | undefined;
-              for (const [index, group] of eventGroups.entries()) {
-                if (index === markerIndex) {
-                  nextCheckpoint = replayStore.getSnapshot();
+              if (markerIndex < 0 && repairingEpisode === undefined) {
+                // Ordinary replay needs no intermediate checkpoint. Dispatch
+                // once so rebuilding a long transcript stays O(B), not O(E×B).
+                replayStore.dispatch(allUiEvents);
+              } else {
+                for (const [index, group] of eventGroups.entries()) {
+                  if (index === markerIndex) {
+                    nextCheckpoint = replayStore.getSnapshot();
+                  }
+                  replayStore.dispatch(group.transcript);
                 }
-                replayStore.dispatch(group.transcript);
               }
               const replayState = replayStore.getSnapshot();
               replayExceededCapacity =
@@ -2360,6 +2370,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);
+          const pendingLoad = pendingSessionLoadRef.current;
+          const errorBody =
+            error instanceof DaemonHttpError && isRecord(error.body)
+              ? error.body
+              : undefined;
+          if (
+            autoReconnect &&
+            loadingRequestedSession &&
+            pendingLoad?.sessionId === restoreSessionId &&
+            error instanceof DaemonHttpError &&
+            error.status === 404 &&
+            typeof errorBody?.['error'] === 'string' &&
+            errorBody['error'].endsWith(
+              'The session is closing; retry after close completes',
+            )
+          ) {
+            reconnectAttempt += 1;
+            const reconnectConfig = reconnectConfigRef.current;
+            await delay(
+              getReconnectDelayMs(
+                reconnectAttempt,
+                reconnectConfig.reconnectDelayMs,
+                reconnectConfig.maxReconnectDelayMs,
+              ),
+              abort.signal,
+            );
+            if (pendingSessionLoadRef.current !== pendingLoad) return;
+            continue;
+          }
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -2375,7 +2414,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
-          const pendingLoad = pendingSessionLoadRef.current;
           if (
             pendingLoad &&
             (pendingLoad.sessionId === restoreSessionId ||
@@ -2556,7 +2594,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
       if (
-        pendingSessionLoadRef.current &&
+        effectPendingSessionLoad !== undefined &&
+        pendingSessionLoadRef.current === effectPendingSessionLoad &&
         (ownsCurrentSession || ownsEmptyState) &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
