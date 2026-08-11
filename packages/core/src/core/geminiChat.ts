@@ -974,26 +974,49 @@ function appendRecoveryContinuationParts(
  * empty-signature placeholder when none exists). A stream's own
  * truncation can only ever leave the DANGLING episode as the trailing
  * element -- any part that follows it in the same stream would have
- * already flushed it via `flushThoughtEpisode()` -- so restricting to
- * "trailing" is what lets this distinguish "truncated mid-episode" from
- * "a provider that doesn't sign its thinking" using only the shape of
- * the array, with no provider-specific context available at this layer.
- * (A wire-protocol violation that drops a non-trailing episode's
- * signature without truncating the connection is a distinct, accepted
- * residual risk -- see the "Known limitation" note above the episode
- * consolidation loop -- and is not safely fixable here for the same
- * reason: it's indistinguishable from DeepSeek's legitimate shape.)
+ * already flushed it via `flushThoughtEpisode()` -- so "trailing" is the
+ * only signal available at this layer, where no provider-specific context
+ * exists.
  *
- * Applied at TWO call sites: once at the end of a single stream's
- * consolidation, and again on the truncated turn's OWN parts (with
- * `hasToolCall` reinterpreted as "the recovery continuation is about to
- * introduce a functionCall") immediately before `coalesceRecoveryPairs`
- * merges it with a recovery continuation. The second call site exists
- * because the per-stream trailing check can't see a functionCall that
- * hasn't arrived yet: the MAX_TOKENS recovery loop only proceeds when the
+ * Two accepted false-result directions, neither safely fixable here:
+ *
+ *  - FALSE NEGATIVE: a wire-protocol violation that drops a NON-trailing
+ *    episode's signature without truncating the connection is not caught.
+ *    See the "Known limitation" note above the episode consolidation loop.
+ *  - FALSE POSITIVE: a non-signing provider (DeepSeek) whose stream is
+ *    truncated mid-reasoning after a tool call also ends in an unsigned
+ *    trailing thought, and its legitimate reasoning text is dropped from
+ *    both history and the JSONL record. Trailing-only scope does NOT
+ *    distinguish that from a truncated signing-provider episode; the shape
+ *    is genuinely identical. Gating the pop on "this turn contains at least
+ *    one signature" was evaluated and rejected: it is wrong at the
+ *    recovery-coalescing call site below, where a truncated turn legitimately
+ *    has no signature anywhere yet. Losing a trailing reasoning fragment for
+ *    a provider that never validates signatures is the cheaper failure than
+ *    permanently wedging a session that does.
+ *
+ * Applied at THREE call sites: at the end of a single stream's
+ * consolidation; inside the XML tool-call recovery branch, immediately
+ * before the recovered `functionCall` parts are appended (the per-stream
+ * call has already early-returned there, because recovery's own gate
+ * requires `hasToolCall === false`, and once the calls are appended the
+ * episode is no longer trailing); and on the truncated turn's OWN parts
+ * (with `hasToolCall` reinterpreted as "the recovery continuation is about
+ * to introduce a functionCall") immediately before `coalesceRecoveryPairs`
+ * merges it with a recovery continuation. The last call site exists because
+ * the per-stream trailing check can't see a functionCall that hasn't
+ * arrived yet: the MAX_TOKENS recovery loop only proceeds when the
  * truncated turn has NO functionCall of its own, so the first call site's
  * `hasToolCall` is false and it never fires -- exactly the precondition
  * under which the merge is about to attach one from a different attempt.
+ *
+ * Scope limit: the coalescing call site mutates in-memory history only.
+ * `recordAssistantTurn` has already written the truncated turn to the
+ * session JSONL by then, so `--resume` rehydrates the dangling episode and
+ * can re-create the wedge this function prevents in-session. That is
+ * inherited drift in the recovery-coalescing mechanism as a whole (the
+ * dropped recovery pair is likewise already on disk), not something this
+ * check introduces, and closing it belongs at the persistence layer.
  */
 function dropDanglingUnsignedTrailingThought(
   parts: Part[],
@@ -4317,6 +4340,25 @@ export class GeminiChat {
     // Anthropic interleaved thinking or OpenAI Responses reasoning items as
     // implemented, but would misattribute text across episodes if a
     // non-compliant proxy ever dropped a signature entirely.
+    //
+    // Known limitation (mirror image of the above): two back-to-back
+    // TEXT-LESS thought parts that each carry their own signature also
+    // merge, and their signatures are concatenated into one
+    // `{text:'', thought:true, thoughtSignature:'AB'}` part that is valid
+    // for neither block. The split condition requires `partText !== ''`,
+    // so a text-less part can never open a new episode, while the
+    // signature accumulation below is unconditional. This is not
+    // disambiguable here: `frag1`+`frag2` within one episode is precisely
+    // the fragmentation case the concatenation exists to serve, and it
+    // is indistinguishable from two complete text-less episodes. Prior
+    // behavior dropped the signature entirely in this shape (no text
+    // meant no emitted part), so this trades a lossy result for a
+    // corrupt-on-replay one -- a bad signature 400s where a missing one
+    // merely degrades. Not reachable on the Anthropic wire, where a
+    // thinking block always carries text; it IS reachable on the OpenAI
+    // Responses wire when reasoning summaries are disabled and only
+    // `encrypted_content` is returned, since every reasoning item is then
+    // text-less (see #8169).
     const consolidatedHistoryParts: Part[] = [];
     let openEpisodeText = '';
     let openEpisodeSignature = '';
@@ -4465,6 +4507,18 @@ export class GeminiChat {
             text: recovery.remainingText,
           });
         }
+        // Third call site for the dangling-episode drop, and the only one
+        // that can catch this path. The per-stream call above already ran
+        // with `hasToolCall === false` (XML recovery's own gate requires
+        // it), so it early-returned; appending functionCallParts below is
+        // what turns this into an active tool-use turn, and once they're
+        // appended the dangling episode is no longer trailing and the
+        // trailing-only check can never see it. Run it here, while the
+        // episode is still last, with the recovery-derived gate.
+        dropDanglingUnsignedTrailingThought(
+          consolidatedHistoryParts,
+          recovery.functionCallParts.some((p) => p.functionCall !== undefined),
+        );
         consolidatedHistoryParts.push(...recovery.functionCallParts);
         // Recompute contentText so the post-recovery validation below
         // (and the recovery debug log) reflects the rewritten parts; the
@@ -4560,13 +4614,14 @@ export class GeminiChat {
         this.config.getContentGeneratorConfig()?.contextWindowSize;
       const recordArgs = {
         model,
-        message: consolidatedHistoryParts
-          .map((part) =>
-            part.functionCall
-              ? redactStructuredOutputArgsForRecording(part)
-              : part,
-          )
-          .filter((part): part is NonNullable<typeof part> => part !== null),
+        message: consolidatedHistoryParts.map((part) =>
+          // Non-null: redactStructuredOutputArgsForRecording only returns
+          // null for parts with no functionCall, which this ternary
+          // already excludes.
+          part.functionCall
+            ? redactStructuredOutputArgsForRecording(part)!
+            : part,
+        ),
         tokens: coercedUsage
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,

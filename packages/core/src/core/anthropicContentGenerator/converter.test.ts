@@ -1235,13 +1235,16 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[4]?.id).toBe('t2');
     });
 
-    it('ensureLeadingAssistantThinking only reorders the LAST assistant message, leaving earlier ones in chronological order', () => {
+    it('ensureLeadingAssistantThinking normalizes EVERY tool_use-bearing assistant message, not only the last', () => {
       // Every other case here collapses all model turns into exactly one
-      // assistant message, so the backward scan (target the last assistant
-      // message) has no discriminating test -- a mutation to a forward
-      // scan (reorder the FIRST assistant message and return) would leave
-      // every other test green while reordering the wrong turn and leaving
-      // the real final turn text-leading, which Anthropic rejects.
+      // assistant message, so "which messages get normalized" has no
+      // discriminating test. A mutation that stops at the first (or the
+      // last) assistant message and returns would leave every other test
+      // green while leaving a sibling turn text-leading. That shape is the
+      // #3786 rejection reported against a PRIOR assistant turn, and it
+      // also makes a turn's serialization depend on its position in
+      // history, which breaks the prompt-cache prefix on every request
+      // (see the position-independence test below).
       const { messages } = converter.convertGeminiRequestToAnthropic(
         {
           model: 'models/test',
@@ -1295,8 +1298,8 @@ describe('AnthropicContentConverter', () => {
         type: string;
       }>;
       expect(earlierBlocks.map((b) => b.type)).toEqual([
-        'text',
         'thinking',
+        'text',
         'tool_use',
       ]);
 
@@ -1308,6 +1311,130 @@ describe('AnthropicContentConverter', () => {
         'text',
         'tool_use',
       ]);
+    });
+
+    it('ensureLeadingAssistantThinking leaves an assistant message with no tool_use in chronological order', () => {
+      // The wire only enforces leading thinking on tool_use turns
+      // (this option's documented scope, and the boundary
+      // injectEmptyThinkingOnToolUseTurns was live-verified against). A
+      // mutation dropping the tool_use gate would reorder plain-text
+      // replay turns for no protocol reason, moving blocks the previous
+      // latest-only implementation also never touched once a later turn
+      // existed.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'plain answer' },
+                { text: 'thought A', thought: true, thoughtSignature: 'sigA' },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'and again' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'thought B', thought: true, thoughtSignature: 'sigB' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      const noToolUseBlocks = assistantMessages[0]?.content as Array<{
+        type: string;
+      }>;
+      expect(noToolUseBlocks.map((b) => b.type)).toEqual(['text', 'thinking']);
+    });
+
+    it('ensureLeadingAssistantThinking serializes a turn identically whether or not a later turn follows it (prompt-cache prefix stability)', () => {
+      // Normalizing only the latest assistant message made one turn's
+      // wire shape a function of its position in history: it went out as
+      // [thinking, text, tool_use] on the request where it was current and
+      // [text, thinking, tool_use] on every request after. cache_control's
+      // breakpoint sits on the last user message, so that rewrites the
+      // cached prefix and forces a full re-read every turn. Pin that the
+      // same turn converts byte-identically in both positions.
+      const firstTurnContents = [
+        { role: 'user', parts: [{ text: 'Hi' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'text A' },
+            { text: 'thinking 1', thought: true, thoughtSignature: 'sig1' },
+            { functionCall: { id: 't1', name: 'tool', args: {} } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 't1',
+                name: 'tool',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+      ];
+
+      const whenLatest = converter.convertGeminiRequestToAnthropic(
+        { model: 'models/test', contents: firstTurnContents },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const whenPrior = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            ...firstTurnContents,
+            {
+              role: 'model',
+              parts: [
+                { text: 'thinking 2', thought: true, thoughtSignature: 'sig2' },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't2',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const firstAssistant = (r: { messages: Anthropic.MessageParam[] }) =>
+        r.messages.filter((m) => m.role === 'assistant')[0]?.content;
+
+      expect(firstAssistant(whenPrior)).toEqual(firstAssistant(whenLatest));
     });
 
     it('ensureLeadingAssistantThinking relocates a multi-block first thinking run as a single unit', () => {
