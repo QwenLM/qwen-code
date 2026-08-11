@@ -283,4 +283,56 @@ describe('TextSelectionController', () => {
 
     expect(setSelection).not.toHaveBeenCalled();
   });
+
+  const renderController = (eventsPaused: boolean) =>
+    render(
+      <TextSelectionController
+        isActive
+        eventsPaused={eventsPaused}
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+
+  it('does not start a selection while eventsPaused', () => {
+    renderController(true);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('move', 5));
+    handler(makeEvent('left-release', 5));
+
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('preserves an existing selection when eventsPaused flips on', () => {
+    const { rerender } = renderController(false);
+    const handler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    selectHello(handler);
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 0,
+    });
+    setSelection.mockClear();
+
+    rerender(
+      <TextSelectionController
+        isActive
+        eventsPaused
+        getViewportRect={() => viewportRect}
+        getScrollState={() => scrollState}
+        hitTestScrollbar={() => false}
+      />,
+    );
+    const pausedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)![0];
+    pausedHandler(makeEvent('left-press', 1));
+    pausedHandler(makeEvent('left-release', 1));
+
+    // No clear (setSelection(null)) and no new selection — the range survives.
+    expect(setSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+  });
 });
