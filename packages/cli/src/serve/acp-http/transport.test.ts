@@ -3257,6 +3257,66 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('cancels session/list without buffering an error when the connection is destroyed', async () => {
+    let loadSignal: AbortSignal | undefined;
+    const listSessionsSpy = vi
+      .spyOn(SessionService.prototype, 'listSessions')
+      .mockImplementation(async (options) => {
+        const signal = options?.signal;
+        expect(signal).toBeDefined();
+        loadSignal = signal;
+        await new Promise<void>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        });
+        return { items: [], nextCursor: undefined, hasMore: false };
+      });
+
+    try {
+      const connId = await initialize();
+      const conn = acpHandle?.registry.get(connId);
+      expect(conn).toBeDefined();
+      const bufferedBefore = conn!.getDiagnostic().bufferedConnectionFrames;
+      const logCallsBefore = stdioMocks.writeStderrLine.mock.calls.length;
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 130,
+        method: 'session/list',
+        params: { workspaceCwd: TEST_WORKSPACE, view: 'organized' },
+      });
+      await waitUntil(() => loadSignal !== undefined);
+
+      const deleted = await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': connId },
+      });
+      expect(deleted.status).toBe(202);
+      await waitUntil(() => loadSignal?.aborted === true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(conn!.abortSignal.aborted).toBe(true);
+      expect(conn!.getDiagnostic().bufferedConnectionFrames).toBe(
+        bufferedBefore,
+      );
+      const cancellationLogs = stdioMocks.writeStderrLine.mock.calls
+        .slice(logCallsBefore)
+        .flat();
+      expect(
+        cancellationLogs.some(
+          (line) =>
+            typeof line === 'string' && line.includes('/acp dispatch error'),
+        ),
+      ).toBe(false);
+    } finally {
+      listSessionsSpy.mockRestore();
+    }
+  });
+
   it('_qwen/sessions/archive rejects invalid batch params', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);

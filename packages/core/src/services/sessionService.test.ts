@@ -156,6 +156,43 @@ describe('SessionService', () => {
       expect(result.nextCursor).toBeUndefined();
     });
 
+    it('yields after 128 directory entries and stops statting after cancellation', async () => {
+      const fileNames = Array.from(
+        { length: 129 },
+        (_, index) => `${index.toString(16).padStart(32, '0')}.jsonl`,
+      );
+      readdirSyncSpy.mockReturnValue(
+        fileNames as unknown as Array<fs.Dirent<Buffer>>,
+      );
+      const controller = new AbortController();
+      const reason = Object.assign(new Error('catalog request disconnected'), {
+        code: 'ENOENT',
+      });
+      setImmediate(() => controller.abort(reason));
+
+      await expect(
+        sessionService.listSessions({ signal: controller.signal }),
+      ).rejects.toBe(reason);
+      expect(statSyncSpy).toHaveBeenCalledTimes(128);
+      expect(jsonl.readLines).not.toHaveBeenCalled();
+    });
+
+    it('does not yield during directory enumeration without a signal', async () => {
+      const fileNames = Array.from(
+        { length: 129 },
+        (_, index) => `${index.toString(16).padStart(32, '0')}.jsonl`,
+      );
+      readdirSyncSpy.mockReturnValue(
+        fileNames as unknown as Array<fs.Dirent<Buffer>>,
+      );
+      const setImmediateSpy = vi.spyOn(globalThis, 'setImmediate');
+
+      await sessionService.listSessions({ size: 0 });
+
+      expect(statSyncSpy).toHaveBeenCalledTimes(129);
+      expect(setImmediateSpy).not.toHaveBeenCalled();
+    });
+
     it('should return empty list when chats directory does not exist', async () => {
       const error = new Error('ENOENT') as NodeJS.ErrnoException;
       error.code = 'ENOENT';
@@ -2329,6 +2366,40 @@ describe('SessionService', () => {
       );
 
       expect(exists).toBe(false);
+    });
+
+    it('does not convert cancellation into a missing session', async () => {
+      const controller = new AbortController();
+      const reason = new Error('existence check cancelled');
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (_filePath, _count, options) => {
+          controller.abort(reason);
+          options?.signal?.throwIfAborted();
+          return [];
+        },
+      );
+
+      await expect(
+        sessionService.sessionExists(sessionIdA, {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(jsonl.readLines).toHaveBeenCalledWith(expect.any(String), 1, {
+        signal: controller.signal,
+      });
+    });
+
+    it('observes cancellation after the project-membership await', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const controller = new AbortController();
+      const reason = new Error('cancelled after membership resolved');
+
+      const exists = sessionService.sessionExists(sessionIdA, {
+        signal: controller.signal,
+      });
+      queueMicrotask(() => controller.abort(reason));
+
+      await expect(exists).rejects.toBe(reason);
     });
 
     it('should return false for session from different project', async () => {

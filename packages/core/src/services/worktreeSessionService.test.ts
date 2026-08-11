@@ -41,6 +41,16 @@ afterEach(async () => {
 });
 
 describe('readWorktreeSession', () => {
+  it('propagates the caller abort reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('worktree sidecar read cancelled');
+    controller.abort(reason);
+
+    await expect(
+      readWorktreeSession(filePath, { signal: controller.signal }),
+    ).rejects.toBe(reason);
+  });
+
   it('returns null when file does not exist', async () => {
     expect(await readWorktreeSession(filePath)).toBeNull();
   });

@@ -108,6 +108,16 @@ describe('writeRuntimeStatus', () => {
 });
 
 describe('readRuntimeStatus', () => {
+  it('propagates the caller abort reason', async () => {
+    const controller = new AbortController();
+    const reason = new Error('runtime status read cancelled');
+    controller.abort(reason);
+
+    await expect(
+      readRuntimeStatus(targetPath(), { signal: controller.signal }),
+    ).rejects.toBe(reason);
+  });
+
   it('round-trips a written record', async () => {
     await writeRuntimeStatus(targetPath(), {
       sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
