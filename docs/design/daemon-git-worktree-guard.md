@@ -205,6 +205,39 @@ not tracked across commands, and program words outside the unwrapped set are
 handled by failing closed on Git-shaped runs rather than by modelling their
 execution semantics.
 
+### Why this cannot be made complete here
+
+The guard decides by reading command **text** before a shell interprets it,
+and that gap is structural rather than a list of unfixed cases. Seven rounds
+of adversarial review on this change bear it out: each round closed the
+reported bypasses and each following round found more, several of them in the
+rules added by the round before. The parser is now several times the size of
+the policy it protects, and the shell's semantics — quoting modes, expansion
+order, subshell boundaries, deferred bodies, environment attributes — remain
+larger than any token scan of them.
+
+So the promise here is deliberately bounded:
+
+- **Reliable** against Git relocation written in the literal forms this
+  document lists. That is the case the control exists for: an agent that
+  mis-targets a sibling checkout, a stale `-C`, a `cd` that outlived its
+  purpose.
+- **Best-effort, not a boundary**, against shell text written to defeat it.
+  Constructions that hide the relocation from a static reader — variable
+  indirection, generated payloads, exotic quoting, program words the daemon
+  cannot model — may pass. New ones will keep being found.
+
+Treating it as more than that would be the actual risk: an operator who
+believes the daemon cannot mutate a sibling worktree will grant it broader
+trust than the mechanism earns.
+
+Closing the gap properly means moving the decision off the text. The
+enforcement point, not the parser, is what would converge — deciding where a
+command may write when it runs (a restricted working directory, a mount or
+namespace view, or interception at the Git invocation rather than the shell
+line) instead of predicting it beforehand. That is a separate change with its
+own design; this one should not grow into it by accretion.
+
 ## Non-goals
 
 - No changes to core `ShellTool`, `ShellToolInvocation`, shell AST parsing,

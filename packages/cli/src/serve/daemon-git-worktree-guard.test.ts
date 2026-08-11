@@ -18,6 +18,9 @@ const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), 'daemon-guard-'));
 const effectiveCwd = path.join(temporaryRoot, 'workspace', 'worktree');
 const insideNested = path.join(effectiveCwd, 'nested');
 const outsideRepo = path.join(temporaryRoot, 'outside', 'repo');
+// A second outside checkout whose path contains no Git word, so a test using
+// it cannot pass because `\bgit\b` happened to match inside the path.
+const plainOutsidePath = path.join(temporaryRoot, 'elsewhere', 'checkout');
 mkdirSync(path.join(outsideRepo, '.git'), { recursive: true });
 mkdirSync(insideNested, { recursive: true });
 
@@ -1637,6 +1640,46 @@ it -C ${outsideRepo} reset --hard`,
         });
       }
     });
+  });
+
+  // Defects the round-7 patch itself introduced. Each was reproduced before
+  // the fix; the path deliberately carries no Git word.
+  it.each([
+    // The fd digit of `2>…` belongs to the redirection, never to argv.
+    () => `sh -c 2> /dev/null 'git -C ${plainOutsidePath} reset --hard'`,
+    // Each `o`/`O` after `c` consumes one entry, not "one if any".
+    () => `bash -coo x y 'git -C ${plainOutsidePath} reset --hard'`,
+    // The last payload rebuild that still joined without re-quoting.
+    () => `env --split-string='git -C' '${plainOutsidePath}' reset --hard`,
+    // A lone `&` backgrounds into a subshell, so its `cd` does not stick.
+    () => `cd ${plainOutsidePath}; cd ${effectiveCwd} & git reset --hard`,
+    // `>|` is the clobber redirect, not a pipe.
+    () => `cd ${plainOutsidePath} >| /tmp/f && git -C . push`,
+    // The export attribute is shell state and crosses `eval`.
+    () =>
+      `export GIT_DIR; eval 'GIT_DIR=${plainOutsidePath}'; git reset --hard`,
+    // A deferred body is keyed on the program word, not on run[0].
+    () => `alias g='git reset --hard'; cd ${plainOutsidePath}; X=1 g`,
+  ])('closes a defect the round-7 patch introduced %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('leaves backgrounded and redirected in-boundary work alone', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'sleep 1 & git commit -m x',
+      'git status > out.txt 2> err.txt',
+      "bash -coo x y 'git status'",
+      "env --split-string='git status'",
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
   });
 
   // The shell-executing set pins ToolNames literals in acp-bridge, which

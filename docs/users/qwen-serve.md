@@ -485,7 +485,12 @@ or unresolvable repository location, and as
 parsed, its payload could not be resolved, or an unrecognized program may run
 a relocated Git command.
 
-The guard is a static best-effort policy: it does not interpret script files,
+The guard is reliable against Git relocation written in the literal forms
+above — the mis-targeted command this control exists for — and is
+**best-effort, not a boundary**, against shell text written to defeat it:
+constructions that hide the relocation from a static reader may pass, and new
+ones will keep being found. Do not grant a daemon broader trust on the
+strength of it. It does not interpret script files,
 track environment variable values across commands, or analyze heredoc bodies
 (Git-shaped text inside a heredoc can be denied even though the shell never
 executes it). `/fork` and agent-backed workspace memory remember/dream remain

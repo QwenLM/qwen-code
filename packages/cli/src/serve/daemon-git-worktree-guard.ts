@@ -700,7 +700,7 @@ function consumeEnvWrapper(
     ) {
       if (token.text.startsWith('--split-string=')) {
         const fused = token.text.slice('--split-string='.length);
-        const rest = joinTokenTexts(run.slice(index + 1));
+        const rest = joinArgvTexts(run.slice(index + 1));
         return { next: run.length, payload: rest ? `${fused} ${rest}` : fused };
       }
       index++;
@@ -796,7 +796,12 @@ type ShellWrapperScan =
 // (`sh -c > /dev/null 'cmd'`) is not the payload.
 function nextArgvIndex(run: GuardToken[], from: number): number {
   let index = from;
-  while (index < run.length && run[index]!.redirect) index++;
+  while (
+    index < run.length &&
+    (run[index]!.redirect || run[index]!.ambiguousFd)
+  ) {
+    index++;
+  }
   return index;
 }
 
@@ -837,7 +842,7 @@ function consumeShellWrapper(
       // before the command string.
       let toSkip =
         shellBundleValueFlagsBeforeCommand(token.text) +
-        (/[oO]/.test(remainder) ? 1 : 0);
+        (remainder.match(/[oO]/g)?.length ?? 0);
       while (toSkip-- > 0) {
         payloadIndex = nextArgvIndex(run, payloadIndex + 1);
       }
@@ -978,6 +983,19 @@ function disablesAllExport(run: GuardToken[], start: number): boolean {
  * `alias name='body'` and `name() { body; }` both defer a command: the body
  * runs where the *later* bare word appears, not where it was written.
  */
+/**
+ * The word that actually names the program, i.e. the first token that is not
+ * a leading assignment or a shell keyword. `X=1 g` runs `g`.
+ */
+function readProgramWord(run: GuardToken[]): string | undefined {
+  for (const token of run) {
+    if (leadingEnvAssignmentKey(token.text) !== null) continue;
+    if (LEADING_SHELL_KEYWORDS.has(token.text)) continue;
+    return token.text;
+  }
+  return undefined;
+}
+
 /** `f()` / `f ()` — the header of a function definition, if this is one. */
 function readFunctionName(run: GuardToken[]): string | undefined {
   if (run.length === 0) return undefined;
@@ -1717,6 +1735,9 @@ interface EvaluationScope {
   // Shell variables the nested command can see: `eval` and subshells inherit
   // them, a `sh -c` subprocess does not.
   readonly locals?: Map<string, GuardToken>;
+  // Names carrying the export attribute, shared with `eval` for the same
+  // reason its locals are.
+  readonly exportedNames?: Set<string>;
 }
 
 /**
@@ -1775,11 +1796,15 @@ function readTopLevelSeparators(command: string): string[] {
     if (character === '&' && next === '&') {
       separators.push('&&');
       index++;
+    } else if (character === '&') {
+      // A lone `&` backgrounds the command in its own subshell.
+      separators.push('&');
     } else if (character === '|' && next === '|') {
       separators.push('||');
       index++;
     } else if (character === '|') {
-      separators.push('|');
+      // `>|` is the clobber redirect, not a pipe.
+      separators.push(command[index - 1] === '>' ? '>|' : '|');
     } else if (character === ';') {
       separators.push(';');
     } else if (character === '\n') {
@@ -1820,7 +1845,7 @@ async function evaluateCommandWithCwd(
   const definedBodies = new Map<string, string>();
   // Names carrying the export attribute from a name-only `export KEY`; a
   // later assignment to one of them reaches the git subprocess.
-  const exportedNames = new Set<string>();
+  const exportedNames = scope.exportedNames ?? new Set<string>();
   // Function bodies that `splitCommands` cut across segments cannot be
   // replayed verbatim, so the name is recorded as Git-shaped instead and the
   // later bare word answers to the unrecognized-program containment rule.
@@ -1876,10 +1901,14 @@ async function evaluateCommandWithCwd(
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;
+  const SUBSHELL_SEPARATORS = new Set(['|', '&']);
   const isPipeComponent = (index: number): boolean =>
     separatorsMatch
-      ? separators[index - 1] === '|' || separators[index] === '|'
-      : separators.includes('|');
+      ? SUBSHELL_SEPARATORS.has(separators[index - 1] ?? '') ||
+        SUBSHELL_SEPARATORS.has(separators[index] ?? '')
+      : // Structural disagreement with `splitCommands`: scope every segment
+        // rather than guess which ones ran in a subshell.
+        separators.some((separator) => SUBSHELL_SEPARATORS.has(separator));
   for (const [segmentIndex, segment] of segments.entries()) {
     const pipeComponent = isPipeComponent(segmentIndex);
     const cwdBeforeSegment = trackedCwd;
@@ -1925,7 +1954,11 @@ async function evaluateCommandWithCwd(
         depth + 1,
         // A substitution runs in a subshell: it inherits the variables but
         // its own assignments die with it, so it gets a copy.
-        { relink: scope.relink, locals: new Map(shellLocals) },
+        {
+          relink: scope.relink,
+          locals: new Map(shellLocals),
+          exportedNames: new Set(exportedNames),
+        },
       );
       if (nested.denial) {
         return { denial: nested.denial, cwdAfter: trackedCwd };
@@ -2004,9 +2037,12 @@ async function evaluateCommandWithCwd(
             depth + 1,
             {
               relink: scope.relink,
-              // `eval` runs in this very shell, so it sees these variables;
-              // a `sh -c` subprocess inherits only exported ones.
-              ...(analysis.propagatesCwd ? { locals: shellLocals } : {}),
+              // `eval` runs in this very shell, so it sees these variables
+              // and the export attributes; a `sh -c` subprocess inherits only
+              // exported ones.
+              ...(analysis.propagatesCwd
+                ? { locals: shellLocals, exportedNames }
+                : {}),
             },
           );
           if (nested.denial) {
@@ -2179,6 +2215,7 @@ async function evaluateCommandWithCwd(
             definedBodies.set(definition.name, definition.body);
             break;
           }
+          const programToken = readProgramWord(run);
           const definitionName = readFunctionName(run);
           if (definitionName) {
             if (run.some((token) => GIT_WORD_PATTERN.test(token.text))) {
@@ -2186,9 +2223,12 @@ async function evaluateCommandWithCwd(
             }
             break;
           }
-          if (run.length === 1 && gitShapedNames.has(run[0]!.text)) {
+          if (programToken !== undefined && gitShapedNames.has(programToken)) {
             const denial = await evaluateUnrecognizedRun(
-              [run[0]!, { text: 'git', dynamic: false }],
+              [
+                { text: programToken, dynamic: false },
+                { text: 'git', dynamic: false },
+              ],
               analysis.state,
               trackedCwd,
               activeContext(),
@@ -2198,7 +2238,9 @@ async function evaluateCommandWithCwd(
             break;
           }
           const body =
-            run.length > 0 ? definedBodies.get(run[0]!.text) : undefined;
+            programToken === undefined
+              ? undefined
+              : definedBodies.get(programToken);
           if (body !== undefined) {
             if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
               return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
