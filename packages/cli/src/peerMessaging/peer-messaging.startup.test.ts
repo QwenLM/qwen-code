@@ -42,6 +42,8 @@ const { ApprovalMode, buildUserFrame, resolvePeerSocketPath } = await import(
 );
 const { PeerMessaging } = await import('./peer-messaging.js');
 
+const isWindows = process.platform === 'win32';
+const describePosix = describe.skipIf(isWindows);
 const SELF_SOCKET = resolvePeerSocketPath(456);
 const PEER_SOCKET = resolvePeerSocketPath(123);
 
@@ -69,7 +71,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('PeerMessaging.start startup window', () => {
+describePosix('PeerMessaging.start startup window', () => {
   it('gates a frame that arrives before the inbox finishes binding', async () => {
     const sent = frame();
     arriveDuringStartup(sent);
@@ -154,7 +156,7 @@ describe('PeerMessaging.start startup window', () => {
   });
 });
 
-describe('PeerMessaging.start when the bind fails after listen', () => {
+describePosix('PeerMessaging.start when the bind fails after listen', () => {
   // `startPeerInbox` returns null after `listen()` when the socket chmod
   // fails. The gate has been wired since before the bind, so frames can
   // already have been admitted during the window — and `start()` must

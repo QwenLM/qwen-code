@@ -245,8 +245,12 @@ export class InboundGate {
     if (!entry) return 'gone';
 
     if (decision === 'approve') {
-      this.options.deliver(entry.frame);
-      this.options.reportStatus?.(entry.frame, 'delivered');
+      if (this.shuttingDown || hasExitStarted()) {
+        this.options.reportStatus?.(entry.frame, 'expired');
+      } else {
+        this.options.deliver(entry.frame);
+        this.options.reportStatus?.(entry.frame, 'delivered');
+      }
     } else {
       this.options.reportStatus?.(entry.frame, 'denied');
     }
@@ -289,8 +293,12 @@ export class InboundGate {
     this.held.push(...stillHeld);
 
     for (const entry of release) {
-      this.options.deliver(entry.frame);
-      this.options.reportStatus?.(entry.frame, 'delivered');
+      if (this.shuttingDown || hasExitStarted()) {
+        this.options.reportStatus?.(entry.frame, 'expired');
+      } else {
+        this.options.deliver(entry.frame);
+        this.options.reportStatus?.(entry.frame, 'delivered');
+      }
     }
 
     // A refreshed cause is a held-set change too: the UI caches what it

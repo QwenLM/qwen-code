@@ -210,6 +210,17 @@ describe('receipts', () => {
     expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'delivered' });
   });
 
+  it('expires an approved held message once exit starts', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame();
+    h.gate.admit(f);
+    markExitStarted();
+
+    expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
+    expect(h.delivered).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+  });
+
   it('reports denied when a held message is rejected', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
     const f = frame();
@@ -265,6 +276,19 @@ describe('reevaluate', () => {
     expect(h.gate.reevaluate('mode-changed')).toBe(1);
     expect(h.delivered).toEqual([f]);
     expect(h.gate.getHeld()).toHaveLength(0);
+  });
+
+  it('expires releasable messages once exit starts', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const f = frame({ fromMode: 'prompting' });
+    h.gate.admit(f);
+    markExitStarted();
+
+    h.setMode(ApprovalMode.DEFAULT);
+    expect(h.gate.reevaluate('mode-changed')).toBe(1);
+    expect(h.delivered).toHaveLength(0);
+    expect(h.gate.getHeld()).toHaveLength(0);
+    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
   });
 
   it('drops the backlog when the policy becomes refuse', () => {
