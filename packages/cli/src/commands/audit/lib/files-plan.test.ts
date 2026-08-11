@@ -26,11 +26,14 @@ import {
   classifyAuditPath,
   collectAuditFiles,
   estimateTokens,
+  FILE_GROUP_LINES,
   LOW_ANGLE_FLOOR_LINES,
+  LOW_FINDING_CAP,
   LOW_SUBJECT_LINES_GATE,
   LOW_SWEEP_FLOOR_LINES,
   lowTierConfig,
   MAX_LINE_CHARS,
+  MAX_REVERSE_ROUNDS,
   resolveAuditRoot,
   rosterForEffort,
   SUBJECT_LINES_GATE,
@@ -100,6 +103,9 @@ describe('walkAuditTree', () => {
       'Pods',
       '.tox',
       '.qwen',
+      'venv',
+      'env',
+      'virtualenv',
     ]) {
       mkdirSync(join(dir, 'src', name), { recursive: true });
       writeFileSync(join(dir, 'src', name, 'x.ts'), 'const x = 1;\n');
@@ -126,6 +132,8 @@ describe('walkAuditTree', () => {
       join(dir, 'vendor', 'pkg', 'build', 'app.js'),
       'module.exports = {};\n',
     );
+    mkdirSync(join(dir, 'bundle'), { recursive: true });
+    writeFileSync(join(dir, 'bundle', 'app.js'), 'console.log(3);\n');
     const { files, excludedDirs } = walkAuditTree(dir);
     expect(files).not.toContain('dist/out.js');
     expect(files).not.toContain('build/app.js');
@@ -133,6 +141,10 @@ describe('walkAuditTree', () => {
     expect(files).toContain('vendor/pkg/build/app.js');
     expect(excludedDirs).toContain('dist');
     expect(excludedDirs).toContain('build');
+    // bundle/ is third-party output in BOTH positions (Bundler under
+    // vendor, JS bundlers at the top level).
+    expect(files).not.toContain('bundle/app.js');
+    expect(excludedDirs).toContain('bundle');
   });
 
   it('excludes node_modules even under vendor/, and vendor/bundle', () => {
@@ -159,13 +171,30 @@ describe('walkAuditTree', () => {
     expect(excludedDirs).toContain('bundle');
   });
 
-  it('does not treat a vendor-named ancestor of the audited path as vendoring', () => {
+  it('applies the vendor rules to a root under a vendor-named ancestor', () => {
+    // Start-point independence: a walk that DESCENDS into vendor/ keeps
+    // vendor/acme/dist as a subject, so starting AT vendor/acme must too.
     const root = join(dir, 'vendor', 'acme');
     mkdirSync(join(root, 'dist'), { recursive: true });
     writeFileSync(join(root, 'dist', 'out.js'), 'console.log(1);\n');
-    const { files, excludedDirs } = walkAuditTree(root);
-    expect(files).not.toContain('dist/out.js');
-    expect(excludedDirs).toContain('dist');
+    const { files } = walkAuditTree(root);
+    expect(files).toContain('dist/out.js');
+  });
+
+  it('keeps the verdicts start-point-independent for vendor roots', () => {
+    // vendor/bundle: a Bundler install — excluded whether the walk descends
+    // into vendor/ or starts at the install dir.
+    const bundleRoot = join(dir, 'vendor', 'bundle');
+    mkdirSync(bundleRoot, { recursive: true });
+    writeFileSync(join(bundleRoot, 'gem.rb'), 'x');
+    const bundleWalk = walkAuditTree(bundleRoot);
+    expect(bundleWalk.files).toEqual([]);
+    expect(bundleWalk.excludedDirs).toEqual(['.']);
+    // vendor/pkg/dist: shipped package output — kept either way.
+    const distRoot = join(dir, 'vendor', 'pkg', 'dist');
+    mkdirSync(distRoot, { recursive: true });
+    writeFileSync(join(distRoot, 'index.js'), 'module.exports = {};');
+    expect(walkAuditTree(distRoot).files).toContain('index.js');
   });
 
   it('treats an excluded name at the path root as excluding everything', () => {
@@ -285,6 +314,33 @@ describe('collectAuditFiles', () => {
     expect(uncoverable.get('module.pyc')?.reason).toBe('non-text');
   });
 
+  it('records secret-shaped files by name and never content-reads them', () => {
+    writeFileSync(join(dir, '.env'), 'API_KEY=secret\n');
+    writeFileSync(join(dir, '.env.local'), 'TOKEN=x\n');
+    mkdirSync(join(dir, 'deploy'), { recursive: true });
+    writeFileSync(join(dir, 'deploy', 'server.pem'), '-----BEGIN-----\n');
+    writeFileSync(join(dir, 'id_rsa'), '-----BEGIN OPENSSH-----\n');
+    writeFileSync(join(dir, 'state.tfstate'), '{}\n');
+    writeFileSync(join(dir, '.npmrc'), '//registry/:_authToken=x\n');
+    const c = collectAuditFiles(dir);
+    const secrets = c.uncoverable.filter((u) => u.reason === 'secret-shaped');
+    expect(secrets.map((u) => u.path).sort()).toEqual([
+      '.env',
+      '.env.local',
+      '.npmrc',
+      'deploy/server.pem',
+      'id_rsa',
+      'state.tfstate',
+    ]);
+    // Names surface at the confirmation; zero lines steer the gate arms.
+    expect(secrets.every((u) => u.lines === 0)).toBe(true);
+    // A regular .ts file named after a secret shape is not caught.
+    writeFileSync(join(dir, 'src', 'env-config.ts'), 'export const e = 1;\n');
+    expect(collectAuditFiles(dir).subjects.map((f) => f.path)).toContain(
+      'src/env-config.ts',
+    );
+  });
+
   it('keeps generated files subjects at collection level', () => {
     writeFileSync(join(dir, 'package-lock.json'), '{"lockfileVersion":3}\n');
     const c = collectAuditFiles(dir);
@@ -308,6 +364,19 @@ describe('collectAuditFiles', () => {
     expect(c.uncoverable.find((u) => u.path === 'src/payload.ts')?.reason).toBe(
       'non-text',
     );
+  });
+
+  it('detects a NUL past the head window as non-text', () => {
+    // The old scan windowed the first 8 KiB; a binary whose first NUL sits
+    // after it escaped as text.
+    writeFileSync(
+      join(dir, 'src', 'late-nul.ts'),
+      `${'a'.repeat(16 * 1024)}\0trailing`,
+    );
+    const c = collectAuditFiles(dir);
+    expect(
+      c.uncoverable.find((u) => u.path === 'src/late-nul.ts')?.reason,
+    ).toBe('non-text');
   });
 
   it('detects an over-cap line as uncoverable with its lines counted', () => {
@@ -369,6 +438,39 @@ describe('collectAuditFiles', () => {
     const c = collectAuditFiles(dir);
     expect(c.eventDetection.callSites).toBe(0);
     expect(c.eventDetection.detected).toBe(false);
+  });
+
+  it('does not count event keywords inside comments or strings', () => {
+    for (const name of ['commented.ts', 'quoted.ts']) {
+      writeFileSync(
+        join(dir, 'src', name),
+        [
+          Array.from({ length: 5 }, (_, i) => `// emit('e${i}')`).join('\n'),
+          Array.from(
+            { length: 3 },
+            (_, i) => `const s${i} = 'dispatch(x)';`,
+          ).join('\n'),
+          '/* subscribe(handlers) */',
+        ].join('\n'),
+      );
+    }
+    const c = collectAuditFiles(dir);
+    expect(c.eventDetection.callSites).toBe(0);
+    expect(c.eventDetection.detected).toBe(false);
+  });
+
+  it('counts .once() alongside .on() as an event call site', () => {
+    for (const name of ['once-bus.ts', 'once-wire.ts']) {
+      writeFileSync(
+        join(dir, 'src', name),
+        Array.from({ length: 5 }, (_, i) => `emitter.once('e${i}', h)`).join(
+          '\n',
+        ),
+      );
+    }
+    const c = collectAuditFiles(dir);
+    expect(c.eventDetection.detected).toBe(true);
+    expect(c.eventDetection.files).toBe(2);
   });
 
   it('does not count past-tense and stem-prefix calls as event call sites', () => {
@@ -460,6 +562,33 @@ describe('buildFilesPlan gates', () => {
     expect(planFor(big, 'medium').subjectLines).toBe(
       LOW_SUBJECT_LINES_GATE + 1,
     );
+  });
+
+  it('names the path when the low-gate remedy would bounce into the test gate', () => {
+    // 2,500 subject lines: over low's gate, subject-legal at medium — but
+    // 20,000 test lines trip medium's test gate, so '--effort medium' would
+    // refuse again.
+    const c = collect({
+      uncoverable: [],
+      subjects: [
+        {
+          path: 'a.ts',
+          kind: 'source',
+          lines: LOW_SUBJECT_LINES_GATE + 500,
+          chars: 0,
+        },
+      ],
+      testCorpus: [
+        {
+          path: 'a.test.ts',
+          kind: 'test',
+          lines: TEST_LINES_GATE + 2_000,
+          chars: 0,
+        },
+      ],
+    });
+    expect(() => planFor(c, 'low')).toThrow(/narrow the path/);
+    expect(() => planFor(c, 'low')).toThrow(/test lines exceed/);
   });
 
   it('names the path, not a dead-end tier change, when medium would hit the cap', () => {
@@ -604,7 +733,7 @@ describe('roster and tier config', () => {
     expect(lowTierConfig(500).angles).toEqual(['A', 'C', 'D', 'E', 'F']);
     expect(lowTierConfig(500).angleFloorApplied).toBe(false);
     expect(lowTierConfig(500).sweep).toBe(true);
-    expect(lowTierConfig(500).findingCap).toBe(10);
+    expect(lowTierConfig(500).findingCap).toBe(LOW_FINDING_CAP);
   });
 
   it('the angle and sweep floors flip exactly at their constants', () => {
@@ -628,10 +757,28 @@ describe('roster and tier config', () => {
     const high = planFor(c, 'high');
     expect(high.fileGroups).not.toBeNull();
     expect(high.agentBound).toBe(
-      (high.roster.length + high.fileGroups!.length * 5) * 2,
+      (high.roster.length + high.fileGroups!.length * MAX_REVERSE_ROUNDS) * 2,
     );
     expect(planFor(c, 'medium').fileGroups).toBeNull();
     expect(planFor(c, 'medium').agentBound).toBeNull();
+  });
+  it('keys the low tier on walked lines, not gate-arm totals', () => {
+    // A small walked module padded by an over-cap uncoverable text file:
+    // the gate arm counts the padding, the low tier must not.
+    const c = collect({
+      subjects: [{ path: 'a.ts', kind: 'source', lines: 10, chars: 0 }],
+      uncoverable: [
+        {
+          path: 'gen.txt',
+          kind: 'source',
+          reason: 'over-cap-lines',
+          lines: LOW_ANGLE_FLOOR_LINES + 100,
+        },
+      ],
+    });
+    const low = planFor(c, 'low');
+    expect(low.lowTier?.angleFloorApplied).toBe(true);
+    expect(low.lowTier?.angles).toEqual(['A', 'C']);
   });
 });
 
@@ -643,16 +790,21 @@ describe('tileFileGroups', () => {
       lines,
       chars: 0,
     });
+    // 400 is FILE_GROUP_LINES — express the fixture against it so the
+    // expected groups cannot survive a constant move with the wrong shape.
     const groups = tileFileGroups([
-      entry('a.ts', 300),
-      entry('b.ts', 200),
-      entry('c.ts', 500),
-      entry('d.ts', 50),
+      entry('a.ts', FILE_GROUP_LINES - 100),
+      entry('b.ts', FILE_GROUP_LINES / 2),
+      entry('c.ts', FILE_GROUP_LINES + 100),
+      entry('d.ts', FILE_GROUP_LINES / 8),
     ]);
     expect(groups).toEqual([['a.ts'], ['b.ts'], ['c.ts'], ['d.ts']]);
-    expect(tileFileGroups([entry('a.ts', 300), entry('b.ts', 100)])).toEqual([
-      ['a.ts', 'b.ts'],
-    ]);
+    expect(
+      tileFileGroups([
+        entry('a.ts', FILE_GROUP_LINES - 100),
+        entry('b.ts', FILE_GROUP_LINES / 4),
+      ]),
+    ).toEqual([['a.ts', 'b.ts']]);
   });
 });
 
@@ -688,6 +840,10 @@ describe('git-backed checks', () => {
       encoding: 'utf8',
       env: {
         ...process.env,
+        // Isolate the helper repos from ambient config (a user/global
+        // core.excludesFile or hooks.path would leak into the probes).
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: join(dir, 'empty-gitconfig'),
         GIT_AUTHOR_NAME: 't',
         GIT_AUTHOR_EMAIL: 't@t',
         GIT_COMMITTER_NAME: 't',
@@ -699,6 +855,7 @@ describe('git-backed checks', () => {
   function initRepo(): string {
     const repo = join(dir, 'repo');
     mkdirSync(join(repo, 'mod'), { recursive: true });
+    writeFileSync(join(dir, 'empty-gitconfig'), '');
     git(['init', '-q'], repo);
     writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
     return repo;
@@ -893,7 +1050,7 @@ describe('git-backed checks', () => {
     expect(guard.dirs[1].status).toBe('unprotected');
     // The representative names the exposed shape: the re-include makes the
     // plan files committable while the other shapes stay ignored.
-    expect(guard.dirs[1].representative).toContain('audit-plan-0.json');
+    expect(guard.dirs[1].representative).toContain('audit-plan-');
   });
 
   it('a date-keyed re-include cannot escape the audits probe', () => {
@@ -922,16 +1079,52 @@ describe('git-backed checks', () => {
     );
   });
 
-  it('the tracked probe takes a literal pathspec under a colon-leading prefix', () => {
-    const repo = join(dir, 'repo-colon');
-    mkdirSync(join(repo, ':weird', '.qwen', 'tmp'), { recursive: true });
-    git(['init', '-q'], repo);
-    writeFileSync(join(repo, '.gitignore'), '.qwen/\n');
-    writeFileSync(join(repo, ':weird', '.qwen', 'tmp', 'forced.json'), '{}');
-    git(['add', '-f', '--', ':(literal):weird/.qwen/tmp/forced.json'], repo);
-    const guard = checkLocalOnlyGuard(join(repo, ':weird'), 'x.md');
-    expect(guard.dirs[1].status).toBe('tracked');
-  });
+  // ':' is a reserved Win32 filename character, so the ':weird' fixture
+  // directory cannot be created on Windows.
+  it.skipIf(process.platform === 'win32')(
+    'the tracked probe takes a literal pathspec under a colon-leading prefix',
+    () => {
+      const repo = join(dir, 'repo-colon');
+      mkdirSync(join(repo, ':weird', '.qwen', 'tmp'), { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, '.gitignore'), '.qwen/\n');
+      writeFileSync(join(repo, ':weird', '.qwen', 'tmp', 'forced.json'), '{}');
+      git(['add', '-f', '--', ':(literal):weird/.qwen/tmp/forced.json'], repo);
+      const guard = checkLocalOnlyGuard(join(repo, ':weird'), 'x.md');
+      expect(guard.dirs[1].status).toBe('tracked');
+    },
+  );
+
+  // Symlink fixtures need POSIX permissions semantics.
+  it.skipIf(process.platform === 'win32')(
+    'answers for a symlinked .qwen through its physical target',
+    () => {
+      const repo = initRepo();
+      // Target outside the worktree: artifacts physically land where git
+      // can never commit them — no probe fatal, no forced fallback.
+      const outside = join(dir, 'outside-audit-store');
+      mkdirSync(outside, { recursive: true });
+      symlinkSync(outside, join(repo, '.qwen'));
+      expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe('ok');
+      rmSync(join(repo, '.qwen'), { force: true });
+
+      // Target inside the worktree and gitignored: the probe follows the
+      // link to the physical path (check-ignore fatals through the link).
+      const inside = join(repo, '.audit-store');
+      mkdirSync(inside, { recursive: true });
+      writeFileSync(join(repo, '.gitignore'), '.audit-store/\n');
+      symlinkSync(inside, join(repo, '.qwen'));
+      expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe('ok');
+      rmSync(join(repo, '.qwen'), { force: true });
+
+      // Dangling link: artifacts cannot land here at all — expose it so the
+      // fallback landing engages.
+      symlinkSync(join(repo, 'nowhere'), join(repo, '.qwen'));
+      expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
+        'unprotected',
+      );
+    },
+  );
 
   it('the exclude remedy refuses a prefix carrying gitignore pattern syntax', () => {
     const repo = initRepo();

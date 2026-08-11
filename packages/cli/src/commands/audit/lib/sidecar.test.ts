@@ -200,6 +200,10 @@ describe('captureSidecar inside a worktree', () => {
       encoding: 'utf8',
       env: {
         ...process.env,
+        // Isolate the helper repos from ambient config (a user/global
+        // core.excludesFile or hooks.path would leak into the capture).
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: join(dir, 'empty-gitconfig'),
         GIT_AUTHOR_NAME: 't',
         GIT_AUTHOR_EMAIL: 't@t',
         GIT_COMMITTER_NAME: 't',
@@ -291,6 +295,57 @@ describe('captureSidecar inside a worktree', () => {
     expect(existsSync(join(sidecarDir, 'untracked', 'untracked.ts'))).toBe(
       false,
     );
+  });
+
+  it('a subtree-touching commit fires both git-state arms', () => {
+    const repo = join(dir, 'repo5');
+    mkdirSync(join(repo, 'mod'), { recursive: true });
+    writeFileSync(join(dir, 'empty-gitconfig'), '');
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'mod', 'tracked.ts'), 'const t = 1;\n');
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+
+    const modPlan = buildFilesPlan(
+      join(repo, 'mod'),
+      join(repo, 'mod'),
+      'medium',
+      collectAuditFiles(join(repo, 'mod')),
+    );
+    captureSidecar(modPlan, sidecarDir);
+    // Content change + commit: HEAD and the subtree both moved.
+    writeFileSync(join(repo, 'mod', 'tracked.ts'), 'const t = 2;\n');
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'change', '-q'], repo);
+    const drift = driftCheck(modPlan, sidecarDir);
+    expect(drift.headMoved).toBe(true);
+    expect(drift.subtreeMoved).toBe(true);
+  });
+
+  it('covers a gitignored vendored subtree the index never sees', () => {
+    const repo = join(dir, 'repo6');
+    mkdirSync(join(repo, 'vendor', 'lib'), { recursive: true });
+    writeFileSync(join(dir, 'empty-gitconfig'), '');
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, '.gitignore'), 'vendor/\n');
+    writeFileSync(join(repo, 'vendor', 'lib', 'v.ts'), 'export const v = 1;\n');
+    git(['add', '.gitignore'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+
+    const vendorPlan = buildFilesPlan(
+      join(repo, 'vendor', 'lib'),
+      join(repo, 'vendor', 'lib'),
+      'medium',
+      collectAuditFiles(join(repo, 'vendor', 'lib')),
+    );
+    const sidecar = captureSidecar(vendorPlan, sidecarDir);
+    // No HEAD entry under the gitignored subtree: no subtree hash to track,
+    // but the content baseline exists and the untracked copy landed.
+    expect(sidecar.hashes['v.ts']).toBeDefined();
+    expect(sidecar.meta.subtreeHash).toBeUndefined();
+    expect(existsSync(join(sidecarDir, 'untracked', 'v.ts'))).toBe(true);
+    writeFileSync(join(repo, 'vendor', 'lib', 'v.ts'), 'export const v = 2;\n');
+    expect(driftCheck(vendorPlan, sidecarDir).driftedFiles).toEqual(['v.ts']);
   });
 
   it('a content-preserving HEAD move fires no content drift', () => {

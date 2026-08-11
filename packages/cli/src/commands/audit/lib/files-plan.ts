@@ -16,16 +16,27 @@
 
 import { execFileSync } from 'node:child_process';
 import {
+  closeSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
+  openSync,
   readdirSync,
+  readFileSync,
+  readSync,
   realpathSync,
   statSync,
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { isGitIgnored, Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
 
@@ -70,6 +81,9 @@ export const MAX_REVERSE_ROUNDS = 5;
  *  emit/dispatch/subscribe-shaped call sites spread over enough files. */
 export const EVENT_CALL_MIN = 8;
 export const EVENT_FILE_MIN = 2;
+/** Files above this size skip event detection — the heuristic stays bounded
+ *  (the read it feeds is 1c's budget, not the enumeration). */
+export const EVENT_SCAN_MAX_CHARS = 1_000_000;
 
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -84,7 +98,7 @@ const TEST_RE =
  *  GENERATED_RE is handled at enumeration (excluded dirs / vendor rules),
  *  not here — vendor/ stays a subject, so it cannot classify generated. */
 const GENERATED_RE =
-  /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lock(b)?|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock|NOTICES\.txt)$|\.snap$|\.min\.(js|css)$/;
+  /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lock(b)?|Cargo\.lock|go\.sum|poetry\.lock|Gemfile\.lock|composer\.lock|NOTICES\.txt)$|\.snap$|\.min\.(js|css)$|\.map$/;
 
 const DOCS_EXT = String.raw`\.(md|mdx|rst|txt|adoc)$`;
 const DOCS_RE = new RegExp(
@@ -103,6 +117,13 @@ export function classifyAuditPath(path: string): PathKind {
 
 const BINARY_EXT_RE =
   /\.(png|jpe?g|gif|webp|svg|ico|bmp|pdf|zip|gz|tar|woff2?|ttf|otf|mp4|mov|wasm|exe|dll|so|dylib|o|obj|a|bin|pyc|class|jar)$/i;
+
+/** Credential-shaped names are enumerated but NEVER content-read: the walk
+ *  deliberately ignores .gitignore, so the gitignored-secret class lands in
+ *  scope — recording the names surfaces them at the confirmation while no
+ *  content copy, walker read, or model payload ever sees them. */
+const SECRET_FILE_RE =
+  /(^|\/)(\.env|\.env\.[^/]+|\.npmrc|\.netrc|credentials\.json|id_rsa[^/]*|[^/]+\.(pem|key|p12|pfx|keystore|tfstate))$/i;
 
 // --- Enumeration -------------------------------------------------------------
 
@@ -123,11 +144,16 @@ const ALWAYS_EXCLUDED_DIRS = new Set([
   'Pods',
   '.tox',
   '.qwen',
+  'venv',
+  'env',
+  'virtualenv',
 ]);
 /** Build output: excluded everywhere except under vendor/, where a published
  *  package ships its runnable code in dist/ and the path choice is
- *  authoritative. */
-const BUILD_OUTPUT_DIRS = new Set(['dist', 'build']);
+ *  authoritative. `bundle` is excluded in both positions: Bundler installs
+ *  (vendor/bundle) and JS-bundler output (top-level bundle/) are both
+ *  third-party lines, never audit subjects. */
+const BUILD_OUTPUT_DIRS = new Set(['dist', 'build', 'bundle']);
 
 function isExcludedDirName(name: string, underVendor: boolean): boolean {
   if (ALWAYS_EXCLUDED_DIRS.has(name)) return true;
@@ -139,6 +165,7 @@ function isExcludedDirName(name: string, underVendor: boolean): boolean {
 export type UncoverableReason =
   | 'over-cap-lines'
   | 'non-text'
+  | 'secret-shaped'
   | 'symlink'
   | 'non-regular'
   | 'unreadable';
@@ -155,7 +182,8 @@ export interface UncoverableEntry {
   path: string;
   kind: PathKind;
   reason: UncoverableReason;
-  /** Counted toward the gate arms; 0 for entries never content-read. */
+  /** Counted toward the gate arms; 0 for entries that carry no code lines
+   *  (never content-read, or non-text). */
   lines: number;
 }
 
@@ -209,11 +237,12 @@ export function walkAuditTree(rootAbs: string): WalkResult {
   const files: string[] = [];
   const excludedDirs: string[] = [];
   const structuralUncoverable: WalkResult['structuralUncoverable'] = [];
-  // Auditing `vendor/` itself is auditing vendored code, so the vendor
-  // rules apply from the first level down; a vendor-named ANCESTOR of the
-  // audited path is just a directory name — vendor directories below the
-  // root are picked up by the walk.
-  const rootUnderVendor = basename(rootAbs) === 'vendor';
+  // The vendor context derives from the whole path, not just the root's own
+  // name: starting the walk at vendor/bundle or vendor/pkg/dist must apply
+  // the same rules a walk that DESCENDS into vendor/ would apply there, or
+  // the verdicts depend on the start point (gems walked at one start,
+  // dist/build kept at another).
+  const rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
   if (isExcludedDirName(basename(rootAbs), rootUnderVendor)) {
     return { files, excludedDirs: ['.'], structuralUncoverable };
   }
@@ -247,6 +276,11 @@ export function walkAuditTree(rootAbs: string): WalkResult {
         structuralUncoverable.push({ path: childRel, reason: 'symlink' });
         continue;
       }
+      if (entry === '.git' && !stat.isDirectory()) {
+        // A linked worktree's .git is a regular file (the gitdir: pointer);
+        // structural metadata, never an audit subject.
+        continue;
+      }
       if (stat.isDirectory()) {
         if (isExcludedDirName(entry, underVendor)) {
           excludedDirs.push(childRel);
@@ -273,13 +307,77 @@ export function walkAuditTree(rootAbs: string): WalkResult {
 // A continuing identifier must start uppercase: past-tense and stem-prefix
 // calls (`fired(`, `emitted(`) are not event-API call sites.
 const EVENT_CALL_RE =
-  /\b(?:emit|dispatch|publish|subscribe|addEventListener|fire|trigger)(?:[A-Z]\w*)?\s*\(|\.on\s*\(/g;
+  /\b(?:emit|dispatch|publish|subscribe|addEventListener|fire|trigger)(?:[A-Z]\w*)?\s*\(|\.on\s*\(|\.once\s*\(/g;
 
-function countLines(content: string): number {
-  if (content === '') return 0;
-  // wc-style: a trailing newline terminates the last line, it does not add one.
-  const lines = content.split('\n').length;
-  return content.endsWith('\n') ? lines - 1 : lines;
+/** Comments and string literals mention keywords without calling anything;
+ *  matching them steers 1c's deep-read budget at nonexistent events. The
+ *  strip is a heuristic (the detection is one), not a language parser. */
+function stripCommentsAndStrings(content: string): string {
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+    .replace(
+      /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g,
+      '""',
+    );
+}
+
+interface FileMeasure {
+  lines: number;
+  chars: number;
+  maxLine: number;
+  hasNul: boolean;
+}
+
+const MEASURE_CHUNK_CHARS = 64 * 1024;
+
+/** Measure a file WITHOUT materializing it: chunked reads count lines,
+ *  chars, the longest line, and NUL presence in O(chunk) memory, so a
+ *  multi-hundred-MB fixture cannot OOM the enumeration. Returns null when
+ *  the file vanished or is unreadable. */
+function measureFile(abs: string): FileMeasure | null {
+  let fd: number;
+  try {
+    fd = openSync(abs, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const buf = Buffer.allocUnsafe(MEASURE_CHUNK_CHARS);
+    let chars = 0;
+    let newlines = 0;
+    let maxLine = 0;
+    let currentLine = 0;
+    let hasNul = false;
+    let lastWasNewline = false;
+    let read: number;
+    while ((read = readSync(fd, buf, 0, buf.length, null)) > 0) {
+      // A multi-byte character split across chunks decodes to a replacement
+      // character: +-1 on a line length, never on newline/NUL detection.
+      const text = buf.toString('utf8', 0, read);
+      chars += text.length;
+      if (text.includes('\0')) hasNul = true;
+      for (const ch of text) {
+        if (ch === '\n') {
+          newlines++;
+          if (currentLine > maxLine) maxLine = currentLine;
+          currentLine = 0;
+        } else {
+          currentLine++;
+        }
+      }
+      lastWasNewline = text.endsWith('\n');
+    }
+    if (currentLine > maxLine) maxLine = currentLine;
+    // wc-style: a trailing newline terminates the last line, it does not add
+    // one.
+    const lines = chars === 0 ? 0 : newlines + (lastWasNewline ? 0 : 1);
+    return { lines, chars, maxLine, hasNul };
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Enumerate, classify, and measure every file under rootAbs. */
@@ -312,47 +410,68 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
         // records it like any other vanished file.
       }
     }
-    let content: string;
-    try {
-      content = readFileSync(entryAbs, 'utf8');
-    } catch {
+    // Secret-shaped names are recorded by name and never content-read.
+    if (SECRET_FILE_RE.test(relPath)) {
+      uncoverable.push({
+        path: relPath,
+        kind,
+        reason: 'secret-shaped',
+        lines: 0,
+      });
+      continue;
+    }
+    // Binary-extension files are never opened: nothing downstream reads
+    // them, and the content can be arbitrarily large.
+    if (BINARY_EXT_RE.test(relPath)) {
+      uncoverable.push({ path: relPath, kind, reason: 'non-text', lines: 0 });
+      continue;
+    }
+    const measured = measureFile(entryAbs);
+    if (measured === null) {
       uncoverable.push({ path: relPath, kind, reason: 'unreadable', lines: 0 });
       continue;
     }
-    const lines = countLines(content);
-    let maxLine = 0;
-    for (const line of content.split('\n')) {
-      if (line.length > maxLine) maxLine = line.length;
-    }
-    const nonText =
-      BINARY_EXT_RE.test(relPath) || content.slice(0, 8192).includes('\0');
-    if (nonText) {
-      uncoverable.push({ path: relPath, kind, reason: 'non-text', lines });
+    // NUL is scanned over the WHOLE content — a windowed scan let late-NUL
+    // binaries escape — and non-text entries record zero lines: raw 0x0A
+    // bytes are not code lines and must not steer the gate arms.
+    if (measured.hasNul) {
+      uncoverable.push({ path: relPath, kind, reason: 'non-text', lines: 0 });
       continue;
     }
-    if (maxLine > MAX_LINE_CHARS) {
+    if (measured.maxLine > MAX_LINE_CHARS) {
       uncoverable.push({
         path: relPath,
         kind,
         reason: 'over-cap-lines',
-        lines,
+        lines: measured.lines,
       });
       continue;
     }
     const entry: AuditFileEntry = {
       path: relPath,
       kind,
-      lines,
-      chars: content.length,
+      lines: measured.lines,
+      chars: measured.chars,
     };
     if (kind === 'test') {
       testCorpus.push(entry);
     } else {
       subjects.push(entry);
-      const matches = content.match(EVENT_CALL_RE);
-      if (matches && matches.length > 0) {
-        eventCallSites += matches.length;
-        eventFiles.add(relPath);
+      if (measured.chars <= EVENT_SCAN_MAX_CHARS) {
+        let content: string | null = null;
+        try {
+          content = readFileSync(entryAbs, 'utf8');
+        } catch {
+          // Vanished between the measure and the read; the hash stage
+          // reports it like any other vanished file.
+        }
+        if (content !== null) {
+          const matches = stripCommentsAndStrings(content).match(EVENT_CALL_RE);
+          if (matches && matches.length > 0) {
+            eventCallSites += matches.length;
+            eventFiles.add(relPath);
+          }
+        }
       }
     }
   }
@@ -398,24 +517,74 @@ function git(root: string, args: string[]): string | null {
   return runGit(root, args, GIT_TIMEOUT_MS);
 }
 
+/** A git probe that distinguishes the three outcomes a guard needs:
+ *  success, DEFINITIVELY not a worktree (git's own exit-128 answer), and
+ *  failure-without-answer (timeout, transient error, missing binary).
+ *  Collapsing the third into the second lets a guard pass vacuously on
+ *  exactly the runs where it cannot verify anything. */
+export type GitProbe =
+  | { ok: true; out: string }
+  | { ok: false; notRepo: boolean };
+
+export function probeGit(
+  root: string,
+  args: string[],
+  timeoutMs: number,
+): GitProbe {
+  try {
+    return {
+      ok: true,
+      out: execFileSync('git', ['-C', root, ...args], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: timeoutMs,
+        maxBuffer: 64 * 1024 * 1024,
+      }),
+    };
+  } catch (err) {
+    const status = (err as { status?: number } | null)?.status;
+    return { ok: false, notRepo: status === 128 };
+  }
+}
+
 export interface GitGeometry {
   inWorktree: boolean;
   /** Repository toplevel, when in a worktree. */
   root?: string;
+  /** The probe failed without a definitive not-a-worktree answer. Guards
+   *  must treat this as exposed, not as a vacuous pass. */
+  probeFailed?: boolean;
 }
 
 export function gitGeometry(rootAbs: string): GitGeometry {
-  const top = git(rootAbs, ['rev-parse', '--show-toplevel']);
-  if (!top) return { inWorktree: false };
-  return { inWorktree: true, root: top.trim() };
+  const probe = probeGit(
+    rootAbs,
+    ['rev-parse', '--show-toplevel'],
+    GIT_TIMEOUT_MS,
+  );
+  if (probe.ok) return { inWorktree: true, root: probe.out.trim() };
+  if (probe.notRepo) return { inWorktree: false };
+  return { inWorktree: false, probeFailed: true };
 }
 
 /** v1 refuses to audit a submodule: no drift arm covers content inside one.
  *  Returns the refusal reason, or null when the path is clear. Outside any
  *  worktree there is no gitlink to hit, so the check passes vacuously. */
 export function submoduleRefusal(rootAbs: string): string | null {
-  const top = git(rootAbs, ['rev-parse', '--show-toplevel']);
-  if (!top) return null;
+  const probe = probeGit(
+    rootAbs,
+    ['rev-parse', '--show-toplevel'],
+    GIT_TIMEOUT_MS,
+  );
+  if (!probe.ok) {
+    // Definitively outside a worktree passes vacuously; a FAILED probe
+    // cannot rule out a gitlink and refuses instead of passing on the
+    // silence.
+    return probe.notRepo
+      ? null
+      : 'the git worktree probe failed — cannot rule out a submodule';
+  }
+  const top = probe.out;
   // git reports the symlink-resolved toplevel (macOS /var → /private/var);
   // resolve both sides before computing the relative path.
   const toplevel = realpathSync(top.trim());
@@ -453,7 +622,12 @@ export function submoduleRefusal(rootAbs: string): string | null {
 export const AUDITS_DIR = join('.qwen', 'audits');
 export const AUDIT_TMP_DIR = join('.qwen', 'tmp');
 
-export type GuardStatus = 'ok' | 'unprotected' | 'tracked' | 'no-worktree';
+export type GuardStatus =
+  | 'ok'
+  | 'unprotected'
+  | 'tracked'
+  | 'no-worktree'
+  | 'git-failed';
 
 export interface GuardDirReport {
   dir: string;
@@ -473,18 +647,66 @@ export interface GuardReport {
 
 function guardDir(
   projectRoot: string,
-  gitRoot: string | null,
+  geometry: GitGeometry,
   dir: string,
   representativeFiles: string[],
 ): GuardDirReport {
+  const gitRoot = geometry.root ?? null;
   if (!gitRoot) {
     return {
       dir,
       representative: join(dir, representativeFiles[0]),
       ignored: false,
       trackedFiles: [],
-      status: 'no-worktree',
+      // A FAILED probe is exposed, not a vacuous pass: the guard cannot
+      // certify what it could not ask about.
+      status: geometry.probeFailed ? 'git-failed' : 'no-worktree',
     };
+  }
+  // check-ignore cannot answer for a path THROUGH a symlink ('beyond a
+  // symbolic link' fatal). The dir's trailing components may not exist yet
+  // (probes run before the first write), so resolve the LEADING components
+  // one by one and probe the physical equivalent.
+  let probeDir = toPosix(dir);
+  const parts = dir.split('/');
+  for (let i = 1; i <= parts.length; i++) {
+    const prefixAbs = join(projectRoot, parts.slice(0, i).join('/'));
+    let prefixStat: Stats;
+    try {
+      prefixStat = lstatSync(prefixAbs);
+    } catch {
+      break; // absent component: nothing deeper can be a link yet
+    }
+    if (!prefixStat.isSymbolicLink()) continue;
+    let target: string;
+    try {
+      target = realpathSync(prefixAbs);
+    } catch {
+      // Dangling link: nothing can land through it in the repo, but
+      // artifacts cannot land here either — expose it so the fallback
+      // landing engages.
+      return {
+        dir,
+        representative: join(dir, representativeFiles[0]),
+        ignored: false,
+        trackedFiles: [],
+        status: 'unprotected',
+      };
+    }
+    const rel = relative(realpathSync(gitRoot), target);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      // The link points outside the worktree: the artifacts physically
+      // land where git can never commit them.
+      return {
+        dir,
+        representative: join(dir, representativeFiles[0]),
+        ignored: true,
+        trackedFiles: [],
+        status: 'ok',
+      };
+    }
+    probeDir = toPosix(join(rel, ...parts.slice(i)));
+    break;
   }
   // The artifacts land under the invocation cwd, which may be a subdirectory
   // of the worktree — probe paths must be toplevel-relative. Both sides are
@@ -499,7 +721,7 @@ function guardDir(
   let ignored = true;
   let representative = join(dir, representativeFiles[0]);
   for (const file of representativeFiles) {
-    const probe = `${prefixDir}${toPosix(join(dir, file))}`;
+    const probe = `${prefixDir}${toPosix(join(probeDir, file))}`;
     if (!isGitIgnored(gitRoot, probe)) {
       ignored = false;
       representative = join(dir, file);
@@ -511,7 +733,7 @@ function guardDir(
   const trackedOut = git(gitRoot, [
     'ls-files',
     '--',
-    `:(literal)${prefixDir}${toPosix(dir)}/`,
+    `:(literal)${prefixDir}${probeDir}/`,
   ]);
   const trackedFiles = (trackedOut ?? '')
     .split('\n')
@@ -532,28 +754,31 @@ function auditTimestamp(date: Date): string {
 
 /** Probe both module-derived directories (.qwen/audits, .qwen/tmp) so the
  *  report, plan, and prompt records can never land in version control.
- *  Probes use the name shapes actually written — the dated report form
- *  (carrying the CURRENT date, so a date-keyed re-include cannot escape
- *  the probe), the sidecar, and one representative per tmp artifact class —
- *  because check-ignore answers per path name and re-includes can be
- *  name-selective. Fresh answers by construction: the shared helper carries
- *  no memo, so a remedy re-check observes the flip. */
+ *  Probes use the name shapes actually written, ALL carrying the CURRENT
+ *  timestamp so a date- or ts-keyed re-include cannot escape the probe —
+ *  the dated report form, the sidecar, and one representative per tmp
+ *  artifact class — because check-ignore answers per path name and
+ *  re-includes can be name-selective. Fresh answers by construction: the
+ *  shared helper carries no memo, so a remedy re-check observes the flip. */
 export function checkLocalOnlyGuard(
   projectRoot: string,
   reportFileName: string,
 ): GuardReport {
   const geometry = gitGeometry(projectRoot);
+  const ts = auditTimestamp(new Date());
   return {
     dirs: [
-      guardDir(projectRoot, geometry.root ?? null, AUDITS_DIR, [
-        `${auditTimestamp(new Date())}-${reportFileName}`,
-        'audit-0.sidecar',
+      guardDir(projectRoot, geometry, AUDITS_DIR, [
+        `${ts}-${reportFileName}`,
+        `audit-${ts}.sidecar`,
       ]),
-      guardDir(projectRoot, geometry.root ?? null, AUDIT_TMP_DIR, [
-        'audit-args-0.json',
-        'audit-plan-0.json',
-        'audit-callers-0.json',
-        'audit-findings-0.md',
+      guardDir(projectRoot, geometry, AUDIT_TMP_DIR, [
+        `audit-args-${ts}.json`,
+        `audit-raw-args-${ts}.txt`,
+        `audit-plan-${ts}.json`,
+        `audit-callers-${ts}.json`,
+        `audit-findings-low-${ts}.md`,
+        `audit-findings-1a-${ts}.md`,
       ]),
     ],
     fallbackRoot: Storage.getAuditFallbackDir(projectRoot),
@@ -767,8 +992,6 @@ export interface FilesPlan {
    *  are uncountable at plan time and stay out of the bound. */
   agentBound: number | null;
   artifacts: {
-    auditsDir: string;
-    tmpDir: string;
     reportSlug: string;
     fallbackRoot: string;
   };
@@ -837,10 +1060,19 @@ export function buildFilesPlan(
   }
   if (effort === 'low' && subjectLines > LOW_SUBJECT_LINES_GATE) {
     const atMedium = estimateTokens(subjectLines, testLines);
+    // The remedy must not bounce into the next refusal: medium applies the
+    // test-line gate low never checks, so advise it only when medium would
+    // actually accept the module.
+    const mediumRefuses =
+      atMedium.topTokens > TOKEN_CAP
+        ? `the priced estimate (${atMedium.floorTokens}–${atMedium.topTokens} tokens) exceeds the ${TOKEN_CAP} cap`
+        : testLines > TEST_LINES_GATE
+          ? `${testLines} test lines exceed the ${TEST_LINES_GATE}-line test gate`
+          : null;
     refuse(
       'low-gate',
-      atMedium.topTokens > TOKEN_CAP
-        ? `audit: ${subjectLines} subject lines exceeds low's ${LOW_SUBJECT_LINES_GATE}-line gate, and at medium the priced estimate (${atMedium.floorTokens}–${atMedium.topTokens} tokens) exceeds the ${TOKEN_CAP} cap — narrow the path.`
+      mediumRefuses
+        ? `audit: ${subjectLines} subject lines exceeds low's ${LOW_SUBJECT_LINES_GATE}-line gate, and at medium ${mediumRefuses} — narrow the path.`
         : `audit: ${subjectLines} subject lines exceeds low's ${LOW_SUBJECT_LINES_GATE}-line gate — run --effort medium instead.`,
     );
   }
@@ -875,7 +1107,13 @@ export function buildFilesPlan(
     eventModule: collection.eventDetection,
     estimate,
     roster,
-    lowTier: effort === 'low' ? lowTierConfig(subjectLines) : null,
+    // Keyed on the WALKED total, not the gate arm: the arm also line-counts
+    // never-walked uncoverable files, which would silently undo the floor's
+    // budget shrink for a small module padded by binaries.
+    lowTier:
+      effort === 'low'
+        ? lowTierConfig(subjects.reduce((n, f) => n + f.lines, 0))
+        : null,
     deepReadQuota: DEEP_READ_QUOTA,
     fileGroups,
     agentBound:
@@ -883,8 +1121,6 @@ export function buildFilesPlan(
         ? null
         : (roster.length + fileGroups.length * MAX_REVERSE_ROUNDS) * 2,
     artifacts: {
-      auditsDir: AUDITS_DIR,
-      tmpDir: AUDIT_TMP_DIR,
       reportSlug: safeTarget(targetPath),
       fallbackRoot: '', // filled by the CLI, which knows the project root
     },
@@ -896,7 +1132,15 @@ export function resolveAuditRoot(targetPath: string): string {
     throw new Error('audit: no directory path given.');
   }
   const abs = resolve(targetPath);
-  const stat = statSync(abs, { throwIfNoEntry: false });
+  // throwIfNoEntry suppresses only ENOENT/ENOTDIR; an untraversable
+  // ancestor (EACCES) or a symlink loop (ELOOP) still threw the raw system
+  // error out of the dedicated path-validation entry.
+  let stat: Stats | undefined;
+  try {
+    stat = statSync(abs, { throwIfNoEntry: false });
+  } catch {
+    stat = undefined;
+  }
   if (!stat) {
     throw new Error(`Path does not exist: ${targetPath}`);
   }

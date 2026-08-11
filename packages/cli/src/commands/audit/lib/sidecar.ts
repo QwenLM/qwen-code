@@ -14,13 +14,18 @@ import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { runGit, type FilesPlan } from './files-plan.js';
+import { probeGit, runGit, type FilesPlan } from './files-plan.js';
+
+/** Callers are agent-authored and read whole into the sidecar: bound the
+ *  read so a pathological path cannot OOM the capture. */
+const CALLER_MAX_BYTES = 10 * 1024 * 1024;
 
 const GIT_TIMEOUT_MS = 30_000;
 
@@ -55,6 +60,11 @@ export interface SidecarMeta {
   /** Set when a capture arm failed after the toplevel probe succeeded: the
    *  sidecar is partial, and the report header says so. */
   captureDegraded?: Array<'diff' | 'untracked'>;
+  /** The toplevel probe FAILED (timeout, transient error, missing binary)
+   *  — as opposed to git's definitive not-a-worktree answer. The capture
+   *  degrades like noVcs, but the header must not claim "outside any git
+   *  worktree" and the drift arms re-probe at checkpoint time. */
+  vcsProbeFailed?: boolean;
 }
 
 export interface Sidecar {
@@ -79,6 +89,12 @@ export interface Sidecar {
  *  unreadable — the name is still recorded by the caller. */
 function recordCaller(sidecarDir: string, caller: string): string | undefined {
   try {
+    // Stat before reading: callers are agent-authored — a writer-less FIFO
+    // blocks readFileSync forever and a device node buffers until OOM. A
+    // skipped caller stays name-registered (drift-check watches it), so the
+    // skip is never a silent drop.
+    const st = lstatSync(caller);
+    if (!st.isFile() || st.size > CALLER_MAX_BYTES) return undefined;
     const hash = sha256(readFileSync(caller));
     const callersRoot = join(sidecarDir, 'callers');
     const dest = join(callersRoot, caller.replace(/^([A-Za-z]:)?[\\/]/, ''));
@@ -124,11 +140,19 @@ export function captureSidecar(
     return existing;
   }
 
-  const top = git(rootAbs, ['rev-parse', '--show-toplevel']);
+  const probe = probeGit(
+    rootAbs,
+    ['rev-parse', '--show-toplevel'],
+    GIT_TIMEOUT_MS,
+  );
+  const top = probe.ok ? probe.out : null;
   const meta: SidecarMeta = {
     capturedAt: new Date().toISOString(),
     noVcs: top === null,
   };
+  if (!probe.ok && !probe.notRepo) {
+    meta.vcsProbeFailed = true;
+  }
   const captureDegraded: Array<'diff' | 'untracked'> = [];
   if (top !== null) {
     meta.headSha = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
@@ -233,12 +257,32 @@ export interface DriftReport {
   /** HEAD moved with content unchanged everywhere — fires no stop. */
   headMoved: boolean;
   subtreeMoved: boolean;
+  /** The git probe failed, so "not moved" cannot be claimed: git() returns
+   *  null on any failure, and without a marker a mid-run commit would read
+   *  as definitively absent. */
+  headUnknown?: boolean;
+  subtreeUnknown?: boolean;
 }
 
 export function loadSidecar(sidecarDir: string): Sidecar {
-  return JSON.parse(
-    readFileSync(join(sidecarDir, 'sidecar.json'), 'utf8'),
-  ) as Sidecar;
+  const file = join(sidecarDir, 'sidecar.json');
+  let raw: string;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `audit: cannot read sidecar ${file} — ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  try {
+    return JSON.parse(raw) as Sidecar;
+  } catch {
+    throw new Error(
+      `audit: sidecar ${file} is corrupt or truncated — re-run \`qwen audit snapshot\`.`,
+    );
+  }
 }
 
 /** Re-check the audited path against the run-start capture. Content-keyed:
@@ -303,18 +347,31 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
 
   let headMoved = false;
   let subtreeMoved = false;
-  if (!sidecar.meta.noVcs) {
+  let headUnknown = false;
+  let subtreeUnknown = false;
+  // A FAILED capture-time probe re-arms the git drift checks: git may have
+  // recovered by checkpoint time, and a definitive not-a-worktree capture
+  // has nothing to re-probe.
+  if (!sidecar.meta.noVcs || sidecar.meta.vcsProbeFailed) {
     const head = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
-    headMoved = head !== undefined && head !== sidecar.meta.headSha;
+    if (head === undefined || sidecar.meta.headSha === undefined) {
+      headUnknown = true;
+    } else {
+      headMoved = head !== sidecar.meta.headSha;
+    }
     if (sidecar.meta.subtreeHash !== undefined) {
       const top = git(rootAbs, ['rev-parse', '--show-toplevel']);
-      const subtree = top ? subtreeHashAt(rootAbs, top.trim()) : undefined;
-      subtreeMoved =
-        subtree !== undefined && subtree !== sidecar.meta.subtreeHash;
+      if (top === null) {
+        subtreeUnknown = true;
+      } else {
+        const subtree = subtreeHashAt(rootAbs, top.trim());
+        if (subtree === undefined) subtreeUnknown = true;
+        else subtreeMoved = subtree !== sidecar.meta.subtreeHash;
+      }
     }
   }
 
-  return {
+  const report: DriftReport = {
     driftedFiles,
     deletedFiles,
     newFiles,
@@ -322,4 +379,7 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
     headMoved,
     subtreeMoved,
   };
+  if (headUnknown) report.headUnknown = true;
+  if (subtreeUnknown) report.subtreeUnknown = true;
+  return report;
 }

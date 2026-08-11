@@ -99,6 +99,14 @@ describe('buildAuditPrompt', () => {
     );
   });
 
+  it('survives a stale plan missing eventModule (no orphaned roles)', () => {
+    const stale: FilesPlan = { ...plan, eventModule: undefined as never };
+    expect(() => buildAuditPrompt('1c', stale, true)).not.toThrow();
+    expect(buildAuditPrompt('1c', stale, true)).not.toContain(
+      'EVENT-COVERAGE WALK',
+    );
+  });
+
   it('tells Agent 5 when the corpus is empty instead of a bare "no tests"', () => {
     const noTests = buildFilesPlan(
       dir,
@@ -290,6 +298,40 @@ describe('buildLowReaderPrompt', () => {
 
   it('refuses a non-low plan', () => {
     expect(() => buildLowReaderPrompt(plan)).toThrow(/not a low-tier plan/);
+  });
+
+  it('refuses a stale plan with an empty or malformed lowTier', () => {
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    // An empty angle list would render "per angle" with no angles attached.
+    const empty: FilesPlan = {
+      ...lowPlan,
+      lowTier: { ...lowPlan.lowTier!, angles: [] },
+    };
+    expect(() => buildLowReaderPrompt(empty)).toThrow(/no angles/);
+    // A hand-edited plan can carry anything — validate presence and types.
+    const missingCap = JSON.parse(JSON.stringify(lowPlan)) as FilesPlan;
+    delete (missingCap.lowTier as { findingCap?: number }).findingCap;
+    expect(() => buildLowReaderPrompt(missingCap)).toThrow(/malformed lowTier/);
+  });
+
+  it('refuses a floor claim paired with angles beyond A and C', () => {
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const inconsistent: FilesPlan = {
+      ...lowPlan,
+      lowTier: {
+        ...lowPlan.lowTier!,
+        angleFloorApplied: true,
+        angles: ['A', 'C', 'D'],
+      },
+    };
+    expect(() => buildLowReaderPrompt(inconsistent)).toThrow(/angle floor/);
+  });
+
+  it('the floor note records the shrink via the per-angle receipt, not a nonexistent header field', () => {
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const prompt = buildLowReaderPrompt(lowPlan);
+    expect(prompt).toContain('per-angle return lines record');
+    expect(prompt).not.toContain('the report header discloses the shrink');
   });
 
   it('reuses the shared severity heuristic, anti-inflation clause included', () => {

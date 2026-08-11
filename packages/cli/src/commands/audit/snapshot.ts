@@ -9,29 +9,9 @@
 // capture shape and the drift arms are deterministic, not orchestrator prose.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import type { FilesPlan } from './lib/files-plan.js';
 import { captureSidecar, driftCheck } from './lib/sidecar.js';
-
-function readPlan(path: string): FilesPlan {
-  return JSON.parse(readFileSync(path, 'utf8')) as FilesPlan;
-}
-
-function readCallers(path?: string): string[] {
-  if (!path) return [];
-  // The callers file is agent-authored — validate the shape before use.
-  const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-  if (
-    !Array.isArray(parsed) ||
-    parsed.some((c) => typeof c !== 'string' || c === '')
-  ) {
-    throw new Error(
-      'audit snapshot: --callers file must be a JSON array of absolute path strings.',
-    );
-  }
-  return parsed as string[];
-}
+import { readCallersFile, readPlanFile } from './lib/read-json.js';
 
 export const snapshotCommand: CommandModule = {
   command: 'snapshot',
@@ -61,12 +41,17 @@ export const snapshotCommand: CommandModule = {
       out: string;
       callers?: string;
     };
-    const sidecar = captureSidecar(readPlan(plan), out, readCallers(callers));
+    const sidecar = captureSidecar(
+      readPlanFile(plan, 'snapshot'),
+      out,
+      callers ? readCallersFile(callers, 'snapshot') : [],
+    );
     writeStdoutLine(
       JSON.stringify(
         {
           capturedAt: sidecar.meta.capturedAt,
           noVcs: sidecar.meta.noVcs,
+          vcsProbeFailed: sidecar.meta.vcsProbeFailed ?? false,
           captureDegraded: sidecar.meta.captureDegraded ?? [],
           headSha: sidecar.meta.headSha ?? null,
           subtreeHash: sidecar.meta.subtreeHash ?? null,
@@ -102,7 +87,11 @@ export const driftCheckCommand: CommandModule = {
       sidecar: string;
     };
     writeStdoutLine(
-      JSON.stringify(driftCheck(readPlan(plan), sidecar), null, 2),
+      JSON.stringify(
+        driftCheck(readPlanFile(plan, 'drift-check'), sidecar),
+        null,
+        2,
+      ),
     );
   },
 };

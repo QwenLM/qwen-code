@@ -11,9 +11,8 @@
 // orchestrator.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import type { FilesPlan } from './lib/files-plan.js';
+import { readPlanFile } from './lib/read-json.js';
 import {
   AUDIT_BRIEFS,
   buildAuditPrompt,
@@ -28,10 +27,11 @@ interface AgentPromptArgs {
 }
 
 function runAgentPrompt(args: AgentPromptArgs): void {
-  const plan = JSON.parse(readFileSync(args.plan, 'utf8')) as FilesPlan;
+  const plan = readPlanFile(args.plan, 'agent-prompt');
   const probesConsented = args.probes === 'opted-in';
-  // A stale plan JSON can carry anything in its roster.
-  const roles = (plan.roster ?? []) as string[];
+  // A stale plan JSON can carry anything in its roster — a non-array must
+  // fail closed (empty roster, every role refused), never reach .includes.
+  const roles = Array.isArray(plan.roster) ? (plan.roster as string[]) : [];
   if (args.role === 'low-reader') {
     if (plan.effort !== 'low') {
       throw new Error(

@@ -20,6 +20,20 @@ export interface ParsedAuditArgs {
 }
 
 export function parseAuditArgs(raw: string): ParsedAuditArgs {
+  // The tokenizer strips quotes with no escape processing, so an UNBALANCED
+  // quote must never reach it: an unquoted apostrophe would silently
+  // re-target the audit (`src/it's-dir` becomes `src/its-dir`), and an
+  // unclosed quote swallows the rest of the string. Balanced quoting stays
+  // supported — it is the only way to carry a spaced path.
+  const singles = raw.split("'").length - 1;
+  const doubles = raw.split('"').length - 1;
+  if (singles % 2 !== 0 || doubles % 2 !== 0) {
+    throw new Error(
+      'audit parse-args: unbalanced quote in the argument string — a path ' +
+        'with spaces needs a matching quote pair on both ends, and a path ' +
+        'that itself contains a quote character cannot be parsed safely.',
+    );
+  }
   const tokens = tokenizeArgs(raw);
   const paths: string[] = [];
   let effort: AuditEffort = 'medium';

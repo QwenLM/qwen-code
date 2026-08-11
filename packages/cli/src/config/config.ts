@@ -1139,6 +1139,16 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
+    //
+    // The handlers above wrote through async pipe writes; a synchronous
+    // exit here truncates large payloads (the audit plan/verdict JSON) at
+    // the 64 KiB pipe buffer. The empty-write callback runs only after
+    // every queued write has flushed.
+    await new Promise<void>((resolve) => {
+      process.stdout.write('', () => {
+        process.stderr.write('', () => resolve());
+      });
+    });
     process.exit(process.exitCode ?? 0);
   }
 

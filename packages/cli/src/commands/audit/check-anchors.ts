@@ -12,8 +12,8 @@
 import type { CommandModule } from 'yargs';
 import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import type { FilesPlan } from './lib/files-plan.js';
 import { parseReportFindings, resolveAnchors } from './lib/anchors.js';
+import { readCallersFile, readPlanFile } from './lib/read-json.js';
 
 export const checkAnchorsCommand: CommandModule = {
   command: 'check-anchors',
@@ -41,22 +41,21 @@ export const checkAnchorsCommand: CommandModule = {
       report: string;
       callers?: string;
     };
-    const planJson = JSON.parse(readFileSync(plan, 'utf8')) as FilesPlan;
-    let registeredCallers: string[] = [];
-    if (callers) {
-      // The callers file is agent-authored — validate the shape before use.
-      const parsed = JSON.parse(readFileSync(callers, 'utf8')) as unknown;
-      if (
-        !Array.isArray(parsed) ||
-        parsed.some((c) => typeof c !== 'string' || c === '')
-      ) {
-        throw new Error(
-          'audit check-anchors: --callers file must be a JSON array of absolute path strings.',
-        );
-      }
-      registeredCallers = parsed as string[];
+    const planJson = readPlanFile(plan, 'check-anchors');
+    const registeredCallers = callers
+      ? readCallersFile(callers, 'check-anchors')
+      : [];
+    let reportText: string;
+    try {
+      reportText = readFileSync(report, 'utf8');
+    } catch (err) {
+      throw new Error(
+        `audit check-anchors: cannot read ${report} — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
-    const findings = parseReportFindings(readFileSync(report, 'utf8'));
+    const findings = parseReportFindings(reportText);
     const results = resolveAnchors(findings, planJson, registeredCallers);
     writeStdoutLine(JSON.stringify(results, null, 2));
     if (results.some((r) => r.verdict !== 'resolved')) {

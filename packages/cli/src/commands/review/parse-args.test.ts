@@ -63,23 +63,13 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: vi.fn(),
 }));
 
-describe('tokenizeArgs', () => {
-  it('splits on whitespace and collapses runs', () => {
-    expect(tokenizeArgs('  6711   --comment ')).toEqual(['6711', '--comment']);
-  });
-
-  it('honours double- and single-quoted segments', () => {
-    expect(tokenizeArgs('"src/my file.ts" --effort low')).toEqual([
-      'src/my file.ts',
-      '--effort',
-      'low',
-    ]);
-    expect(tokenizeArgs("'a b' c")).toEqual(['a b', 'c']);
-  });
-
-  it('returns an empty list for an empty string', () => {
-    expect(tokenizeArgs('')).toEqual([]);
-    expect(tokenizeArgs('   ')).toEqual([]);
+describe('tokenizeArgs re-export', () => {
+  // The tokenizer's own suite is collocated at utils/shell-args.test.ts;
+  // this gate pins the re-export so the shared home cannot move without a
+  // test noticing.
+  it('is the shared utils/shell-args implementation', async () => {
+    const shared = await import('../../utils/shell-args.js');
+    expect(tokenizeArgs).toBe(shared.tokenizeArgs);
   });
 });
 

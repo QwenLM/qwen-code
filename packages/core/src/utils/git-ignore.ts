@@ -32,8 +32,11 @@ const GIT_TIMEOUT_MS = 5_000;
  * exist — check-ignore evaluates the ignore rules against the pathname.
  */
 export function isGitIgnored(worktree: string, path: string): boolean {
+  // A leading ':' in the first component would be parsed as pathspec magic
+  // and probe the wrong pathname ('./' disambiguates it as a literal).
+  const probe = path.startsWith(':') ? `./${path}` : path;
   try {
-    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', path], {
+    execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
       stdio: 'ignore',
       timeout: GIT_TIMEOUT_MS,
     });

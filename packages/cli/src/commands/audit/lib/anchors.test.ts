@@ -10,8 +10,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseReportFindings, resolveAnchors } from './anchors.js';
 import { buildFilesPlan, collectAuditFiles } from './files-plan.js';
+import type { FilesPlan } from './files-plan.js';
 
 let dir: string;
+let plan: FilesPlan;
 
 beforeEach(() => {
   dir = join(
@@ -24,6 +26,7 @@ beforeEach(() => {
     join(dir, 'dup.ts'),
     'const x = 1;\nconst y = x;\nconst z = x;\n',
   );
+  plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
 });
 
 afterEach(() => {
@@ -52,12 +55,12 @@ describe('parseReportFindings', () => {
     expect(findings[0]).toMatchObject({
       title: 'first finding',
       severity: 'Critical',
-      location: 'unique.ts',
+      locations: ['unique.ts'],
       anchor: 'export const uniqueToken = 42;',
     });
     expect(findings[1]).toMatchObject({
       severity: 'Suggestion',
-      location: 'dup.ts',
+      locations: ['dup.ts'],
     });
   });
 
@@ -79,10 +82,9 @@ const y = x;
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
       title: 'no fields',
-      location: '',
+      locations: [],
       anchor: '',
     });
-    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
     expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
   });
 
@@ -97,7 +99,7 @@ const y = x;
     expect(findings[0]).toMatchObject({
       title: 'indented and lowercase',
       severity: 'Critical',
-      location: 'unique.ts',
+      locations: ['unique.ts'],
     });
   });
 
@@ -107,10 +109,9 @@ const y = x;
     expect(findings[0]).toMatchObject({
       title: '##### [Bug] stray severity',
       severity: '',
-      location: '',
+      locations: [],
       anchor: '',
     });
-    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
     expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
   });
 
@@ -138,7 +139,7 @@ const y = x;
       '- Issue: a',
     ].join('\n');
     const findings = parseReportFindings(quoted);
-    expect(findings[0].location).toBe('unique.ts');
+    expect(findings[0].locations).toEqual(['unique.ts']);
     expect(findings[0].anchor).toContain('- Location: remote');
   });
 
@@ -215,22 +216,30 @@ const y = x;
       '- Failure Scenario: x',
     ].join('\n');
     const findings = parseReportFindings(deviated);
-    expect(findings[0].location).toBe('unique.ts');
+    expect(findings[0].locations).toEqual(['unique.ts']);
     expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
   });
 
   it('strips line, column, and range suffixes from locations', () => {
     const block = (location: string) =>
       `### [Critical] suffixes\n- Location: ${location}\n- Anchor: x\n`;
-    expect(parseReportFindings(block('unique.ts:1'))[0].location).toBe(
+    expect(parseReportFindings(block('unique.ts:1'))[0].locations).toEqual([
       'unique.ts',
-    );
-    expect(parseReportFindings(block('unique.ts:1:5'))[0].location).toBe(
+    ]);
+    expect(parseReportFindings(block('unique.ts:1:5'))[0].locations).toEqual([
       'unique.ts',
-    );
-    expect(parseReportFindings(block('unique.ts:1-3'))[0].location).toBe(
+    ]);
+    expect(parseReportFindings(block('unique.ts:1-3'))[0].locations).toEqual([
       'unique.ts',
+    ]);
+    // The four-part editor form peels whole, not to a residual ':1'.
+    expect(parseReportFindings(block('unique.ts:1:5-10'))[0].locations).toEqual(
+      ['unique.ts'],
     );
+    // Agents habitually emit a leading './'.
+    expect(parseReportFindings(block('./unique.ts:1'))[0].locations).toEqual([
+      'unique.ts',
+    ]);
   });
 
   it('fails closed on bracket-less and bold finding headers', () => {
@@ -241,38 +250,185 @@ const y = x;
     expect(bracketless[0]).toMatchObject({
       title: '### Critical: no brackets',
       severity: '',
-      location: '',
+      locations: [],
       anchor: '',
     });
     const bold = parseReportFindings('**[Suggestion] bold header**\n');
     expect(bold).toHaveLength(1);
     expect(bold[0]).toMatchObject({ severity: '', anchor: '' });
-    // The report's own section headings are not findings.
+    // The report's own section headings are not findings — bare or with
+    // trailing text.
     expect(parseReportFindings('## Critical\n\n## Suggestion\n')).toEqual([]);
+    expect(
+      parseReportFindings('## Critical Findings\n\n## Suggestion\n'),
+    ).toEqual([]);
+  });
+
+  it('synthesizes an entry when fields follow a bare severity heading', () => {
+    // The bare heading stays invisible as a section heading would — but its
+    // FIELDS belong to a finding and must fire the gate, not drop silently
+    // into a zero-finding parse.
+    const findings = parseReportFindings(
+      '### Critical\n- Location: unique.ts:1\n- Anchor: export const uniqueToken = 42;\n',
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      severity: '',
+      locations: ['unique.ts'],
+    });
+    // A finding whose header did not parse is uncertifiable even when its
+    // anchor resolves.
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
+  });
+
+  it('ends anchor collection on the next finding header', () => {
+    const two = [
+      '### [Critical] first',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '',
+      '### [Suggestion] second',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(two);
+    expect(findings).toHaveLength(2);
+    expect(findings[0].anchor).toBe('const x = 1;');
+    expect(findings[1]).toMatchObject({
+      title: 'second',
+      locations: ['unique.ts'],
+    });
+  });
+
+  it('parses a reordered Anchor-before-Location block', () => {
+    const reordered = [
+      '### [Critical] reordered',
+      '- Anchor: const x = 1;',
+      '- Location: dup.ts:1',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(reordered);
+    expect(findings[0].locations).toEqual(['dup.ts']);
+    expect(findings[0].anchor).toBe('const x = 1;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('starts over on a second Anchor field after a field gap', () => {
+    const headerless = [
+      '### [Critical] doubled',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(headerless);
+    expect(findings).toHaveLength(1);
+    // The second pair wins whole — no merged location, no concatenated
+    // anchor bleeding across blocks.
+    expect(findings[0].locations).toEqual(['unique.ts']);
+    expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+  });
+
+  it('splits pair locations and resolves each end', () => {
+    const pair = [
+      '### [Critical] pair',
+      '- Location: dup.ts:1, unique.ts:1',
+      '- Anchor: const x = 1;',
+    ].join('\n');
+    const findings = parseReportFindings(pair);
+    expect(findings[0].locations).toEqual(['dup.ts', 'unique.ts']);
+    // The anchor exists in only one of the two cited files: one match.
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('strips single-line inline-code wrapping from anchors', () => {
+    const inline = [
+      '### [Critical] inline backticks',
+      '- Location: dup.ts:1',
+      '- Anchor: `const x = 1;`',
+    ].join('\n');
+    const findings = parseReportFindings(inline);
+    expect(findings[0].anchor).toBe('const x = 1;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('accepts bold-markdown field labels', () => {
+    const bold = [
+      '### [Critical] bold fields',
+      '- **Location:** unique.ts:1',
+      '- **Anchor:** export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(bold);
+    expect(findings[0].locations).toEqual(['unique.ts']);
+    expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('drops trailing whitespace on interior anchor lines', () => {
+    const trailing = [
+      '### [Critical] trailing space',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1; ',
+      'const y = x;',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(trailing);
+    expect(findings[0].anchor).toBe('const x = 1;\nconst y = x;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('dedents deeper-indented fence continuations by their own minimum', () => {
+    const indentedFence = [
+      '### [Critical] indented fence',
+      '- Location: dup.ts:1',
+      '- Anchor: ```',
+      '  const x = 1;',
+      '  const y = x;',
+      '  ```',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(indentedFence);
+    expect(findings[0].anchor).toBe('const x = 1;\nconst y = x;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('ignores field-shaped lines inside an open fence', () => {
+    const fencedYaml = [
+      '### [Critical] fenced field shape',
+      '- Location: dup.ts:1',
+      '- Anchor: ```yaml',
+      '- location: /var/run',
+      'key: value',
+      '```',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(fencedYaml);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].anchor).toBe('- location: /var/run\nkey: value');
+    expect(findings[0].locations).toEqual(['dup.ts']);
   });
 });
 
 describe('resolveAnchors', () => {
   it('resolves a unique anchor, refuses a missing one, flags an ambiguous one', () => {
-    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
     const results = resolveAnchors(
       [
         {
           title: 'a',
           severity: 'Critical',
-          location: 'unique.ts',
+          locations: ['unique.ts'],
           anchor: 'export const uniqueToken = 42;',
         },
         {
           title: 'b',
           severity: 'Critical',
-          location: 'unique.ts',
+          locations: ['unique.ts'],
           anchor: 'not in the file',
         },
         {
           title: 'c',
           severity: 'Suggestion',
-          location: 'dup.ts',
+          locations: ['dup.ts'],
           anchor: '= x;',
         },
       ],
@@ -286,32 +442,66 @@ describe('resolveAnchors', () => {
     expect(results[2].matchCount).toBe(2); // "= x;" in lines 2 and 3
   });
 
+  it('refuses a finding whose header never parsed even if it resolves', () => {
+    const results = resolveAnchors(
+      [
+        {
+          title: '',
+          severity: '',
+          locations: ['unique.ts'],
+          anchor: 'export const uniqueToken = 42;',
+        },
+      ],
+      plan,
+    );
+    expect(results[0].verdict).toBe('unresolved');
+  });
+
   it('resolves anchors inside the test corpus', () => {
     writeFileSync(join(dir, 'unique.test.ts'), 'export const tested = 1;\n');
-    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const corpusPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
     const results = resolveAnchors(
       [
         {
           title: 't',
           severity: 'Suggestion',
-          location: 'unique.test.ts',
+          locations: ['unique.test.ts'],
           anchor: 'export const tested = 1;',
         },
       ],
-      plan,
+      corpusPlan,
     );
     expect(results[0].verdict).toBe('resolved');
   });
 
   it('refuses anchors citing files outside the audited set as out-of-scope', () => {
-    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
     const results = resolveAnchors(
       [
         {
           title: 'd',
           severity: 'Critical',
-          location: '../elsewhere.ts',
+          locations: ['../elsewhere.ts'],
           anchor: 'anything',
+        },
+      ],
+      plan,
+    );
+    expect(results[0].verdict).toBe('out-of-scope');
+  });
+
+  it('refuses a pair whose second location is out of scope', () => {
+    const results = resolveAnchors(
+      [
+        {
+          title: 'p',
+          severity: 'Critical',
+          locations: ['dup.ts', '../elsewhere.ts'],
+          anchor: 'const x = 1;',
         },
       ],
       plan,
@@ -321,17 +511,17 @@ describe('resolveAnchors', () => {
 
   it('resolves a multi-line anchor against a CRLF file', () => {
     writeFileSync(join(dir, 'crlf.ts'), 'line one\r\nline two\r\n');
-    const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const crlfPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
     const results = resolveAnchors(
       [
         {
           title: 'crlf',
           severity: 'Critical',
-          location: 'crlf.ts',
+          locations: ['crlf.ts'],
           anchor: 'line one\nline two',
         },
       ],
-      plan,
+      crlfPlan,
     );
     expect(results[0].verdict).toBe('resolved');
   });
@@ -340,13 +530,12 @@ describe('resolveAnchors', () => {
     const caller = join(dir, '..', `caller-${Date.now()}.ts`);
     writeFileSync(caller, 'callerOnlyToken();\n');
     try {
-      const plan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
       const results = resolveAnchors(
         [
           {
             title: 'e',
             severity: 'Critical',
-            location: caller,
+            locations: [caller],
             anchor: 'callerOnlyToken();',
           },
         ],

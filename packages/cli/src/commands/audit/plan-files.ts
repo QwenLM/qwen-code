@@ -37,9 +37,19 @@ interface PlanFilesArgs {
 /** The args-report is any file on disk — stale, partial, or hand-authored —
  *  so validate the shape before the cast instead of trusting it. */
 function readArgsReport(path: string): ParsedAuditArgs {
-  const parsed = JSON.parse(
-    readFileSync(path, 'utf8'),
-  ) as Partial<ParsedAuditArgs>;
+  let parsed: Partial<ParsedAuditArgs>;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ParsedAuditArgs>;
+  } catch (err) {
+    // A truncated/partial report is the same hand-authored input class as
+    // a wrong-shape one — surface the designed diagnostic, not a raw
+    // SyntaxError/ENOENT stack.
+    throw new Error(
+      `plan-files: --args-report is not a parse-args verdict — regenerate it. (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+  }
   if (
     typeof parsed.targetPath !== 'string' ||
     typeof parsed.targetPathAbsolute !== 'string' ||
@@ -59,34 +69,26 @@ function readArgsReport(path: string): ParsedAuditArgs {
 }
 
 function runPlanFiles(args: PlanFilesArgs): void {
-  if ((args.path === undefined) === (args.argsReport === undefined)) {
+  // Truthiness, not === undefined, so an empty-string value is refused by
+  // the either-or guard instead of crashing the reader below.
+  if (!args.path === !args.argsReport) {
     throw new Error(
       'plan-files: pass exactly one of <path> or --args-report <path>.',
     );
   }
   const parsed = args.argsReport ? readArgsReport(args.argsReport) : undefined;
   const targetPath = parsed ? parsed.targetPath : (args.path as string);
+  // The recorded targetPathAbsolute is re-validated, not trusted: the
+  // report is any file on disk, and a deleted/moved target must surface
+  // the clean 'Path does not exist' diagnostic, not a misattributed
+  // all-uncoverable refusal.
   const rootAbs = parsed
-    ? parsed.targetPathAbsolute
+    ? resolveAuditRoot(parsed.targetPathAbsolute)
     : resolveAuditRoot(targetPath);
   // An explicit --effort flag overrides the recorded verdict: the low-gate
   // refusal's remedy re-runs this command with --effort medium.
   const effort = args.effort ?? parsed?.effort ?? 'medium';
   const projectRoot = process.cwd();
-
-  if (args.applyExcludeRemedy) {
-    try {
-      const excludeFile = applyExcludeRemedy(projectRoot);
-      writeStderrLine(
-        `Added ignore rules for /.qwen/audits/ and /.qwen/tmp/ to ${excludeFile} ` +
-          `(applies to every worktree of this repository).`,
-      );
-    } catch (err) {
-      // The guard re-probe stays 'unprotected', so the fallback landing
-      // still engages — relay why the remedy did not apply.
-      writeStderrLine(err instanceof Error ? err.message : String(err));
-    }
-  }
 
   const collection = collectAuditFiles(rootAbs);
   let plan;
@@ -110,6 +112,23 @@ function runPlanFiles(args: PlanFilesArgs): void {
     throw err;
   }
 
+  // The remedy mutates the repository's shared exclude file, so it runs
+  // only once the plan has succeeded: a refusing run must not leave the
+  // mutation behind with no record of it.
+  if (args.applyExcludeRemedy) {
+    try {
+      const excludeFile = applyExcludeRemedy(projectRoot);
+      writeStderrLine(
+        `Added ignore rules for /.qwen/audits/ and /.qwen/tmp/ to ${excludeFile} ` +
+          `(applies to every worktree of this repository).`,
+      );
+    } catch (err) {
+      // The guard re-probe stays 'unprotected', so the fallback landing
+      // still engages — relay why the remedy did not apply.
+      writeStderrLine(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const guard = checkLocalOnlyGuard(
     projectRoot,
     `${plan.artifacts.reportSlug}.md`,
@@ -126,6 +145,13 @@ function runPlanFiles(args: PlanFilesArgs): void {
   );
   const remediable = exposed.filter((d) => d.status === 'unprotected');
   const tracked = exposed.filter((d) => d.status === 'tracked');
+  const probeFailed = exposed.filter((d) => d.status === 'git-failed');
+  if (probeFailed.length > 0) {
+    writeStderrLine(
+      `WARNING: the git worktree probe failed for ${probeFailed.map((d) => d.dir).join(', ')} — ` +
+        `the guard cannot certify them. Land artifacts outside the repo (${guard.fallbackRoot}).`,
+    );
+  }
   if (remediable.length > 0) {
     writeStderrLine(
       `WARNING: ${remediable.map((d) => d.dir).join(', ')} can land in version control. ` +

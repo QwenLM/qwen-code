@@ -244,8 +244,10 @@ export function buildAuditPrompt(
     plan.uncoverable.length > 0
       ? `\n\nUncoverable (enumerated, never walked — do not open them): ${plan.uncoverable.map((u) => `${u.path} (${u.reason})`).join(', ')}`
       : '';
+  // Optional-chained like every sibling stale-plan read: a hand-edited or
+  // older plan without eventModule must not orphan the roles mid-fan-out.
   const eventAddendum =
-    role === '1c' && plan.eventModule.detected ? EVENT_COVERAGE_ADDENDUM : '';
+    role === '1c' && plan.eventModule?.detected ? EVENT_COVERAGE_ADDENDUM : '';
   const subjectNote =
     role === '5'
       ? '(for you the test corpus is the subject; every other test file is evidence about intent)'
@@ -281,8 +283,19 @@ export function buildLowReaderPrompt(plan: FilesPlan): string {
     E: '**E — reuse and dead code.** Code that re-implements a helper visible in the module, the same block pasted into two files of the module, and code nothing reaches: a function, branch, export or import with no live caller.',
     F: '**F — sibling consistency.** Where one member of a parallel family — sibling loaders, the arms of a switch, the handlers of a route table — carries a guard, validation, cleanup or shape-check, check that every sibling carries it too. The missing half is a latent asymmetric failure.',
   };
-  // A stale/hand-edited plan JSON can carry anything in its angles —
-  // validate at the read site instead of rendering a bare "- undefined".
+  // A stale/hand-edited plan JSON can carry anything in its lowTier —
+  // validate presence and types at the read site instead of rendering a
+  // bare "- undefined" or a "capped at undefined" prompt.
+  if (
+    !Array.isArray(low.angles) ||
+    typeof low.findingCap !== 'number' ||
+    typeof low.angleFloorApplied !== 'boolean' ||
+    typeof low.sweep !== 'boolean'
+  ) {
+    throw new Error(
+      'buildLowReaderPrompt: the plan carries a malformed lowTier — regenerate the plan.',
+    );
+  }
   for (const angle of low.angles) {
     if (!Object.hasOwn(angleDefs, angle)) {
       throw new Error(
@@ -290,12 +303,26 @@ export function buildLowReaderPrompt(plan: FilesPlan): string {
       );
     }
   }
+  // An empty angle list would render "up to 6 candidates per angle" with no
+  // angles attached — a silent degradation to one undirected pass.
+  if (low.angles.length === 0) {
+    throw new Error(
+      'buildLowReaderPrompt: the plan carries no angles — regenerate the plan.',
+    );
+  }
+  // The floor shrinks the set to exactly A and C: a plan that claims the
+  // floor while carrying other angles misreports coverage both ways.
+  if (low.angleFloorApplied && low.angles.some((a) => a !== 'A' && a !== 'C')) {
+    throw new Error(
+      'buildLowReaderPrompt: the plan claims the angle floor while carrying angles beyond A and C — regenerate the plan.',
+    );
+  }
   const angleList = low.angles.map((a) => `- ${angleDefs[a]}`).join('\n');
   const sweep = low.sweep
     ? `\n\n**Then one sweep.** Take a further pass, in this same context, as a fresh reviewer handed the candidate list so far, hunting ONLY what is not already on it: moved-or-extracted code that dropped a guard, second-tier footguns (a default evaluated once at definition time, a lock whose scope shrank, a predicate method with a side effect, iteration order relied on but not guaranteed), setup/teardown asymmetry, flipped config defaults. Up to 6 more candidates; if nothing new, return nothing from the sweep — do not pad it.`
     : '';
   const floorNote = low.angleFloorApplied
-    ? `\n\nThis module is below the ${LOW_ANGLE_FLOOR_LINES}-line angle floor, so only angles A and C run — the report header discloses the shrink.`
+    ? `\n\nThis module is below the ${LOW_ANGLE_FLOOR_LINES}-line angle floor, so only angles A and C run — your per-angle return lines record exactly which angles walked.`
     : '';
   const corpus =
     plan.testCorpus.length > 0
