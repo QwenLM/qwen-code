@@ -1493,14 +1493,21 @@ export const ToolGroup = memo(function ToolGroup({
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = activeTool ?? tools[0];
+  const liveStartedAtRef = useRef(Date.now());
   const summaryNow = useSharedNow(animateSummary);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
-  const runningDuration =
-    animateSummary && activeTool?.startTime !== undefined
-      ? formatLiveElapsed(summaryNow - activeTool.startTime)
-      : undefined;
+  const runningDuration = animateSummary
+    ? formatLiveElapsed(
+        summaryNow - (activeTool?.startTime ?? liveStartedAtRef.current),
+      )
+    : undefined;
+
+  useEffect(() => {
+    if (!animateSummary) return;
+    liveStartedAtRef.current = Date.now();
+  }, [animateSummary, activeTool?.callId]);
 
   useEffect(() => {
     setMonitorDetailsUnavailable(false);

@@ -625,6 +625,20 @@ describe('tool row rendering', () => {
     }
   });
 
+  it('falls back to a local timer when the running tool has no start time', () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(6_000);
+    const container = renderToolGroup([
+      makeTool({ status: 'in_progress' }),
+      makeTool({ callId: 'done', status: 'completed' }),
+    ]);
+
+    try {
+      expect(container.querySelector('button')?.textContent).toContain('1s');
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('shows stable elapsed time from persisted tool timestamps', () => {
     const container = renderToolLine(
       makeTool({
