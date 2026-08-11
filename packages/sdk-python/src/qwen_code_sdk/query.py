@@ -44,10 +44,14 @@ _DONE = object()
 def _parse_effort_status(value: Any) -> EffortStatus | None:
     if not isinstance(value, dict) or not isinstance(value.get("applied"), bool):
         return None
-    return {
+    status: EffortStatus = {
         "applied": value["applied"],
         "override": cast(EffortOverride | None, value.get("override")),
     }
+    reason = value.get("reason")
+    if isinstance(reason, str):
+        status["reason"] = reason
+    return status
 
 
 @dataclass

@@ -742,6 +742,7 @@ async def test_initialize_sends_effort() -> None:
                             "source": "samplingParams",
                             "field": "enable_thinking",
                         },
+                        "reason": "samplingParams.enable_thinking takes precedence",
                     }
                 },
             },
@@ -754,6 +755,7 @@ async def test_initialize_sends_effort() -> None:
             "source": "samplingParams",
             "field": "enable_thinking",
         },
+        "reason": "samplingParams.enable_thinking takes precedence",
     }
     await query.close()
 

@@ -34,6 +34,7 @@ class EffortOverride(TypedDict):
 class EffortStatus(TypedDict):
     applied: bool
     override: EffortOverride | None
+    reason: NotRequired[str]
 
 
 class PermissionSuggestion(TypedDict):
