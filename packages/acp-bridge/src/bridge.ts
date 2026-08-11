@@ -5078,11 +5078,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (
-        byId.get(req.sessionId) !== existing ||
-        isClosingOrAuthorizingClose(existing)
-      ) {
+      if (byId.get(req.sessionId) !== existing) {
         throw new SessionNotFoundError(req.sessionId);
+      }
+      if (isClosingOrAuthorizingClose(existing)) {
+        throw new SessionNotFoundError(
+          req.sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
+        );
       }
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
