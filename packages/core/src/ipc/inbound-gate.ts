@@ -16,17 +16,14 @@
  * encodes one idea: a message may auto-deliver only when acting on it
  * cannot do more than the sender could already have done itself.
  *
- *   receiver YOLO      + sender YOLO       → accept
- *   receiver YOLO      + sender prompting  → hold
- *   receiver YOLO      + sender unasserted → hold
  *   receiver prompting + anything          → accept
+ *   receiver AUTO_EDIT/YOLO + any sender   → hold
  *   receiver mode unknown                  → hold  (fail closed)
  *
  * A prompting receiver can accept freely because every consequential
  * action still faces its own gate; the message is a suggestion, not an
- * execution. A YOLO receiver has no such backstop, so anything it is told
- * to do simply happens — which is why an unverified sender has to be
- * reviewed first.
+ * execution. AUTO_EDIT and YOLO can approve consequential actions without
+ * user confirmation, so an unverified sender has to be reviewed first.
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -46,6 +43,7 @@ export type HoldCause =
   | 'explicit-setting'
   | 'mode-mismatch'
   | 'no-mode-asserted'
+  | 'sender-mode-unverified'
   | 'mode-unknown';
 
 /**
@@ -64,12 +62,14 @@ export type ModeClass = 'bypass' | 'prompting';
 /**
  * Map an approval mode onto the two classes that matter for parity.
  *
- * Only YOLO is "bypass". AUTO is deliberately "prompting": it does not
- * stop to ask, but every tool call still passes the permission
- * classifier, which sees the full message text.
+ * AUTO_EDIT and YOLO are "bypass" because both can approve consequential
+ * actions without user confirmation. AUTO still passes every tool call
+ * through the permission classifier, which sees the full message text.
  */
 export function approvalModeClass(mode: ApprovalMode): ModeClass {
-  return mode === ApprovalMode.YOLO ? 'bypass' : 'prompting';
+  return mode === ApprovalMode.YOLO || mode === ApprovalMode.AUTO_EDIT
+    ? 'bypass'
+    : 'prompting';
 }
 
 export interface HeldMessage {
@@ -152,14 +152,16 @@ export class InboundGate {
       return { policy: 'accept', cause: 'explicit-setting' };
     }
 
-    // Receiver is bypassing prompts from here down.
+    // The wire's fromMode is self-asserted, so a sender cannot earn automatic
+    // delivery into a receiver that bypasses user confirmation.
     const sender = frame?.fromMode;
     if (sender === undefined) {
       return { policy: 'hold', cause: 'no-mode-asserted' };
     }
-    return sender === 'bypass'
-      ? { policy: 'accept', cause: 'explicit-setting' }
-      : { policy: 'hold', cause: 'mode-mismatch' };
+    return {
+      policy: 'hold',
+      cause: sender === 'bypass' ? 'sender-mode-unverified' : 'mode-mismatch',
+    };
   }
 
   /** Run a freshly-arrived message through the gate. */
@@ -317,6 +319,8 @@ export function describeHoldCause(cause: HoldCause): string {
       return 'this session bypasses permission prompts and the sender does not';
     case 'no-mode-asserted':
       return 'this session bypasses permission prompts and the sender did not say whether it does';
+    case 'sender-mode-unverified':
+      return 'this session bypasses permission prompts and the sender claim is unverified';
     case 'mode-unknown':
       return "this session's approval mode could not be determined";
     default: {
