@@ -1156,6 +1156,24 @@ function isValidContentPart(part: Part): boolean {
   return !isInvalid;
 }
 
+// Upstream endpoints occasionally fail fast with an HTTP 200 whose entire
+// body is a placeholder. Such turns look valid (finish reason + non-empty
+// text) but carry no model output, so they must not be persisted as real
+// replies or replayed into subsequent requests. Exact match only — a
+// substring check would false-positive on legitimate mentions.
+const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
+
+function isDegradedPlaceholderTurn(content: Content): boolean {
+  const parts = content.parts ?? [];
+  if (parts.length === 0) return false;
+  if (parts.some((part) => part.functionCall !== undefined)) return false;
+  const text = parts
+    .map((part) => part.text ?? '')
+    .join('')
+    .trim();
+  return text === UPSTREAM_DEGRADED_PLACEHOLDER;
+}
+
 /**
  * Validates the history contains the correct roles.
  *
@@ -1194,7 +1212,11 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
       let isValid = true;
       while (i < length && comprehensiveHistory[i].role === 'model') {
         modelOutput.push(comprehensiveHistory[i]);
-        if (isValid && !isValidContent(comprehensiveHistory[i])) {
+        if (
+          isValid &&
+          (!isValidContent(comprehensiveHistory[i]) ||
+            isDegradedPlaceholderTurn(comprehensiveHistory[i]))
+        ) {
           isValid = false;
         }
         i++;
@@ -4839,6 +4861,17 @@ export class GeminiChat {
       throw new InvalidStreamError(
         'Model response started with leaked protocol tags.',
         'PROTOCOL_TAG_LEAK',
+      );
+    }
+
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      contentText === UPSTREAM_DEGRADED_PLACEHOLDER
+    ) {
+      throw new InvalidStreamError(
+        'Model response is an upstream fail-fast placeholder.',
+        'UPSTREAM_DEGRADED_RESPONSE',
       );
     }
 

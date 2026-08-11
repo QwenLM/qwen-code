@@ -2660,6 +2660,107 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('excludes degraded placeholder model turns from curated history and requests', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'summarize the work' }] },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'real summary' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'again' },
+        'prompt-id-placeholder-curation',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        {
+          role: 'user',
+          parts: [{ text: 'summarize the work' }, { text: 'again' }],
+        },
+      ]);
+      expect(chat.getHistory(true)).toEqual([
+        {
+          role: 'user',
+          parts: [{ text: 'summarize the work' }, { text: 'again' }],
+        },
+        { role: 'model', parts: [{ text: 'real summary' }] },
+      ]);
+      // Comprehensive history keeps the faithful record.
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'summarize the work' }] },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+        { role: 'user', parts: [{ text: 'again' }] },
+        { role: 'model', parts: [{ text: 'real summary' }] },
+      ]);
+    });
+
+    it('keeps turns that only mention the placeholder text inside longer output', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'what happened?' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'the upstream returned "(request timeout)" once' }],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'ok' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-placeholder-mention',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        { role: 'user', parts: [{ text: 'what happened?' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'the upstream returned "(request timeout)" once' }],
+        },
+        { role: 'user', parts: [{ text: 'next' }] },
+      ]);
+    });
+
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'prior question' }] },
@@ -6040,6 +6141,80 @@ describe('GeminiChat', async () => {
           );
         }
         expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered response',
+          ),
+        ).toBe(true);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should retry an upstream fail-fast placeholder response without persisting it', async () => {
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: '(request timeout)' }],
+                      role: 'model',
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })();
+          }
+
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'Recovered response' }],
+                    role: 'model',
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })();
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-degraded-placeholder',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+            model: 'test-model',
+          }),
+        );
         expect(
           events.some(
             (event) =>
