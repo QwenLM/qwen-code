@@ -93,6 +93,14 @@ export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
+ * The bare chunk subject, exactly as coverage's labels and the uncoverable
+ * push below spell it. One predicate for every site that must tell a chunk
+ * id from prose: the richer caller form `chunk 5 (src/big.min.js)` is
+ * prose, and deliberately does NOT match.
+ */
+const CHUNK_SUBJECT_RE = /^chunk (\d+)$/;
+
+/**
  * Reads a PR's description body, given its `owner/repo` and number. The one
  * production implementation calls `gh pr view`; the bilingual fallback uses it
  * to recover the Han signal from the live PR when the plan does not carry it.
@@ -683,6 +691,11 @@ function composeReviewBody(
   // zero-certified test falls to the `coverage` disclosure instead.
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
+  // The Chinese twins of rostered public labels, keyed by the label —
+  // coverage resolves them once, at the single name-derivation point; the
+  // idle/unopened/blind entries and the budget-gap agent names below look
+  // them up for the bilingual body.
+  let publicLabelsZh: Record<string, string> = {};
 
   // The deterministic script-lint gate. `compose-review` is the authority here:
   // it reads the report the orchestrator's `qwen review script-lint` step wrote
@@ -767,6 +780,7 @@ function composeReviewBody(
       const cov = coverageFromTranscripts(input.planPath, input.env);
       plannedChunks = cov.plannedChunks;
       coveredChunks = cov.coveredChunks;
+      publicLabelsZh = cov.publicLabelsZh;
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
@@ -784,12 +798,13 @@ function composeReviewBody(
           subject: label,
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
+          subjectZh: publicLabelsZh[label],
         };
         coverageEntries.push(entry);
         // A chunk agent's idle label is `chunk N` and keeps the prefix
         // dedup; a rostered agent's is a role publicLabel — the caller's
         // own relay register — and joins the exemption (see above).
-        if (!/^chunk \d+$/.test(label)) roleLabelEntries.add(entry);
+        if (!CHUNK_SUBJECT_RE.test(label)) roleLabelEntries.add(entry);
       }
       if (cov.idleAgents.length > 0) {
         remediation.push(
@@ -806,13 +821,21 @@ function composeReviewBody(
       // this line: the line lands in the posted body, and `qwen review
       // agent-prompt` is not something a PR author can run.
       for (const label of cov.blindAgents) {
-        coverageEntries.push({
+        const entry = {
           subject: label,
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
           reasonZh: '启动 prompt 从未提到 diff 文件，它不可能读过 diff',
-        });
+          subjectZh: publicLabelsZh[label],
+        };
+        coverageEntries.push(entry);
+        // Mirror the idle/unopened loops: the rename means a blind agent
+        // can carry a role publicLabel (an orchestrator-inserted chunk
+        // phrase that matched a readsDiff-false role), and a caller relay
+        // spelled in that register must not be swallowed by the prefix
+        // match (see `roleLabelEntries`).
+        if (!CHUNK_SUBJECT_RE.test(label)) roleLabelEntries.add(entry);
       }
       if (cov.blindAgents.length > 0) {
         remediation.push(
@@ -834,9 +857,10 @@ function composeReviewBody(
             'none of them read the diff',
           reasonZh:
             '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
+          subjectZh: publicLabelsZh[label],
         };
         coverageEntries.push(entry);
-        if (!/^chunk \d+$/.test(label)) roleLabelEntries.add(entry);
+        if (!CHUNK_SUBJECT_RE.test(label)) roleLabelEntries.add(entry);
       }
       if (cov.unopenedAgents.length > 0) {
         remediation.push(
@@ -1239,7 +1263,7 @@ function composeReviewBody(
     const bareIds: number[] = [];
     const callerNamed: string[] = [];
     for (const e of uncoverable) {
-      const m = /^chunk (\d+)$/.exec(e);
+      const m = CHUNK_SUBJECT_RE.exec(e);
       if (m) bareIds.push(Number(m[1]));
       else callerNamed.push(e);
     }
@@ -1315,9 +1339,19 @@ function composeReviewBody(
   // and the body must not say it twice in two registers. These are
   // "stopped at the budget", not "nobody looked": the phrasing must not
   // claim the stronger gap, and the entries do not join the capping lists.
-  const budgetGapItems: Array<{ agent: string; gap: string }> = [];
+  const budgetGapItems: Array<{
+    agent: string;
+    agentZh?: string;
+    gap: string;
+  }> = [];
   for (const g of budgetGapNotes) {
-    for (const gap of g.gaps) budgetGapItems.push({ agent: g.agent, gap });
+    for (const gap of g.gaps) {
+      budgetGapItems.push({
+        agent: g.agent,
+        agentZh: publicLabelsZh[g.agent],
+        gap,
+      });
+    }
   }
   const keptBudgetGaps = budgetGapItems.filter(
     (it) => !unreviewed.some((d) => d.includes(it.gap)),
@@ -1329,8 +1363,9 @@ function composeReviewBody(
       shown.map((it) => `${it.agent}: ${mdField(it.gap)}`).join('; ') +
       (more > 0 ? `, and ${more} more` : '');
     const zhList =
-      shown.map((it) => `${it.agent}：${mdField(it.gap)}`).join('；') +
-      (more > 0 ? `，另有 ${more} 条` : '');
+      shown
+        .map((it) => `${it.agentZh ?? it.agent}：${mdField(it.gap)}`)
+        .join('；') + (more > 0 ? `，另有 ${more} 条` : '');
     notReviewedParts.push({
       en: `Not explored to full depth (tool budget reached): ${enList}.`,
       zh: `未探索到全部深度（达到工具调用预算）：${zhList}。`,
@@ -1341,38 +1376,47 @@ function composeReviewBody(
   // paragraphs — a posted body on #7166 was ninety-nine clauses over four
   // causes, the six real findings buried beneath. Grouped by the reason
   // STRING, so a reason embedding per-subject detail (an unread brief\'s own
-  // path) differs per entry and keeps its own line. One subject that appears
-  // under two causes keeps the FIRST — the categories push in precision
-  // order, and a chunk flagged `rewritten` is also, to the roster, a
-  // requirement with no verbatim launch; repeating it under the later, vaguer
-  // cause would tell the author "no agent was launched" about an agent that
-  // demonstrably ran.
-  const seenSubjects = new Set<string>();
+  // path) differs per entry and keeps its own line.
+  const seenEntries = new Set<string>();
   const byReason = new Map<
     string,
     Array<{ subject: string; publicSubject?: string; subjectZh?: string }>
   >();
   const reasonZhOf = new Map<string, string>();
   for (const e of covEntries) {
-    if (seenSubjects.has(e.subject)) continue;
-    seenSubjects.add(e.subject);
     // Keyed on the reason the body will PRINT — public over internal. Two
     // unread briefs differ internally only by their brief paths; grouped on
     // those, the path-free public sentence would render once per role, which
     // is the per-subject repetition this map exists to kill.
-    const key = e.publicReason ?? e.reason;
-    const group = byReason.get(key) ?? [];
+    const reasonKey = e.publicReason ?? e.reason;
+    // Deduped on the subject AND the printed reason, not the subject alone:
+    // the publicLabel register is shared by every round and shard of a role,
+    // so one subject can owe several distinct disclosures — a budget stop
+    // and an idle round both render as `reverse audit`, and a subject-only
+    // shadow silently dropped the second, in the channel whose whole promise
+    // is the disclosure. True duplicates (one subject, one printed reason)
+    // still collapse. Bare chunk subjects keep the first-cause-wins shadow:
+    // the chunk categories derive from one another for a single chunk, and
+    // the later, vaguer cause would say "no agent was launched" about a
+    // chunk an earlier line already showed launched — the precise cause
+    // keeps the subject.
+    const dedupKey = CHUNK_SUBJECT_RE.test(e.subject)
+      ? e.subject
+      : `${e.subject}\u0000${reasonKey}`;
+    if (seenEntries.has(dedupKey)) continue;
+    seenEntries.add(dedupKey);
+    const group = byReason.get(reasonKey) ?? [];
     group.push({
       subject: e.subject,
       publicSubject: e.publicSubject,
       subjectZh: e.subjectZh,
     });
-    byReason.set(key, group);
+    byReason.set(reasonKey, group);
     // One printed reason, one translation: entries sharing the printed
     // English reason share the Chinese one by construction (both derive from
     // the same source string). Entries with none fall back to the English.
-    if (e.reasonZh !== undefined && !reasonZhOf.has(key)) {
-      reasonZhOf.set(key, e.reasonZh);
+    if (e.reasonZh !== undefined && !reasonZhOf.has(reasonKey)) {
+      reasonZhOf.set(reasonKey, e.reasonZh);
     }
   }
   for (const [reason, entries] of byReason) {
@@ -1389,7 +1433,7 @@ function composeReviewBody(
     const named: string[] = [];
     const namedZh: string[] = [];
     for (const e of entries) {
-      const m = /^chunk (\d+)$/.exec(e.subject);
+      const m = CHUNK_SUBJECT_RE.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
       else {
         named.push(e.publicSubject ?? e.subject);
@@ -1600,7 +1644,7 @@ function composeReviewBody(
     // certified.
     const disclosedChunkIds = new Set<number>();
     for (const e of coverageEntries) {
-      const m = /^chunk (\d+)$/.exec(e.subject);
+      const m = CHUNK_SUBJECT_RE.exec(e.subject);
       if (m) disclosedChunkIds.add(Number(m[1]));
     }
     const nothingCertified =

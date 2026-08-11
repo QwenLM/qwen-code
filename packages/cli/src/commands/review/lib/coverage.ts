@@ -166,6 +166,15 @@ export interface CoverageFromTranscripts {
    * hit its ceiling mid-check.
    */
   budgetGaps: Array<{ agent: string; gaps: string[] }>;
+  /**
+   * The Chinese twins of the rostered public labels in this report, keyed
+   * by the label — for the Chinese half of a bilingual posted body. Only
+   * labels resolved through a brief's `publicLabel` carry a twin; a
+   * fallback label (a truncated launch line) has none, and the renderer
+   * falls back to the English text, the way it does for every subject
+   * without a Chinese variant.
+   */
+  publicLabelsZh: Record<string, string>;
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
   /**
@@ -386,6 +395,11 @@ export function coverageFromTranscripts(
   const blindAgents: string[] = [];
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
+  // The Chinese twins of every rostered public label resolved below, keyed
+  // by the label — the bilingual body looks them up for the idle/unopened/
+  // blind entries and the budget-gap agent names, the way the Step 4/5
+  // floor gaps and the budget-stop marker carry theirs inline.
+  const publicLabelsZh: Record<string, string> = {};
   const rewrittenPrompts: string[] = [];
   const driftedLaunches: string[] = [];
   // Did this record's agent open the brief recorded under `key`? Compared as a
@@ -502,10 +516,13 @@ export function coverageFromTranscripts(
     return g;
   };
   // The rostered role a record's launch was built for, said as the brief's
-  // publicLabel — the register the posted body renders disclosures in.
-  // `null` when the launch matches no built role prompt (a chunk agent's
-  // label is already its chunk; anything else keeps the fallback).
-  const rosteredLabel = (rec: AgentRecord): string | null => {
+  // publicLabel — the register the posted body renders disclosures in —
+  // with its Chinese twin for the bilingual body. `null` when the launch
+  // matches no built role prompt (a chunk agent's label is already its
+  // chunk; anything else keeps the fallback).
+  const rosteredLabel = (
+    rec: AgentRecord,
+  ): { label: string; labelZh?: string } | null => {
     for (const key of built.keys()) {
       const b = builtOf(key);
       if (b === undefined || !wasDeliveredVerbatim(rec.launchPrompt, b)) {
@@ -525,7 +542,10 @@ export function coverageFromTranscripts(
       // repeated line — the author could not tell which file's check
       // stopped.
       const req = rosterForRun.find((r) => r.key === key);
-      return (req && publicRoleLabel(req)) || brief.publicLabel;
+      return {
+        label: (req && publicRoleLabel(req)) || brief.publicLabel,
+        labelZh: (req && publicRoleLabelZh(req)) || brief.publicLabelZh,
+      };
     }
     return null;
   };
@@ -587,7 +607,11 @@ export function coverageFromTranscripts(
     // first line, and a real posted body rendered a disclosure as "You are
     // review agent `reverse-audit` — Reverse audit agen...:" — the run's
     // own plumbing, truncated, on a public PR page.
-    const name = rosteredLabel(rec) ?? label(rec, chunk);
+    const rostered = rosteredLabel(rec);
+    const name = rostered?.label ?? label(rec, chunk);
+    if (rostered?.labelZh !== undefined) {
+      publicLabelsZh[rostered.label] = rostered.labelZh;
+    }
 
     // Could this agent have read the diff at all? The prompt is the harness's
     // record of what was asked of it. 23 of 23 real chunk agents were launched
@@ -1008,6 +1032,7 @@ export function coverageFromTranscripts(
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     budgetGaps,
+    publicLabelsZh,
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({
       id: c.id,

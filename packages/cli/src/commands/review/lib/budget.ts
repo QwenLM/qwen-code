@@ -455,7 +455,10 @@ function stripWrappers(s: string): string {
   return out;
 }
 
-const TRAILING_GAP_CHAR_RE = /[.!…,;:\s]/;
+// Edge characters also include list markers (`- none`, `* none`): the
+// budget brief hands agents a bullet format, so a placeholder can arrive
+// marker-wrapped exactly the way it arrives bracket-wrapped.
+const TRAILING_GAP_CHAR_RE = /[-—–*_.!…,;:\s]/;
 
 /** Wrapping bracket/quote pairs stripped only SYMMETRICALLY. */
 const GAP_WRAPPER_CLOSES: Record<string, string> = {
@@ -466,6 +469,13 @@ const GAP_WRAPPER_CLOSES: Record<string, string> = {
   "'": "'",
   '“': '”',
   '‘': '’',
+  // The disclosure marker is bilingual, and so are the wrappers a
+  // bilingual agent reaches for — `（none）` defeated the classifier
+  // exactly the way `(none)` did before these joined.
+  '（': '）',
+  '【': '】',
+  '「': '」',
+  '『': '』',
 };
 
 /**
@@ -474,6 +484,8 @@ const GAP_WRAPPER_CLOSES: Record<string, string> = {
  * must lose its period AND its bracket), so a fixed-order single pass per
  * side strands one of the layers. The balance keeps an inner completion
  * clause's closing paren intact for the classifier's parenthesized shape.
+ * An empty wrapper pair strips to nothing — nothing inside a balanced
+ * pair is nothing, and a bare `()` or `""` cannot be ruled on as a gap.
  */
 function stripGapWrappers(s: string): string {
   // Two-pointer (walk both ends inward) rather than end-anchored class
@@ -484,7 +496,7 @@ function stripGapWrappers(s: string): string {
   for (;;) {
     while (start < end && TRAILING_GAP_CHAR_RE.test(s.charAt(start))) start++;
     while (end > start && TRAILING_GAP_CHAR_RE.test(s.charAt(end - 1))) end--;
-    if (end - start <= 2) break;
+    if (end - start < 2) break;
     const close = GAP_WRAPPER_CLOSES[s.charAt(start)];
     if (close === undefined || s.charAt(end - 1) !== close) break;
     start++;

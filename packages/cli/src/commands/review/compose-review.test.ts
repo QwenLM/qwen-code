@@ -928,6 +928,176 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
   });
 
+  it('a budget stop does not swallow an idle round of the same role', () => {
+    // The publicLabel register is shared by every round of a role: a round-2
+    // budget stop and a round-1 auditor that made zero tool calls are ONE
+    // subject with two distinct failures, and the render dedup keys on the
+    // subject+reason pair or the second disclosure never reaches the body —
+    // silently, in the channel whose whole promise is the disclosure. Both
+    // lines render; the floor's brief-unread gap for the same subject joins
+    // them, one sentence per reason.
+    transcript('a1', goodPrompt(1), { toolCalls: 3, range: [0, 100] });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const key = 'reverse-audit--round-1--abc123def456';
+    const brief = briefPath(p, key);
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\` round 1.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
+    transcript('v-ra-idle', launch, { toolCalls: 0 });
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      2,
+    );
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would relaunch a WORKING reverse auditor over this
+    // fixture's idle one.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 2 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — the agent made no tool call: it read nothing.',
+    );
+  });
+
+  it('an unopened chunk entry still dedups a caller relay of the same chunk', () => {
+    // The `chunk N` guard on `roleLabelEntries` earns its keep: chunk
+    // subjects keep the prefix dedup (a caller echoing `chunk 1 — …` is
+    // pasting the gate's own line, #7188), and only role-publicLabel entries
+    // join the exemption. Delete the guard at either loop and this relay
+    // renders twice — the coverage sentence and its verbatim echo. The
+    // fixture isolates the guard: an UNOPENED chunk agent (brief opened,
+    // zero diff reads) — a zero-tool-call idle chunk agent would also push a
+    // same-subject entry that dedups the relay regardless of the guard.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    transcript('a1', goodPrompt(1), { opens: [briefPath(p, 'chunk-1')] });
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would relaunch a WORKING chunk-1 agent over this
+    // fixture's unopened one.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'chunk 1 — the agent read its brief but never the diff',
+      ],
+    });
+    // The chunk subject renders in the author's units (its files), the
+    // way every chunk gap does; the relay dedup keys on the internal
+    // `chunk 1` subject all the same.
+    expect(r.body).toContain(
+      'Not reviewed: the diff section covering src/a.ts — pointed at diff ' +
+        'lines it never opened: it made tool calls, but none of them read ' +
+        'the diff.',
+    );
+    expect(r.body).not.toContain('the agent read its brief but never the diff');
+  });
+
+  it('an idle rostered agent keeps its Chinese twin in a bilingual body', () => {
+    // The rename resolves rostered names through the brief's publicLabel;
+    // the Chinese half must say them the way the sibling floor/budget-stop
+    // lines do (subjectZh), not fall back to the English label beside
+    // `反向审计` for the same missing pass.
+    transcript('a1', goodPrompt(1), { toolCalls: 3, range: [0, 100] });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const key = 'reverse-audit--round-1--abc123def456';
+    const brief = briefPath(p, key);
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\` round 1.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
+    transcript('v-ra-idle', launch, { toolCalls: 0 });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '未审查：反向审计——该 agent 未发起任何工具调用：它什么都没读。',
+    );
+  });
+
+  it('a rostered budget-gap discloser keeps its Chinese twin in a bilingual body', () => {
+    // The budget-gap sentence's zh half names the agent too; it rides the
+    // same label lookup as the coverage entries.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const key = 'reverse-audit';
+    const brief = briefPath(p, key);
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
+    transcript('v-ra-gap', launch, {
+      toolCalls: 2,
+      range: [0, 100],
+      text:
+        'No issues found — walked the diff.\n' +
+        'Budget gap: the round-2 scope walk',
+    });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not explored to full depth (tool budget reached): ' +
+        'reverse audit: `the round-2 scope walk`.',
+    );
+    expect(r.body).toContain(
+      '未探索到全部深度（达到工具调用预算）：反向审计：`the round-2 scope walk`。',
+    );
+  });
+
   it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
     // The gate refused round 1, so no reverse-audit record exists. Without
     // the marker the floor would report the absence as a rogue/unlaunched
@@ -1037,9 +1207,10 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       'stopped before round 2 by the review time budget',
     );
     // …and the rewritten round is NOT laundered: the operator channel carries
-    // its exact repair. (The posted body collapses same-subject disclosures —
-    // both say "reverse audit" — so the author sees the stop; the rewritten
-    // repair rides stderr, which is where repairs are acted on.)
+    // its exact repair, and the posted body renders the floor's rewritten gap
+    // beside the stop — one subject, two distinct reasons, and the dedup
+    // keeps both (the rewritten repair itself rides stderr, which is where
+    // repairs are acted on).
     expect(r.remediation.join(' ')).toContain('reverse audit:');
     expect(r.remediation.join(' ')).toContain('EXACTLY what it prints');
   });

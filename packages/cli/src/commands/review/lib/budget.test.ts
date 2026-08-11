@@ -344,8 +344,30 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       // Quote-wrapped non-answers, straight and smart.
       'Budget gap: "none"',
       "Budget gap: 'none'",
+      'Budget gap: ‘none’',
+      'Budget gap: {N/A}',
       'Budget gap: “none”',
       'Budget gap: "N/A"',
+      // Fullwidth/CJK wrappers — the disclosure marker is bilingual, and a
+      // bilingual agent's `（none）` defeated the classifier exactly the way
+      // `(none)` did before the wrapper pairs joined the strip.
+      'Budget gap: （none）',
+      'Budget gap: 【N/A】',
+      'Budget gap: 「none」',
+      // List markers from the brief's bullet format wrap placeholders the
+      // same way brackets do.
+      'Budget gap: - none',
+      'Budget gap: — none',
+      'Budget gap: * none',
+      'Budget gap: _ none',
+      'Budget gap: - None.',
+      // Empty wrapper pairs: nothing inside a balanced pair is nothing.
+      'Budget gap: ""',
+      'Budget gap: ()',
+      'Budget gap: []',
+      'Budget gap: {}',
+      "Budget gap: ''",
+      'Budget gap: “”',
       'Budget gap:',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);
