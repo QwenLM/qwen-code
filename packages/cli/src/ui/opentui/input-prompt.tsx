@@ -508,6 +508,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onSubmit(decision.text.trim());
   }, [onSubmit]);
 
+  // Force the editor text color after mount (prop may not forward), max contrast.
+  useEffect(() => {
+    const el = editorRef.current as
+      | (TextareaRenderable & { textColor?: string })
+      | null;
+    if (el) el.textColor = C.text;
+  }, []);
+
   // Force Enter=submit after mount (override any default newline mapping).
   useEffect(() => {
     const el = editorRef.current as
