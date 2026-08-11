@@ -138,12 +138,17 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    */
   stripAssistantThinking?: boolean;
   /**
-   * Ensure the latest assistant message starts with its first contiguous
-   * thinking/redacted-thinking run. Anthropic manual extended thinking
-   * requires the final assistant turn in a tool loop to begin with thinking;
-   * adaptive thinking does not. Gate this on the outgoing request's actual
-   * `thinking.type === 'enabled'` mode so adaptive histories keep their exact
-   * chronological block order.
+   * Ensure every assistant message that carries a `tool_use` block starts
+   * with its first contiguous thinking/redacted-thinking run. Anthropic
+   * manual extended thinking requires an assistant turn in a tool loop to
+   * begin with thinking; adaptive thinking does not. Gate this on the
+   * outgoing request's actual `thinking.type === 'enabled'` mode so adaptive
+   * histories keep their exact chronological block order.
+   *
+   * Applies to prior turns as well as the current one -- see
+   * `ensureLeadingThinkingOnToolUseAssistantMessages` for why scoping it to
+   * the latest message both misses the #3786 shape one turn later and breaks
+   * the prompt cache on every request.
    */
   ensureLeadingAssistantThinking?: boolean;
   /**
@@ -332,7 +337,7 @@ export class AnthropicContentConverter {
     }
     messages = mergeConsecutiveUserMessages(messages);
     if (options.ensureLeadingAssistantThinking) {
-      ensureLeadingThinkingOnLatestAssistantMessage(messages);
+      ensureLeadingThinkingOnToolUseAssistantMessages(messages);
     }
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
@@ -1448,46 +1453,65 @@ function mergeConsecutiveAssistantMessages(
 }
 
 /**
- * Relocate the most recent assistant message's first contiguous run of
- * `thinking`/`redacted_thinking` blocks to the front of its content array,
- * if it doesn't already start with one.
+ * Relocate the first contiguous run of `thinking`/`redacted_thinking`
+ * blocks to the front of its content array, for every assistant message
+ * that carries a `tool_use` block and doesn't already start with thinking.
  *
  * See {@link ConvertGeminiRequestToAnthropicOptions.ensureLeadingAssistantThinking}
  * for why this is needed: `mergeConsecutiveAssistantMessages`'s straight
- * concatenation can leave a leading text block ahead of a later thinking
- * run, which is chronologically correct but invalid on the wire for
- * Anthropic's manual-mode extended thinking. Only the first thinking run
- * moves; every other block -- including any later thinking blocks and
- * their relative order -- is untouched, and nothing is fabricated when the
- * message has no thinking block at all.
+ * concatenation -- and, now that reasoning episodes are no longer hoisted
+ * to `parts[0]` during history consolidation, an ordinary "say a line,
+ * then think, then call a tool" turn -- can leave a leading text block
+ * ahead of a later thinking run, which is chronologically correct but
+ * invalid on the wire for Anthropic's manual-mode extended thinking. Only
+ * the first thinking run moves; every other block -- including any later
+ * thinking blocks and their relative order -- is untouched, and nothing is
+ * fabricated when the message has no thinking block at all.
  *
- * Scoped to the single most recent assistant message: only the final turn
- * actually sent on the wire is subject to Anthropic's leading-thinking
- * requirement. Earlier turns are replay, not the active turn, and adaptive
- * mode explicitly permits them not to start with thinking.
+ * Applied to EVERY tool_use-bearing assistant message rather than only the
+ * most recent one, for two independent reasons:
+ *
+ *  1. The constraint is not latest-turn-only. #3786 describes the
+ *     anthropic-compatible rejection in terms of a PRIOR assistant turn
+ *     carrying `tool_use`, and `injectEmptyThinkingOnToolUseTurns`
+ *     correspondingly repairs every tool_use turn, not just the last. Under
+ *     latest-only scoping a turn normalized while it was current reverts to
+ *     the text-leading shape on the very next request, so the defect
+ *     surfaces one turn after the turn that produced it.
+ *  2. Latest-only scoping makes an assistant turn's serialization depend on
+ *     its position in history, so the same turn goes out two different ways
+ *     on consecutive requests. `addCacheControlToMessages` puts its
+ *     breakpoint on the last user message, so that rewrites the cached
+ *     prefix and forces a full re-read on every turn for the life of the
+ *     conversation. Normalizing uniformly makes the shape position-
+ *     independent and the prefix stable.
+ *
+ * Gated on `tool_use` because that is the boundary the wire actually
+ * enforces (matching this option's documented scope and
+ * `injectEmptyThinkingOnToolUseTurns`): a plain-text assistant turn that
+ * doesn't lead with thinking is accepted, so reordering one would move
+ * blocks for no protocol reason.
  */
-function ensureLeadingThinkingOnLatestAssistantMessage(
+function ensureLeadingThinkingOnToolUseAssistantMessages(
   messages: AnthropicMessageParam[],
 ): void {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
+  const blockType = (b: AnthropicContentBlockParam) =>
+    (b as { type?: string }).type;
+  const isThinking = (b: AnthropicContentBlockParam) => {
+    const t = blockType(b);
+    return t === 'thinking' || t === 'redacted_thinking';
+  };
+
+  for (const message of messages) {
     if (message.role !== 'assistant') continue;
-    if (!Array.isArray(message.content)) return;
+    if (!Array.isArray(message.content)) continue;
 
     const blocks = message.content as AnthropicContentBlockParam[];
-    const isThinking = (b: AnthropicContentBlockParam) => {
-      const t = (b as { type?: string }).type;
-      return t === 'thinking' || t === 'redacted_thinking';
-    };
-
-    if (blocks.length === 0 || isThinking(blocks[0]!)) {
-      return;
-    }
+    if (blocks.length === 0 || isThinking(blocks[0]!)) continue;
+    if (!blocks.some((b) => blockType(b) === 'tool_use')) continue;
 
     const runStart = blocks.findIndex(isThinking);
-    if (runStart === -1) {
-      return;
-    }
+    if (runStart === -1) continue;
 
     let runEnd = runStart;
     while (runEnd < blocks.length && isThinking(blocks[runEnd]!)) {
@@ -1497,7 +1521,6 @@ function ensureLeadingThinkingOnLatestAssistantMessage(
     const run = blocks.slice(runStart, runEnd);
     const rest = [...blocks.slice(0, runStart), ...blocks.slice(runEnd)];
     message.content = [...run, ...rest];
-    return;
   }
 }
 
