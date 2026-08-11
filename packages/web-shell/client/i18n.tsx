@@ -2666,7 +2666,7 @@ const ZH: Messages = {
   'toolName.record_artifact': '记录制品',
   'toolName.image_gen': '生成图片',
   'toolName.omni_downsample_image': '降采样图像',
-  'toolName.omni_downscale_video': '降清视频',
+  'toolName.omni_downscale_video': '降采样视频',
   'toolName.omni_downsample_audio': '降采样音频',
   'toolName.omni_extract_keyframes': '提取关键帧',
   'toolName.omni_extract_audio': '提取音轨',

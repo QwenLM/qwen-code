@@ -215,7 +215,7 @@ export default {
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
   'toolDisplayName.DownsampleImage': '降採樣圖像',
-  'toolDisplayName.DownscaleVideo': '降清影片',
+  'toolDisplayName.DownscaleVideo': '降採樣影片',
   'toolDisplayName.DownsampleAudio': '降採樣音訊',
   'toolDisplayName.ExtractKeyframes': '擷取關鍵影格',
   'toolDisplayName.ExtractAudio': '擷取音軌',
