@@ -46,6 +46,8 @@ export { useDaemonActions as useActions } from './daemon/index.js';
 /** Connection status, capabilities, and model info. */
 export { useDaemonConnection as useConnection } from './daemon/index.js';
 
+export { useDaemonSessionOwnerGuard } from './daemon/session/DaemonSessionProvider.js';
+
 /** Current session metadata (id, model, approval mode). */
 export { useDaemonSession as useSession } from './daemon/index.js';
 
@@ -244,6 +246,11 @@ export type {
   /** Result of non-blocking `submitPrompt()`: the daemon-assigned promptId. */
   SubmitPromptResult,
 } from './daemon/index.js';
+export type {
+  DaemonSessionOwnerGuard,
+  DaemonSessionOwnerSnapshot,
+  DaemonSessionTransition,
+} from './daemon/session/types.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────
 

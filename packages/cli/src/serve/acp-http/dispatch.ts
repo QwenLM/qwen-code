@@ -120,6 +120,7 @@ import {
 } from '../workspace-agents.js';
 import {
   InvalidCursorError,
+  invalidateWorkspaceSessionListCache,
   listWorkspaceSessionsForResponse,
 } from '../server.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
@@ -981,6 +982,27 @@ export class AcpDispatcher {
     }),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
+  }
+
+  private invalidateSessionLists(
+    archiveStates: readonly SessionArchiveState[],
+  ): void {
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: this.sessionRuntimeBaseDir,
+      workspaceCwd: this.boundWorkspace,
+      archiveStates,
+    });
+  }
+
+  private async runWithSessionListInvalidation<T>(
+    archiveStates: readonly SessionArchiveState[],
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await mutation();
+    } finally {
+      this.invalidateSessionLists(archiveStates);
+    }
   }
 
   private removeOrphanSession(
@@ -1974,6 +1996,7 @@ export class AcpDispatcher {
               parentSessionId,
               ...parsedSource,
             },
+            { runtimeBaseDir: this.sessionRuntimeBaseDir },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -2070,6 +2093,7 @@ export class AcpDispatcher {
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
+            this.invalidateSessionLists(['active']);
           }
           closeLocalSessionStream();
           this.replyConn(conn, id, {});
@@ -2660,13 +2684,18 @@ export class AcpDispatcher {
             const metadata = isObject(params['metadata'])
               ? (params['metadata'] as Record<string, unknown>)
               : {};
-            const result = this.bridge.updateSessionMetadata(
-              sessionId,
-              metadata as unknown as Parameters<
-                HttpAcpBridge['updateSessionMetadata']
-              >[1],
-              this.sessionCtx(conn, sessionId, loopback),
-            );
+            let result: ReturnType<HttpAcpBridge['updateSessionMetadata']>;
+            try {
+              result = this.bridge.updateSessionMetadata(
+                sessionId,
+                metadata as unknown as Parameters<
+                  HttpAcpBridge['updateSessionMetadata']
+                >[1],
+                this.sessionCtx(conn, sessionId, loopback),
+              );
+            } finally {
+              this.invalidateSessionLists(['active']);
+            }
             this.replyConn(conn, id, result as unknown);
           });
           return;
@@ -4329,19 +4358,23 @@ export class AcpDispatcher {
           const ids = this.parseSessionIds(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace);
-          const result = await deleteDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            bridge: this.bridge,
-            coordinator: this.archiveCoordinator,
-            onError: ({ phase, sessionId, error }) => {
-              const safeSessionId = logSafe(sessionId.slice(0, 8));
-              const safeMessage = logSafe(error);
-              writeStderrLine(
-                `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
-              );
-            },
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              deleteDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                bridge: this.bridge,
+                coordinator: this.archiveCoordinator,
+                onError: ({ phase, sessionId, error }) => {
+                  const safeSessionId = logSafe(sessionId.slice(0, 8));
+                  const safeMessage = logSafe(error);
+                  writeStderrLine(
+                    `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
+                  );
+                },
+              }),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -4352,12 +4385,16 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
-          const result = await archiveDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            bridge: this.bridge,
-            coordinator: this.archiveCoordinator,
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              archiveDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                bridge: this.bridge,
+                coordinator: this.archiveCoordinator,
+              }),
+          );
           this.replyConn(conn, id, {
             archived: result.archived,
             alreadyArchived: result.alreadyArchived,
@@ -4372,11 +4409,15 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
-          const result = await unarchiveDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            coordinator: this.archiveCoordinator,
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              unarchiveDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                coordinator: this.archiveCoordinator,
+              }),
+          );
           this.replyConn(conn, id, {
             unarchived: result.unarchived,
             alreadyActive: result.alreadyActive,
