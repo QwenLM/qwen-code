@@ -54,6 +54,13 @@ const OUTPUT_FILE_NAME = 'transcript.txt';
 /** How many chunk transcription requests run concurrently. */
 const CHUNK_CONCURRENCY = 3;
 
+/** Hard ceiling on chunked-transcription segments. The claimed duration
+ * comes from container metadata, which a crafted file controls freely: an
+ * absurd duration must not translate into millions of outcome slots and
+ * queued ffmpeg cuts. 512 × the 30s chunkSeconds floor ≈ 4h16m — far past
+ * anything the 10MiB default input cap plausibly holds. */
+const MAX_SEGMENT_COUNT = 512;
+
 /** Chunk re-encode target: 16kHz mono AAC — small enough that a chunk's
  * base64 payload stays far under request limits, and speech-sufficient. */
 const CHUNK_AUDIO_ARGS = [
@@ -357,6 +364,13 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
         durationSeconds !== undefined
           ? Math.ceil(durationSeconds / chunkSeconds)
           : 1;
+      if (segmentCount > MAX_SEGMENT_COUNT) {
+        // Fail closed: the duration is attacker-influenced metadata, and
+        // the size gate above already bounds what REAL audio can be here.
+        return mediaPolicyToolError(
+          `container claims ${Math.round(durationSeconds ?? 0)}s of audio (${segmentCount} segments of ${chunkSeconds}s, over the ${MAX_SEGMENT_COUNT}-segment ceiling) — implausible for a ${inputSizeBytes}-byte input`,
+        );
+      }
 
       let transcript: string;
       let degeneratedSegments = 0;

@@ -493,6 +493,20 @@ describe('OmniTranscribeAudioTool', () => {
       );
     });
 
+    it('fails closed on an implausible container duration (segment-count ceiling)', async () => {
+      // 10⁸ claimed seconds → ~555556 segments at 180s. The duration is
+      // attacker-influenced metadata: without the ceiling this would fan
+      // out into hundreds of thousands of ffmpeg cuts + API calls.
+      probe({ durationMs: 100_000_000_000 });
+      const { result } = await run();
+
+      expect(result.error?.message).toMatch(/over the 512-segment ceiling/);
+      expect(result.error?.message).toMatch(/implausible/);
+      expect(mocks.runFfmpeg).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.artifacts).toBeUndefined();
+    });
+
     it('marks individual failed segments inline instead of failing the run', async () => {
       fetchMock.mockImplementation(async (_url: string, init: RequestInit) =>
         seekTagOf(init).startsWith('133')
