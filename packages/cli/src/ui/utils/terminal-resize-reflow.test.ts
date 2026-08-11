@@ -346,7 +346,7 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
-  it('repaint falls back to a bare clear when the width changed', () => {
+  it('repaint is a no-op when the width changed (stale beats blank)', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
@@ -357,13 +357,13 @@ describe('installTerminalResizeReflow', () => {
       stdout.columns = 80;
       stdout.written.length = 0;
       repaint!();
-      expect(stdout.written).toEqual([`${ESC}2J${ESC}H`]);
+      expect(stdout.written).toEqual([]);
     } finally {
       restore();
     }
   });
 
-  it('repaint before any frame is a bare clear', () => {
+  it('repaint before any frame is a no-op', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
@@ -371,7 +371,7 @@ describe('installTerminalResizeReflow', () => {
     );
     try {
       repaint!();
-      expect(stdout.written).toEqual([`${ESC}2J${ESC}H`]);
+      expect(stdout.written).toEqual([]);
     } finally {
       restore();
     }

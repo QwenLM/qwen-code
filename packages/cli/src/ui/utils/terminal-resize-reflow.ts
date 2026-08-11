@@ -203,14 +203,17 @@ export function installTerminalResizeReflow(
   let clearUntil = 0;
   debugLogger.debug('installed', { width: lastWidth, isVP });
 
-  const modelFrame = (content: string, bypassMin = false) => {
-    if (!bypassMin && content.split('\n').length < MIN_FRAME_LINES) return;
+  const modelFrame = (content: string, bypassMin = false): boolean => {
+    if (!bypassMin && content.split('\n').length < MIN_FRAME_LINES) {
+      return false;
+    }
     model.content = content;
     model.columns = stdout.columns ?? lastWidth;
     // Ink appends the cursor suffix AFTER the frame's trailing newline, so
     // detect the newline on the ANSI-stripped content (the suffix is either
     // pure control bytes or a one-cell cursor block, never a '\n').
     model.trailingNewline = stripAnsi(content).endsWith('\n');
+    return true;
   };
 
   const onResize = () => {
@@ -317,13 +320,17 @@ export function installTerminalResizeReflow(
           expectFrame = false;
         } else if (stripAnsi(chunk).trim() !== '') {
           // Bare redraw (or static append preceding it): model each printable
-          // bare write, last one wins; the second printable bare write of a
-          // commit is the live frame and replaces the model even below
-          // MIN_FRAME_LINES. Once the live frame is consumed, disarm so later
-          // strays cannot clobber the model during idle.
-          barePrintableCount++;
-          modelFrame(chunk, barePrintableCount > 1);
-          if (barePrintableCount > 1) expectFrame = false;
+          // bare write, last one wins; the second ACCEPTED printable bare
+          // write of a commit is the live frame and replaces the model even
+          // below MIN_FRAME_LINES. Only accepted writes consume a slot —
+          // rejected sub-MIN strays must not count, or two of them would
+          // bypass the gate and poison the model before the live frame.
+          // Once the live frame is consumed, disarm so later strays cannot
+          // clobber the model during idle.
+          if (modelFrame(chunk, barePrintableCount > 0)) {
+            barePrintableCount++;
+            if (barePrintableCount > 1) expectFrame = false;
+          }
         }
       }
     }
@@ -345,12 +352,12 @@ export function installTerminalResizeReflow(
     },
     repaint: () => {
       const columns = stdout.columns ?? lastWidth;
-      originalWrite.call(
-        stdout,
-        model.columns === columns && model.content
-          ? CLEAR_VIEWPORT + model.content
-          : CLEAR_VIEWPORT,
-      );
+      // A bare CLEAR_VIEWPORT with no replay would blank the screen until
+      // unrelated output (Ink skips byte-identical redraws) — stale-but-
+      // visible beats blank, so only repaint when the model matches the
+      // current width.
+      if (model.columns !== columns || !model.content) return;
+      originalWrite.call(stdout, CLEAR_VIEWPORT + model.content);
     },
   };
 }

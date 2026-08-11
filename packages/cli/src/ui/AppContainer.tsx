@@ -78,7 +78,10 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
-import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
+import {
+  buildWakeRepaint,
+  CLEAR_WINDOW_MS,
+} from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
@@ -1332,16 +1335,25 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     const prev = prevTerminalWidthRef.current;
     prevTerminalWidthRef.current = terminalWidth;
-    if (useTerminalBuffer && terminalWidth < prev) {
-      remountStaticHistory();
+    // repaintViewport is undefined exactly under the legacy hatch (wrapper
+    // no-op, no viewport clears), where pre-PR behavior was no bump at all.
+    if (useTerminalBuffer && repaintViewport && terminalWidth < prev) {
+      // Bump only on the first shrink of a burst; in-window ticks would just
+      // re-emit statics that the next CLEAR_VIEWPORT substitute wipes.
+      if (!shrinkRemountTimerRef.current) {
+        remountStaticHistory();
+      }
       if (shrinkRemountTimerRef.current) {
         clearTimeout(shrinkRemountTimerRef.current);
       }
-      // Slightly past CLEAR_WINDOW_MS (600) so the last window clear lands
-      // before the re-emit.
-      shrinkRemountTimerRef.current = setTimeout(remountStaticHistory, 650);
+      // Slightly past CLEAR_WINDOW_MS so the last window clear lands before
+      // the re-emit.
+      shrinkRemountTimerRef.current = setTimeout(() => {
+        shrinkRemountTimerRef.current = null;
+        remountStaticHistory();
+      }, CLEAR_WINDOW_MS + 50);
     }
-  }, [terminalWidth, useTerminalBuffer, remountStaticHistory]);
+  }, [terminalWidth, useTerminalBuffer, repaintViewport, remountStaticHistory]);
   useEffect(
     () => () => {
       if (shrinkRemountTimerRef.current) {
