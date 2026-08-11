@@ -170,6 +170,17 @@ describe('VirtualSubagentSessions', () => {
     ).toBeUndefined();
   });
 
+  it('rejects an oversized parent part under the total session id cap', () => {
+    const parentPart = Buffer.from('a'.repeat(600), 'utf8').toString(
+      'base64url',
+    );
+    const agentPart = Buffer.from('agent-1', 'utf8').toString('base64url');
+
+    expect(
+      parseVirtualSubagentSessionId(`subagent.${parentPart}.${agentPart}`),
+    ).toBeUndefined();
+  });
+
   it.each(['general-purpose-agent:8', 'general-purpose-agent/8'])(
     'round-trips an existing agent id containing reserved characters: %s',
     (agentId) => {
