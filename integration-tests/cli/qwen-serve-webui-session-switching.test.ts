@@ -527,6 +527,125 @@ describe('qwen serve WebUI transactional session switching', () => {
     }
   }, 30_000);
 
+  it('serializes non-equivalent load and resume requests for one target', async () => {
+    const originalFetch = globalThis.fetch;
+    const state = await setup();
+    const loadResponseReady = deferred();
+    const releaseLoadResponse = deferred();
+    let loadRequests = 0;
+    let resumeRequests = 0;
+    let targetDetachRequests = 0;
+    let staleClientId: string | undefined;
+    const detachedClientIds: Array<string | null> = [];
+    let loadOutcome: Promise<unknown> | undefined;
+    let resumeOutcome: Promise<void> | undefined;
+    try {
+      globalThis.fetch = async (input, init) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init);
+        const pathname = new URL(request.url).pathname;
+        const targetPath = `/session/${encodeURIComponent(state.target.sessionId)}`;
+        if (
+          request.method === 'POST' &&
+          pathname.endsWith(`${targetPath}/resume`)
+        ) {
+          resumeRequests += 1;
+        }
+        if (
+          request.method === 'POST' &&
+          pathname.endsWith(`${targetPath}/detach`)
+        ) {
+          targetDetachRequests += 1;
+          detachedClientIds.push(request.headers.get('X-Qwen-Client-Id'));
+        }
+        const response = await originalFetch(request);
+        if (
+          request.method === 'POST' &&
+          pathname.endsWith(`${targetPath}/load`)
+        ) {
+          loadRequests += 1;
+          const payload = (await response.clone().json()) as {
+            clientId?: unknown;
+          };
+          staleClientId =
+            typeof payload.clientId === 'string' ? payload.clientId : undefined;
+          loadResponseReady.resolve();
+          await releaseLoadResponse.promise;
+        }
+        return response;
+      };
+      act(() => {
+        loadOutcome = state
+          .getActions()
+          .loadSession(state.target.sessionId, {
+            workspaceCwd: state.workspace,
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+      });
+      await loadResponseReady.promise;
+
+      act(() => {
+        resumeOutcome = state
+          .getActions()
+          .resumeSession(state.target.sessionId, {
+            workspaceCwd: state.workspace,
+          });
+      });
+      expect(await loadOutcome).toMatchObject({ name: 'AbortError' });
+      expect(loadRequests).toBe(1);
+      expect(resumeRequests).toBe(0);
+      expect(state.getConnection()).toMatchObject({
+        status: 'connected',
+        sessionId: state.source.sessionId,
+        sessionTransition: { phase: 'queued', operation: 'resume' },
+      });
+
+      await activeDaemon!.client.prompt(state.source.sessionId, {
+        prompt: [{ type: 'text', text: 'source remains live while queued' }],
+      });
+      await waitFor(
+        () =>
+          JSON.stringify(state.getBlocks()).includes(
+            'source remains live while queued',
+          ),
+        'source event while resume is queued',
+      );
+
+      await act(async () => {
+        releaseLoadResponse.resolve();
+        await resumeOutcome;
+      });
+      expect(resumeRequests).toBe(1);
+      await waitFor(
+        () => targetDetachRequests === 1,
+        'stale target attachment cleanup',
+      );
+      expect(staleClientId).toBeTruthy();
+      expect(detachedClientIds).toEqual([staleClientId]);
+      expect(state.getConnection()).toMatchObject({
+        status: 'connected',
+        sessionId: state.target.sessionId,
+      });
+      expect(state.getConnection()?.clientId).toBeTruthy();
+      expect(state.getConnection()?.clientId).not.toBe(staleClientId);
+    } finally {
+      globalThis.fetch = originalFetch;
+      releaseLoadResponse.resolve();
+      await loadOutcome?.catch(() => undefined);
+      await resumeOutcome?.catch(() => undefined);
+      if (root) {
+        await act(async () => root?.unmount());
+        root = undefined;
+      }
+      await activeDaemon?.dispose();
+      activeDaemon = undefined;
+      fs.rmSync(state.workspace, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('preserves the source after a structured target timeout', async () => {
     const originalFetch = globalThis.fetch;
     const state = await setup();
