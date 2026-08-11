@@ -222,6 +222,8 @@ export default {
   'toolDisplayName.ClipVideo': '剪輯影片',
   'toolDisplayName.ConvertImage': '轉換圖像',
   'toolDisplayName.TranscribeAudio': '轉寫音訊',
+  '[fixed-only: runs via media policies, not the model]':
+    '［僅固定策略：由媒體策略調用，不開放給模型］',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
