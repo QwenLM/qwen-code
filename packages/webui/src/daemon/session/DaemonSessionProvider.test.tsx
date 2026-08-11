@@ -6534,6 +6534,105 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
+  it('clears a source passive-assistant timer before transactional commit', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['client_identity'],
+      });
+      const source = createMockSession({
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        events: async function* passiveSourceEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'source partial' },
+              },
+            },
+          };
+          await new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          );
+        },
+      });
+      const target = createMockSession({
+        sessionId: 'session-b',
+        clientId: 'client-b',
+        hasActivePrompt: true,
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 2,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'target partial' },
+                },
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+      });
+      sdkMocks.sessions.push(source, target);
+      let actions: DaemonSessionActions | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+      function Harness() {
+        actions = useDaemonActions();
+        blocks = useDaemonTranscriptBlocks();
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+        await flushPromises();
+      });
+      expect(blocks).toMatchObject([
+        { kind: 'assistant', text: 'source partial', streaming: true },
+      ]);
+
+      await act(async () => {
+        await requireActions(actions).loadSession('session-b');
+        await flushPromises();
+      });
+      expect(blocks).toMatchObject([
+        { kind: 'assistant', text: 'target partial', streaming: true },
+      ]);
+      expect(streamingState).toBe('responding');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+        await flushPromises();
+      });
+      expect(blocks).toMatchObject([
+        { kind: 'assistant', text: 'target partial', streaming: true },
+      ]);
+      expect(streamingState).toBe('responding');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('finishes replayed assistant streaming when replay completes', async () => {
     vi.useFakeTimers();
     try {
@@ -7676,7 +7775,7 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[0]?.[3]).toBe('client-b');
   });
 
-  it('keeps cross-session restore blocked until every branch settles', async () => {
+  it('rejects a concurrent branch and opens the first branch', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
       mode: 'http-bridge',
@@ -7688,28 +7787,23 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-a',
       clientId: 'client-a',
     });
-    const secondBranchSession = createMockSession({
-      sessionId: 'session-c',
-      clientId: 'client-c',
+    const branchedSession = createMockSession({
+      sessionId: 'session-b',
+      clientId: 'client-b',
     });
     const firstBranch = createDeferred<{
       sessionId: string;
       displayName: string;
       clientId: string;
     }>();
-    const secondBranch = createDeferred<{
-      sessionId: string;
-      displayName: string;
-      clientId: string;
-    }>();
-    sdkMocks.branchSession
-      .mockReturnValueOnce(firstBranch.promise)
-      .mockReturnValueOnce(secondBranch.promise);
-    sdkMocks.sessions.push(sourceSession, secondBranchSession);
+    sdkMocks.branchSession.mockReturnValueOnce(firstBranch.promise);
+    sdkMocks.sessions.push(sourceSession, branchedSession);
     let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       actions = useDaemonActions();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -7720,12 +7814,16 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.MockDaemonSessionClient.load.mockClear();
 
     let first!: Promise<{ sessionId: string; displayName: string }>;
-    let second!: Promise<{ sessionId: string; displayName: string }>;
+    let second!: Promise<unknown>;
     await act(async () => {
       first = requireActions(actions).branchSession('First');
-      second = requireActions(actions).branchSession('Second');
+      second = requireActions(actions)
+        .branchSession('Second')
+        .catch((error: unknown) => error);
       await flushPromises();
     });
+    await expect(second).resolves.toMatchObject({ name: 'InvalidStateError' });
+    expect(sdkMocks.branchSession).toHaveBeenCalledOnce();
     let firstResult: { sessionId: string; displayName: string } | undefined;
     await act(async () => {
       firstBranch.resolve({
@@ -7740,43 +7838,16 @@ describe('DaemonSessionProvider', () => {
       sessionId: 'session-b',
       displayName: 'First',
     });
-    expect(sdkMocks.detachSession).toHaveBeenCalledWith(
-      'session-b',
-      'client-b',
-    );
-
-    let blockedResult: unknown;
-    await act(async () => {
-      blockedResult = await requireActions(actions)
-        .loadSession('session-d')
-        .catch((error: unknown) => error);
-      await flushPromises();
-    });
-    expect(blockedResult).toMatchObject({
-      name: 'InvalidStateError',
-    });
-    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
-
-    let secondResult: { sessionId: string; displayName: string } | undefined;
-    await act(async () => {
-      secondBranch.resolve({
-        sessionId: 'session-c',
-        displayName: 'Second',
-        clientId: 'client-c',
-      });
-      secondResult = await second;
-      await wait(5);
-      await flushPromises();
-    });
-    expect(secondResult).toEqual({
-      sessionId: 'session-c',
-      displayName: 'Second',
-    });
-
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
     expect(sdkMocks.MockDaemonSessionClient.load.mock.calls[0]?.[1]).toBe(
-      'session-c',
+      'session-b',
     );
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-b',
+      clientId: 'client-b',
+      sessionTransition: undefined,
+    });
   });
 
   it('exposes daemon capabilities on the connection state', async () => {

@@ -5247,14 +5247,12 @@ export function App({
       updateFailedPrompt(null);
       return;
     }
-    const retryAttachment = sessionOwnerGuard.capture();
     const retryOwner = {
       sourceVersion: composerSourceVersionRef.current,
       sessionId: connectionRef.current.sessionId,
       workspaceCwd: getComposerWorkspaceCwd(),
     };
     const retryOwnerIsCurrent = () =>
-      retryAttachment.isCurrent() &&
       composerSourceVersionRef.current === retryOwner.sourceVersion &&
       connectionRef.current.sessionId === retryOwner.sessionId &&
       getComposerWorkspaceCwd() === retryOwner.workspaceCwd;
@@ -5328,7 +5326,6 @@ export function App({
     pushToast,
     reportError,
     sendPrompt,
-    sessionOwnerGuard,
     store,
     t,
     updateFailedPrompt,
@@ -5482,7 +5479,7 @@ export function App({
     const anchorIndex = messages.length;
     const anchorAfterId = messages.at(-1)?.id;
     const sessionId = connection.sessionId;
-    const owner = sessionOwnerGuard.capture();
+    const workspaceCwd = connection.workspaceCwd;
     setRecapMessage({
       anchorAfterId,
       anchorIndex,
@@ -5496,7 +5493,10 @@ export function App({
     });
     sessionActions.recapSession().then(
       (result) => {
-        if (!owner.isCurrent() || currentSessionIdRef.current !== sessionId)
+        if (
+          currentSessionIdRef.current !== sessionId ||
+          connectionRef.current.workspaceCwd !== workspaceCwd
+        )
           return;
         setRecapMessage({
           anchorAfterId,
@@ -5513,7 +5513,10 @@ export function App({
         });
       },
       (error: unknown) => {
-        if (!owner.isCurrent() || currentSessionIdRef.current !== sessionId)
+        if (
+          currentSessionIdRef.current !== sessionId ||
+          connectionRef.current.workspaceCwd !== workspaceCwd
+        )
           return;
         setRecapMessage(null);
         if (!isAbortError(error) && !isAlreadyDispatched(error)) {
@@ -5523,11 +5526,11 @@ export function App({
     );
   }, [
     connection.sessionId,
+    connection.workspaceCwd,
     messages,
     requireActiveSessionForLocalCommand,
     sessionWriteBlocked,
     sessionActions,
-    sessionOwnerGuard,
     t,
   ]);
 
@@ -5543,7 +5546,7 @@ export function App({
 
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
-      const owner = sessionOwnerGuard.capture();
+      const workspaceCwd = connection.workspaceCwd;
       btwAbortControllerRef.current?.abort();
       const abortController = new AbortController();
       btwAbortControllerRef.current = abortController;
@@ -5559,7 +5562,10 @@ export function App({
         .btwSession(question, { signal: abortController.signal })
         .then(
           (result) => {
-            if (!owner.isCurrent() || currentSessionIdRef.current !== sessionId)
+            if (
+              currentSessionIdRef.current !== sessionId ||
+              connectionRef.current.workspaceCwd !== workspaceCwd
+            )
               return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
@@ -5572,7 +5578,10 @@ export function App({
             });
           },
           (error: unknown) => {
-            if (!owner.isCurrent() || currentSessionIdRef.current !== sessionId)
+            if (
+              currentSessionIdRef.current !== sessionId ||
+              connectionRef.current.workspaceCwd !== workspaceCwd
+            )
               return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
@@ -5585,11 +5594,11 @@ export function App({
     },
     [
       connection.sessionId,
+      connection.workspaceCwd,
       pushToast,
       requireActiveSessionForLocalCommand,
       sessionWriteBlocked,
       sessionActions,
-      sessionOwnerGuard,
       t,
     ],
   );
@@ -8940,17 +8949,17 @@ export function App({
       (lastSubmittedPromptRef.current ||
         (lastSubmittedImagesRef.current?.length ?? 0) > 0)
     ) {
-      const retryAttachment = sessionOwnerGuard.capture();
       const retryErrorId = retryableTurnErrorIdRef.current;
       const retrySessionId = connectionRef.current.sessionId;
+      const retryWorkspaceCwd = getComposerWorkspaceCwd();
       const retrySourceVersion = composerSourceVersionRef.current;
       const retryText = lastSubmittedPromptRef.current;
       const retryImages = lastSubmittedImagesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
       const retryOwnerIsCurrent = () =>
-        retryAttachment.isCurrent() &&
         composerSourceVersionRef.current === retrySourceVersion &&
-        connectionRef.current.sessionId === retrySessionId;
+        connectionRef.current.sessionId === retrySessionId &&
+        getComposerWorkspaceCwd() === retryWorkspaceCwd;
       retriedTurnErrorIdRef.current = retryErrorId;
       setShowRetryHint(false);
       setFailedPromptRetry({
@@ -9015,10 +9024,10 @@ export function App({
     }
   }, [
     connected,
+    getComposerWorkspaceCwd,
     pushToast,
     reportError,
     sendPrompt,
-    sessionOwnerGuard,
     store,
     t,
     updateUnknownPromptAdmission,

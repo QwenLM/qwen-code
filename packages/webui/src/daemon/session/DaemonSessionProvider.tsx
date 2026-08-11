@@ -3348,6 +3348,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       settledPromptsRef.current.clear();
       hasCurrentSessionActivePromptRef.current = () =>
         staged.session.hasActivePrompt === true;
+      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus(staged.session.hasActivePrompt ? 'streaming' : 'idle');
       liveJournalRepairRef.current?.controller?.abort();
       liveJournalRepairRef.current = staged.repair;
@@ -3755,6 +3756,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         cancelCrossSessionTransition,
         isCrossSessionTransitionPending: () =>
           desiredTransitionRef.current !== undefined,
+        isSourceBoundOperationInFlight: () =>
+          sourceBoundOperationCountRef.current > 0,
         setSourceBoundOperationInFlight: (inFlight) =>
           (sourceBoundOperationCountRef.current += inFlight ? 1 : -1),
         getTransitionOrigin: () => {

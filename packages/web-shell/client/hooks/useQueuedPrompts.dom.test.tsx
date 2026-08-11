@@ -182,12 +182,12 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
-  it('clears queued work when a same-id attachment is replaced', () => {
+  it('restores an unaccepted mid-turn prompt when its owner is replaced', () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
       new Promise(() => undefined),
     );
-    const { render } = mount('responding', actions);
+    const { editor, render } = mount('responding', actions);
 
     act(() => latest.enqueuePrompt('belongs to the source attachment'));
     expect(latest.queuedPrompts).toHaveLength(1);
@@ -195,6 +195,9 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('responding', 'session-1', true);
 
     expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).toHaveBeenCalledWith(
+      'belongs to the source attachment',
+    );
     const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
       ?.signal;
     expect(signal?.aborted).toBe(true);
@@ -984,6 +987,87 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toEqual([]);
     expect(editor.setText).toHaveBeenCalledWith('修改我');
     expect(editor.focus).toHaveBeenCalled();
+  });
+
+  it('restores an edited prompt after a same-id attachment replacement', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-edit',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('修改后保留'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-1', true);
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
+
+    expect(editor.setText).toHaveBeenCalledWith('修改后保留');
+    expect(editor.setText).toHaveBeenCalledOnce();
+    expect(editor.focus).toHaveBeenCalled();
+  });
+
+  it('restores an edited prompt when switching to a different session', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-cross-session-edit',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('切换后保留'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true);
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
+
+    expect(editor.setText).toHaveBeenCalledWith('切换后保留');
+    expect(editor.setText).toHaveBeenCalledOnce();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('does not restore an edited prompt when cross-session removal loses', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-cross-session-edit-lost',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('仍在服务端'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true);
+    expect(editor.setText).not.toHaveBeenCalled();
+    await act(async () => {
+      removal.resolve({ removed: false });
+      await editPromise;
+    });
+
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('keeps the row when removal loses the race with drain or idle', async () => {

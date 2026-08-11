@@ -316,10 +316,21 @@ const {
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestMessageListProps: null as {
+        messages?: Array<{
+          role?: string;
+          content?: string;
+          answer?: string;
+          isPending?: boolean;
+        }>;
         failedPromptMessageId?: string;
         onRetryFailedPrompt?: () => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+      } | null,
+      latestBtwMessageProps: null as {
+        question: string;
+        answer: string;
+        isPending: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
@@ -646,6 +657,12 @@ vi.mock('./components/MessageList', async () => {
   return {
     MessageList: React.forwardRef(function MessageList(
       props: {
+        messages?: Array<{
+          role?: string;
+          content?: string;
+          answer?: string;
+          isPending?: boolean;
+        }>;
         showRetryHint?: boolean;
         onRetryClick?: () => void;
         failedPromptMessageId?: string;
@@ -1459,7 +1476,19 @@ vi.doMock('./monitorDetailsContext', async () => {
     },
   };
 });
-mockComponent('./components/messages/BtwMessage', 'BtwMessage');
+vi.doMock('./components/messages/BtwMessage', async () => {
+  const React = await import('react');
+  return {
+    BtwMessage: (props: {
+      question: string;
+      answer: string;
+      isPending: boolean;
+    }) => {
+      testState.latestBtwMessageProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
 const {
@@ -4408,6 +4437,7 @@ beforeEach(() => {
   testState.latestStatusBarTasks = null;
   testState.latestStatusBarOnOpenTasks = null;
   testState.latestMessageListProps = null;
+  testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
@@ -11254,6 +11284,57 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('does not settle a turn-error retry into a different workspace', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const retrySend = deferred<void>();
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    mockSessionActions.sendPrompt.mockClear();
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-cross-workspace',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender();
+    });
+    mockSessionActions.sendPrompt.mockReturnValueOnce(retrySend.promise);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls[0]?.[1];
+    act(() => {
+      retryOptions?.onAdmissionStarted?.();
+      mockConnection.workspaceCwd = '/other-workspace';
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      retrySend.reject(new Error('response lost'));
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="prompt-admission-unknown"]'),
+    ).toBeNull();
+    expect(warn).not.toHaveBeenCalledWith(
+      '[WebShell] post-turn retry admission outcome is unknown',
+      expect.anything(),
+    );
+    warn.mockRestore();
+  });
+
   it('locks an image retry when its admission response is lost', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const retrySend = deferred<void>();
@@ -11473,6 +11554,65 @@ describe('App session callbacks', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(container.querySelector('button[title="Side task"]')).toBeNull();
+  });
+
+  it('settles visible recap after a same-id attachment replacement', async () => {
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/recap';
+    await clickSubmit(container);
+    expect(
+      testState.latestMessageListProps?.messages?.some((message) =>
+        message.content?.includes('Generating recap'),
+      ),
+    ).toBe(true);
+
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      recap.resolve({ sessionId: 'session-1', recap: 'Reconnect-safe recap' });
+      await recap.promise;
+    });
+
+    expect(
+      testState.latestMessageListProps?.messages?.some((message) =>
+        message.content?.includes('Reconnect-safe recap'),
+      ),
+    ).toBe(true);
+  });
+
+  it('settles visible btw after a same-id attachment replacement', async () => {
+    const btw = deferred<{ answer: string }>();
+    mockSessionActions.btwSession.mockReturnValueOnce(btw.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    expect(testState.latestBtwMessageProps).toMatchObject({
+      question: 'keep this answer',
+      isPending: true,
+    });
+
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      btw.resolve({ answer: 'Reconnect-safe answer' });
+      await btw.promise;
+    });
+
+    expect(testState.latestBtwMessageProps).toMatchObject({
+      question: 'keep this answer',
+      answer: 'Reconnect-safe answer',
+      isPending: false,
+    });
   });
 
   it('opens a new side task for /btw side when the capability is available', async () => {
@@ -15129,6 +15269,67 @@ describe('App prompt send failure retry', () => {
       rerender();
       await Promise.resolve();
     });
+  });
+
+  it('settles a prompt retry after a same-id attachment replacement', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const retrySend = deferred<void>();
+    let retryAdmitted: (() => void) | undefined;
+    mockSessionActions.sendPrompt
+      .mockImplementationOnce(() => {
+        testState.blocks = [{ id: 'u1', kind: 'user' }];
+        return firstSend.promise;
+      })
+      .mockImplementationOnce(
+        (
+          _text: string,
+          options?: {
+            onAdmitted?: () => void;
+          },
+        ) => {
+          retryAdmitted = options?.onAdmitted;
+          return retrySend.promise;
+        },
+      );
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click(),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+      retryAdmitted?.();
+    });
+    await act(async () => {
+      retrySend.resolve();
+      await retrySend.promise;
+      testState.streamingState = 'idle';
+      rerender();
+      await Promise.resolve();
+    });
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+
+    expect(testState.latestMessageListProps?.isResponding).toBe(true);
+    expect(
+      container.querySelector('[data-testid="streaming-status"]'),
+    ).not.toBeNull();
   });
 
   it('shows processing only after retry admission and restarts its timer', async () => {

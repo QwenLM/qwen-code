@@ -130,6 +130,7 @@ export interface CreateDaemonSessionActionsArgs {
   ) => Promise<void>;
   cancelCrossSessionTransition?: (reason: string) => void;
   isCrossSessionTransitionPending?: () => boolean;
+  isSourceBoundOperationInFlight?: () => boolean;
   setSourceBoundOperationInFlight?: (inFlight: boolean) => void;
   getTransitionOrigin?: () => 'action' | 'controlled';
 }
@@ -198,6 +199,7 @@ export function createDaemonSessionActions({
   beginCrossSessionTransition,
   cancelCrossSessionTransition = () => undefined,
   isCrossSessionTransitionPending = () => false,
+  isSourceBoundOperationInFlight = () => false,
   setSourceBoundOperationInFlight = () => undefined,
   getTransitionOrigin = () => 'action',
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
@@ -205,12 +207,28 @@ export function createDaemonSessionActions({
   let noticeOwner = sessionRef.current;
 
   function requireStableSession(): void {
-    if (!isCrossSessionTransitionPending()) return;
-    throw new DOMException(
-      'A session switch is still preparing',
-      'InvalidStateError',
-    );
+    if (isCrossSessionTransitionPending()) {
+      throw new DOMException(
+        'A session switch is still preparing',
+        'InvalidStateError',
+      );
+    }
+    if (isSourceBoundOperationInFlight()) {
+      throw new DOMException(
+        'Another session operation is still in progress',
+        'InvalidStateError',
+      );
+    }
   }
+
+  const isCurrentLogicalSession = (session: DaemonSessionClient) => {
+    const current = sessionRef.current;
+    return (
+      current?.sessionId === session.sessionId &&
+      normalizeWorkspaceIdentity(current.workspaceCwd) ===
+        normalizeWorkspaceIdentity(session.workspaceCwd)
+    );
+  };
 
   const ignoreStaleNotice: AddDaemonSessionNotice = (notice) => ({
     ...notice,
@@ -223,6 +241,11 @@ export function createDaemonSessionActions({
     noticeOwner = session;
     return addNotice;
   };
+  const noticeForLogicalSession = (session: DaemonSessionClient) =>
+    isCurrentLogicalSession(session) ? addNotice : ignoreStaleNotice;
+  const shouldSettlePromptForSession = (session: DaemonSessionClient) =>
+    sessionRef.current === session ||
+    (isCurrentLogicalSession(session) && !hasSessionActivePrompt());
 
   function clearActiveSessionState() {
     clearLiveJournalRepair();
@@ -540,7 +563,7 @@ export function createDaemonSessionActions({
         );
       } catch (error) {
         if (isAbortError(error)) {
-          if (sessionRef.current === session) {
+          if (shouldSettlePromptForSession(session)) {
             store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
           }
           return { stopReason: 'cancelled' };
@@ -548,11 +571,11 @@ export function createDaemonSessionActions({
         if (isDaemonTurnError(error)) {
           throw error;
         }
-        if (sessionRef.current === session) {
+        if (shouldSettlePromptForSession(session)) {
           store.dispatch({ type: 'assistant.done', reason: 'error' });
         }
         throw dispatchActionError(
-          noticeForSession(session),
+          noticeForLogicalSession(session),
           'Prompt failed',
           error,
           'send_prompt',
@@ -562,7 +585,7 @@ export function createDaemonSessionActions({
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
         }
-        if (sessionRef.current === session && !hasSessionActivePrompt()) {
+        if (isCurrentLogicalSession(session) && !hasSessionActivePrompt()) {
           setPromptStatus('idle');
         }
       }
@@ -657,7 +680,7 @@ export function createDaemonSessionActions({
         await withActionTimeout(session.cancel(), 'Cancel timed out');
       } catch (error) {
         throw dispatchActionError(
-          noticeForSession(session),
+          noticeForLogicalSession(session),
           'Cancel failed',
           error,
           'cancel_prompt',
@@ -670,7 +693,7 @@ export function createDaemonSessionActions({
         ) {
           activePromptsRef.current.delete(session.sessionId);
         }
-        if (sessionRef.current === session && !hasSessionActivePrompt()) {
+        if (isCurrentLogicalSession(session) && !hasSessionActivePrompt()) {
           setPromptStatus('idle');
         }
       }
@@ -1362,7 +1385,7 @@ export function createDaemonSessionActions({
         return await session.shellCommand(command, ctrl.signal);
       } catch (error) {
         throw dispatchActionError(
-          noticeForSession(session),
+          noticeForLogicalSession(session),
           'Shell command failed',
           error,
           'send_shell_command',
@@ -1371,7 +1394,7 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(shellKey)?.controller === ctrl) {
           activePromptsRef.current.delete(shellKey);
         }
-        if (sessionRef.current === session && !hasSessionActivePrompt()) {
+        if (isCurrentLogicalSession(session) && !hasSessionActivePrompt()) {
           setPromptStatus('idle');
         }
       }
@@ -1525,6 +1548,15 @@ export function createDaemonSessionActions({
           branchRequest,
           'Branch session timed out',
         );
+        if (!isCurrentLogicalSession(session)) {
+          void session.client
+            .detachSession(result.sessionId, result.clientId)
+            .catch(() => undefined);
+          return {
+            sessionId: result.sessionId,
+            displayName: result.displayName,
+          };
+        }
         persistStableClientId(result.clientId, result.sessionId);
         void startSessionSwitch(result.sessionId, 'load').catch(
           (switchError: unknown) => {
