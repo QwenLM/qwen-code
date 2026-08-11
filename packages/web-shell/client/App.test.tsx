@@ -202,6 +202,9 @@ const {
       Promise.resolve({ workspaceCwd: '/tmp/project' }),
     ),
     listWorkspaceSessions: vi.fn(() => Promise.resolve([])),
+    resolveSubagentSession: vi
+      .fn()
+      .mockRejectedValue(new Error('Subagent details unavailable')),
   };
   const settingsSetValue = vi.fn().mockResolvedValue(undefined);
   const mockCollectSystemInfo = vi.fn();
@@ -4291,6 +4294,10 @@ beforeEach(() => {
   });
   mockWorkspace.client.listWorkspaceSessions.mockReset();
   mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([]);
+  mockWorkspace.client.resolveSubagentSession.mockReset();
+  mockWorkspace.client.resolveSubagentSession.mockRejectedValue(
+    new Error('Subagent details unavailable'),
+  );
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
   testState.promptImages = undefined;
@@ -4445,6 +4452,7 @@ afterEach(() => {
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('App plan todos', () => {
@@ -7618,7 +7626,7 @@ describe('App session callbacks', () => {
     globalThis.ResizeObserver = originalResizeObserver;
   });
 
-  it('opens an out-of-band fork task in the right panel', () => {
+  it('loads an out-of-band fork after the right panel opens', async () => {
     testState.backgroundTasks = [
       {
         kind: 'agent',
@@ -7654,6 +7662,10 @@ describe('App session callbacks', () => {
     act(() => forkButton?.click());
 
     expect(
+      container.querySelector('[class*="artifactPanelDockNoOpenAnimation"]'),
+    ).toBeNull();
+    expect(mockWorkspace.client.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(
       container.querySelector(
         '[data-testid="environment-panel"]:not([hidden])',
       ),
@@ -7661,6 +7673,97 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('button[title="Agent: Review current changes"]'),
     ).not.toBeNull();
+
+    const dock = container.querySelector<HTMLElement>(
+      '[class*="artifactPanelDock"]',
+    );
+    const panel = dock?.querySelector('aside');
+    await act(async () => {
+      panel?.dispatchEvent(new Event('animationend', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(mockWorkspace.client.resolveSubagentSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      dock?.dispatchEvent(new Event('animationend', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(
+      mockWorkspace.client.resolveSubagentSession,
+    ).toHaveBeenCalledExactlyOnceWith('session-1', 'fork-agent-1');
+  });
+
+  it('loads an out-of-band fork after the floating drawer opens with reduced motion', async () => {
+    vi.stubGlobal('CSS', { escape: (value: string) => value });
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('prefers-reduced-motion'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'fork-agent-1',
+        label: 'Review current changes',
+        description: 'Review current changes',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 10,
+        isBackgrounded: true,
+      },
+    ];
+    const { container } = renderApp();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle environment information"]',
+        )
+        ?.click();
+    });
+    const subagentsButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('Subagents'));
+    act(() => subagentsButton?.click());
+    const forkButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="environment-panel"] ul button',
+      ),
+    ).find((button) => button.textContent?.includes('Review current changes'));
+
+    act(() => forkButton?.click());
+
+    expect(mockWorkspace.client.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 700);
+    const drawer = document.querySelector<HTMLElement>(
+      '[data-slot="drawer-content"]',
+    );
+    expect(drawer).not.toBeNull();
+    const dispatchAnimationEnd = (target: Element, animationName: string) => {
+      const event = new Event('animationend', { bubbles: true });
+      Object.defineProperty(event, 'animationName', { value: animationName });
+      target.dispatchEvent(event);
+    };
+
+    await act(async () => {
+      const panel = drawer?.querySelector('aside');
+      if (panel) dispatchAnimationEnd(panel, 'child-animation');
+      await Promise.resolve();
+    });
+    expect(mockWorkspace.client.resolveSubagentSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      if (drawer) dispatchAnimationEnd(drawer, 'slideFromRight');
+      await Promise.resolve();
+    });
+    expect(
+      mockWorkspace.client.resolveSubagentSession,
+    ).toHaveBeenCalledExactlyOnceWith('session-1', 'fork-agent-1');
   });
 
   it('updates the header when session metadata supplies a generated title', () => {

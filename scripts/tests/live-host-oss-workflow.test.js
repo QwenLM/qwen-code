@@ -18,6 +18,12 @@ const syncWorkflow = readFileSync(
 );
 
 describe('Live Host OSS mirror workflow', () => {
+  it('grants the reusable mirror workflow its required token permissions', () => {
+    expect(releaseWorkflow).toContain(
+      "permissions:\n  actions: 'read'\n  contents: 'read'",
+    );
+  });
+
   it('runs only after a stable Live Host release or a manual re-run', () => {
     expect(syncWorkflow).not.toContain('pull_request:');
     expect(syncWorkflow).not.toContain('dry_run');
@@ -28,6 +34,19 @@ describe('Live Host OSS mirror workflow', () => {
     );
     expect(syncOss).toContain("- 'publish'");
     expect(syncOss).toContain("source: 'artifact'");
+    expect(syncOss).not.toContain('secrets: inherit');
+    expect(syncOss).toContain(
+      "ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'",
+    );
+    expect(syncOss).toContain(
+      "ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'",
+    );
+    expect(syncWorkflow).toContain(
+      'ALIYUN_OSS_ACCESS_KEY_ID:\n        required: true',
+    );
+    expect(syncWorkflow).toContain(
+      'ALIYUN_OSS_ACCESS_KEY_SECRET:\n        required: true',
+    );
   });
 
   it('uploads and verifies one release without an OSS state machine', () => {
