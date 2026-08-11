@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { OpenAILogger } from '@qwen-code/qwen-code-core';
@@ -15,6 +16,8 @@ import {
   cleanupOldSubagentTranscripts,
   getCutoffDate,
 } from './cleanup.js';
+
+vi.mock('node:fs/promises', { spy: true });
 
 const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -272,6 +275,7 @@ describe('cleanupOldOpenAILogs', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(logDir, { recursive: true, force: true });
   });
 
@@ -401,7 +405,7 @@ describe('cleanupOldOpenAILogs', () => {
     expect(r).toEqual({ removed: 0, errors: 0, completed: false });
   });
 
-  it('checks cancellation for every directory entry and settles a partial batch', async () => {
+  it('checks cancellation for every directory entry', async () => {
     const old = new Date(Date.now() - 30 * MS_PER_DAY);
     for (let i = 0; i < 10; i++) {
       mkLog(`notes-${i}.txt`, old);
@@ -427,6 +431,49 @@ describe('cleanupOldOpenAILogs', () => {
     expect(r.completed).toBe(false);
     expect(checks).toBeGreaterThan(5);
     expect(r.removed).toBeLessThan(10);
+  });
+
+  it('settles a partially populated deletion batch before returning', async () => {
+    const old = new Date(Date.now() - 30 * MS_PER_DAY);
+    for (let i = 0; i < 10; i++) {
+      mkLog(openAILogName(old, i.toString(16).padStart(8, '0')), old);
+    }
+
+    let unlinkStarted = false;
+    let releaseUnlink: (() => void) | undefined;
+    vi.mocked(fsPromises.unlink).mockImplementation(async (filePath) => {
+      unlinkStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseUnlink = resolve;
+      });
+      fs.unlinkSync(filePath);
+    });
+    const signal = {
+      get aborted() {
+        return unlinkStarted;
+      },
+    } as AbortSignal;
+
+    let settled = false;
+    const cleanup = cleanupOldOpenAILogs({
+      logDir,
+      cutoffDate: cutoff,
+      signal,
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await vi.waitFor(() => expect(releaseUnlink).toBeTypeOf('function'));
+    await Promise.resolve();
+    try {
+      expect(settled).toBe(false);
+    } finally {
+      releaseUnlink?.();
+    }
+    const r = await cleanup;
+
+    expect(r).toEqual({ removed: 1, errors: 0, completed: false });
   });
 
   it.skipIf(process.platform === 'win32')(

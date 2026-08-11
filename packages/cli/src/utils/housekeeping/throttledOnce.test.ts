@@ -6,9 +6,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import type { FileHandle } from 'node:fs/promises';
 import { runThrottledOnce } from './throttledOnce.js';
+
+vi.mock('node:fs/promises', { spy: true });
 
 const MS_PER_HOUR = 60 * 60 * 1000;
 
@@ -24,6 +28,7 @@ describe('runThrottledOnce', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -101,6 +106,25 @@ describe('runThrottledOnce', () => {
     ]);
     expect(task).toHaveBeenCalledOnce();
     expect([a.status, b.status].sort()).toEqual(['completed', 'locked']);
+  });
+
+  it('rechecks marker freshness after acquiring the lock', async () => {
+    vi.mocked(fsPromises.open).mockImplementationOnce(async () => {
+      fs.writeFileSync(markerPath, 'completed elsewhere');
+      return {
+        close: vi.fn(async () => {}),
+      } as unknown as FileHandle;
+    });
+    const task = vi.fn(async () => {});
+
+    const result = await runThrottledOnce(
+      { name: 'test', markerPath, lockPath },
+      task,
+    );
+
+    expect(result.status).toBe('fresh');
+    expect(task).not.toHaveBeenCalled();
+    expect(fs.existsSync(lockPath)).toBe(false);
   });
 
   it('skips when a fresh lock exists (lock held by another process)', async () => {
