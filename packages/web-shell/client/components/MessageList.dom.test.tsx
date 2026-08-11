@@ -645,7 +645,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 
-  it('restores final actions for stale active agents loaded from history', () => {
+  it('keeps actions suppressed for stale agents until they reconcile terminal', () => {
     const firstAgent = agentMsg('agent-1');
     const secondAgent = agentMsg('agent-2');
     firstAgent.tools[0]!.status = 'pending';
@@ -660,11 +660,101 @@ describe('MessageList — turn collapse (DOM)', () => {
       catchingUp: false,
       isResponding: false,
     });
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    rerenderMessages(
+      c,
+      [userMsg('u1'), agentMsg('agent-1'), agentMsg('agent-2'), asstMsg('a1')],
+      { catchingUp: false, isResponding: false },
+    );
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows final actions for stale agents in a readonly transcript', () => {
+    const staleAgent = agentMsg('agent-1');
+    staleAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), staleAgent, asstMsg('a1')], undefined, {
+      transcriptRenderMode: 'readonly',
+    });
 
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 
+  it('keeps turn-2 final actions while a turn-1 agent stays pending', () => {
+    const pendingAgent = agentMsg('agent-1');
+    pendingAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      pendingAgent,
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a2')).toBe('true');
+    expect(assistantActions(c, 'a1')).toBe('false');
+  });
+
+  it('releases a delayed sibling footer hold only after a bounded grace', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    // The sibling reconciles terminal before its notification arrives: the
+    // hold stays until the grace expires, in case the notification is merely
+    // delayed.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A late notification still re-hides the narration until the summary.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
   it('restores final actions when a completed sibling notification is lost', () => {
+    vi.useFakeTimers();
     const firstAgent = agentMsg('agent-1');
     const secondAgent = agentMsg('agent-2');
     firstAgent.tools[0]!.status = 'pending';
@@ -696,6 +786,13 @@ describe('MessageList — turn collapse (DOM)', () => {
       backgroundNotificationMsg('bg-1', 'call-agent-1'),
       asstMsg('summary'),
     ]);
+    // The hold survives until the grace expires, in case the sibling
+    // notification is merely delayed; afterwards the lost notification can
+    // no longer hide the final answer.
+    expect(assistantActions(c, 'summary')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 

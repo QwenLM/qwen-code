@@ -58,6 +58,10 @@ const noopTurnOutputAction = () => undefined;
 const RELOAD_TRANSCRIPT_DELAY_MS = 120_000;
 const TURN_LAYOUT_ANIMATION_MS = 180;
 const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
+// A reconciled-terminal sibling whose completion notification is delayed (not
+// lost) lands within moments; bound the unmatched-completion hold so a truly
+// lost notification cannot hide the final footer forever.
+const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 interface MessageListProps {
   messages: Message[];
@@ -573,7 +577,15 @@ function findFinalAnswerIndex(
 
 function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
-  latestTurnIncomplete: boolean,
+  {
+    isResponding,
+    latestTurnAwaitsAgentSummary,
+    gateBackgroundAgentStatus,
+  }: {
+    isResponding: boolean;
+    latestTurnAwaitsAgentSummary: boolean;
+    gateBackgroundAgentStatus: boolean;
+  },
 ): ReadonlyMap<string, string> {
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
@@ -585,9 +597,23 @@ function collectFinalAssistantTurnIds(
 
   const turnIdByAssistantId = new Map<string, string>();
   for (let k = 0; k < userIdxs.length; k++) {
-    if (k === userIdxs.length - 1 && latestTurnIncomplete) continue;
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    if (
+      k === userIdxs.length - 1 &&
+      (isResponding ||
+        (gateBackgroundAgentStatus && latestTurnAwaitsAgentSummary))
+    ) {
+      continue;
+    }
+    // A turn that still owns active background-agent work is not final,
+    // whether it is the latest turn or the user has moved on to a newer one.
+    if (
+      gateBackgroundAgentStatus &&
+      turnHasActiveBackgroundAgent(items, start, end)
+    ) {
+      continue;
+    }
     const turnHead = items[start];
     const answerIdx = findFinalAnswerIndex(items, start, end, false);
     if (answerIdx < 0) continue;
@@ -1316,7 +1342,7 @@ export function getSessionTimelineRangeForIndexes(
  */
 /** Does any tool-carrying row in [start, end] hold a tool matching `pred`? */
 function someTurnToolCall(
-  items: DisplayItem[],
+  items: readonly DisplayItem[],
   start: number,
   end: number,
   pred: (tool: ACPToolCall) => boolean,
@@ -1359,7 +1385,7 @@ function turnHasActiveAgent(
 }
 
 function turnHasActiveBackgroundAgent(
-  items: DisplayItem[],
+  items: readonly DisplayItem[],
   start: number,
   end: number,
 ): boolean {
@@ -2590,29 +2616,37 @@ export const MessageList = memo(
       }
       return 0;
     }, [displayItems]);
+    // Forced-'pending' background-agent statuses only mean "live work" where
+    // reconciliation can classify them; a static transcript has no live state,
+    // so a stale card there must not suppress the final footer.
+    const gateBackgroundAgentStatus = transcriptRenderMode === 'interactive';
     const latestTurnHasActiveBackgroundAgent = useMemo(
       () =>
-        !establishingBackgroundNotificationBaseline &&
+        gateBackgroundAgentStatus &&
         turnHasActiveBackgroundAgent(
           displayItems,
           latestTurnStartIndex,
           displayItems.length - 1,
         ),
-      [
-        displayItems,
-        establishingBackgroundNotificationBaseline,
-        latestTurnStartIndex,
-      ],
+      [displayItems, gateBackgroundAgentStatus, latestTurnStartIndex],
     );
-    const latestTurnAwaitsAgentSummary = useMemo(
+    const [
+      unmatchedCompletionGraceExpired,
+      setUnmatchedCompletionGraceExpired,
+    ] = useState(false);
+    useEffect(() => {
+      setUnmatchedCompletionGraceExpired(false);
+    }, [latestBackgroundNotificationId, latestTurnStartIndex]);
+    const latestTurnHoldsUnmatchedAgentCompletion = useMemo(
       () =>
         backgroundSummaryGraceActive &&
+        !latestTurnHasActiveBackgroundAgent &&
         turnAwaitsBackgroundSummary(
           displayItems,
           latestTurnStartIndex,
           displayItems.length - 1,
           true,
-          latestTurnHasActiveBackgroundAgent,
+          true,
         ),
       [
         backgroundSummaryGraceActive,
@@ -2621,10 +2655,37 @@ export const MessageList = memo(
         latestTurnStartIndex,
       ],
     );
-    const latestTurnIncomplete =
-      isResponding ||
-      latestTurnHasActiveBackgroundAgent ||
-      latestTurnAwaitsAgentSummary;
+    useEffect(() => {
+      if (!latestTurnHoldsUnmatchedAgentCompletion) return;
+      const timer = setTimeout(
+        () => setUnmatchedCompletionGraceExpired(true),
+        UNMATCHED_AGENT_COMPLETION_GRACE_MS,
+      );
+      return () => clearTimeout(timer);
+    }, [
+      latestTurnHoldsUnmatchedAgentCompletion,
+      latestBackgroundNotificationId,
+      latestTurnStartIndex,
+    ]);
+    const latestTurnAwaitsAgentSummary = useMemo(
+      () =>
+        backgroundSummaryGraceActive &&
+        turnAwaitsBackgroundSummary(
+          displayItems,
+          latestTurnStartIndex,
+          displayItems.length - 1,
+          true,
+          latestTurnHasActiveBackgroundAgent ||
+            !unmatchedCompletionGraceExpired,
+        ),
+      [
+        backgroundSummaryGraceActive,
+        displayItems,
+        latestTurnHasActiveBackgroundAgent,
+        latestTurnStartIndex,
+        unmatchedCompletionGraceExpired,
+      ],
+    );
     const latestTurnParallelAgentKeys = useMemo(() => {
       const keys = new Set<string>();
       for (let i = latestTurnStartIndex; i < displayItems.length; i += 1) {
@@ -2759,8 +2820,18 @@ export const MessageList = memo(
       return null;
     }, [isResponding, mergedMessages]);
     const finalAssistantTurnIdByAssistantId = useMemo(
-      () => collectFinalAssistantTurnIds(displayItems, latestTurnIncomplete),
-      [displayItems, latestTurnIncomplete],
+      () =>
+        collectFinalAssistantTurnIds(displayItems, {
+          isResponding,
+          latestTurnAwaitsAgentSummary,
+          gateBackgroundAgentStatus,
+        }),
+      [
+        displayItems,
+        gateBackgroundAgentStatus,
+        isResponding,
+        latestTurnAwaitsAgentSummary,
+      ],
     );
 
     // ── Per-turn collapse ────────────────────────────────────────────────

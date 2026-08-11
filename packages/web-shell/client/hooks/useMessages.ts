@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonHttpError,
+  isSessionLevelNotFound,
+  isSubagentSessionNotFound,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -20,7 +22,12 @@ type Translator = (
   vars?: Record<string, string | number>,
 ) => string;
 
-const BACKGROUND_AGENT_RECONCILIATION_RETRY_MS = 3_000;
+const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
+const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
+// The daemon registers a launched background task shortly after the tool
+// call appears in the transcript, so a first `session_not_found` can race
+// registration. Require repeated misses before treating the agent as gone.
+const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
 
 export interface BackgroundAgentResolution {
   status: string;
@@ -54,14 +61,6 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
-}
-
-function isMissingBackgroundAgent(error: unknown, callId: string): boolean {
-  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
-  const body = getRecord(error.body);
-  return (
-    body?.['code'] === 'session_not_found' && body?.['toolCallId'] === callId
-  );
 }
 
 export function getBackgroundAgentNotificationKey(
@@ -197,6 +196,11 @@ export function useMessagesFromBlocks(
       }
     | undefined
   >(undefined);
+  const retryBackoffRef = useRef<{ key: string; attempts: number }>({
+    key: '',
+    attempts: 0,
+  });
+  const missingAgentMissesRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     const sessionId = connection.sessionId;
@@ -220,6 +224,11 @@ export function useMessagesFromBlocks(
     const requestKey = `${sessionId}:${pendingBackgroundAgentKey}:${backgroundAgentNotificationKey}`;
     const existingRequest = reconciliationRequestRef.current;
     const callIds = pendingBackgroundAgentKey.split('|');
+    for (const callId of [...missingAgentMissesRef.current.keys()]) {
+      if (!callIds.includes(callId)) {
+        missingAgentMissesRef.current.delete(callId);
+      }
+    }
     const request =
       existingRequest?.key === requestKey
         ? existingRequest.request
@@ -231,9 +240,29 @@ export function useMessagesFromBlocks(
                     sessionId,
                     callId,
                   );
+                missingAgentMissesRef.current.delete(callId);
                 return [callId, resolution] as const;
               } catch (error) {
-                if (isMissingBackgroundAgent(error, callId)) {
+                if (isSubagentSessionNotFound(error, callId)) {
+                  const misses =
+                    (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
+                  missingAgentMissesRef.current.set(callId, misses);
+                  if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
+                    return [callId, { status: 'failed' }] as const;
+                  }
+                  throw error;
+                }
+                // Permanent client errors never recover on retry; make the
+                // card terminal so it can stop gating the UI. Unrecognized
+                // 404 shapes stay transient so contract drift cannot
+                // silently fail agents.
+                if (
+                  isSessionLevelNotFound(error) ||
+                  (error instanceof DaemonHttpError &&
+                    error.status >= 400 &&
+                    error.status < 500 &&
+                    error.status !== 404)
+                ) {
                   return [callId, { status: 'failed' }] as const;
                 }
                 throw error;
@@ -265,12 +294,24 @@ export function useMessagesFromBlocks(
             ]),
           }));
           if (resolutions.size < callIds.length) {
+            const attempts =
+              (retryBackoffRef.current.key === requestKey
+                ? retryBackoffRef.current.attempts
+                : 0) + 1;
+            retryBackoffRef.current = { key: requestKey, attempts };
+            const delay = Math.min(
+              BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS *
+                2 ** (attempts - 1),
+              BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS,
+            );
             retryTimer = setTimeout(() => {
               if (reconciliationRequestRef.current?.request === request) {
                 reconciliationRequestRef.current = undefined;
               }
               setReconciliationAttempt((attempt) => attempt + 1);
-            }, BACKGROUND_AGENT_RECONCILIATION_RETRY_MS);
+            }, delay);
+          } else {
+            retryBackoffRef.current = { key: requestKey, attempts: 0 };
           }
         }
       })

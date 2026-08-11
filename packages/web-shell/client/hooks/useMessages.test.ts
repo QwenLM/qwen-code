@@ -278,12 +278,106 @@ describe('background agent task reconciliation', () => {
     await act(async () => root.unmount());
   });
 
-  it('retries a running background agent until it reaches a terminal status', async () => {
+  it('retries a running background agent with bounded backoff until terminal', async () => {
     vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession
       .mockResolvedValueOnce(backgroundAgentResolution('running'))
+      .mockResolvedValueOnce(backgroundAgentResolution('running'))
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    function Consumer() {
+      const messages = useMessages(t);
+      const status =
+        messages[0]?.role === 'tool_group'
+          ? messages[0].tools[0]?.status
+          : undefined;
+      return createElement('div', null, status);
+    }
+
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    );
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // The backoff doubles after each non-terminal result.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => root.unmount());
+    vi.useRealTimers();
+  });
+
+  it('treats a missing background agent as terminal after repeated misses', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    function Consumer() {
+      const messages = useMessages(t);
+      const status =
+        messages[0]?.role === 'tool_group'
+          ? messages[0].tools[0]?.status
+          : undefined;
+      return createElement('div', null, status);
+    }
+
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    );
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => root.unmount());
+    vi.useRealTimers();
+  });
+
+  it('recovers a missing background agent that registers after a first miss', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      )
       .mockResolvedValueOnce(backgroundAgentResolution('completed'));
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -315,13 +409,40 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
-  it('treats a missing background agent as terminal', async () => {
+  it('treats a permanent client error as terminal without retrying', async () => {
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(400, { code: 'invalid_tool_call_id' }, 'bad request'),
+    );
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    function Consumer() {
+      const messages = useMessages(t);
+      const status =
+        messages[0]?.role === 'tool_group'
+          ? messages[0].tools[0]?.status
+          : undefined;
+      return createElement('div', null, status);
+    }
+
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    );
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it('treats a session-level 404 as terminal without a grace period', async () => {
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession.mockRejectedValue(
       new DaemonHttpError(
         404,
-        { code: 'session_not_found', toolCallId: 'agent-call' },
+        { code: 'session_not_found', sessionId: 'session-1' },
         'not found',
       ),
     );
@@ -343,6 +464,39 @@ describe('background agent task reconciliation', () => {
     await vi.waitFor(() => expect(container.textContent).toBe('failed'));
 
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it('does not fail an agent on a 404 identifying a different tool call', async () => {
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'other-call' },
+        'not found',
+      ),
+    );
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    function Consumer() {
+      const messages = useMessages(t);
+      const status =
+        messages[0]?.role === 'tool_group'
+          ? messages[0].tools[0]?.status
+          : undefined;
+      return createElement('div', null, status);
+    }
+
+    await act(async () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    );
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
     await act(async () => root.unmount());
   });
 
