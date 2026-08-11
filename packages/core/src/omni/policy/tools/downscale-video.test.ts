@@ -164,6 +164,30 @@ describe('OmniDownscaleVideoTool', () => {
     );
   });
 
+  it('discloses only the dimensions that actually dropped', async () => {
+    // 360p@8fps against the 480p/10fps defaults: neither the height nor
+    // the frame rate goes down — the loss clause must not claim it did.
+    probe({ height: 360, frameRate: 8 });
+    const { result } = await run();
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 360p8/2MB → 360p10/300KB，重新编码压缩，细节受损',
+    );
+
+    // Height drops, frame rate does not.
+    probe({ height: 720, frameRate: 8 });
+    const heightOnly = await run();
+    expect(
+      heightOnly.result.artifacts?.[0]?.metadata?.['omniDisclosure'],
+    ).toBe('原 720p8/2MB → 480p10/300KB，分辨率下降，细节受损');
+
+    // Frame rate drops, height does not.
+    probe({ height: 360, frameRate: 30 });
+    const rateOnly = await run();
+    expect(rateOnly.result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 360p30/2MB → 360p10/300KB，帧率下降，细节受损',
+    );
+  });
+
   it('falls back to AAC 64k when audio stream copy fails', async () => {
     probe({ height: 720, frameRate: 25 });
     mocks.runFfmpeg

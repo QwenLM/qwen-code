@@ -207,7 +207,21 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
       const outputSizeBytes = (await fs.stat(outputPath)).size;
       const originalRate =
         probe.frameRate !== undefined ? Math.round(probe.frameRate) : '?';
-      const disclosure = `原 ${probe.height}p${originalRate}/${formatBytesShort(inputSizeBytes)} → ${targetHeight}p${fps}/${formatBytesShort(outputSizeBytes)}，分辨率与帧率下降，细节受损`;
+      // The loss clause must match the numbers shown next to it: a 360p@8
+      // input downscaled for size against the 480p/10fps defaults lowers
+      // neither dimension — claiming 分辨率与帧率下降 would contradict the
+      // user-visible before/after figures (D8).
+      const drops = [
+        ...(targetHeight < probe.height ? ['分辨率下降'] : []),
+        ...(probe.frameRate !== undefined && fps < probe.frameRate
+          ? ['帧率下降']
+          : []),
+      ];
+      const lossClause =
+        drops.length === 2
+          ? '分辨率与帧率下降'
+          : (drops[0] ?? '重新编码压缩');
+      const disclosure = `原 ${probe.height}p${originalRate}/${formatBytesShort(inputSizeBytes)} → ${targetHeight}p${fps}/${formatBytesShort(outputSizeBytes)}，${lossClause}，细节受损`;
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
