@@ -277,6 +277,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/mid-turn-messages',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/mid-turn-messages',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/pending-prompts',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/pending-prompts',

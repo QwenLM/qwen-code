@@ -549,9 +549,13 @@ describe('createDaemonSessionActions', () => {
     vi.useFakeTimers();
     try {
       const existingSession = createMockSession('session-a');
+      const manualSessionClearRef = { current: false };
+      const setRestoreSessionId = vi.fn();
       const { actions, getConnection } = createActionsHarness({
         connection: { status: 'connected', sessionId: 'session-a' },
+        manualSessionClearRef,
         session: existingSession,
+        setRestoreSessionId,
       });
 
       const loadPromise = actions.loadSession('session-b');
@@ -561,11 +565,7 @@ describe('createDaemonSessionActions', () => {
         loadingTranscript: true,
       });
 
-      // Split the boundary, and observe pendingness rather than connection
-      // status — the status stays 'connecting' after a rejection, so asserting
-      // it would stay green for any watchdog ≤ 75s, including the 30s attach
-      // value. A 30s load watchdog abandons a load the daemon's 60s budget
-      // still completes, recreating the #8678 symptom in the browser.
+      // Split the boundary so a shorter watchdog cannot pass this test.
       let settledEarly = false;
       void loadPromise.catch(() => {
         settledEarly = true;
@@ -576,10 +576,13 @@ describe('createDaemonSessionActions', () => {
 
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
-        sessionId: 'session-b',
+        status: 'disconnected',
+        sessionId: undefined,
         loadingTranscript: undefined,
         catchingUp: undefined,
       });
+      expect(manualSessionClearRef.current).toBe(true);
+      expect(setRestoreSessionId).toHaveBeenLastCalledWith(undefined);
     } finally {
       vi.useRealTimers();
     }
@@ -1096,6 +1099,60 @@ describe('createDaemonSessionActions', () => {
     expect(restartEventStream).not.toHaveBeenCalled();
   });
 
+  it('preserves ambiguous stable-id admission failures for reconciliation', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('response lost')),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+    ).rejects.toThrow('response lost');
+    // The stable id must reach the session client verbatim: the daemon's
+    // messageId-keyed idempotency and the reconciliation rings never match
+    // if this hop drops the option.
+    expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
+      messageId: 'stable-id',
+    });
+  });
+
+  it('keeps legacy mid-turn admission failures best-effort', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('daemon unavailable')),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.enqueueMidTurnMessage('follow up')).resolves.toEqual({
+      accepted: false,
+    });
+  });
+
+  it('resolves undefined when getMidTurnMessages fails instead of throwing', async () => {
+    // Snapshot failure is unknown state. The caller must not infer that it is
+    // safe to resend.
+    const session = {
+      ...createMockSession('session-a'),
+      getMidTurnMessages: vi.fn().mockRejectedValue(new Error('daemon 500')),
+    };
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('resolves undefined from getMidTurnMessages when no session exists', async () => {
+    const { actions } = createActionsHarness();
+
+    await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
+  });
+
   it('does not apply a late model update to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -1250,6 +1307,7 @@ function createActionsHarness(
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
+    setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -1308,7 +1366,7 @@ function createActionsHarness(
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     setConnection,
     setPromptStatus: vi.fn(),
-    setRestoreSessionId: vi.fn(),
+    setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
     setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),

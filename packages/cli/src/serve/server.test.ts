@@ -401,6 +401,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_side_task',
   'session_prompt',
   'session_mid_turn_message_mutation',
+  'session_mid_turn_message_query',
   'session_cancel',
   'session_events',
   'session_artifacts',
@@ -644,12 +645,22 @@ interface FakeBridgeOpts {
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
+    messageId?: string,
   ) => { accepted: boolean; messageId?: string };
   removeMidTurnImpl?: (
     sessionId: string,
     messageId: string,
     context?: BridgeClientRequestContext,
   ) => { removed: boolean };
+  /** Drives `GET /session/:id/mid-turn-messages`. Default: empty snapshot. */
+  getMidTurnMessagesImpl?: (sessionId: string) => {
+    messages: Array<{
+      messageId: string;
+      text: string;
+    }>;
+    settledMessageIds: string[];
+    promotedMessageIds: string[];
+  };
   getPendingPromptsImpl?: (sessionId: string) => ReadonlyArray<{
     promptId: string;
     text: string;
@@ -951,10 +962,15 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     message: string;
     context?: BridgeClientRequestContext;
+    messageId?: string;
   }>;
   removeMidTurnCalls: Array<{
     sessionId: string;
     messageId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  getMidTurnMessagesCalls: Array<{
+    sessionId: string;
     context?: BridgeClientRequestContext;
   }>;
   permissionVotes: Array<{
@@ -1153,6 +1169,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const removeMidTurnCalls: FakeBridge['removeMidTurnCalls'] = [];
   const removeMidTurnImpl =
     opts.removeMidTurnImpl ?? (() => ({ removed: true }));
+  const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
+  const getMidTurnMessagesImpl =
+    opts.getMidTurnMessagesImpl ??
+    (() => ({
+      messages: [],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    }));
   const getPendingPromptsCalls: string[] = [];
   const getPendingPromptsImpl = opts.getPendingPromptsImpl ?? (() => []);
   const removePendingPromptCalls: Array<{
@@ -1751,6 +1775,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setSessionWorktreeCalls,
     enqueueMidTurnCalls,
     removeMidTurnCalls,
+    getMidTurnMessagesCalls,
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
@@ -2141,13 +2166,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    enqueueMidTurnMessage(sessionId, message, context) {
+    enqueueMidTurnMessage(sessionId, message, context, messageId) {
       enqueueMidTurnCalls.push({
         sessionId,
         message,
         ...(context ? { context } : {}),
+        ...(messageId ? { messageId } : {}),
       });
-      return enqueueMidTurnImpl(sessionId, message, context);
+      return enqueueMidTurnImpl(sessionId, message, context, messageId);
     },
     removeMidTurnMessage(sessionId, messageId, context) {
       removeMidTurnCalls.push({
@@ -2156,6 +2182,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return removeMidTurnImpl(sessionId, messageId, context);
+    },
+    getMidTurnMessages(sessionId, context) {
+      getMidTurnMessagesCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return getMidTurnMessagesImpl(sessionId);
     },
     getPendingPrompts(sessionId) {
       getPendingPromptsCalls.push(sessionId);
@@ -3167,6 +3200,20 @@ describe('createServeApp', () => {
       expect(res.headers['cache-control']).toContain('no-cache');
     });
 
+    it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
+      // Re-pins the contract the deleted `/demo` CORS test carried: the
+      // pre-auth page surface sits behind the Origin wall, so a future
+      // mount-order regression that exposes the shell to cross-origin
+      // browsers fails here instead of silently shipping.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/')
+        .set('Host', host)
+        .set('Origin', 'https://evil.example.com');
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
+    });
+
     it('serves the shell for a // root request pre-auth (non-strict routing)', async () => {
       // Express non-strict routing matches a raw `//` against `app.get('/')`
       // too; the deferred gate's isPreAuthWebShellRequest mirrors this shape.
@@ -3367,6 +3414,67 @@ describe('createServeApp', () => {
       const res = await request(app)
         .get('/deep/link')
         .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<div id="root">');
+    });
+
+    it('no longer serves a demo page: /demo is an ordinary unknown path', async () => {
+      // `/demo` used to be its own pre-auth route. Now it is nothing: a
+      // non-navigation request must 404 (never a debug console), while a
+      // browser navigation is indistinguishable from any other SPA deep link
+      // and gets the shell. Reintroducing the old handler flips the first
+      // assertion.
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+
+      const api = await request(app)
+        .get('/demo')
+        .set('Host', host)
+        .set('Accept', 'application/json');
+      expect(api.status).toBe(404);
+      expect(api.text).not.toContain('<div id="root">');
+
+      const nav = await request(app)
+        .get('/demo')
+        .set('Host', host)
+        .set('Accept', 'text/html');
+      expect(nav.status).toBe(200);
+      expect(nav.text).toContain('<div id="root">');
+    });
+
+    it('gates a /demo navigation behind the bearer once a token is configured', async () => {
+      // The SPA fallback is mounted AFTER bearerAuth, so unlike `/` and
+      // `/session/:id` an unauthenticated navigation to a leftover `/demo`
+      // bookmark is refused rather than answered with the shell — the old
+      // route's loopback pre-auth exposure is gone in every launch mode.
+      for (const opts of [
+        { ...baseOpts, token: 'secret' },
+        { ...baseOpts, token: 'secret', requireAuth: true },
+      ]) {
+        const app = createServeApp(opts, undefined, { webShellDir });
+        const res = await request(app)
+          .get('/demo')
+          .set('Host', host)
+          .set('Accept', 'text/html');
+        expect(res.status).toBe(401);
+        expect(res.text).not.toContain('<div id="root">');
+      }
+    });
+
+    it('serves the shell pre-auth on a non-loopback bind (every launch mode)', async () => {
+      // Re-pins the non-loopback half of the deleted `/demo` suite: the
+      // shell is pre-auth in every launch mode. The old `/demo` registered
+      // after bearerAuth on non-loopback, so a future change re-gating
+      // mountWebShellAssets on the bind address would 401 browser
+      // navigations to a --hostname 0.0.0.0 deployment; this fails first.
+      const app = createServeApp(
+        { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+        undefined,
+        { webShellDir },
+      );
+      const res = await request(app)
+        .get('/')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .set('Accept', 'text/html');
       expect(res.status).toBe(200);
       expect(res.text).toContain('<div id="root">');
@@ -9035,12 +9143,12 @@ describe('createServeApp', () => {
         { bridge },
       );
 
-    it('200 { accepted: true } and forwards the trimmed message + client id', async () => {
+    it('200 { accepted: true } and forwards the message, client id, and message id', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(
         midTurnApp(bridge),
         's-1',
-        { message: '  hello  ' },
+        { message: '  hello  ', messageId: 'client-mid-1' },
         'client-9',
       );
       expect(res.status).toBe(200);
@@ -9055,11 +9163,41 @@ describe('createServeApp', () => {
           sessionId: 's-1',
           message: 'hello',
           context: { clientId: 'client-9' },
+          messageId: 'client-mid-1',
         },
       ]);
     });
 
-    it('200 { accepted: false } when the bridge rejects (idle session)', async () => {
+    it('forwards an id-less push with messageId undefined', async () => {
+      // The web-shell legacy branch posts without a messageId; the route must
+      // forward `undefined` (not the raw body value) so the bridge mints an id.
+      const bridge = fakeBridge();
+      const res = await midTurnPost(
+        midTurnApp(bridge),
+        's-1',
+        { message: 'hi' },
+        'client-9',
+      );
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        { sessionId: 's-1', message: 'hi', context: { clientId: 'client-9' } },
+      ]);
+    });
+
+    it.each([[''], [123], ['x'.repeat(129)]])(
+      '400 when `messageId` is invalid: %j',
+      async (messageId) => {
+        const bridge = fakeBridge();
+        const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+          message: 'hi',
+          messageId,
+        });
+        expect(res.status).toBe(400);
+        expect(bridge.enqueueMidTurnCalls).toEqual([]);
+      },
+    );
+
+    it('200 { accepted: false } when the bridge rejects admission', async () => {
       const bridge = fakeBridge({
         enqueueMidTurnImpl: () => ({ accepted: false }),
       });
@@ -9182,6 +9320,96 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ removed: false });
+    });
+  });
+
+  describe('GET /session/:id/mid-turn-messages', () => {
+    const queryApp = (bridge: FakeBridge) =>
+      createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+    it('200 with the reconciliation snapshot and forwards client identity', async () => {
+      const bridge = fakeBridge({
+        getMidTurnMessagesImpl: () => ({
+          messages: [
+            {
+              messageId: 'mid-1',
+              text: 'waiting',
+            },
+          ],
+          settledMessageIds: ['mid-0', 'mid-deleted'],
+          promotedMessageIds: ['mid-promoted'],
+        }),
+      });
+      const res = await request(queryApp(bridge))
+        .get('/session/s-1/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-9');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        messages: [
+          {
+            messageId: 'mid-1',
+            text: 'waiting',
+          },
+        ],
+        settledMessageIds: ['mid-0', 'mid-deleted'],
+        promotedMessageIds: ['mid-promoted'],
+      });
+      expect(bridge.getMidTurnMessagesCalls).toEqual([
+        { sessionId: 's-1', context: { clientId: 'client-9' } },
+      ]);
+    });
+
+    it('maps a bridge SessionNotFoundError to 404', async () => {
+      const bridge = fakeBridge({
+        getMidTurnMessagesImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const res = await request(queryApp(bridge))
+        .get('/session/missing/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 on a malformed X-Qwen-Client-Id (never reaches the bridge)', async () => {
+      const bridge = fakeBridge();
+      const res = await request(queryApp(bridge))
+        .get('/session/s-1/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'bad client id with spaces');
+      expect(res.status).toBe(400);
+      expect(bridge.getMidTurnMessagesCalls).toEqual([]);
+    });
+
+    it('maps a bridge InvalidClientIdError to 400 invalid_client_id', async () => {
+      // Well-formed but unbound client id: the bridge's ownership check
+      // throws, and `sendBridgeError` maps it like the sibling routes, so a
+      // token-holding client bound to another session never reads this
+      // session's queue texts or terminal-id rings.
+      const bridge = fakeBridge({
+        getMidTurnMessagesImpl: (sessionId) => {
+          throw new InvalidClientIdError(sessionId, 'rogue');
+        },
+      });
+      const res = await request(queryApp(bridge))
+        .get('/session/s-1/mid-turn-messages')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'rogue');
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+      expect(bridge.getMidTurnMessagesCalls).toEqual([
+        { sessionId: 's-1', context: { clientId: 'rogue' } },
+      ]);
     });
   });
 
@@ -25329,85 +25557,6 @@ describe('GET /session/:id/events (SSE)', () => {
   });
 });
 
-describe('GET /demo', () => {
-  it('returns 200 with text/html content type on loopback', async () => {
-    const app = createServeApp(baseOpts, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/text\/html/);
-    expect(res.text).toContain('Qwen Serve');
-    expect(res.text).toContain('<!DOCTYPE html>');
-  });
-
-  it('is accessible without bearer token on loopback even when --token is set', async () => {
-    // Loopback: /demo is registered BEFORE bearerAuth so browsers can
-    // reach the page via address-bar navigation (no Authorization header).
-    const app = createServeApp({ ...baseOpts, token: 'secret' }, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/text\/html/);
-  });
-
-  it('requires bearer token on non-loopback (401 without token)', async () => {
-    // Non-loopback: /demo is registered AFTER bearerAuth to prevent
-    // unauthenticated access on public interfaces.
-    const app = createServeApp(
-      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
-      () => 4170,
-      { bridge: fakeBridge() },
-    );
-    const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
-    expect(res.status).toBe(401);
-  });
-
-  it('is accessible on non-loopback with valid bearer token', async () => {
-    const app = createServeApp(
-      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
-      () => 4170,
-      { bridge: fakeBridge() },
-    );
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', '0.0.0.0:4170')
-      .set('Authorization', 'Bearer secret');
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/text\/html/);
-  });
-
-  it('is guarded by CORS (rejects cross-origin requests)', async () => {
-    const app = createServeApp(baseOpts, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`)
-      .set('Origin', 'https://evil.example.com');
-    expect(res.status).toBe(403);
-  });
-
-  it('sets anti-clickjacking headers (X-Frame-Options + CSP)', async () => {
-    const app = createServeApp(baseOpts, () => 4170, {
-      bridge: fakeBridge(),
-    });
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
-    expect(res.status).toBe(200);
-    expect(res.headers['x-frame-options']).toBe('DENY');
-    expect(res.headers['content-security-policy']).toContain(
-      "frame-ancestors 'none'",
-    );
-  });
-});
-
 describe('same-origin Origin-stripping middleware', () => {
   it('strips loopback Origin header matching daemon port', async () => {
     const app = createServeApp(baseOpts, () => 4170, {
@@ -25607,7 +25756,7 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     );
   });
 
-  it('demo self-origin shim still works when `--allow-origin` is set (loopback strip runs first)', async () => {
+  it('loopback self-origin shim still works when `--allow-origin` is set (loopback strip runs first)', async () => {
     // Regression anchor: the loopback-self-origin shim that strips the
     // Origin header for matching addresses must continue working even
     // when the new allowlist middleware is installed. Without this,

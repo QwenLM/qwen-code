@@ -466,6 +466,10 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_mutation',
     ) === true;
+  const canQueryMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_query',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -481,6 +485,7 @@ export function ChatPane({
     sessionId: connection.sessionId,
     clientId: connection.clientId,
     canMutateMidTurn,
+    canQueryMidTurn,
     streamingState,
     sessionActions: actions,
     store,

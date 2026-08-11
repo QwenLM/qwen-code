@@ -711,6 +711,63 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards stable mid-turn ids and the session clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { accepted: true, messageId: 'stable-1' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.enqueueMidTurnMessage('shared message', {
+        messageId: 'stable-1',
+      }),
+    ).resolves.toEqual({ accepted: true, messageId: 'stable-1' });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-message',
+    );
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      message: 'shared message',
+      messageId: 'stable-1',
+    });
+  });
+
+  it('forwards the mid-turn snapshot query with session and client ids', async () => {
+    const snapshot = {
+      messages: [{ messageId: 'mid-1', text: 'shared message' }],
+      settledMessageIds: ['mid-2'],
+      promotedMessageIds: ['mid-3'],
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, snapshot));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getMidTurnMessages()).resolves.toEqual(snapshot);
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages',
+    );
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('forwards mid-turn message removals with encoded ids and clientId', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, { removed: true }),
