@@ -34,6 +34,11 @@ export interface BackgroundAgentResolution {
   durationMs?: number;
 }
 
+interface ReconciliationRound {
+  resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
+  errors: ReadonlyArray<{ callId: string; error: unknown }>;
+}
+
 export function transcriptBlocksToLocalizedMessages(
   blocks: readonly DaemonTranscriptBlock[],
   t: Translator,
@@ -61,6 +66,16 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function describeReconciliationError(error: unknown): string {
+  if (error instanceof DaemonHttpError) {
+    const code = getRecord(error.body)?.['code'];
+    return typeof code === 'string'
+      ? `HTTP ${error.status} ${code}`
+      : `HTTP ${error.status}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function getBackgroundAgentNotificationKey(
@@ -192,7 +207,7 @@ export function useMessagesFromBlocks(
   const reconciliationRequestRef = useRef<
     | {
         key: string;
-        request: Promise<ReadonlyMap<string, BackgroundAgentResolution>>;
+        request: Promise<ReconciliationRound>;
       }
     | undefined
   >(undefined);
@@ -229,6 +244,7 @@ export function useMessagesFromBlocks(
         missingAgentMissesRef.current.delete(callId);
       }
     }
+    const roundErrors: Array<{ callId: string; error: unknown }> = [];
     const request =
       existingRequest?.key === requestKey
         ? existingRequest.request
@@ -250,21 +266,21 @@ export function useMessagesFromBlocks(
                   if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
                     return [callId, { status: 'failed' }] as const;
                   }
-                  throw error;
-                }
-                // Permanent client errors never recover on retry; make the
-                // card terminal so it can stop gating the UI. Unrecognized
-                // 404 shapes stay transient so contract drift cannot
-                // silently fail agents.
-                if (
+                } else if (
                   isSessionLevelNotFound(error) ||
                   (error instanceof DaemonHttpError &&
                     error.status >= 400 &&
                     error.status < 500 &&
-                    error.status !== 404)
+                    error.status !== 404 &&
+                    error.status !== 429)
                 ) {
+                  // Permanent client errors never recover on retry; make the
+                  // card terminal so it can stop gating the UI. A 429 is the
+                  // daemon's rate-limit signal and unrecognized 404 shapes
+                  // stay transient, so neither may fail the agent.
                   return [callId, { status: 'failed' }] as const;
                 }
+                roundErrors.push({ callId, error });
                 throw error;
               }
             }),
@@ -278,13 +294,13 @@ export function useMessagesFromBlocks(
                 resolutions.set(result.value[0], result.value[1]);
               }
             });
-            return resolutions;
+            return { resolutions, errors: roundErrors };
           });
     reconciliationRequestRef.current = { key: requestKey, request };
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     request
-      .then((resolutions) => {
+      .then(({ resolutions, errors }) => {
         if (active) {
           setResolutionSnapshot((current) => ({
             sessionId,
@@ -294,6 +310,18 @@ export function useMessagesFromBlocks(
             ]),
           }));
           if (resolutions.size < callIds.length) {
+            if (errors.length > 0) {
+              console.warn(
+                '[web-shell] background agent reconciliation retry scheduled',
+                {
+                  sessionId,
+                  callIds: errors.map((entry) => entry.callId),
+                  errors: errors.map((entry) =>
+                    describeReconciliationError(entry.error),
+                  ),
+                },
+              );
+            }
             const attempts =
               (retryBackoffRef.current.key === requestKey
                 ? retryBackoffRef.current.attempts

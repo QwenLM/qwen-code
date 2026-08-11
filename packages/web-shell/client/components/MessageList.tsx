@@ -1440,22 +1440,21 @@ function backgroundAgentCallIds(item: DisplayItem): string[] {
   return [];
 }
 
-function backgroundAgentCompletion(
-  item: DisplayItem,
+function backgroundAgentCompletionForMessage(
+  message: Message,
 ): { callId?: string } | null {
   if (
-    item.type !== 'message' ||
-    item.message.role !== 'system' ||
-    item.message.source !== 'background_notification'
+    message.role !== 'system' ||
+    message.source !== 'background_notification'
   ) {
     return null;
   }
   const identifiesAgent =
-    item.message.content
+    message.content
       ?.trimStart()
       .toLowerCase()
       .startsWith('background agent ') === true;
-  const data = item.message.data;
+  const data = message.data;
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     return identifiesAgent ? {} : null;
   }
@@ -1465,6 +1464,14 @@ function backgroundAgentCompletion(
   };
   if (kind !== 'agent' && !(kind === undefined && identifiesAgent)) return null;
   return typeof toolUseId === 'string' ? { callId: toolUseId } : {};
+}
+
+function backgroundAgentCompletion(
+  item: DisplayItem,
+): { callId?: string } | null {
+  return item.type === 'message'
+    ? backgroundAgentCompletionForMessage(item.message)
+    : null;
 }
 
 function turnAwaitsBackgroundSummary(
@@ -2568,6 +2575,18 @@ export const MessageList = memo(
       }
       return null;
     }, [mergedMessages]);
+    // The unmatched-completion hold only tracks agent notifications, so its
+    // grace reset/timer must key on those too; a monitor or shell-task
+    // notification must not restart the bound on a lost agent completion.
+    const latestAgentNotificationId = useMemo(() => {
+      for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
+        const message = mergedMessages[i];
+        if (message && backgroundAgentCompletionForMessage(message)) {
+          return message.id;
+        }
+      }
+      return null;
+    }, [mergedMessages]);
     const [
       backgroundNotificationBaselineId,
       setBackgroundNotificationBaselineId,
@@ -2636,7 +2655,7 @@ export const MessageList = memo(
     ] = useState(false);
     useEffect(() => {
       setUnmatchedCompletionGraceExpired(false);
-    }, [latestBackgroundNotificationId, latestTurnStartIndex]);
+    }, [latestAgentNotificationId, latestTurnStartIndex]);
     const latestTurnHoldsUnmatchedAgentCompletion = useMemo(
       () =>
         backgroundSummaryGraceActive &&
@@ -2664,7 +2683,7 @@ export const MessageList = memo(
       return () => clearTimeout(timer);
     }, [
       latestTurnHoldsUnmatchedAgentCompletion,
-      latestBackgroundNotificationId,
+      latestAgentNotificationId,
       latestTurnStartIndex,
     ]);
     const latestTurnAwaitsAgentSummary = useMemo(

@@ -796,6 +796,52 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 
+  it('does not restart the unmatched-completion grace for a non-agent notification', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    // The sibling's completion notification is lost: the hold is bounded.
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    // A non-agent notification must not restart the grace timer; the bound
+    // still runs from the agent notification.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+      monitorNotificationMsg('monitor'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
   it('keeps completed turn actions while the latest turn awaits agents', () => {
     const activeAgent = agentMsg('agent-2');
     activeAgent.tools[0]!.status = 'pending';

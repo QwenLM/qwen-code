@@ -109,6 +109,18 @@ describe('isSessionLevelNotFound', () => {
     ).toBe(false);
   });
 
+  it('rejects a 404 whose body carries a different code', () => {
+    expect(
+      isSessionLevelNotFound(
+        new DaemonHttpError(
+          404,
+          { code: 'workspace_not_found', sessionId: 'session-1' },
+          'not found',
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it('rejects non-404 and non-matching errors', () => {
     expect(
       isSessionLevelNotFound(

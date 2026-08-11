@@ -135,6 +135,33 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function mountStatusConsumer(options: { allTools?: boolean } = {}) {
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const t = (key: string) => key;
+  function Consumer() {
+    const messages = useMessages(t);
+    const status = options.allTools
+      ? messages
+          .flatMap((message) =>
+            message.role === 'tool_group'
+              ? message.tools.map((tool) => tool.status)
+              : [],
+          )
+          .join(',')
+      : messages[0]?.role === 'tool_group'
+        ? messages[0].tools[0]?.status
+        : undefined;
+    return createElement('div', null, status);
+  }
+  return {
+    container,
+    render: () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    unmount: () => root.unmount(),
+  };
+}
+
 describe('background agent task reconciliation', () => {
   it('uses terminal agent notifications as a reconciliation trigger without requiring toolUseId', () => {
     expect(
@@ -232,22 +259,9 @@ describe('background agent task reconciliation', () => {
     hookState.resolveSubagentSession.mockResolvedValue(
       backgroundAgentResolution('completed'),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
-
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
       expect(hookState.resolveSubagentSession).toHaveBeenCalledWith(
@@ -266,62 +280,52 @@ describe('background agent task reconciliation', () => {
         streaming: true,
       }),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
 
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
     hookState.connection.status = 'disconnected';
-    await act(async () => renderConsumer());
+    await act(async () => render());
     hookState.connection.status = 'connected';
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('retries a running background agent with bounded backoff until terminal', async () => {
     vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
-    hookState.resolveSubagentSession
-      .mockResolvedValueOnce(backgroundAgentResolution('running'))
-      .mockResolvedValueOnce(backgroundAgentResolution('running'))
-      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('running'),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toBe('pending');
+
+    // The backoff doubles after each non-terminal result and caps at 60s.
+    // Asserted synchronously at exact 1-ms boundaries: vi.waitFor would
+    // advance fake timers by its poll interval and blur them.
+    for (const [index, delay] of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000,
+    ].entries()) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(index + 1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(index + 2);
+      expect(container.textContent).toBe('pending');
     }
 
-    await act(async () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    hookState.resolveSubagentSession.mockResolvedValueOnce(
+      backgroundAgentResolution('completed'),
     );
-    await vi.waitFor(() =>
-      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
-    );
-    expect(container.textContent).toBe('pending');
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+    expect(container.textContent).toBe('completed');
 
-    await act(async () => vi.advanceTimersByTimeAsync(3_000));
-    await vi.waitFor(() =>
-      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
-    );
-    expect(container.textContent).toBe('pending');
-
-    // The backoff doubles after each non-terminal result.
-    await act(async () => vi.advanceTimersByTimeAsync(3_000));
-    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
-    await act(async () => vi.advanceTimersByTimeAsync(3_000));
-    await vi.waitFor(() => {
-      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
-      expect(container.textContent).toBe('completed');
-    });
-
-    await act(async () => root.unmount());
+    await act(async () => unmount());
     vi.useRealTimers();
   });
 
@@ -336,21 +340,9 @@ describe('background agent task reconciliation', () => {
         'not found',
       ),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer))),
-    );
+    await act(async () => render());
     await vi.waitFor(() =>
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
     );
@@ -362,7 +354,7 @@ describe('background agent task reconciliation', () => {
       expect(container.textContent).toBe('failed');
     });
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
     vi.useRealTimers();
   });
 
@@ -379,21 +371,9 @@ describe('background agent task reconciliation', () => {
         ),
       )
       .mockResolvedValueOnce(backgroundAgentResolution('completed'));
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer))),
-    );
+    await act(async () => render());
     await vi.waitFor(() =>
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
     );
@@ -405,7 +385,7 @@ describe('background agent task reconciliation', () => {
       expect(container.textContent).toBe('completed');
     });
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
     vi.useRealTimers();
   });
 
@@ -415,25 +395,56 @@ describe('background agent task reconciliation', () => {
     hookState.resolveSubagentSession.mockRejectedValue(
       new DaemonHttpError(400, { code: 'invalid_tool_call_id' }, 'bad request'),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer))),
-    );
+    await act(async () => render());
     await vi.waitFor(() => expect(container.textContent).toBe('failed'));
 
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
-    await act(async () => root.unmount());
+    await act(async () => unmount());
+  });
+
+  it('retries a rate-limited query instead of failing the agent', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          429,
+          { code: 'rate_limit_exceeded', retryAfterMs: 500 },
+          'rate limited',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+    await vi.waitFor(() =>
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[web-shell] background agent reconciliation retry scheduled',
+        {
+          sessionId: 'session-1',
+          callIds: ['agent-call'],
+          errors: ['HTTP 429 rate_limit_exceeded'],
+        },
+      ),
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('treats a session-level 404 as terminal without a grace period', async () => {
@@ -446,25 +457,13 @@ describe('background agent task reconciliation', () => {
         'not found',
       ),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer))),
-    );
+    await act(async () => render());
     await vi.waitFor(() => expect(container.textContent).toBe('failed'));
 
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('does not fail an agent on a 404 identifying a different tool call', async () => {
@@ -477,27 +476,15 @@ describe('background agent task reconciliation', () => {
         'not found',
       ),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer))),
-    );
+    await act(async () => render());
     await vi.waitFor(() =>
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
     );
     expect(container.textContent).toBe('pending');
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('reconciles after a terminal agent notification without toolUseId', async () => {
@@ -508,21 +495,9 @@ describe('background agent task reconciliation', () => {
     hookState.resolveSubagentSession
       .mockResolvedValueOnce(backgroundAgentResolution('running'))
       .mockResolvedValueOnce(backgroundAgentResolution('completed'));
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(container.textContent).toBe('pending');
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
 
@@ -542,13 +517,13 @@ describe('background agent task reconciliation', () => {
         },
       }),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
       expect(container.textContent).toBe('completed');
     });
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('ignores an older response after the pending Agent set expands', async () => {
@@ -563,27 +538,17 @@ describe('background agent task reconciliation', () => {
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newerA.promise)
       .mockReturnValueOnce(newerB.promise);
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const statuses = useMessages(t).flatMap((message) =>
-        message.role === 'tool_group'
-          ? message.tools.map((tool) => tool.status)
-          : [],
-      );
-      return createElement('div', null, statuses.join(','));
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
     hookState.blocks = [
       backgroundAgentBlock('agent-a'),
       backgroundAgentBlock('agent-b'),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
 
     await act(async () => {
@@ -594,7 +559,7 @@ describe('background agent task reconciliation', () => {
     await act(async () => older.resolve(backgroundAgentResolution('running')));
     expect(container.textContent).toBe('completed,completed');
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('applies successful resolutions when another pending Agent fails', async () => {
@@ -611,21 +576,11 @@ describe('background agent task reconciliation', () => {
           ? Promise.resolve(backgroundAgentResolution('completed'))
           : Promise.reject(new Error('not found')),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const statuses = useMessages(t).flatMap((message) =>
-        message.role === 'tool_group'
-          ? message.tools.map((tool) => tool.status)
-          : [],
-      );
-      return createElement('div', null, statuses.join(','));
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
       expect(container.textContent).toBe('completed,pending');
@@ -654,13 +609,13 @@ describe('background agent task reconciliation', () => {
         },
       }),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(4);
       expect(container.textContent).toBe('completed,completed');
     });
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('ignores an older response after switching sessions', async () => {
@@ -673,23 +628,11 @@ describe('background agent task reconciliation', () => {
     hookState.resolveSubagentSession
       .mockReturnValueOnce(sessionA.promise)
       .mockReturnValueOnce(sessionB.promise);
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     hookState.connection.sessionId = 'session-b';
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
 
     await act(async () =>
@@ -701,7 +644,7 @@ describe('background agent task reconciliation', () => {
     );
     expect(container.textContent).toBe('completed');
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
     hookState.connection.sessionId = 'session-1';
   });
 });
