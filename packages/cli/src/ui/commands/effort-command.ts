@@ -14,6 +14,7 @@ import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
+  applyReasoningEffort,
   normalizeReasoningEffort,
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
@@ -97,7 +98,7 @@ export const effortCommand: SlashCommand = {
 
     // Apply at runtime (takes effect next turn) and persist for future sessions.
     // Provider adapters clamp the tier to what the active model supports.
-    config.setReasoningEffort(tier);
+    const applied = applyReasoningEffort(config, tier);
     settings.setValue(
       getPersistScopeForModelSelection(settings),
       'model.reasoningEffort',
@@ -108,7 +109,7 @@ export const effortCommand: SlashCommand = {
     // (`reasoning: false`), so effort cannot silently re-enable it. The tier is
     // still persisted for future sessions, but report that it won't take effect
     // yet instead of a misleading success message.
-    if (config.getReasoningEffort() !== tier) {
+    if (!applied) {
       return {
         type: 'message',
         messageType: 'info',

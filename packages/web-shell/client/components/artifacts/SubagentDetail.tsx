@@ -6,7 +6,8 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
-import { useMessages } from '../../hooks/useMessages';
+import { useAnimationFrameTranscriptBlocks } from '../../hooks/useAnimationFrameTranscriptBlocks';
+import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
@@ -142,7 +143,8 @@ function SubagentDetailContent({
 }) {
   const { t } = useI18n();
   const connection = useConnection();
-  const messages = useMessages(t);
+  const blocks = useAnimationFrameTranscriptBlocks();
+  const messages = useMessagesFromBlocks(t, blocks);
   const { artifacts } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
@@ -241,7 +243,9 @@ function SubagentDetailContent({
           messages={messages}
           pendingApproval={null}
           loadingTranscript={connection.loadingTranscript}
+          catchingUp={connection.catchingUp}
           isResponding={isRunning}
+          activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
           hideFirstUserMessage
@@ -280,7 +284,8 @@ export function SubagentDetail({
   const { t } = useI18n();
   const workspace = useWorkspace();
   const parentConnection = useConnection();
-  const parentMessages = useMessages(t);
+  const parentBlocks = useAnimationFrameTranscriptBlocks();
+  const parentMessages = useMessagesFromBlocks(t, parentBlocks);
   const rootTool =
     (parentConnection.sessionId === sessionId
       ? findSubagentRootTool(parentMessages, rootToolCallId)

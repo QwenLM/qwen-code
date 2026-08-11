@@ -17,7 +17,7 @@
 // this directory already shares between the same two commands.
 
 /** The attribution marker the strip regex anchors on. */
-const FOOTER_MARKER = 'via Qwen Code /review';
+export const FOOTER_MARKER = 'via Qwen Code /review';
 
 /** The footer naming the reviewing model and the CLI version it ran under. */
 export function reviewFooter(modelId: string, cliVersion: string): string {
