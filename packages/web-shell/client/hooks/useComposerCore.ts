@@ -3755,8 +3755,11 @@ export function useComposerCore(
       if (tagOptions?.placement === 'inline' && !isTouchComposer) {
         const view = viewRef.current;
         if (!view) return;
+        const appendToEnd = tagOptions.position === 'end';
         const selection = view.state.selection.main;
-        let at = selection.from;
+        const insertAt = appendToEnd ? view.state.doc.length : selection.from;
+        const replaceTo = appendToEnd ? view.state.doc.length : selection.to;
+        let at = insertAt;
         const ranges: InlineTagRange[] = [];
         const insert = tags
           .map((tag) => {
@@ -3768,7 +3771,7 @@ export function useComposerCore(
           .join(' ');
         const text = insert ? `${insert} ` : '';
         view.dispatch({
-          changes: { from: selection.from, to: selection.to, insert: text },
+          changes: { from: insertAt, to: replaceTo, insert: text },
           effects:
             ranges.length > 0
               ? ranges.map((range) =>
@@ -3778,10 +3781,12 @@ export function useComposerCore(
                   }),
                 )
               : undefined,
-          selection: { anchor: selection.from + text.length },
+          selection: { anchor: insertAt + text.length },
           scrollIntoView: true,
         });
-        view.focus();
+        // An asynchronous completion (upload) must not steal focus from
+        // whatever control the user moved to while it was in flight.
+        if (!appendToEnd || view.hasFocus) view.focus();
         return;
       }
       setComposerTags((current) => {

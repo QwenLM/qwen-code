@@ -70,19 +70,18 @@ Body: raw binary bytes
 **Middleware chain:**
 
 1. `deps.mutate({ strict: true })` — unauthenticated mutations are rejected before any buffering.
-2. `fileUploadAdmission` — performs every cheap request-level check before buffering:
+2. `fileUploadAdmission` — performs every cheap request-level check before buffering (final-name boundary checks happen in the handler's candidate loop, which runs after buffering):
    - Legacy route: verifies the primary workspace is currently trusted through an injected `isWorkspaceTrusted()` dependency.
    - Qualified route: `resolveWorkspaceRuntimeFromParam` → `requireTrustedWorkspaceRuntime` → `setWorkspaceRouteContext`. Unknown (including an already removed workspace), untrusted, or draining workspaces stop here and never fall back to the primary runtime.
    - Requires `Content-Type: application/octet-stream`; otherwise returns `{ errorKind: 'unsupported_media_type', error: 'File uploads require application/octet-stream', status: 415 }` with status 415.
    - Rejects missing/invalid `path` and a requested basename over `MAX_UPLOAD_FILENAME_BYTES` with a standard `parse_error` envelope.
    - If a valid `Content-Length` is present and exceeds `MAX_UPLOAD_BYTES`, returns the upload-specific 413 immediately. The raw parser remains authoritative for chunked bodies and clients that omit or understate the header.
    - Runs `parseClientId` and `resolveOriginatorClientId` against the selected runtime's bridge. An invalid client id is rejected before buffering.
-   - Splits `path` into directory + basename, resolves the directory with `fs.resolve(dir, 'write')`, and verifies it is an existing directory with `fs.stat`. Traversal, parent-link escapes, missing/non-directory parents, and other boundary failures are therefore rejected before buffering.
-   - Builds the first candidate from the captured resolved directory plus basename and resolves that absolute path. Ordinary `fs.resolve(..., 'write')` follows a final-component symlink that stays inside the workspace. If the result differs from the candidate path, the route treats that name as occupied and starts numbering instead of writing beside or through the link target; an escaping link still fails at the boundary.
-   - Stores the requested basename, resolved parent directory, initially resolved target or occupied marker, route name, fs instance, and `originatorClientId` in a private request context for the handler; later stages do not resolve the original path again.
+   - Splits `path` into directory + basename, resolves the directory with `fs.resolve(dir, 'write')`, and verifies it is an existing directory with `fs.stat`. Traversal, parent-link escapes, missing/non-directory parents, and other boundary failures are therefore rejected before buffering. The requested final name itself is resolved per candidate in the handler's loop after buffering; an escaping final-component symlink surfaces as the loop's boundary error.
+   - Stores the requested basename, resolved parent directory, route name, and the per-request fs instance in a private request context for the handler; the handler does not resolve the parent directory again.
 3. `fileUploadConcurrencyGate` — admits at most `MAX_CONCURRENT_UPLOADS = 4` requests across the legacy and qualified routes. `createServeApp` creates one shared gate and injects it into both route registrations. A saturated gate returns 429 with `Retry-After: 1` before body parsing. Before the upload handler starts, response `finish` or `close` releases the slot; after the handler starts, the slot remains held until the handler settles so disconnecting clients cannot bypass the memory bound.
 4. `fileUploadBodyParser` — wraps `express.raw({ type: 'application/octet-stream', limit: MAX_UPLOAD_BYTES })`. The numeric fs policy constant is the single source of truth for both parser and write limits. Its callback intercepts body-parser `status === 413` and returns the upload-specific `file_too_large` envelope below; other errors call `next(err)`. This prevents the global JSON parser error handler from incorrectly reporting the existing 10 MB JSON limit.
-5. Handler: normalizes an absent parsed body for a valid zero-length request to `Buffer.alloc(0)`, gets the request-scoped fs with the admitted `originatorClientId`, then executes the name-allocation flow below.
+5. Handler: normalizes an absent parsed body for a valid zero-length request to `Buffer.alloc(0)`, takes the admitted request-scoped fs instance, then executes the name-allocation flow below.
 
 Path traversal and symlink escape are blocked by the same `fs.resolve` boundary guards as `/file/write`.
 

@@ -387,6 +387,24 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     }
   });
 
+  it('normalizes the plural workspace upload route to a stable route label', () => {
+    const mw = daemonTelemetryMiddleware(() => '/ws');
+    const res = mockRes(200);
+    mw(
+      mockReq('POST', '/workspaces/ws-secondary/file/upload'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        route: 'POST /workspace/file/upload',
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('attributes plural workspace voice requests to the selected workspace', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     for (const [method, path, route] of [

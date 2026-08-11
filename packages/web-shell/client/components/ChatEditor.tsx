@@ -1400,7 +1400,7 @@ export const ChatEditor = memo(
               serialized,
             },
           ],
-          { placement: 'inline' },
+          { placement: 'inline', position: 'end' },
         );
       },
       [addComposerTags],
@@ -1409,26 +1409,38 @@ export const ChatEditor = memo(
     const uploadDragDepthRef = useRef(0);
     const handleUploadDragEnter = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
-        if (!uploadEnabled || !event.dataTransfer.types.includes('Files'))
+        if (
+          !uploadEnabled ||
+          disabled ||
+          !event.dataTransfer.types.includes('Files')
+        )
           return;
         event.preventDefault();
         uploadDragDepthRef.current += 1;
         setUploadDragActive(true);
       },
-      [uploadEnabled],
+      [uploadEnabled, disabled],
     );
     const handleUploadDragOver = useCallback(
       (event: ReactDragEvent<HTMLDivElement>) => {
-        if (!uploadEnabled || !event.dataTransfer.types.includes('Files'))
+        if (
+          !uploadEnabled ||
+          disabled ||
+          !event.dataTransfer.types.includes('Files')
+        )
           return;
         event.preventDefault();
       },
-      [uploadEnabled],
+      [uploadEnabled, disabled],
     );
     const handleUploadDragLeave = useCallback(() => {
       if (uploadDragDepthRef.current === 0) return;
       uploadDragDepthRef.current = Math.max(0, uploadDragDepthRef.current - 1);
       if (uploadDragDepthRef.current === 0) setUploadDragActive(false);
+    }, []);
+    const clearUploadDragState = useCallback(() => {
+      uploadDragDepthRef.current = 0;
+      setUploadDragActive(false);
     }, []);
     // `uploadFiles` is a stable callback from the hook; depend on it (not the
     // freshly-created `fileUpload` object) so these handlers are not rebuilt
@@ -1443,6 +1455,7 @@ export const ChatEditor = memo(
         const files = Array.from(event.dataTransfer.files);
         uploadDragDepthRef.current = 0;
         setUploadDragActive(false);
+        if (disabled) return;
         if (
           !uploadEnabled ||
           files.length === 0 ||
@@ -1459,6 +1472,7 @@ export const ChatEditor = memo(
       [
         core.imageTransferHandlers,
         clearImageDragState,
+        disabled,
         uploadEnabled,
         uploadFiles,
         insertUploadReference,
@@ -1484,6 +1498,19 @@ export const ChatEditor = memo(
       },
       [uploadFiles, insertUploadReference, uploadTarget?.targetKey],
     );
+
+    useEffect(() => {
+      if (!uploadDragActive) return;
+      window.addEventListener('dragend', clearUploadDragState);
+      window.addEventListener('blur', clearUploadDragState);
+      return () => {
+        window.removeEventListener('dragend', clearUploadDragState);
+        window.removeEventListener('blur', clearUploadDragState);
+      };
+    }, [clearUploadDragState, uploadDragActive]);
+    useEffect(() => {
+      if (disabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
@@ -2136,7 +2163,11 @@ export const ChatEditor = memo(
                   <span className={styles.uploadRowName}>
                     {upload.file.name}
                   </span>
-                  <span className={styles.uploadRowStatus}>
+                  <span
+                    className={styles.uploadRowStatus}
+                    role="status"
+                    aria-live="polite"
+                  >
                     {upload.status === 'pending' &&
                       t('composer.upload.pending')}
                     {upload.status === 'uploading' &&
@@ -2148,7 +2179,16 @@ export const ChatEditor = memo(
                         ? `${t('composer.upload.renamed')} ${upload.resultPath}`
                         : t('composer.upload.done'))}
                     {upload.status === 'error' &&
-                      (upload.error ?? t('composer.upload.error'))}
+                      (upload.error ??
+                        (upload.errorCode === 'tooLarge'
+                          ? t('composer.upload.error.tooLarge', {
+                              limit: `${Math.round(
+                                maxUploadBytes / (1024 * 1024),
+                              )} MiB`,
+                            })
+                          : upload.errorCode === 'noDaemon'
+                            ? t('composer.upload.error.noDaemon')
+                            : t('composer.upload.error')))}
                   </span>
                   <button
                     type="button"
@@ -2173,7 +2213,9 @@ export const ChatEditor = memo(
           data-web-shell-composer-surface
           data-upload-drag-active={uploadDragActive || undefined}
           data-typewriter-visible={showTypewriterPlaceholder || undefined}
-          data-image-drag-active={core.imageDragActive || undefined}
+          data-image-drag-active={
+            (core.imageDragActive && !uploadDragActive) || undefined
+          }
           aria-busy={core.pendingImageBatchCount > 0 || undefined}
           {...core.imageTransferHandlers}
           onDragEnter={handleUploadDragEnter}

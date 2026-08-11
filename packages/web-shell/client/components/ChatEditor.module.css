@@ -1746,6 +1746,10 @@
     animation: none;
   }
 
+  .uploadRowSpinner {
+    animation: none;
+  }
+
   .sendBtnArmed,
   .sendBtnArmed:not(:disabled) {
     animation: none;
@@ -2004,7 +2008,7 @@
 }
 
 .uploadRow[data-status='error'] .uploadRowStatus {
-  color: var(--chat-editor-error-color, #d93025);
+  color: var(--error-color);
 }
 
 .uploadRowAction {

@@ -528,6 +528,9 @@ const EN: Messages = {
   'composer.upload.uploading': 'Uploading',
   'composer.upload.done': 'Uploaded',
   'composer.upload.error': 'Failed',
+  'composer.upload.error.noDaemon': 'No daemon connection',
+  'composer.upload.error.tooLarge': (v) =>
+    `File exceeds the ${v?.limit ?? ''} upload limit`,
   'composer.upload.cancel': 'Cancel upload',
   'composer.upload.dismiss': 'Dismiss',
   'composer.upload.renamed': 'Saved as',
@@ -3357,6 +3360,9 @@ const ZH: Messages = {
   'composer.upload.uploading': '上传中',
   'composer.upload.done': '已上传',
   'composer.upload.error': '失败',
+  'composer.upload.error.noDaemon': '未连接 Daemon',
+  'composer.upload.error.tooLarge': (v) =>
+    `文件超过 ${v?.limit ?? ''} 上传上限`,
   'composer.upload.cancel': '取消上传',
   'composer.upload.dismiss': '关闭',
   'composer.upload.renamed': '已保存为',

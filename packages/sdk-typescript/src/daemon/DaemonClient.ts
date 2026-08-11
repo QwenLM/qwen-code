@@ -2028,7 +2028,12 @@ export class DaemonClient {
           abortListener = () => xhr.abort();
           req.signal.addEventListener('abort', abortListener, { once: true });
         }
-        xhr.send(req.data as XMLHttpRequestBodyInit);
+        try {
+          xhr.send(req.data as XMLHttpRequestBodyInit);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
       },
     );
   }

@@ -24,6 +24,9 @@ export interface FileUploadClient {
 
 export type FileUploadStatus = 'pending' | 'uploading' | 'done' | 'error';
 
+/** Machine-readable failure codes; the render site localizes them. */
+export type FileUploadErrorCode = 'tooLarge' | 'noDaemon';
+
 export interface FileUploadItem {
   id: string;
   file: File;
@@ -32,6 +35,9 @@ export interface FileUploadItem {
   status: FileUploadStatus;
   /** 0–1. */
   progress: number;
+  /** Set for locally classified failures; localized at the render site. */
+  errorCode?: FileUploadErrorCode;
+  /** Raw failure message (server-side errors). */
   error?: string;
   /** Server-confirmed final path (may be auto-numbered). */
   resultPath?: string;
@@ -123,7 +129,7 @@ export function useFileUpload(
         if (controller.signal.aborted) continue;
         const activeClient = clientRef.current;
         if (!activeClient) {
-          patchItem(id, { status: 'error', error: 'No daemon connection' });
+          patchItem(id, { status: 'error', errorCode: 'noDaemon' });
           continue;
         }
         activeUploadRef.current = next;
@@ -207,7 +213,7 @@ export function useFileUpload(
               targetPath,
               status: 'error',
               progress: 0,
-              error: `File exceeds the ${limit} byte upload limit`,
+              errorCode: 'tooLarge',
             },
           ];
           continue;

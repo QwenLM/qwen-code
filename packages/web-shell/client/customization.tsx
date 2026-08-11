@@ -263,6 +263,12 @@ export type WebShellComposerTagPlacement = 'top' | 'inline';
 
 export interface WebShellComposerTagOptions {
   placement?: WebShellComposerTagPlacement;
+  /**
+   * Inline placement only: insert at the caret (default, synchronous user
+   * gestures) or append after the document end (asynchronous producers,
+   * which must not interrupt typing or steal focus).
+   */
+  position?: 'caret' | 'end';
 }
 
 export interface WebShellComposerTextOptions {

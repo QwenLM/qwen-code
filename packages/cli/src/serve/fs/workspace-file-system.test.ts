@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -2396,9 +2396,11 @@ describe('WorkspaceFileSystem - writeBytesAtomic', () => {
       generationGuard: {
         assertOpen() {
           checks += 1;
-          // entry (1), inside-lock (2), pre-publish (3). Close at the
-          // final publish checkpoint.
-          if (checks === 3) throw new Error('generation closed');
+          // resolve() consumes calls 1-2; writeBytesAtomic entry (3) and
+          // the inside-lock re-check (4) precede the pre-publish checkpoint
+          // (5). Close at the final publish checkpoint, when the temp file
+          // already exists.
+          if (checks === 5) throw new Error('generation closed');
         },
       },
     });
@@ -2407,12 +2409,73 @@ describe('WorkspaceFileSystem - writeBytesAtomic', () => {
     await expect(
       h.fs.writeBytesAtomic(r, Buffer.from('must not land')),
     ).rejects.toThrow('generation closed');
+    expect(checks).toBe(5);
     await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
     // No stray temp files left behind in the workspace.
     const leftover = (await fsp.readdir(h.workspace)).filter((n) =>
       n.endsWith('.tmp'),
     );
     expect(leftover).toEqual([]);
+  });
+
+  it('never clobbers when an external writer wins the pre-publish race', async () => {
+    let checks = 0;
+    let target = '';
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          // At the pre-publish checkpoint (after the entry/lock checks and
+          // the temp write), an external writer grabs the name.
+          if (checks === 5) writeFileSync(target, 'external');
+        },
+      },
+    });
+    target = path.join(h.workspace, 'race.bin');
+    const r = await h.fs.resolve('race.bin', 'write');
+    const err = await h.fs
+      .writeBytesAtomic(r, Buffer.from('upload'))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_already_exists');
+    // The external writer's content is untouched.
+    expect(await fsp.readFile(target, 'utf-8')).toBe('external');
+    const leftover = (await fsp.readdir(h.workspace)).filter((n) =>
+      n.endsWith('.tmp'),
+    );
+    expect(leftover).toEqual([]);
+  });
+
+  it('records audit access on success and denial', async () => {
+    const ignore = new Ignore().add(['*.log']);
+    await teardown(h);
+    h = await makeHarness({ ignore });
+
+    const data = randomBytes(64);
+    const r = await h.fs.resolve('audit.log', 'write');
+    await h.fs.writeBytesAtomic(r, data);
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+    expect((access!.data as { sizeBytes: number }).sizeBytes).toBe(data.length);
+    expect((access!.data as { matchedIgnore?: string }).matchedIgnore).toBe(
+      'file',
+    );
+
+    const tooBig = await h.fs.resolve('audit-big.bin', 'write');
+    await h.fs
+      .writeBytesAtomic(tooBig, Buffer.alloc(50 * 1024 * 1024 + 1))
+      .catch(() => {});
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'file_too_large',
+    );
+    expect(denied).toBeDefined();
   });
 });
 

@@ -113,7 +113,12 @@ const composerCoreState = vi.hoisted(() => ({
 const uploadWorkspaceState = vi.hoisted(() => ({
   current: undefined as
     | {
-        client: { uploadWorkspaceFile: ReturnType<typeof vi.fn> };
+        client: {
+          uploadWorkspaceFile: ReturnType<typeof vi.fn>;
+          workspaceByCwd?: (cwd: string) => {
+            uploadWorkspaceFile: ReturnType<typeof vi.fn>;
+          };
+        };
         capabilities: {
           features: string[];
           limits?: { maxWorkspaceFileUploadBytes: number };
@@ -304,6 +309,7 @@ function renderChatEditor(props: {
   placeholderText?: string;
   animatePlaceholder?: boolean;
   disabled?: boolean;
+  atWorkspaceCwd?: string;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
 }) {
@@ -1500,6 +1506,70 @@ describe('ChatEditor file upload gating', () => {
     ).toBeNull();
   });
 
+  it('keeps the overlay until nested dragenter depth fully drains', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({});
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    dispatchDrag(surface, 'dragenter', ['Files']);
+    dispatchDrag(surface, 'dragenter', ['Files']);
+    dispatchDrag(surface, 'dragleave', ['Files']);
+    expect(
+      container.querySelector('[data-web-shell-upload-drop-overlay]'),
+    ).not.toBeNull();
+    dispatchDrag(surface, 'dragleave', ['Files']);
+    expect(
+      container.querySelector('[data-web-shell-upload-drop-overlay]'),
+    ).toBeNull();
+  });
+
+  it('clears the upload drag state on window dragend and blur', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({});
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    for (const type of ['dragend', 'blur']) {
+      dispatchDrag(surface, 'dragenter', ['Files']);
+      expect(
+        container.querySelector('[data-web-shell-upload-drop-overlay]'),
+      ).not.toBeNull();
+      act(() => {
+        window.dispatchEvent(new Event(type));
+      });
+      expect(
+        container.querySelector('[data-web-shell-upload-drop-overlay]'),
+      ).toBeNull();
+    }
+  });
+
+  it('ignores file drag-and-drop while the composer is disabled', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({ disabled: true });
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = surface.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(editor, 'dragenter', ['Files']);
+    expect(
+      container.querySelector('[data-web-shell-upload-drop-overlay]'),
+    ).toBeNull();
+
+    const drop = dispatchDrag(
+      editor,
+      'drop',
+      ['Files'],
+      [new File(['abc'], 'report.txt')],
+    );
+    expect(drop.defaultPrevented).toBe(false);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(composerCoreState.addTags).not.toHaveBeenCalled();
+    expect(composerCoreState.imageDropCapture).not.toHaveBeenCalled();
+  });
+
   it('intercepts file drops before the editor and renders status above it', () => {
     uploadWorkspaceState.current = makeWorkspace(
       ['workspace_file_upload'],
@@ -1575,7 +1645,101 @@ describe('ChatEditor file upload gating', () => {
           serialized: '@report\\ \\(1\\).txt',
         },
       ],
-      { placement: 'inline' },
+      { placement: 'inline', position: 'end' },
     );
+  });
+
+  describe('qualified upload targeting', () => {
+    const makeQualifiedWorkspace = (
+      features: string[],
+      workspaces: Array<{ cwd: string; primary: boolean; trusted: boolean }>,
+    ) => {
+      const qualifiedClient = { uploadWorkspaceFile: vi.fn() };
+      qualifiedClient.uploadWorkspaceFile.mockResolvedValue({
+        kind: 'file_upload',
+        path: 'report.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+      const workspaceByCwd = vi.fn(() => qualifiedClient);
+      const workspace = {
+        client: { uploadWorkspaceFile: vi.fn(), workspaceByCwd },
+        capabilities: {
+          features,
+          limits: { maxWorkspaceFileUploadBytes: 50 * 1024 * 1024 },
+          workspaces,
+        },
+      };
+      return { workspace, qualifiedClient, workspaceByCwd };
+    };
+    const qualifiedFeatures = [
+      'workspace_file_upload',
+      'workspace_qualified_rest_core',
+    ];
+    const primaryAndSecondary = [
+      { cwd: '/workspace', primary: true, trusted: true },
+      { cwd: '/secondary', primary: false, trusted: true },
+    ];
+
+    it('routes the upload through the qualified client for a trusted cwd match', async () => {
+      const { workspace, qualifiedClient, workspaceByCwd } =
+        makeQualifiedWorkspace(qualifiedFeatures, primaryAndSecondary);
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({ atWorkspaceCwd: '/secondary' });
+      expect(
+        container.querySelector('[data-web-shell-upload-input]'),
+      ).not.toBeNull();
+      const editor = container.querySelector(
+        '[data-web-shell-composer-editor]',
+      )!;
+
+      dispatchDrag(
+        editor,
+        'drop',
+        ['Files'],
+        [new File(['abc'], 'report.txt')],
+      );
+      await act(async () => {});
+
+      expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+      expect(qualifiedClient.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+      expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it('stays disabled without the qualified-rest capability', () => {
+      const { workspace } = makeQualifiedWorkspace(
+        ['workspace_file_upload'],
+        primaryAndSecondary,
+      );
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({ atWorkspaceCwd: '/secondary' });
+      expect(
+        container.querySelector('[data-web-shell-upload-input]'),
+      ).toBeNull();
+    });
+
+    it('stays disabled when the cwd matches more than one workspace', () => {
+      const { workspace } = makeQualifiedWorkspace(qualifiedFeatures, [
+        { cwd: '/secondary', primary: false, trusted: true },
+        { cwd: '/secondary', primary: false, trusted: true },
+      ]);
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({ atWorkspaceCwd: '/secondary' });
+      expect(
+        container.querySelector('[data-web-shell-upload-input]'),
+      ).toBeNull();
+    });
+
+    it('stays disabled when the matching workspace is untrusted', () => {
+      const { workspace } = makeQualifiedWorkspace(qualifiedFeatures, [
+        { cwd: '/workspace', primary: true, trusted: true },
+        { cwd: '/secondary', primary: false, trusted: false },
+      ]);
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({ atWorkspaceCwd: '/secondary' });
+      expect(
+        container.querySelector('[data-web-shell-upload-input]'),
+      ).toBeNull();
+    });
   });
 });

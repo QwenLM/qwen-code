@@ -185,7 +185,9 @@ const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
 const EMPTY_PROVIDERS: readonly WebShellAtProvider[] = [];
 const SEARCH_DEBOUNCE_MS = 150;
 const ITEM_LIMIT = 50;
-const FILE_ROOT_ITEM_LIMIT = ITEM_LIMIT + 1;
+// The empty-query file root view prefixes the current-directory item and,
+// when upload is available, the upload item ahead of the file entries.
+const FILE_ROOT_ITEM_LIMIT = ITEM_LIMIT + 2;
 export const FILE_PROVIDER_ID = 'files';
 const EXTENSIONS_PROVIDER_ID = 'extensions';
 export const MCP_RESOURCES_PROVIDER_ID = 'mcp-resources';
@@ -700,11 +702,10 @@ function createFileProvider(
           return [
             ...(uploadItem ? [uploadItem] : []),
             ...(entryQuery ? [] : [currentDirectoryItem]),
-            ...entries.map((entry): AtMentionItem => {
+            ...entries.slice(0, ITEM_LIMIT).map((entry): AtMentionItem => {
               const path = joinWorkspacePath(dirPath, entry.name);
               const safeName = safeDisplayText(entry.name);
               const safePath = sanitizeDisplayText(path);
-              const safeInsertPath = sanitizeInsertText(path);
               if (entry.kind === 'directory') {
                 return {
                   id: `dir:${path}`,
@@ -718,11 +719,11 @@ function createFileProvider(
                 id: `file:${path}`,
                 label: safeName,
                 description: safePath,
-                insertText: `@${escapeAtReferenceText(safeInsertPath)} `,
+                insertText: fileReferenceInsertText(path),
                 kind: 'insert',
               };
             }),
-          ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT + 1);
+          ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT);
         } catch (error) {
           if (!signal.aborted) {
             console.warn('Failed to load @ file suggestions', error);
@@ -748,7 +749,7 @@ function createFileProvider(
           .map((file) => ({
             id: file,
             label: safeDisplayText(file),
-            insertText: `@${escapeAtReferenceText(sanitizeInsertText(file))} `,
+            insertText: fileReferenceInsertText(file),
             kind: 'insert',
           }));
       } catch (error) {
@@ -1852,6 +1853,10 @@ export function useAtMentionMenu({
         lastSelectedProviderIdRef.current = current.selectedProviderId;
       }
       if (item.kind === 'upload') {
+        if (disabledRef.current) {
+          close();
+          return true;
+        }
         view.dispatch({
           changes: { from: current.from, to: current.to, insert: '' },
           selection: { anchor: current.from },
@@ -1959,6 +1964,7 @@ export function useAtMentionMenu({
       createInlineTagEffect,
       scheduleLoadItems,
       scheduleLoadMcpResourceItems,
+      disabledRef,
       viewRef,
       onUploadRequest,
     ],

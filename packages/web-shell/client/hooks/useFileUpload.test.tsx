@@ -129,15 +129,125 @@ describe('useFileUpload', () => {
     const uploadWorkspaceFile = vi.fn();
     const client: FileUploadClient = { uploadWorkspaceFile };
     render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    const onUploaded = vi.fn();
 
     act(() => {
-      latest!.uploadFiles([makeFile('big.bin', MAX + 1)], '.');
+      latest!.uploadFiles([makeFile('big.bin', MAX + 1)], '.', onUploaded);
     });
     await act(async () => {});
     expect(uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(onUploaded).not.toHaveBeenCalled();
     expect(latest!.uploads).toHaveLength(1);
     expect(latest!.uploads[0].status).toBe('error');
-    expect(latest!.uploads[0].error).toContain('upload limit');
+    expect(latest!.uploads[0].errorCode).toBe('tooLarge');
+    expect(latest!.uploads[0].error).toBeUndefined();
+  });
+
+  it('accepts a file at exactly the size limit', async () => {
+    const uploadWorkspaceFile = vi.fn(async () => ({
+      kind: 'file_upload' as const,
+      path: 'exact.bin',
+      sizeBytes: MAX,
+      hash: `sha256:${'a'.repeat(64)}`,
+    }));
+    const client: FileUploadClient = { uploadWorkspaceFile };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('exact.bin', MAX)], '.');
+    });
+    await act(async () => {});
+    expect(uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(latest!.uploads[0]).toMatchObject({ status: 'done' });
+  });
+
+  it('continues the batch after a local oversize rejection', async () => {
+    const uploadWorkspaceFile = vi.fn(
+      async (
+        req,
+      ): Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>> => ({
+        kind: 'file_upload',
+        path: req.path,
+        sizeBytes: 3,
+        hash: `sha256:${'b'.repeat(64)}`,
+      }),
+    );
+    const client: FileUploadClient = { uploadWorkspaceFile };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles(
+        [makeFile('big.bin', MAX + 1), makeFile('small.txt')],
+        '.',
+      );
+    });
+    await act(async () => {});
+    expect(uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(uploadWorkspaceFile.mock.calls[0][0].path).toBe('small.txt');
+    expect(latest!.uploads.map((u) => u.status)).toEqual(['error', 'done']);
+  });
+
+  it('passes the file bytes through with no SDK timeout', async () => {
+    let captured:
+      | Parameters<FileUploadClient['uploadWorkspaceFile']>[0]
+      | undefined;
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(async (req) => {
+        captured = req;
+        return {
+          kind: 'file_upload' as const,
+          path: req.path,
+          sizeBytes: 3,
+          hash: `sha256:${'c'.repeat(64)}`,
+        };
+      }),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    const file = makeFile('payload.bin');
+
+    act(() => {
+      latest!.uploadFiles([file], '.');
+    });
+    await act(async () => {});
+    expect(captured?.data).toBe(file);
+    expect(captured?.timeoutMs).toBe(0);
+  });
+
+  it('clamps progress between 0 and 1', async () => {
+    let onProgress:
+      | ((event: { loaded: number; total: number }) => void)
+      | undefined;
+    const gate =
+      deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>();
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn((req) => {
+        onProgress = req.onProgress;
+        return gate.promise;
+      }),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('big.bin', MAX)], '.');
+    });
+    expect(latest!.uploads[0].status).toBe('uploading');
+    expect(onProgress).toBeDefined();
+
+    act(() => onProgress!({ loaded: 3, total: 2 }));
+    expect(latest!.uploads[0].progress).toBe(1);
+    act(() => onProgress!({ loaded: 5, total: 0 }));
+    expect(latest!.uploads[0].progress).toBe(0);
+    act(() => onProgress!({ loaded: 1, total: 4 }));
+    expect(latest!.uploads[0].progress).toBe(0.25);
+
+    await act(async () => {
+      gate.resolve({
+        kind: 'file_upload',
+        path: 'big.bin',
+        sizeBytes: MAX,
+        hash: `sha256:${'d'.repeat(64)}`,
+      });
+    });
   });
 
   it('invokes onUploaded exactly once with the server-confirmed path', async () => {
@@ -316,9 +426,14 @@ describe('useFileUpload', () => {
       }),
     };
     render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    const onUploaded = vi.fn();
 
     act(() => {
-      latest!.uploadFiles([makeFile('bad.txt'), makeFile('good.txt')], '.');
+      latest!.uploadFiles(
+        [makeFile('bad.txt'), makeFile('good.txt')],
+        '.',
+        onUploaded,
+      );
     });
     await act(async () => {});
     expect(latest!.uploads[0]).toMatchObject({
@@ -326,6 +441,85 @@ describe('useFileUpload', () => {
       error: 'boom',
     });
     expect(latest!.uploads[1]).toMatchObject({ status: 'done' });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+    expect(onUploaded).toHaveBeenCalledWith('good.txt');
+  });
+
+  it('keeps a removed upload removed when its abort rejects', async () => {
+    const gate =
+      deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>();
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(() => gate.promise),
+    };
+    const onUploaded = vi.fn();
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('a.txt')], '.', onUploaded);
+    });
+    act(() => {
+      latest!.removeUpload(latest!.uploads[0].id);
+    });
+    await act(async () => {
+      gate.reject(new DOMException('This operation was aborted', 'AbortError'));
+    });
+    expect(latest!.uploads).toHaveLength(0);
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it('ignores a rejection from the aborted generation on workspace switch', async () => {
+    const gate =
+      deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>();
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(() => gate.promise),
+    };
+    const onUploaded = vi.fn();
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('a.txt')], '.', onUploaded);
+    });
+    render({ client, maxBytes: MAX, targetKey: 'ws:/b' });
+    await act(async () => {
+      gate.reject(new DOMException('This operation was aborted', 'AbortError'));
+    });
+    expect(latest!.uploads).toHaveLength(0);
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it('aborts in-flight uploads and clears the queue on unmount', async () => {
+    const gate =
+      deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>();
+    let signal: AbortSignal | undefined;
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn((req) => {
+        signal = req.signal;
+        return gate.promise;
+      }),
+    };
+    const onUploaded = vi.fn();
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('a.txt')], '.', onUploaded);
+    });
+    expect(latest!.uploads).toHaveLength(1);
+
+    act(() => {
+      root!.unmount();
+      root = null;
+    });
+    expect(signal?.aborted).toBe(true);
+
+    await act(async () => {
+      gate.resolve({
+        kind: 'file_upload',
+        path: 'a.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'9'.repeat(64)}`,
+      });
+    });
+    expect(onUploaded).not.toHaveBeenCalled();
   });
 
   it('changing the target workspace clears the queue and ignores late completions', async () => {

@@ -21,6 +21,9 @@ type HookResult = ReturnType<typeof useAtMentionMenu>;
 let latest: HookResult | null = null;
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+// Stable identity across renders (like useComposerCore's ref) so tests can
+// flip disabled mid-interaction without remounting.
+const harnessDisabledRef = { current: false };
 
 function makeView(doc: string): EditorView {
   return {
@@ -68,9 +71,10 @@ function Harness({
   }) => StateEffect<unknown>;
   onUploadRequest?: (targetDir: string) => void;
 }) {
+  harnessDisabledRef.current = disabled;
   latest = useAtMentionMenu({
     viewRef: { current: view ?? null },
-    disabledRef: { current: disabled },
+    disabledRef: harnessDisabledRef,
     shellModeRef: { current: shellMode },
     workspaceActionsRef: { current: actions },
     builtinProviders,
@@ -206,6 +210,35 @@ describe('useAtMentionMenu', () => {
       selection: { anchor: 0 },
     });
     expect(onUploadRequest).toHaveBeenCalledWith('.');
+  });
+
+  it('closes the upload item without dispatching once the composer is disabled', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const onUploadRequest = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    harnessDisabledRef.current = true;
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(onUploadRequest).not.toHaveBeenCalled();
+    expect(latest!.state).toBeNull();
   });
 
   it('reuses an unchanged category menu and limits rendered providers', () => {
@@ -960,6 +993,33 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items).toHaveLength(51);
     expect(latest!.state?.items[0]?.id).toBe('current:.');
     expect(latest!.state?.items[50]?.label).toBe('file-49.ts');
+  });
+
+  it('keeps fifty file entries when the upload item is prepended', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: Array.from({ length: 55 }, (_, index) => ({
+        name: `file-${String(index).padStart(2, '0')}.ts`,
+        kind: 'file',
+        ignored: false,
+      })),
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+      onUploadRequest: vi.fn(),
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state?.items).toHaveLength(52);
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    expect(latest!.state?.items[1]?.id).toBe('current:.');
+    expect(latest!.state?.items[51]?.label).toBe('file-49.ts');
   });
 
   it('keeps built-in providers when custom provider ids collide', () => {

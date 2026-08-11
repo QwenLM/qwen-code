@@ -6,6 +6,8 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -71,6 +73,79 @@ function loopbackHost(): string {
 
 function rawHash(data: string | Buffer): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(data).digest('hex')}`;
+}
+
+/**
+ * Upload `totalBytes` with chunked transfer encoding, i.e. without a
+ * Content-Length header. The admission pre-check cannot see the size, so the
+ * request reaches the concurrency gate and the raw parser — pinning their
+ * order and the pre-handler slot release on parser rejection.
+ */
+async function sendChunkedUpload(
+  app: ReturnType<typeof createServeApp>,
+  targetPath: string,
+  totalBytes: number,
+): Promise<{ status: number; body: string }> {
+  const server = app.listen(0);
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    return await new Promise<{ status: number; body: string }>(
+      (resolvePromise) => {
+        let settled = false;
+        const settle = (status: number, body: string) => {
+          if (!settled) {
+            settled = true;
+            resolvePromise({ status, body });
+          }
+        };
+        const req = http.request(
+          {
+            host: '127.0.0.1',
+            port,
+            method: 'POST',
+            path: `/file/upload?path=${encodeURIComponent(targetPath)}`,
+            headers: {
+              Host: loopbackHost(),
+              Authorization: 'Bearer secret',
+              'Content-Type': 'application/octet-stream',
+              'Transfer-Encoding': 'chunked',
+            },
+          },
+          (res) => {
+            let body = '';
+            res.on('data', (chunk) => (body += String(chunk)));
+            res.on('end', () => settle(res.statusCode ?? 0, body));
+            // The server rejects before draining the body; the socket can
+            // be cut before the response stream reports `end`.
+            res.on('close', () => settle(res.statusCode ?? 0, body));
+          },
+        );
+        // The server may destroy the connection mid-body once it rejects.
+        req.on('error', () => {});
+        const chunk = Buffer.alloc(4 * 1024 * 1024, 1);
+        let remaining = totalBytes;
+        const writeNext = (): void => {
+          while (remaining > 0) {
+            const size = Math.min(chunk.length, remaining);
+            remaining -= size;
+            const ok = req.write(
+              size === chunk.length ? chunk : chunk.subarray(0, size),
+            );
+            if (!ok) {
+              req.once('drain', writeNext);
+              return;
+            }
+          }
+          req.end();
+        };
+        writeNext();
+      },
+    );
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 }
 
 describe('POST /file/write', () => {
@@ -315,6 +390,8 @@ describe('POST /file/upload', () => {
     const data = randomBytes(256);
     const res = await upload('blob.bin').send(data);
     expect(res.status).toBe(201);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.body).toMatchObject({
       kind: 'file_upload',
       path: 'blob.bin',
@@ -336,6 +413,10 @@ describe('POST /file/upload', () => {
       sizeBytes: 0,
       hash: rawHash(Buffer.alloc(0)),
     });
+    // The empty file must actually materialize on disk.
+    await expect(
+      fsp.readFile(path.join(h.workspace, 'empty.bin')),
+    ).resolves.toEqual(Buffer.alloc(0));
   });
 
   it('rejects a wrong Content-Type with 415 before buffering', async () => {
@@ -388,6 +469,16 @@ describe('POST /file/upload', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('numbers dotfiles as whole names (.env -> .env (1))', async () => {
+    await fsp.writeFile(path.join(h.workspace, '.env'), 'orig');
+    const res = await upload('.env').send(Buffer.from('new'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('.env (1)');
+    expect(await fsp.readFile(path.join(h.workspace, '.env'), 'utf-8')).toBe(
+      'orig',
+    );
+  });
+
   it('auto-numbers when the requested name is occupied by a file', async () => {
     await fsp.writeFile(path.join(h.workspace, 'report.pdf'), 'orig');
     const res = await upload('report.pdf').send(Buffer.from('new'));
@@ -421,13 +512,16 @@ describe('POST /file/upload', () => {
     expect(new Set([first.body.path, second.body.path])).toEqual(
       new Set(['race.bin', 'race (1).bin']),
     );
-    // Both files exist with their own content.
-    await expect(
-      fsp.stat(path.join(h.workspace, 'race.bin')),
-    ).resolves.toBeDefined();
-    await expect(
-      fsp.stat(path.join(h.workspace, 'race (1).bin')),
-    ).resolves.toBeDefined();
+    // Each response path holds exactly one of the two bodies — a
+    // misrouted write (same bytes twice, or an empty file) fails here.
+    const contents = new Set(
+      await Promise.all(
+        [first.body.path, second.body.path].map((p) =>
+          fsp.readFile(path.join(h.workspace, p), 'utf-8'),
+        ),
+      ),
+    );
+    expect(contents).toEqual(new Set(['one', 'two']));
   });
 
   it('numbers a name occupied by a directory', async () => {
@@ -518,6 +612,19 @@ describe('POST /file/upload', () => {
     expect(res.body.errorKind).toBe('parse_error');
   });
 
+  it('accepts a 255-byte basename and rejects a 256-byte one', async () => {
+    const atCap = 'a'.repeat(251) + '.txt'; // exactly 255 bytes
+    expect(Buffer.byteLength(atCap, 'utf-8')).toBe(255);
+    const ok = await upload(atCap).send(Buffer.from('x'));
+    expect(ok.status).toBe(201);
+    expect(ok.body.path).toBe(atCap);
+
+    const overCap = 'a'.repeat(252) + '.txt'; // 256 bytes
+    const bad = await upload(overCap).send(Buffer.from('x'));
+    expect(bad.status).toBe(400);
+    expect(bad.body.errorKind).toBe('parse_error');
+  });
+
   it('rejects an unknown client id before buffering', async () => {
     const res = await request(h.app)
       .post('/file/upload')
@@ -572,6 +679,19 @@ describe('POST /file/upload', () => {
     );
   });
 
+  it('accepts an upload of exactly MAX_UPLOAD_BYTES', async () => {
+    // The inclusive acceptance boundary across all three size checks:
+    // admission Content-Length pre-check, express.raw limit, and the fs
+    // layer's enforceWriteSize all use strict `>`.
+    const data = Buffer.alloc(50 * 1024 * 1024, 3);
+    const res = await upload('exact.bin').send(data);
+    expect(res.status).toBe(201);
+    expect(res.body.sizeBytes).toBe(data.length);
+    expect((await fsp.stat(path.join(h.workspace, 'exact.bin'))).size).toBe(
+      data.length,
+    );
+  }, 30_000);
+
   it('trims a long stem on numbering to stay within the 255-byte cap', async () => {
     // 249-byte stem + '.txt' = 253-byte basename (passes the admission cap).
     const stem = 'a'.repeat(249);
@@ -580,30 +700,80 @@ describe('POST /file/upload', () => {
     const res = await upload(name).send(Buffer.from('new'));
     expect(res.status).toBe(201);
     const base = path.posix.basename(res.body.path);
-    // Numbering adds ' (1)' (4 bytes) -> 257, so the stem is trimmed to fit 255.
-    expect(Buffer.byteLength(base, 'utf-8')).toBeLessThanOrEqual(255);
+    // Numbering adds ' (1)' (4 bytes) -> 257, so the stem is trimmed by
+    // exactly two bytes (the minimal trim for 1-byte code points).
+    expect(Buffer.byteLength(base, 'utf-8')).toBe(255);
     expect(base.endsWith(' (1).txt')).toBe(true);
-    expect(base).not.toBe(`${stem} (1).txt`);
+    expect(base).toBe(`${'a'.repeat(247)} (1).txt`);
+    // The trimmed name is the real on-disk name with the new content.
+    expect(await fsp.readFile(path.join(h.workspace, base), 'utf-8')).toBe(
+      'new',
+    );
     // The original is untouched.
     expect(await fsp.readFile(path.join(h.workspace, name), 'utf-8')).toBe(
       'orig',
     );
   });
 
-  it('returns 409 when all numbered candidates up to the cap are occupied', async () => {
-    // Occupy a.txt, a (1).txt ... a (999).txt (all 1000 candidates).
+  it('trims a multi-byte stem on a code-point boundary when numbering', async () => {
+    // 83 * 3 = 249-byte stem + '.txt' = 253 bytes (passes admission).
+    const stem = '数'.repeat(83);
+    const name = `${stem}.txt`;
+    await fsp.writeFile(path.join(h.workspace, name), 'orig');
+    const res = await upload(name).send(Buffer.from('new'));
+    expect(res.status).toBe(201);
+    const base = path.posix.basename(res.body.path);
+    // 249 + 4 (' (1)') + 4 ('.txt') = 257 > 255, so one 3-byte code point
+    // is dropped: exactly 82 chars + suffix = 254 bytes, whole code points.
+    expect(base).toBe(`${'数'.repeat(82)} (1).txt`);
+    expect(Buffer.byteLength(base, 'utf-8')).toBe(254);
+    // The API response path is the exact on-disk name.
+    expect(await fsp.readFile(path.join(h.workspace, base), 'utf-8')).toBe(
+      'new',
+    );
+  });
+
+  it('lands on the 1000th candidate, then 409s when all are occupied', async () => {
+    // Occupy a.txt, a (1).txt ... a (998).txt: candidate 999 (the 1000th
+    // attempt) must still land — pinning the cap against shrinkage.
     await Promise.all(
-      Array.from({ length: 1000 }, (_, i) =>
+      Array.from({ length: 999 }, (_, i) =>
         fsp.writeFile(
           path.join(h.workspace, i === 0 ? 'a.txt' : `a (${i}).txt`),
           'x',
         ),
       ),
     );
-    const res = await upload('a.txt').send(Buffer.from('y'));
+    const lands = await upload('a.txt').send(Buffer.from('y'));
+    expect(lands.status).toBe(201);
+    expect(lands.body.path).toBe('a (999).txt');
+
+    // With all 1000 candidates now occupied the route gives up with 409.
+    const res = await upload('a.txt').send(Buffer.from('z'));
     expect(res.status).toBe(409);
     expect(res.body.errorKind).toBe('file_already_exists');
-  });
+  }, 30_000);
+
+  it('frees gate slots when oversized chunked bodies are rejected after admission', async () => {
+    // A chunked body carries no Content-Length, so it passes the admission
+    // pre-check, acquires a gate slot, and is rejected by the raw parser.
+    // Five sequential rejections would exhaust the four-slot gate if the
+    // pre-handler finish/close release leaked on the parser-413 path.
+    for (let i = 0; i < 5; i++) {
+      const res = await sendChunkedUpload(
+        h.app,
+        `big-${i}.bin`,
+        50 * 1024 * 1024 + 1,
+      );
+      expect(res.status).toBe(413);
+      expect(JSON.parse(res.body)).toMatchObject({
+        errorKind: 'file_too_large',
+        status: 413,
+      });
+    }
+    const ok = await upload('small.bin').send(Buffer.from('x'));
+    expect(ok.status).toBe(201);
+  }, 60_000);
 });
 
 describe('upload concurrency gate', () => {
@@ -617,11 +787,15 @@ describe('upload concurrency gate', () => {
     expect(gate.tryAcquire()).toBe(false);
     gate.release();
     expect(gate.tryAcquire()).toBe(true);
-    // Release is idempotent and never goes negative.
+    // Release is idempotent and never goes negative: after over-releasing
+    // from empty, probing to the cap admits exactly `max` more acquires
+    // (an underflowed counter would admit more).
     gate.release();
     gate.release();
     gate.release();
     expect(gate.tryAcquire()).toBe(true);
+    expect(gate.tryAcquire()).toBe(true);
+    expect(gate.tryAcquire()).toBe(false);
   });
 });
 
@@ -722,16 +896,41 @@ describe('POST /file/upload HTTP concurrency gate (end-to-end)', () => {
       });
       expect(fifth.headers['retry-after']).toBe('1');
 
+      // Order probe: a chunked over-limit body carries no Content-Length,
+      // so admission cannot pre-check it. The saturated gate must reject it
+      // (429) before the parser buffers it; a parser-first middleware order
+      // would answer the upload-specific 413 instead.
+      const chunked = await sendChunkedUpload(
+        app,
+        'chunked.bin',
+        50 * 1024 * 1024 + 1,
+      );
+      expect(chunked.status).toBe(429);
+      expect(JSON.parse(chunked.body)).toMatchObject({
+        errorKind: 'upload_busy',
+        status: 429,
+      });
+
       release();
       const results = await Promise.all(inFlight.slice(1));
       for (const res of results) {
         expect(res.status).toBe(201);
       }
 
-      // Slots freed on completion — a subsequent upload now succeeds.
-      const sixth = await upload('f.bin');
-      expect(sixth.status).toBe(201);
-      expect(sixth.body.path).toBe('f.bin');
+      // The disconnected a.bin write still completed server-side.
+      expect((await fsp.stat(path.join(wsDir, 'a.bin'))).size).toBe(1);
+
+      // All four slots must be free again: four concurrent uploads all
+      // succeed — exactly one leaked slot would surface as one 429 here.
+      const after = await Promise.all([
+        upload('f.bin'),
+        upload('g.bin'),
+        upload('h.bin'),
+        upload('i.bin'),
+      ]);
+      for (const res of after) {
+        expect(res.status).toBe(201);
+      }
     } finally {
       release();
       await fsp.rm(scratch, { recursive: true, force: true });
@@ -761,5 +960,23 @@ describe('fileUploadBodyParser 413 (oversized buffered body)', () => {
       status: 413,
       maxBytes: 50 * 1024 * 1024,
     });
+  });
+
+  it('passes non-413 body-parser errors through next(err)', async () => {
+    // An unsupported Content-Encoding makes body-parser throw a 415
+    // `encoding.unsupported` — the wrapper must forward it via `next(err)`
+    // instead of misreporting an oversized body.
+    const { fileUploadBodyParser } = await import('./workspace-file-write.js');
+    const app = express();
+    app.post('/upload', fileUploadBodyParser(), (req, res) => {
+      res.status(200).json({ ok: true });
+    });
+    const res = await request(app)
+      .post('/upload')
+      .set('Content-Type', 'application/octet-stream')
+      .set('Content-Encoding', 'zstd')
+      .send(Buffer.from('x'));
+    expect(res.status).toBe(415);
+    expect(res.text).not.toContain('file_too_large');
   });
 });

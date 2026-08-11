@@ -387,7 +387,6 @@ const uploadGateLeases = new WeakMap<Request, UploadGateLease>();
 export interface UploadConcurrencyGate {
   tryAcquire(): boolean;
   release(): void;
-  readonly max: number;
 }
 
 export function createUploadConcurrencyGate(
@@ -395,7 +394,6 @@ export function createUploadConcurrencyGate(
 ): UploadConcurrencyGate {
   let active = 0;
   return {
-    max,
     tryAcquire() {
       if (active >= max) return false;
       active += 1;
@@ -410,7 +408,6 @@ export function createUploadConcurrencyGate(
 interface UploadAdmission {
   route: string;
   fs: WorkspaceFileSystem;
-  originatorClientId: string | undefined;
   basename: string;
   resolvedDir: ResolvedPath;
 }
@@ -627,7 +624,6 @@ function fileUploadAdmission(
         uploadAdmissions.set(req, {
           route: ROUTE,
           fs,
-          originatorClientId,
           basename,
           resolvedDir,
         });
