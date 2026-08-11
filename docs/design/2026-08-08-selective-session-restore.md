@@ -353,8 +353,9 @@ chain is known:
 - background notification task ids;
 - active parent-session and session-source positions;
 - goal-state and legacy goal-status candidates;
-- normalized Goal-evidence eligibility, lineage context, bounded preview,
-  proof kind, and catalog-byte contribution, but not evidence content;
+- normalized Goal-evidence eligibility, lineage context (including malformed-
+  context and turn-reentry error markers), bounded preview, proof kind, and
+  catalog-byte contribution, but not evidence content;
 - file-history record positions;
 - artifact side-record metadata and physical order.
 
@@ -471,13 +472,14 @@ segments once:
    shared with `buildGoalEvidenceCheckpointWindow()`. After Goal recovery
    identifies the pending permit and cursor, run the selector over active-chain
    evidence hints to reproduce the existing newest-entry, catalog-byte, lineage,
-   and truncation decisions without retaining evidence content. Add only the
-   selected evidence UUIDs to the union, then feed their materialized records to
-   the shared accumulator and retain the resulting window in the projection.
-   This two-stage selection must preserve the existing production helper's
-   result; it must not select every active record, perform a second scan, or copy
-   Goal precedence. Deferred Goal activation consumes that window instead of
-   reading the transcript again.
+   malformed-context, turn-reentry, and truncation decisions without retaining
+   evidence content. Add only the selected evidence UUIDs to the union, then feed
+   their materialized records to the shared accumulator and retain the resulting
+   window in the projection. This two-stage selection must preserve both the
+   existing production helper's result and its fail-closed errors; it must not
+   select every active record, perform a second scan, or copy Goal precedence.
+   Deferred Goal activation consumes that window instead of reading the
+   transcript again.
 5. **File history.** Read every active `file_history_snapshot` record in
    chronological order and feed each batch through the existing whole-batch
    deserializer. This preserves today's behavior where one malformed item skips

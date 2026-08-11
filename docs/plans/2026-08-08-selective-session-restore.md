@@ -82,9 +82,10 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
 - Treat a pending Goal checkpoint as a restore consumer. Extract a bounded
   evidence selector and accumulator shared with the existing Goal
   evidence-window builder. Retain bounded eligibility, lineage, preview,
-  proof-kind, and catalog-byte hints without content; after Goal recovery fixes
-  the permit and cursor, use those active-chain hints to select the
-  production-equivalent bounded evidence UUIDs, materialize only that union, and
+  proof-kind, catalog-byte, malformed-context, and turn-reentry hints without
+  content; after Goal recovery fixes the permit and cursor, use those
+  active-chain hints to select the production-equivalent bounded evidence UUIDs
+  or reproduce the helper's fail-closed error, materialize only that union, and
   include the accumulated window in the projection. Prohibit all-record
   selection, a second scan, or restore-time fallback to
   `readActiveTranscriptChain()` or the old loader.
@@ -354,8 +355,9 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
   attribution mutation, FileHistory validation, or stale Session entry is
   permitted. Compare the hint-based evidence UUID selection and materialized
   checkpoint window with the production helper across entry/byte truncation,
-  cursor and lineage errors, prior checkpoint claims, and mixed eligible or
-  ineligible records; assert that unselected payloads are never read.
+  cursor, malformed-context, and turn-reentry errors, prior checkpoint claims,
+  and mixed eligible or ineligible records; assert that unselected payloads are
+  never read.
 - Exercise missing file-history backups and the targeted finalizer: envelope or
   setup failure appends nothing; success hydrates once, then runs the finalizer
   once after rewriter installation and before cron/commands. Inject independent
@@ -466,9 +468,10 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
       blocks legacy fallback.
 - [ ] Pending Goal checkpoint evidence is reduced during the single projection,
       uses bounded active-chain hints to select only the UUIDs chosen by the
-      production evidence-window helper, never selects every active payload,
-      performs a second scan, or calls the old loader, and activates
-      checkpoint/continuation work only from successful restore finalization.
+      production evidence-window helper or reproduce its fail-closed lineage
+      errors, never selects every active payload, performs a second scan, or
+      calls the old loader, and activates checkpoint/continuation work only from
+      successful restore finalization.
 - [ ] Active file-history batches preserve last-write-wins, first-insertion,
       100-snapshot cap, and whole-record malformed-skip semantics.
 - [ ] Transcript file-history records are reduced inside the single projection;
