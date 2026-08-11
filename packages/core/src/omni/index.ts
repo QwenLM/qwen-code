@@ -724,8 +724,12 @@ export async function processMediaForOmniDelivery(
       collectTranscripts(fileDeliveries);
       // Pure-transcript guard resolution (§6.2): the guard policy
       // replaced the over-limit media with text-only deliverables — the
-      // violation is resolved by not sending media at all.
-      if (deliveries.length === 0 && transcripts.length > 0) {
+      // violation is resolved by not sending media at all. Keyed on THIS
+      // pass's fileDeliveries, not the cumulative transcripts: a guard
+      // pass that omitted the source without producing any deliverable
+      // must fall through to the zero-deliverable throw below, even when
+      // an earlier pass already collected a transcript.
+      if (deliveries.length === 0 && fileDeliveries.length > 0) {
         return textOnlyDelivery(final.recognized, guard.estimate, {
           disclosure: final.disclosure,
           additionalMedia: await processAdditionalMedia(),
