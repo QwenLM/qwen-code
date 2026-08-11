@@ -35,6 +35,7 @@ import {
 } from './scheduler.js';
 
 const MS_PER_MINUTE = 60 * 1000;
+const MS_PER_HOUR = 60 * MS_PER_MINUTE;
 
 function makeConfig(logDir: string): Config {
   return {
@@ -101,6 +102,8 @@ describe('non-interactive OpenAI log housekeeping', () => {
     await vi.waitFor(() =>
       expect(mocks.cleanupOldOpenAILogs).toHaveBeenCalledOnce(),
     );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.cleanupOldOpenAILogs).toHaveBeenCalledOnce();
   });
 
   it('serializes different directories in FIFO order', async () => {
@@ -166,6 +169,32 @@ describe('non-interactive OpenAI log housekeeping', () => {
     );
   });
 
+  it('prefers the initialized content-generator logging directory', async () => {
+    const contentGeneratorLogDir = path.join(
+      qwenHome,
+      'from-content-generator-config',
+    );
+    const modelLogDir = path.join(qwenHome, 'from-models-config');
+    const config = {
+      getContentGeneratorConfig: () => ({
+        openAILoggingDir: contentGeneratorLogDir,
+      }),
+      getModelsConfig: () => ({
+        getGenerationConfig: () => ({ openAILoggingDir: modelLogDir }),
+      }),
+      getWorkingDir: () => process.cwd(),
+    } as unknown as Config;
+
+    startNonInteractiveOpenAILogHousekeeping(config, makeSettings());
+
+    await vi.waitFor(() =>
+      expect(mocks.cleanupOldOpenAILogs).toHaveBeenCalledOnce(),
+    );
+    expect(mocks.cleanupOldOpenAILogs.mock.calls[0]?.[0].logDir).toBe(
+      contentGeneratorLogDir,
+    );
+  });
+
   it('retries a held lock after one minute', async () => {
     vi.useFakeTimers();
     mocks.runThrottledOnce.mockResolvedValue({ status: 'locked' });
@@ -206,6 +235,32 @@ describe('non-interactive OpenAI log housekeeping', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(mocks.runThrottledOnce).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ['minimum', 5_000, MS_PER_MINUTE],
+    ['maximum', 25 * MS_PER_HOUR, 24 * MS_PER_HOUR],
+  ])(
+    'clamps a fresh marker retry to the %s delay',
+    async (_name, retryAfterMs, expectedDelayMs) => {
+      vi.useFakeTimers();
+      mocks.runThrottledOnce
+        .mockResolvedValueOnce({ status: 'fresh', retryAfterMs })
+        .mockResolvedValue({ status: 'completed' });
+
+      startNonInteractiveOpenAILogHousekeeping(
+        makeConfig(path.join(qwenHome, 'logs')),
+        makeSettings(),
+      );
+      await vi.waitFor(() =>
+        expect(mocks.runThrottledOnce).toHaveBeenCalledOnce(),
+      );
+
+      await vi.advanceTimersByTimeAsync(expectedDelayMs - 1);
+      expect(mocks.runThrottledOnce).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mocks.runThrottledOnce).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('retries a failed cleanup after ten minutes', async () => {
     vi.useFakeTimers();

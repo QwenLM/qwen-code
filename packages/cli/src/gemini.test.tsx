@@ -1048,6 +1048,8 @@ describe('gemini.tsx main function', () => {
     mockWriteStderrLine.mockClear();
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
+    const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
+      .mock.calls.length;
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
       authError: null,
       themeError: null,
@@ -1144,6 +1146,11 @@ describe('gemini.tsx main function', () => {
       configStub,
       expect.any(Object),
     );
+    const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
+      .calls[cleanupRegistrationStart]?.[0];
+    expect(housekeepingCleanup).toBeTypeOf('function');
+    await housekeepingCleanup?.();
+    expect(mockStopNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledOnce();
 
     const runFailure = new Error('headless run failed');
     runNonInteractiveSpy.mockRejectedValueOnce(runFailure);
@@ -1438,6 +1445,8 @@ describe('gemini.tsx main function', () => {
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
     vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
+    const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
+      .mock.calls.length;
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
@@ -1554,6 +1563,11 @@ describe('gemini.tsx main function', () => {
       validatedConfig,
       settingsArg,
     );
+    const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
+      .calls[cleanupRegistrationStart]?.[0];
+    expect(housekeepingCleanup).toBeTypeOf('function');
+    await housekeepingCleanup?.();
+    expect(mockStopNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledOnce();
 
     const streamFailure = new Error('stream failed');
     runStreamJsonSpy.mockRejectedValueOnce(streamFailure);
