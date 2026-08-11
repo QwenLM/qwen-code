@@ -15,6 +15,7 @@ import type { FileAttachment } from '../../utils/files.ts';
 type QwenAgentConfig = ConstructorParameters<typeof QwenAgent>[0];
 
 type QwenHistoryInternals = {
+  extractQwenRecordText: (record: Record<string, unknown>) => string;
   mergeSlashCommandInvocationMessages: (
     sessionId: string,
     messages: Message[],
@@ -209,6 +210,75 @@ describe('QwenAgent slash command history', () => {
     for (const root of tempRoots.splice(0)) {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('projects Qwen user transcript records without hook context', () => {
+    const extractQwenRecordText = (
+      QwenAgent.prototype as unknown as QwenHistoryInternals
+    ).extractQwenRecordText;
+    const hookContext =
+      '<qwen:user-prompt-submit-context>\ntrusted context\n</qwen:user-prompt-submit-context>';
+
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'expanded prompt' }, { text: hookContext }],
+        },
+        systemPayload: {
+          displayText: 'original prompt',
+          hookContext: 'trusted context',
+        },
+      }),
+    ).toBe('original prompt');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'expanded prompt' }, { text: hookContext }],
+        },
+        systemPayload: { displayText: '', hookContext: 'trusted context' },
+      }),
+    ).toBe('');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'tag-only prompt' }, { text: hookContext }],
+        },
+      }),
+    ).toBe('tag-only prompt');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: { parts: [{ text: 'legacy prompt' }] },
+      }),
+    ).toBe('legacy prompt');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: { parts: [{ text: 'notification model text' }] },
+        systemPayload: { displayText: 'Background agent completed' },
+      }),
+    ).toBe('notification model text');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'user prompt' }, { text: hookContext }],
+        },
+        systemPayload: { displayText: 'raw @file prompt' },
+      }),
+    ).toBe('raw @file prompt');
+    expect(
+      extractQwenRecordText({
+        type: 'user',
+        message: {
+          parts: [{ text: 'user prompt' }, { text: hookContext }],
+        },
+        systemPayload: null,
+      }),
+    ).toBe('user prompt');
   });
 
   it('sends slash commands as raw ACP prompts', () => {
@@ -2122,6 +2192,60 @@ describe('QwenAgent slash command history', () => {
     expect(result.messages.map((message) => message.timestamp)).toEqual([
       1_000, 2_000,
     ]);
+  });
+
+  it('does not re-add hook-expanded transcript users after ACP history replay', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'user-1',
+        sessionId,
+        timestamp: '1970-01-01T00:00:01.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'expanded prompt' },
+            {
+              text: '<qwen:user-prompt-submit-context>\ntrusted context\n</qwen:user-prompt-submit-context>',
+            },
+          ],
+        },
+        systemPayload: {
+          displayText: 'original prompt',
+          hookContext: 'trusted context',
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        extMethod: async () => ({
+          updates: [
+            {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'original prompt' },
+              timestamp: 1_000,
+            },
+          ],
+        }),
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    expect(
+      result.messages.map((message) => [message.role, message.content]),
+    ).toEqual([['user', 'original prompt']]);
   });
 
   it('restores Qwen transcript API aborts as interrupted info', async () => {

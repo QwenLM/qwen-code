@@ -964,6 +964,53 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+// Keep these in sync with USER_PROMPT_SUBMIT_CONTEXT_OPEN/CLOSE in Qwen core.
+const QWEN_USER_PROMPT_CONTEXT_OPEN = '<qwen:user-prompt-submit-context>';
+const QWEN_USER_PROMPT_CONTEXT_CLOSE = '</qwen:user-prompt-submit-context>';
+
+function isQwenUserPromptContextPart(part: unknown): boolean {
+  if (!isRecord(part) || typeof part.text !== 'string') return false;
+  const text = part.text.trim();
+  const prefix = `${QWEN_USER_PROMPT_CONTEXT_OPEN}\n`;
+  const suffix = `\n${QWEN_USER_PROMPT_CONTEXT_CLOSE}`;
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) {
+    return false;
+  }
+  const body = text.slice(prefix.length, -suffix.length);
+  return (
+    !body.includes(QWEN_USER_PROMPT_CONTEXT_OPEN) &&
+    !body.includes(QWEN_USER_PROMPT_CONTEXT_CLOSE)
+  );
+}
+
+function projectQwenUserRecordText(record: JsonRecord): string {
+  const message = toRecord(record.message);
+  const parts = Array.isArray(message.parts)
+    ? message.parts.filter(isRecord)
+    : [];
+  const hasFinalHookContextPart =
+    parts.length > 1 &&
+    isQwenUserPromptContextPart(parts[parts.length - 1]);
+  const payload = isRecord(record.systemPayload)
+    ? record.systemPayload
+    : undefined;
+  const displayText =
+    payload &&
+    (asString(payload.hookContext) !== undefined || hasFinalHookContextPart)
+      ? asString(payload.displayText)
+      : undefined;
+  if (displayText !== undefined) return displayText;
+
+  const visibleParts =
+    payload === undefined && hasFinalHookContextPart
+      ? parts.slice(0, -1)
+      : parts;
+  return visibleParts
+    .map((part) => asString(part.text))
+    .filter((text): text is string => !!text)
+    .join('\n\n');
+}
+
 export function extractQwenParentToolUseId(
   update: Record<string, unknown>,
 ): string | undefined {
@@ -3399,6 +3446,9 @@ export class QwenAgent extends BaseAgent {
   }
 
   private extractQwenRecordText(record: JsonRecord): string {
+    if (record.type === 'user') {
+      return projectQwenUserRecordText(record);
+    }
     const message = toRecord(record.message);
     const parts = Array.isArray(message.parts)
       ? message.parts.filter(isRecord)

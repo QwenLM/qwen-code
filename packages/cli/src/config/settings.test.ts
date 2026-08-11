@@ -62,6 +62,7 @@ import {
   SETTINGS_DIRECTORY_NAME, // This is from the original module, but used by the mock.
   type Settings,
   loadEnvironment,
+  preResolveHomeEnvOverrides,
   reloadEnvironment,
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
@@ -4732,6 +4733,40 @@ describe('Settings Loading and Merging', () => {
         loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
         expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
+        cwdSpy.mockRestore();
+      });
+
+      it('does not pre-resolve attribution markers from a user-level .env', () => {
+        delete process.env['QWEN_HOME'];
+        delete process.env['QWEN_CODE_SERVE'];
+        delete process.env['QWEN_CODE_DESKTOP'];
+
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue('/mock/home/user');
+        const userQwenEnvPath = path.join('/mock/home/user', QWEN_DIR, '.env');
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [userQwenEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === userQwenEnvPath) {
+              return [
+                'QWEN_HOME=/tmp/from-user-env',
+                'QWEN_CODE_SERVE=1',
+                'QWEN_CODE_DESKTOP=1',
+              ].join('\n');
+            }
+            return '{}';
+          },
+        );
+
+        preResolveHomeEnvOverrides();
+
+        expect(process.env['QWEN_HOME']).toEqual('/tmp/from-user-env');
+        expect(process.env['QWEN_CODE_SERVE']).toBeUndefined();
+        expect(process.env['QWEN_CODE_DESKTOP']).toBeUndefined();
         cwdSpy.mockRestore();
       });
 

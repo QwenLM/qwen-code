@@ -80,4 +80,40 @@ describe('bundled review skill', () => {
     expect(body).toContain('`fetch-pr` before all of them');
     expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
+
+  it('pins the bounded-tail protocol on the round-cap bullet', () => {
+    // The ROUND CAP refusal message carries the same verify-only /
+    // compose-floor contract; a revert of the bullet's protocol hunk must
+    // fail a test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`agent-prompt --role verify` **only**');
+    expect(body).toContain('no fresh re-verification pass');
+  });
+
+  it('pins the relay-entry removal on the CONVERGED bullet', () => {
+    // The CONVERGED clear removes the marker on disk, but the entry an
+    // earlier stop refusal told the orchestrator to relay is orchestrator
+    // state — compose-review's dedup splice stops running once the marker
+    // is gone, so only this instruction recalls it. A revert of the
+    // sentence must fail a test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('remove it now — this convergence supersedes');
+  });
+
+  it('routes both remote-resolution paths through match-remote', () => {
+    // The pr-url path (Step 1) and the bare-PR-number path both resolve the
+    // remote via the deterministic matcher. A later edit reverting either
+    // hunk to the old model-prose rule must fail a test, not slip through.
+    const body = skillBody();
+    const invocations =
+      body.match(/"\$\{QWEN_CODE_CLI:-qwen\}" review match-remote/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    // The bare-number path threads the host `gh repo view` resolved at —
+    // dropping it rematches auth-config-only GHE clones against github.com.
+    expect(body).toContain('--host <host from gh repo view>');
+    expect(body).toContain('Exit 6 means no remote matches');
+    expect(body).toContain(
+      'the matcher exits 6 (no remote matches) or 7 (several do)',
+    );
+  });
 });

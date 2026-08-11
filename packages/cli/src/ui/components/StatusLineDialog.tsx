@@ -176,8 +176,20 @@ export function StatusLineDialog({
 
   const handleConfirm = useCallback(() => {
     const effectiveScope = getEffectiveStatusLineScope(settings);
-    settings.setValue(effectiveScope, 'ui.statusLine', presetConfig);
-    onSaved?.(presetConfig);
+    const statusLine =
+      settings.forScope(effectiveScope).settings.ui?.statusLine;
+    const hideContextIndicator =
+      statusLine && typeof statusLine === 'object'
+        ? statusLine.hideContextIndicator
+        : undefined;
+    const savedConfig = {
+      ...presetConfig,
+      ...(typeof hideContextIndicator === 'boolean'
+        ? { hideContextIndicator }
+        : {}),
+    };
+    settings.setValue(effectiveScope, 'ui.statusLine', savedConfig);
+    onSaved?.(savedConfig);
     const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
       type: MessageType.INFO,
       text: `Status line preset saved to ${effectiveScope.toLowerCase()} settings.`,
