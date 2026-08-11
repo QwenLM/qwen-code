@@ -1534,7 +1534,7 @@ function composeReviewBody(
 function publicAgentSubject(label: string): string | undefined {
   return /^chunk \d+$/.test(label)
     ? undefined
-    : mdField(JSON.stringify(compressSummary(label)));
+    : mdField(JSON.stringify(compressSummary(label.replace(/[`\r\n]+/g, ' '))));
 }
 
 /**

@@ -2233,6 +2233,18 @@ describe('coverage is recomputed, never accepted', () => {
     );
   });
 
+  it('collapses spaces after removing backticks from agent labels', () => {
+    transcript(
+      'p1',
+      `You are review agent \`security\` — inspect auth\n${DIFF}`,
+    );
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain(
+      'Not reviewed: `"You are review agent security — inspect auth"`',
+    );
+  });
+
   it('names a blind launch as itself, not as a whiff', () => {
     // An agent whose prompt never named the diff could not have read it, and
     // relaunching it produces another agent that cannot either. The prompt is the
