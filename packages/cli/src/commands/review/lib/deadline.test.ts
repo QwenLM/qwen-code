@@ -25,16 +25,23 @@ import {
   DEFAULT_COMPOSE_FLOOR_SECONDS,
   budgetStopEntry,
   budgetStopEntryZh,
+  clearBudgetStop,
   expectedRoundSeconds,
   readBudgetStop,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
+  ROUND_CAP_PHRASE,
+  roundCapStopDisclosure,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
+  writeRoundCapStop,
   stampRound,
   verifyBudgetExhausted,
   verifyBudgetMessage,
   writeBudgetStop,
 } from './deadline.js';
+import { promptRecordDir } from './prompt-record.js';
 
 const NOW_MS = 1_754_000_000_000;
 const NOW_S = NOW_MS / 1000;
@@ -342,6 +349,72 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     expect(readBudgetStop(p)?.round).toBe(3);
   });
 
+  it('first refusal wins — a later cap write does not flip a same-run budget marker', () => {
+    // The retry-after-refusal misbehavior class: the time gate refuses round
+    // 3, the orchestrator asks for round 4 anyway, the cap gate fires first
+    // (4 > 3) and — without the guard — overwrites the marker. compose-review
+    // would then splice out the wrong relayed entry and post two contradictory
+    // stop disclosures. First-write-wins keeps the marker the audit actually
+    // stopped on.
+    const p = stopPlan();
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+      NOW_MS,
+    );
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    const stop = readBudgetStop(p);
+    expect(stop?.cause).toBeUndefined(); // still the time-budget marker
+    expect(stop?.entry).toBe(
+      'reverse audit — stopped before round 3 by the review time budget',
+    );
+  });
+
+  it('first refusal wins the other way — a later budget write does not flip a cap marker', () => {
+    const p = stopPlan();
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      5,
+      NOW_MS,
+    );
+    const stop = readBudgetStop(p);
+    expect(stop?.cause).toBe('round-cap');
+    expect(stop?.cap).toBe(3);
+  });
+
+  it('clearBudgetStop removes a same-run marker — and never throws', () => {
+    // The CONVERGED-exit tests in agent-prompt.test.ts pin the call SITE;
+    // this pins the function itself, so a refactor that moves the clear out
+    // of refuseConverged (or unlinks a different file) fails here directly,
+    // not only through the loop-level tests.
+    const p = stopPlan();
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    expect(readBudgetStop(p)?.cause).toBe('round-cap');
+    clearBudgetStop(p);
+    expect(readBudgetStop(p)).toBeNull();
+    // A repeat clear (file already gone), a run with no record dir at all,
+    // and an unlink that fails (record dir blocked by a regular file) are
+    // all no-ops, not throws: the file is the thing to be rid of, and a
+    // clear that cannot run still only leaves a cap on, never corrupts a
+    // verdict.
+    expect(() => clearBudgetStop(p)).not.toThrow();
+    const fresh = stopPlan();
+    expect(() => clearBudgetStop(fresh)).not.toThrow();
+    writeFileSync(promptRecordDir(fresh), 'a file where the record dir goes');
+    expect(() => clearBudgetStop(fresh)).not.toThrow();
+  });
+
   it('the dedup phrase travels with the entry it identifies', () => {
     // compose-review dedups the orchestrator's relayed copy by this phrase;
     // a reword of the entry that left the phrase behind would post the
@@ -426,6 +499,11 @@ describe('reverseAuditBudgetMessage', () => {
     expect(msg).toContain('never a hand-rolled agent');
     expect(msg).toContain('compose floor');
     expect(msg).toContain('Do NOT re-verify findings already');
+    // The wait-bound and no-fresh-pass clauses the round-cap refusal's
+    // tail carries (and SKILL.md's budget-stop bullet documents) — the
+    // two refusals share one bounded-tail protocol, so both pin both.
+    expect(msg).toContain('stop waiting on any verifier batch still out');
+    expect(msg).toContain('invent a fresh re-verification pass');
   });
 
   it('says "the next round" when no round number was passed', () => {
@@ -439,6 +517,74 @@ describe('reverseAuditBudgetMessage', () => {
     );
     expect(msg).toContain('0 minute(s) remain');
     expect(msg).toContain('stopped before the next round');
+  });
+});
+
+describe('writeRoundCapStop — the round-cap marker', () => {
+  it('round-trips through readBudgetStop with cause and cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
+      expect(stop?.entry).toBe(roundCapStopEntry(3));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a cap marker from before the plan capture is a previous run — the guard still writes', () => {
+    // Mirror of the budget-stop fence test for the round-cap writer: run 1
+    // stops at the cap and is killed before cleanup; run 2 re-captures the
+    // plan and runs past the cap again. The first-refusal-wins guard must
+    // read through the stale file via the run-epoch fence — a raw
+    // existsSync check would make run 2's writeRoundCapStop a no-op, and
+    // compose-review would neither cap the verdict nor print the stop
+    // disclosure for an audit that stopped at the cap.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, PLAN_CAPTURED_MS - 28_800_000); // 8h before capture
+      expect(readBudgetStop(plan)).toBeNull(); // fenced out as a previous run
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('disclosure names the cap in both languages', () => {
+    expect(roundCapStopDisclosure(3).reason).toContain(ROUND_CAP_PHRASE);
+    expect(roundCapStopDisclosure(3).reason).toContain('of 3');
+    expect(roundCapStopEntryZh(3)).toContain('3');
+  });
+
+  it('writes round as an explicit null when the caller passes undefined', () => {
+    // The chunkless call site (agent-prompt.ts) passes `round: undefined`; the
+    // `?? null` fallback must keep the key PRESENT with a null value, not let
+    // JSON.stringify drop it — a consumer that distinguishes null from an
+    // absent key would otherwise misread the marker.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, undefined, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop).not.toBeNull();
+      expect(stop && 'round' in stop).toBe(true);
+      expect(stop?.round).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

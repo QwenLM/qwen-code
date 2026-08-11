@@ -5,8 +5,10 @@
  */
 
 import {
+  addDaemonRequestAttribute,
   SessionService,
   SessionOrganizationError,
+  Storage,
   readWorktreeSession,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -17,10 +19,19 @@ import type {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  PersistedSessionListCache,
+  type PersistedSessionListSnapshot,
+} from './persisted-session-list-cache.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
 const MAX_ORGANIZED_SESSIONS = 50_000;
+const PERSISTED_SESSION_LIST_CACHE_TTL_MS = 2_000;
+const persistedSessionListCache = new PersistedSessionListCache(
+  PERSISTED_SESSION_LIST_CACHE_TTL_MS,
+  MAX_ORGANIZED_SESSIONS,
+);
 
 export interface ListWorkspaceSessionsOptions {
   cursor?: string;
@@ -73,6 +84,31 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Runtime root owned by the selected managed workspace. */
+  runtimeBaseDir?: string;
+}
+
+interface ResolvedListWorkspaceSessionsReadOptions {
+  mergeLive?: boolean;
+  runtimeBaseDir: string;
+}
+
+export interface InvalidateWorkspaceSessionListCacheOptions {
+  runtimeBaseDir: string;
+  workspaceCwd: string;
+  archiveStates: readonly SessionArchiveState[];
+}
+
+export function invalidateWorkspaceSessionListCache(
+  options: InvalidateWorkspaceSessionListCacheOptions,
+): void {
+  for (const archiveState of options.archiveStates) {
+    persistedSessionListCache.invalidate({
+      runtimeBaseDir: options.runtimeBaseDir,
+      workspaceCwd: options.workspaceCwd,
+      archiveState,
+    });
+  }
 }
 
 export class InvalidCursorError extends Error {
@@ -292,11 +328,14 @@ async function enrichWorktreeSidecars(
       ),
     ).catch(() => null);
     if (sidecar) {
-      summary.worktree = {
-        slug: sidecar.slug,
-        path: sidecar.worktreePath,
-        branch: sidecar.worktreeBranch,
-      };
+      bySessionId.set(sessionId, {
+        ...summary,
+        worktree: {
+          slug: sidecar.slug,
+          path: sidecar.worktreePath,
+          branch: sidecar.worktreeBranch,
+        },
+      });
     }
   }
 }
@@ -358,16 +397,28 @@ function mergeLiveSessionSummary(
   };
 }
 
-async function listAllPersistedSummaries(
+function clonePersistedSummary(
+  session: Readonly<BridgeSessionSummary>,
+): BridgeSessionSummary {
+  return {
+    ...session,
+    ...(session.worktree ? { worktree: { ...session.worktree } } : {}),
+  };
+}
+
+async function loadAllPersistedSummaries(
   sessionService: SessionService,
   archiveState: SessionArchiveState,
-): Promise<{ sessions: BridgeSessionSummary[]; truncated: boolean }> {
+): Promise<PersistedSessionListSnapshot> {
+  const scanStartedAt = performance.now();
   // Organized view needs global pin/group ordering before pagination; v1 keeps
   // the storage API unchanged and performs that merge in memory.
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
+  let scanPages = 0;
   let cursor: number | undefined;
   do {
+    scanPages += 1;
     const page = await sessionService.listSessions({
       cursor,
       size: 10_000,
@@ -390,7 +441,68 @@ async function listAllPersistedSummaries(
       break;
     }
   } while (cursor !== undefined);
-  return { sessions, truncated };
+  const bySessionId = new Map(
+    sessions.map((session) => [session.sessionId, session]),
+  );
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+  return {
+    sessions: [...bySessionId.values()],
+    truncated,
+    scanPages,
+    scanDurationMs: Math.max(0, performance.now() - scanStartedAt),
+  };
+}
+
+async function listAllPersistedSummaries(
+  sessionService: SessionService,
+  workspaceCwd: string,
+  archiveState: SessionArchiveState,
+  runtimeBaseDir: string,
+  queryKind: 'organized' | 'metadata',
+): Promise<PersistedSessionListSnapshot> {
+  const lookup = persistedSessionListCache.lookup(
+    { runtimeBaseDir, workspaceCwd, archiveState },
+    () => loadAllPersistedSummaries(sessionService, archiveState),
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.cache_status',
+    lookup.status,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.archive_state',
+    archiveState,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.query_kind',
+    queryKind,
+  );
+  if (lookup.cacheAgeMs !== undefined) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.cache_age_ms',
+      lookup.cacheAgeMs,
+    );
+  }
+
+  const snapshot = await lookup.promise;
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.persisted_sessions',
+    snapshot.sessions.length,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.scan_pages',
+    snapshot.scanPages,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_list.truncated',
+    snapshot.truncated,
+  );
+  if (lookup.status === 'scan') {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_list.scan_duration_ms',
+      snapshot.scanDurationMs,
+    );
+  }
+  return snapshot;
 }
 
 function getSummaryActivityTime(session: BridgeSessionSummary): number {
@@ -476,7 +588,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
-  readOptions: ListWorkspaceSessionsReadOptions,
+  readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
@@ -511,16 +623,20 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
     sessionService,
+    workspaceCwd,
     archiveState,
+    readOptions.runtimeBaseDir,
+    'organized',
   );
   for (const session of persisted.sessions) {
     bySessionId.set(
       session.sessionId,
-      applyOrganization(session, snapshot.sessions.get(session.sessionId)),
+      applyOrganization(
+        clonePersistedSummary(session),
+        snapshot.sessions.get(session.sessionId),
+      ),
     );
   }
-
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   if (
     readOptions.mergeLive !== false &&
@@ -635,20 +751,21 @@ async function listWorkspaceSessionsByMetadataForResponse(
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
   filter: SessionMetadataFilter,
-  readOptions: ListWorkspaceSessionsReadOptions,
+  readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
   const bySessionId = new Map<string, BridgeSessionSummary>();
   const persisted = await listAllPersistedSummaries(
     sessionService,
+    workspaceCwd,
     archiveState,
+    readOptions.runtimeBaseDir,
+    'metadata',
   );
   for (const session of persisted.sessions) {
-    bySessionId.set(session.sessionId, session);
+    bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
-
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
@@ -739,6 +856,26 @@ export async function listWorkspaceSessionsForResponse(
   workspaceCwd: string,
   options?: ListWorkspaceSessionsOptions,
   readOptions: ListWorkspaceSessionsReadOptions = {},
+): Promise<ListWorkspaceSessionsResult> {
+  const runtimeBaseDir = new Storage(
+    workspaceCwd,
+    readOptions.runtimeBaseDir,
+  ).getRuntimeBaseDir();
+  return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
+    listWorkspaceSessionsForResponseInRuntime(bridge, workspaceCwd, options, {
+      ...(readOptions.mergeLive !== undefined
+        ? { mergeLive: readOptions.mergeLive }
+        : {}),
+      runtimeBaseDir,
+    }),
+  );
+}
+
+async function listWorkspaceSessionsForResponseInRuntime(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  options: ListWorkspaceSessionsOptions | undefined,
+  readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
   const rawSize = options?.size;
   const requestedSize =
