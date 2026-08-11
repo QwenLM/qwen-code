@@ -52,6 +52,7 @@ export interface WebShellTranscriptProps {
   chatMaxWidth?: number;
   workspaceCwd?: string;
   compactThinking?: boolean;
+  showThinking?: boolean;
   collapseCompletedTurns?: boolean;
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
@@ -102,6 +103,7 @@ function WebShellTranscriptContent({
   chatMaxWidth,
   workspaceCwd = '',
   compactThinking = false,
+  showThinking,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
@@ -132,6 +134,7 @@ function WebShellTranscriptContent({
       renderComposerTagTooltip,
       renderAssistantTurnFooter,
       compactThinking,
+      showThinking,
       collapseCompletedTurns,
       markdownTableMode,
       markdown,
@@ -148,6 +151,7 @@ function WebShellTranscriptContent({
       renderComposerTagTooltip,
       renderToolHeaderExtra,
       renderUserMessageContent,
+      showThinking,
     ],
   );
   const rootRef = useRef<HTMLDivElement>(null);

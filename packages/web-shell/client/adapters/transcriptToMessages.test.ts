@@ -3063,6 +3063,28 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('keeps the full timing range when adjacent thoughts merge', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'first', 100_000, false, {
+        serverTimestamp: 1_000,
+        serverUpdatedAt: 6_000,
+      }),
+      textBlock('t2', 'thought', ' second', 101_000, false, {
+        serverTimestamp: 6_000,
+        serverUpdatedAt: 9_000,
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'thinking',
+        content: 'first second',
+        startTime: 1_000,
+        endTime: 9_000,
+      },
+    ]);
+  });
+
   it('projects live daemon timing onto the client clock', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'thinking', 100_000, true, {

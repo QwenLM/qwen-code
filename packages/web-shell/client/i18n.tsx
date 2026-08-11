@@ -5483,12 +5483,6 @@ const ZH: Messages = {
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
     '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
-  'settings.label.ui.compactMode': '紧凑模式',
-  'settings.description.ui.compactMode':
-    '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',
-  'settings.label.ui.compactInline': '紧凑内联',
-  'settings.description.ui.compactInline':
-    '在每个分组内紧凑显示工具内容，而不是跨分组合并。需要先启用紧凑模式。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',

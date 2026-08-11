@@ -113,8 +113,6 @@ const SUB_DIALOG_KEYS = new Set([
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
-  'ui.compactMode',
-  'ui.compactInline',
   'mcpServers',
 ]);
 const LIVE_SETTING_KEYS = new Set([

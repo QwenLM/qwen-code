@@ -188,6 +188,11 @@ const agentMsg = (id: string): ToolGroupMessage => ({
     },
   ],
 });
+const standaloneToolMsg = (id: string, toolName: string): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [{ callId: `call-${id}`, toolName, status: 'completed' }],
+});
 const asstMsg = (id: string): AssistantMessage => ({
   id,
   role: 'assistant',
@@ -565,6 +570,31 @@ describe('MessageList — thinking visibility', () => {
 
     expect(parallelAgentsSummary(container)).not.toBeNull();
   });
+
+  it.each(['TodoWrite', 'AskUserQuestion'])(
+    'keeps %s groups separate across hidden thinking',
+    (toolName) => {
+      const container = mount(
+        [
+          toolMsg('g1'),
+          thinkingMsg('t1'),
+          standaloneToolMsg('special', toolName),
+        ],
+        undefined,
+        {
+          customization: {
+            showThinking: false,
+            collapseCompletedTurns: false,
+          },
+        },
+      );
+
+      expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="msg-special"]'),
+      ).not.toBeNull();
+    },
+  );
 });
 
 describe('MessageList — turn collapse (DOM)', () => {

@@ -250,6 +250,20 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
+  it('rejects the retired compact mode setting', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'ui.compactMode',
+      value: true,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'disallowed_key' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
   it.each(['ui.mouseTracking', 'ui.showScrollbar'])(
     'rejects a TUI-only key (%s) that has no effect in the web shell',
     async (key) => {

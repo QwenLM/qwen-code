@@ -100,6 +100,15 @@ describe('AssistantMessage thinking logic', () => {
     expect(container.textContent).toContain('Thought for 5s');
   });
 
+  it('keeps completed thinking without timing durationless', () => {
+    const container = render(
+      <ThinkingMessage messageId="legacy" content="private chain of thought" />,
+    );
+
+    expect(container.textContent).toContain('Done thinking');
+    expect(container.textContent).not.toContain('Thought for');
+  });
+
   it('uses authoritative timing when a live thought completes', () => {
     vi.setSystemTime(100_000);
     const container = document.createElement('div');

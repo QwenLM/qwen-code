@@ -152,6 +152,7 @@ describe('WebShellTranscript contract', () => {
         language="zh"
         chatMaxWidth={720}
         compactThinking
+        showThinking={false}
         collapseCompletedTurns={false}
         markdownTableMode="advanced"
         composerTagIcons={{ file: '/file.svg' }}
@@ -168,6 +169,7 @@ describe('WebShellTranscript contract', () => {
     });
     expect(observation.customization).toMatchObject({
       compactThinking: true,
+      showThinking: false,
       collapseCompletedTurns: false,
       markdownTableMode: 'advanced',
       composerTagIcons: { file: '/file.svg' },

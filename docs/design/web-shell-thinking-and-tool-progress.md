@@ -14,4 +14,4 @@ Transcript blocks retain the first and latest daemon timestamps. Thinking and to
 
 ## Compatibility
 
-The default remains to show thinking. Missing, invalid, or unavailable `localStorage` falls back safely. No public prop, URL parameter, settings dependency, shortcut, or package dependency is added.
+The default remains to show thinking. Missing, invalid, or unavailable `localStorage` falls back safely. The interactive app adds no URL parameter or settings dependency; the read-only `WebShellTranscript` mirrors the presentation option through an optional `showThinking` prop for embedders without the keyboard shortcut.

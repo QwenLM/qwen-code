@@ -3309,6 +3309,11 @@ describe('daemon UI time schema (PR-B)', () => {
           serverTimestamp: 1_000,
         },
         {
+          type: 'thought.text.delta',
+          text: ' more',
+          serverTimestamp: 3_000,
+        },
+        {
           type: 'assistant.text.delta',
           text: 'answer',
           serverTimestamp: 6_000,
@@ -3693,6 +3698,33 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     expect(state.blocks[0]).toMatchObject({
       kind: 'tool',
       status: 'cancelled',
+    });
+  });
+
+  it('stamps the cancelling event time on in-flight tools', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'call-1',
+        status: 'running',
+        serverTimestamp: 1_000,
+      },
+    ]);
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'assistant.done',
+        reason: 'cancelled',
+        serverTimestamp: 6_000,
+      },
+    ]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'cancelled',
+      serverTimestamp: 1_000,
+      serverUpdatedAt: 6_000,
     });
   });
 
