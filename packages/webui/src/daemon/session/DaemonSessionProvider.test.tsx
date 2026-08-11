@@ -3764,6 +3764,24 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('injects replay snapshot on initial session load', async () => {
+    const sdk = await import('@qwen-code/sdk/daemon');
+    const realCreateStore = sdk.createDaemonTranscriptStore;
+    const replayDispatchBatchSizes: number[] = [];
+    const createStoreSpy = vi
+      .spyOn(sdk, 'createDaemonTranscriptStore')
+      .mockImplementation((seed) => {
+        const store = realCreateStore(seed);
+        if (seed?.maxBlocks === Number.MAX_SAFE_INTEGER) {
+          const realDispatch = store.dispatch.bind(store);
+          store.dispatch = (event) => {
+            replayDispatchBatchSizes.push(
+              Array.isArray(event) ? event.length : 1,
+            );
+            return realDispatch(event);
+          };
+        }
+        return store;
+      });
     const session = createMockSession({
       replaySnapshot: {
         compactedReplay: [
@@ -3808,6 +3826,8 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'initial replay', streaming: false },
     ]);
+    expect(replayDispatchBatchSizes).toEqual([2]);
+    createStoreSpy.mockRestore();
   });
 
   it.each([
@@ -8084,6 +8104,54 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     expect(blocks).toEqual([]);
+  });
+
+  it('does not attach a session after its load watchdog expires', async () => {
+    const firstSession = createMockSession({ sessionId: 'session-a' });
+    const lateSession = createMockSession({ sessionId: 'session-b' });
+    const lateLoad = createDeferred<MockSession>();
+    sdkMocks.sessions.push(firstSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => lateLoad.promise,
+    );
+
+    vi.useFakeTimers();
+    try {
+      const loadPromise = requireActions(actions).loadSession('session-b');
+      const rejection = loadPromise.catch((error: unknown) => error);
+      await act(async () => {
+        await flushPromises();
+        await vi.advanceTimersByTimeAsync(75_000);
+      });
+      const loadError = await rejection;
+      expect(loadError).toBeInstanceOf(Error);
+      expect((loadError as Error).message).toContain('Session load timed out');
+      expect(connection).toMatchObject({ sessionId: undefined });
+
+      lateLoad.resolve(lateSession);
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(connection).toMatchObject({ sessionId: undefined });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('surfaces a restore 504 without treating the session as missing', async () => {

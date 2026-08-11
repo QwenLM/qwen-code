@@ -18,6 +18,7 @@ const EMPTY_QUERIES: readonly SessionCatalogQuery[] = [];
 interface SessionCatalogHookOptions {
   autoLoad?: boolean;
   enabled?: boolean;
+  maxAgeMs?: number;
   pollIntervalMs?: number;
 }
 
@@ -37,7 +38,12 @@ export function useSessionCatalogQuery(
   query: SessionCatalogQuery | undefined,
   options: SessionCatalogHookOptions = {},
 ) {
-  const { autoLoad = false, enabled = true, pollIntervalMs } = options;
+  const {
+    autoLoad = false,
+    enabled = true,
+    maxAgeMs,
+    pollIntervalMs,
+  } = options;
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const queryKey = query ? getSessionCatalogQueryKey(query) : undefined;
   const stableQueryRef = useRef<{
@@ -54,10 +60,11 @@ export function useSessionCatalogQuery(
       if (!enabled || !stableQuery) return () => undefined;
       return store.subscribe(stableQuery, listener, {
         autoLoad,
+        ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
         ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
       });
     },
-    [autoLoad, enabled, pollIntervalMs, stableQuery, store],
+    [autoLoad, enabled, maxAgeMs, pollIntervalMs, stableQuery, store],
   );
   const getSnapshot = useCallback(
     () =>
@@ -95,7 +102,12 @@ export function useSessionCatalogQueries(
   queries: readonly SessionCatalogQuery[],
   options: SessionCatalogHookOptions = {},
 ): readonly SessionCatalogSnapshot[] {
-  const { autoLoad = false, enabled = true, pollIntervalMs } = options;
+  const {
+    autoLoad = false,
+    enabled = true,
+    maxAgeMs,
+    pollIntervalMs,
+  } = options;
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const queriesKey = queries.map(getSessionCatalogQueryKey).join('\n');
   const stableQueriesRef = useRef<{
@@ -114,6 +126,7 @@ export function useSessionCatalogQueries(
       const unsubscribes = stableQueries.map((query) =>
         store.subscribe(query, listener, {
           autoLoad,
+          ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
           ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
         }),
       );
@@ -121,7 +134,7 @@ export function useSessionCatalogQueries(
         for (const unsubscribe of unsubscribes) unsubscribe();
       };
     },
-    [autoLoad, enabled, pollIntervalMs, stableQueries, store],
+    [autoLoad, enabled, maxAgeMs, pollIntervalMs, stableQueries, store],
   );
   const getSnapshot = useCallback(() => {
     if (!enabled || stableQueries.length === 0) {
@@ -216,6 +229,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const {
     autoLoad = false,
     enabled = true,
+    maxAgeMs,
     pollIntervalMs,
     pageSize,
     cursor,
@@ -276,6 +290,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const result = useSessionCatalogQuery(workspace.client, query, {
     autoLoad,
     enabled: enabled && Boolean(workspaceCwd),
+    ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
   const reloadPage = result.reload;

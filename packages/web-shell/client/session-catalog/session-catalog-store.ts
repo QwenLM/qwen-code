@@ -23,6 +23,7 @@ export interface SessionCatalogSnapshot {
 
 export interface SessionCatalogSubscriptionOptions {
   autoLoad?: boolean;
+  maxAgeMs?: number;
   pollIntervalMs?: number;
 }
 
@@ -161,10 +162,18 @@ export class SessionCatalogStore {
     this.updateVisibilityListener();
     this.resetPollSchedule(entry);
 
+    const retainedPageExpired =
+      subscriber.autoLoad &&
+      options.maxAgeMs !== undefined &&
+      entry.snapshot.page !== undefined &&
+      (entry.snapshot.updatedAt === undefined ||
+        Date.now() - entry.snapshot.updatedAt >= options.maxAgeMs);
+
     if (
       entry.invalidated ||
       (subscriber.autoLoad &&
-        (entry.snapshot.page === undefined || entry.snapshot.stale))
+        (entry.snapshot.page === undefined || entry.snapshot.stale)) ||
+      retainedPageExpired
     ) {
       this.requestBackground(entry, 'initial');
     }

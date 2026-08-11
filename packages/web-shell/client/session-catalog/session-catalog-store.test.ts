@@ -139,6 +139,35 @@ describe('SessionCatalogStore', () => {
     unsubscribeSecond();
   });
 
+  it('refreshes an expired retained page for a new automatic subscriber', async () => {
+    legacy
+      .mockResolvedValueOnce(page('cached'))
+      .mockResolvedValueOnce(page('refreshed'));
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+    await flushMicrotasks();
+    unsubscribe();
+
+    const unsubscribeFresh = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
+    await flushMicrotasks();
+    expect(legacy).toHaveBeenCalledTimes(1);
+    unsubscribeFresh();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const unsubscribeAgain = store.subscribe(target, vi.fn(), {
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
+    await flushMicrotasks();
+
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot(target).page).toEqual(page('refreshed'));
+    unsubscribeAgain();
+  });
+
   it('shares an in-flight request between non-fresh command loads', async () => {
     const response = deferred<DaemonSessionListPage>();
     legacy.mockReturnValue(response.promise);

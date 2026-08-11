@@ -12,6 +12,7 @@ import type { SessionCatalogQuery } from '../session-catalog/session-catalog-sto
 interface ScopedSessionsOptions {
   autoLoad?: boolean;
   enabled?: boolean;
+  maxAgeMs?: number;
   pageSize?: number;
   archiveState?: DaemonSessionArchiveState;
   view?: 'organized';
@@ -26,6 +27,7 @@ export function useScopedSessions(
   const {
     autoLoad = false,
     enabled = true,
+    maxAgeMs,
     pageSize,
     archiveState,
     view,
@@ -35,6 +37,7 @@ export function useScopedSessions(
   const primary = useWebShellSessions({
     autoLoad,
     enabled: enabled && !workspaceCwd,
+    maxAgeMs,
     pageSize,
     archiveState,
     view,
@@ -67,6 +70,7 @@ export function useScopedSessions(
   const scoped = useSessionCatalogQuery(workspace.client, query, {
     autoLoad,
     enabled: enabled && Boolean(workspaceCwd),
+    ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
   const reloadScopedPage = scoped.reload;
