@@ -915,6 +915,22 @@ describe('fileUtils', () => {
       expect(await detectFileType('tutorial.m4v')).toBe('video');
     });
 
+    it.each([
+      ['movie.mkv', 'video'],
+      ['clip.avi', 'video'],
+      ['song.flac', 'audio'],
+      ['stream.aac', 'audio'],
+    ] as const)(
+      'should detect %s via the mime/lite override map as %s',
+      async (fileName, expected) => {
+        // Same mime/lite gap as .m4v: the standard database returns null for
+        // these container extensions, so only the override map keeps a real
+        // media file out of the binary content sampler.
+        mockMimeGetType.mockReturnValueOnce(null);
+        expect(await detectFileType(fileName)).toBe(expected);
+      },
+    );
+
     it('should detect known binary extensions as binary (e.g. .zip)', async () => {
       mockMimeGetType.mockReturnValueOnce('application/zip');
       expect(await detectFileType('archive.zip')).toBe('binary');
@@ -1679,6 +1695,28 @@ describe('fileUtils', () => {
         (result.llmContent as { inlineData: { mimeType: string } }).inlineData
           .mimeType,
       ).toBe('video/x-m4v');
+      expect(result.returnDisplay).toContain('Read video file');
+    });
+
+    it('processes an .mkv video as inline data despite the mime/lite gap', async () => {
+      // Same regression class as .m4v: mime/lite's standard database has no
+      // .mkv entry, so without the override map a Matroska movie fell into
+      // the binary/size-cap path instead of the media pipeline.
+      const fakeVideo = Buffer.from('fake mkv data');
+      const testVideoPath = path.join(tempRootDir, 'movie.mkv');
+      actualNodeFs.writeFileSync(testVideoPath, fakeVideo);
+      mockMimeGetType.mockReturnValue(null);
+
+      const result = await processSingleFileContent(testVideoPath, mockConfig);
+
+      expect(typeof result.llmContent).toBe('object');
+      expect(
+        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
+      ).toBe(fakeVideo.toString('base64'));
+      expect(
+        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
+          .mimeType,
+      ).toBe('video/x-matroska');
       expect(result.returnDisplay).toContain('Read video file');
     });
 

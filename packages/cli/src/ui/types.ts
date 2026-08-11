@@ -339,6 +339,9 @@ export interface ToolDefinition {
   name: string;
   displayName: string;
   description?: string;
+  /** Omni media-policy tool that only runs via fixed policies: it is hidden
+   * from the model's declarations, so /tools annotates it for the human. */
+  fixedOnly?: boolean;
 }
 
 export interface SkillDefinition {

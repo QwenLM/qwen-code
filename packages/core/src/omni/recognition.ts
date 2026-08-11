@@ -120,6 +120,13 @@ export function sniffMediaType(header: Buffer): SniffedType | null {
       header[1] !== 0xfe &&
       (header[1]! & 0xe0) === 0xe0
     ) {
+      // Layer bits 00 are RESERVED in MPEG audio but mandatory in an ADTS
+      // header — an .aac stream starts 0xFFF with layer 00, so this shape
+      // is ADTS AAC, not MP3. Mislabeling it audio/mpeg would make the
+      // transcribe tool announce `format: "mp3"` for AAC bytes.
+      if ((header[1]! & 0x06) === 0) {
+        return { mimeType: 'audio/aac', modality: 'audio' };
+      }
       return { mimeType: 'audio/mpeg', modality: 'audio' };
     }
   }
@@ -144,10 +151,13 @@ export function extensionForMime(mimeType: string): string {
     'image/webp': '.webp',
     'image/gif': '.gif',
     'audio/mpeg': '.mp3',
+    'audio/aac': '.aac',
     'audio/wav': '.wav',
     'audio/flac': '.flac',
     'audio/ogg': '.ogg',
     'audio/mp4': '.m4a',
+    // Non-media policy artifacts (transcripts) promoted into objects/.
+    'text/plain': '.txt',
   };
   return sniffTable[mimeType] ?? '.bin';
 }

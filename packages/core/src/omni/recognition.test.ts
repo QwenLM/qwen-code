@@ -162,6 +162,22 @@ describe('sniffMediaType (S2 modalities)', async () => {
     });
   });
 
+  it('detects ADTS AAC (layer bits 00) as audio/aac, not audio/mpeg', () => {
+    // ADTS header: syncword 0xFFF, MPEG-4, layer 00, no CRC → 0xFF 0xF1.
+    // Layer 00 is reserved in MPEG audio, so no valid MP3 is lost.
+    expect(sniffMediaType(Buffer.from([0xff, 0xf1, 0x50, 0x80]))).toMatchObject(
+      { mimeType: 'audio/aac', modality: 'audio' },
+    );
+    // MPEG-2 ADTS with CRC → 0xFF 0xF8.
+    expect(sniffMediaType(Buffer.from([0xff, 0xf8, 0x50, 0x80]))).toMatchObject(
+      { mimeType: 'audio/aac', modality: 'audio' },
+    );
+    // A real MP3 frame (layer III = bits 01) still sniffs as audio/mpeg.
+    expect(sniffMediaType(Buffer.from([0xff, 0xfb, 0x90, 0x00]))).toMatchObject(
+      { mimeType: 'audio/mpeg', modality: 'audio' },
+    );
+  });
+
   it('rejects non-media content', () => {
     expect(sniffMediaType(Buffer.from('#!/bin/sh\necho hi'))).toBeNull();
     expect(sniffMediaType(Buffer.from('<html><body>'))).toBeNull();

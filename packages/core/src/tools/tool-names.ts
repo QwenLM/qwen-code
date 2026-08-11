@@ -69,6 +69,16 @@ export const ToolNames = {
   RECORD_ARTIFACT: 'record_artifact',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
+  // Omni media-policy tools (fixed-policy-only by default; modelAccess
+  // config can open them to the model).
+  OMNI_DOWNSAMPLE_IMAGE: 'omni_downsample_image',
+  OMNI_DOWNSCALE_VIDEO: 'omni_downscale_video',
+  OMNI_DOWNSAMPLE_AUDIO: 'omni_downsample_audio',
+  OMNI_EXTRACT_KEYFRAMES: 'omni_extract_keyframes',
+  OMNI_EXTRACT_AUDIO: 'omni_extract_audio',
+  OMNI_CLIP_VIDEO: 'omni_clip_video',
+  OMNI_CONVERT_IMAGE: 'omni_convert_image',
+  OMNI_TRANSCRIBE_AUDIO: 'omni_transcribe_audio',
 } as const;
 
 /**
@@ -123,6 +133,14 @@ export const ToolDisplayNames = {
   RECORD_ARTIFACT: 'RecordArtifact',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
+  OMNI_DOWNSAMPLE_IMAGE: 'DownsampleImage',
+  OMNI_DOWNSCALE_VIDEO: 'DownscaleVideo',
+  OMNI_DOWNSAMPLE_AUDIO: 'DownsampleAudio',
+  OMNI_EXTRACT_KEYFRAMES: 'ExtractKeyframes',
+  OMNI_EXTRACT_AUDIO: 'ExtractAudio',
+  OMNI_CLIP_VIDEO: 'ClipVideo',
+  OMNI_CONVERT_IMAGE: 'ConvertImage',
+  OMNI_TRANSCRIBE_AUDIO: 'TranscribeAudio',
 } as const;
 
 // Migration from old tool names to new tool names

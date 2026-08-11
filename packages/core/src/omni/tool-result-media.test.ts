@@ -21,7 +21,10 @@ import type { Config } from '../config/config.js';
 
 const deliverMock = vi.hoisted(() => vi.fn());
 const gateMock = vi.hoisted(() => vi.fn());
-vi.mock('./index.js', () => ({
+vi.mock('./index.js', async (importOriginal) => ({
+  // buildAdditionalMediaParts stays REAL: these tests pin the funnel's
+  // materialization of multi-output deliveries end to end.
+  ...(await importOriginal<typeof import('./index.js')>()),
   isOmniDeliveryActive: gateMock,
   processMediaForOmniDelivery: deliverMock,
 }));
@@ -196,6 +199,125 @@ describe('processToolResultOmniMedia', () => {
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key3');
   });
 
+  it('withholds the part when guard-stage PROCESSING fails (never inline the rejected bytes)', async () => {
+    // A guard-policy execution failure arrives as OmniTransportGuardError
+    // with the underlying error as `cause` (see processMediaForOmniDelivery's
+    // guard loop): the violation verdict already stands, so falling back to
+    // inline would deliver exactly the over-limit bytes the guard rejected.
+    const { OmniTransportGuardError } = await import('./guard.js');
+    deliverMock.mockRejectedValueOnce(
+      new OmniTransportGuardError(
+        'Transport-guard processing failed for x.png: ffmpeg failed (exit 1)',
+        { cause: new Error('ffmpeg failed (exit 1)') },
+      ),
+    );
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', PNG_BYTES)],
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result[0]!.inlineData).toBeUndefined();
+    expect(result[0]!.text).toMatch(/withheld by the omni transport guard/);
+    expect(result[0]!.text).toMatch(/Transport-guard processing failed/);
+  });
+
+  it('replaces an explicitly omitted delivery with the omission notice text', async () => {
+    // Stage B (policy design §10.2): the pipeline itself withheld the media
+    // after the guard policies could not bring it within limits. Not an
+    // error — the notice stands in for the part.
+    deliverMock.mockResolvedValueOnce({
+      fileUri: '',
+      mimeType: 'image/png',
+      sha256: '',
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      omission: { reason: 'still 900 bytes over the upload limit' },
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).not.toBe(parts);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      text: '【媒体省略】tool-media.image：still 900 bytes over the upload limit',
+    });
+  });
+
+  it('charges uploaded additionalMedia extras against the upload-count budget', async () => {
+    // One part whose delivery carries 7 uploaded extras uses 1 + 7 = 8
+    // upload slots — a multi-output policy must not let a tool result fan
+    // out past MAX_UPLOADS_PER_TOOL_RESULT. The next part stays inline.
+    deliverMock.mockResolvedValueOnce({
+      fileUri: 'oss://bucket/primary',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      additionalMedia: Array.from({ length: 8 }, (_, i) => ({
+        fileUri: i === 0 ? '' : `oss://bucket/frame${i}`,
+        mimeType: 'image/jpeg',
+        sha256: String(i).repeat(64).slice(0, 64),
+        // The omitted extra was NOT uploaded — it must not be charged.
+        ...(i === 0 ? { omission: { reason: 'too big' } } : {}),
+      })),
+    });
+    const parts = [
+      inlinePart('image/png', PNG_BYTES),
+      inlinePart('image/png', PNG_BYTES),
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    // Second part never started a delivery (budget exhausted).
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(result[result.length - 1]!.inlineData).toBeDefined();
+    expect(result.filter((p) => p.fileData).length).toBe(8);
+  });
+
+  it('an omission does not consume the per-result upload budgets', async () => {
+    // Nothing was uploaded for an omitted part, so all 8 upload slots must
+    // remain for the following parts.
+    deliverMock.mockResolvedValueOnce({
+      fileUri: '',
+      mimeType: 'image/png',
+      sha256: '',
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      omission: { reason: 'over limit' },
+    });
+    const parts = Array.from({ length: 9 }, () =>
+      inlinePart('image/png', PNG_BYTES),
+    );
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(deliverMock).toHaveBeenCalledTimes(9);
+    expect(result.filter((p) => p.fileData).length).toBe(8);
+    expect(result.filter((p) => p.inlineData).length).toBe(0);
+  });
+
   it('keeps the part inline when staging-dir setup itself fails', async () => {
     // ~/.qwen/omni existing as a regular FILE makes mkdir fail with ENOTDIR.
     // That failure must degrade THIS part to inline like any other delivery
@@ -221,6 +343,39 @@ describe('processToolResultOmniMedia', () => {
     }
   });
 
+  it('keeps the part inline when downloads/ is a planted symlink (no bytes through the link)', async () => {
+    // mkdir { recursive: true } succeeds silently on a symlink-to-dir, so
+    // without the lstat guard the staged bytes would land at an
+    // attacker-chosen location outside the omni root.
+    const qwenDir = await nodeFs.mkdtemp(
+      nodePath.join(os.tmpdir(), 'omni-trm-link-'),
+    );
+    const outside = await nodeFs.mkdtemp(
+      nodePath.join(os.tmpdir(), 'omni-trm-out-'),
+    );
+    try {
+      await nodeFs.mkdir(nodePath.join(qwenDir, 'omni'), { recursive: true });
+      await nodeFs.symlink(
+        outside,
+        nodePath.join(qwenDir, 'omni', 'downloads'),
+      );
+      const config = {
+        isOmniEnabled: () => true,
+        getContentGeneratorConfig: () => ({ modalities: { image: true } }),
+        storage: { getQwenDir: () => qwenDir },
+      } as unknown as Config;
+      const parts = [inlinePart('image/png', PNG_BYTES)];
+      const result = await processToolResultOmniMedia(parts, config, signal);
+      expect(result).toBe(parts);
+      expect(deliverMock).not.toHaveBeenCalled();
+      // Nothing was written through the link.
+      await expect(nodeFs.readdir(outside)).resolves.toEqual([]);
+    } finally {
+      await nodeFs.rm(qwenDir, { recursive: true, force: true });
+      await nodeFs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('returns the original array untouched when the omni gate is off', async () => {
     gateMock.mockReturnValue(false);
     const parts = [inlinePart('image/png', PNG_BYTES)];
@@ -231,6 +386,168 @@ describe('processToolResultOmniMedia', () => {
     );
     expect(result).toBe(parts);
     expect(deliverMock).not.toHaveBeenCalled();
+  });
+
+  it('emits the degradation disclosure text immediately before the fileData part', async () => {
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/degraded',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      disclosure: 'downsampled to 1568px',
+      degraded: true,
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0]!.text).toBe(
+      '【媒体降质】tool-media.image：downsampled to 1568px',
+    );
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/degraded');
+    // The pipeline was told this media came from a tool (policy origins).
+    expect(deliverMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.anything(),
+      expect.objectContaining({
+        origin: 'tool',
+        displayName: 'tool-media.image',
+        expectedModality: 'image',
+      }),
+    );
+  });
+
+  it('materializes additionalMedia extras as [disclosure, fileData] pairs after the primary', async () => {
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/frame1',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      disclosure: '帧 1/3',
+      degraded: true,
+      additionalMedia: [
+        {
+          fileUri: 'oss://bucket/frame2',
+          mimeType: 'image/jpeg',
+          sha256: 'd'.repeat(64),
+          disclosure: '帧 2/3',
+        },
+        {
+          fileUri: '',
+          mimeType: 'image/jpeg',
+          sha256: 'e'.repeat(64),
+          disclosure: '帧 3/3',
+          omission: { reason: 'too big' },
+        },
+      ],
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    // [primary disclosure, primary fileData, extra disclosure, extra
+    // fileData, omitted-extra disclosure, omission notice] — D8 adjacency
+    // per pair; a violating extra is an explicit omission text Part.
+    expect(result).toHaveLength(6);
+    expect(result[0]!.text).toBe('【媒体降质】tool-media.image：帧 1/3');
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/frame1');
+    expect(result[2]!.text).toBe('【媒体降质】tool-media.image：帧 2/3');
+    expect(result[3]!.fileData?.fileUri).toBe('oss://bucket/frame2');
+    expect(result[4]!.text).toBe('【媒体降质】tool-media.image：帧 3/3');
+    expect(result[5]!.text).toContain('【媒体省略】tool-media.image');
+    expect(result[5]!.text).toContain('too big');
+  });
+
+  it('materializes additionalMedia extras even when the primary has no disclosure', async () => {
+    // The undisclosed-primary branch is separate code from the disclosed
+    // one — both must splice the extras in.
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/frame1',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      additionalMedia: [
+        {
+          fileUri: 'oss://bucket/frame2',
+          mimeType: 'image/jpeg',
+          sha256: 'd'.repeat(64),
+        },
+      ],
+    });
+    const parts = [inlinePart('image/png', PNG_BYTES)];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0]!.fileData?.fileUri).toBe('oss://bucket/frame1');
+    expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/frame2');
+  });
+
+  it('expands a disclosed delivery inside functionResponse.parts', async () => {
+    deliverMock.mockResolvedValue({
+      fileUri: 'oss://bucket/degraded',
+      mimeType: 'image/jpeg',
+      sha256: 'b'.repeat(64),
+      recognized: { modality: 'image' },
+      tokenEstimate: {
+        estimatedTokenCount: 1,
+        method: 'raw-resource-v1',
+        status: 'ok',
+      },
+      deduped: false,
+      disclosure: 'downsampled to 1568px',
+      degraded: true,
+    });
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call_1',
+          name: 'Read',
+          response: { output: 'ok' },
+          parts: [
+            { text: 'caption' },
+            inlinePart('image/png', PNG_BYTES),
+          ] as Part[],
+        },
+      } as Part,
+    ];
+    const result = await processToolResultOmniMedia(
+      parts,
+      cfg({ image: true }),
+      signal,
+    );
+    const nested = result[0]!.functionResponse?.parts as Part[];
+    expect(nested).toHaveLength(3);
+    expect(nested[0]!.text).toBe('caption');
+    expect(nested[1]!.text).toBe(
+      '【媒体降质】tool-media.image：downsampled to 1568px',
+    );
+    expect(nested[2]!.fileData?.fileUri).toBe('oss://bucket/degraded');
   });
 
   it('converts media nested inside functionResponse.parts (the production funnel shape)', async () => {

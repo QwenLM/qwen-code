@@ -17,6 +17,7 @@ import {
   isFfprobeAvailable,
   probeMediaMetadata,
   resetFfmpegCachesForTests,
+  runFfmpeg,
 } from './ffmpeg.js';
 
 type ExecCallback = (
@@ -203,7 +204,67 @@ describe('probeMediaMetadata per-modality branches', () => {
       formatName: 'mov,mp4',
       durationMs: 12_500,
       codec: 'aac',
+      sampleRateHz: 44_100,
+      channels: 2,
     });
+  });
+
+  it('prefers the format-level bit rate and falls back to the stream', async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp3', duration: '10', bit_rate: '320000' },
+        streams: [
+          { codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' },
+        ],
+      }),
+    }));
+    await expect(probeMediaMetadata('/a.mp3', 'audio')).resolves.toMatchObject({
+      bitRate: 320_000,
+    });
+
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp3', duration: '10' },
+        streams: [
+          { codec_type: 'audio', codec_name: 'mp3', bit_rate: '128000' },
+        ],
+      }),
+    }));
+    await expect(probeMediaMetadata('/a.mp3', 'audio')).resolves.toMatchObject({
+      bitRate: 128_000,
+    });
+  });
+
+  it('reports the video bit rate for modality video', async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'mp4', duration: '5', bit_rate: '2500000' },
+        streams: [{ codec_type: 'video', codec_name: 'h264' }],
+      }),
+    }));
+    await expect(probeMediaMetadata('/v.mp4', 'video')).resolves.toMatchObject({
+      bitRate: 2_500_000,
+    });
+  });
+
+  it('omits bitRate/sampleRateHz/channels when unusable', async () => {
+    mockExecResult(() => ({
+      stdout: JSON.stringify({
+        format: { format_name: 'wav', duration: '3', bit_rate: 'N/A' },
+        streams: [
+          {
+            codec_type: 'audio',
+            codec_name: 'pcm_s16le',
+            sample_rate: 'N/A',
+            channels: 0,
+          },
+        ],
+      }),
+    }));
+    const result = await probeMediaMetadata('/a.wav', 'audio');
+    expect(result.bitRate).toBeUndefined();
+    expect(result.sampleRateHz).toBeUndefined();
+    expect(result.channels).toBeUndefined();
   });
 
   it("reads only dimensions for modality 'image' (no duration)", async () => {
@@ -281,5 +342,53 @@ describe('probeMediaMetadata per-modality branches', () => {
     }));
     const result = await probeMediaMetadata('/silent.mp4', 'audio');
     expect(result.codec).toBeUndefined();
+  });
+});
+
+describe('runFfmpeg', () => {
+  it('invokes ffmpeg with the given args and resolves code 0 on success', async () => {
+    mockExecResult(() => ({ stderr: 'frame= 100' }));
+    await expect(
+      runFfmpeg(['-y', '-i', '/in.mov', '/out.mp4']),
+    ).resolves.toEqual({
+      code: 0,
+      stderr: 'frame= 100',
+    });
+    const [command, args, options] = execFileMock.mock.calls[0];
+    expect(command).toBe('ffmpeg');
+    expect(args).toEqual(['-y', '-i', '/in.mov', '/out.mp4']);
+    expect(options).toMatchObject({ maxBuffer: 16 * 1024 * 1024 });
+    expect(options).not.toHaveProperty('timeout');
+  });
+
+  it('threads timeoutMs and signal into execFile options', async () => {
+    mockExecResult(() => ({}));
+    const signal = new AbortController().signal;
+    await runFfmpeg(['-version'], { signal, timeoutMs: 120_000 });
+    const options = execFileMock.mock.calls[0][2];
+    expect(options).toMatchObject({ timeout: 120_000, signal });
+  });
+
+  it('never rejects: a failing run resolves with the exit code and stderr', async () => {
+    mockExecResult(() => ({
+      error: Object.assign(new Error('exit 187'), { code: 187 }),
+      stderr: 'Conversion failed!',
+    }));
+    await expect(runFfmpeg(['-i', '/in.mov'])).resolves.toEqual({
+      code: 187,
+      stderr: 'Conversion failed!',
+    });
+  });
+
+  it('maps a non-numeric error code (e.g. ENOENT/abort kill) to 1', async () => {
+    mockExecResult(() => ({
+      error: Object.assign(new Error('spawn ffmpeg ENOENT'), {
+        code: 'ENOENT',
+      }),
+    }));
+    await expect(runFfmpeg(['-version'])).resolves.toEqual({
+      code: 1,
+      stderr: '',
+    });
   });
 });

@@ -784,14 +784,21 @@ function isTextMime(lookedUpMimeType: string): boolean {
 }
 
 /**
- * Video containers whose MIME type `mime/lite` does not carry in its default
- * "standard" database. `.m4v`'s `video/x-m4v` mapping lives only in the
- * non-default "other" set, so `mime.getType('clip.m4v')` returns null and —
- * without this override — {@link detectFileType} falls through to the content
- * sampler and misclassifies a real video as binary.
+ * Media containers whose MIME type `mime/lite` does not carry in its default
+ * "standard" database (the mappings below live only in the non-default
+ * "other" set), so `mime.getType()` returns null and — without this
+ * override — {@link detectFileType} falls through to the content sampler and
+ * misclassifies a real video/audio file as binary. Scope rule: only list
+ * extensions whose bytes the omni recognizer can also sniff-confirm
+ * (Matroska/EBML, RIFF/AVI, FLAC, ADTS AAC), so a lie-by-extension still
+ * falls back to the legacy path instead of entering media delivery.
  */
-const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
+const MIME_LITE_MISSING_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
   ['.m4v', 'video/x-m4v'],
+  ['.mkv', 'video/x-matroska'],
+  ['.avi', 'video/x-msvideo'],
+  ['.flac', 'audio/x-flac'],
+  ['.aac', 'audio/x-aac'],
 ]);
 
 /**
@@ -821,11 +828,11 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   }
 
   // Returns null if not found, or the mime type string. `mime/lite` omits a
-  // few video containers (see MIME_LITE_MISSING_VIDEO_TYPES), so fall back to
+  // few media containers (see MIME_LITE_MISSING_MEDIA_TYPES), so fall back to
   // that override before giving up — otherwise a real video falls through to
   // the content sampler and is misclassified as binary.
   const lookedUpMimeType =
-    mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
+    mime.getType(filePath) ?? MIME_LITE_MISSING_MEDIA_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
       return 'image';
@@ -1113,7 +1120,7 @@ export async function processSingleFileContent(
     const fileType = await detectFileType(filePath);
     const mediaMimeType =
       mime.getType(filePath) ??
-      MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
+      MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase()) ??
       'application/octet-stream';
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
@@ -1292,7 +1299,7 @@ export async function processSingleFileContent(
     // 100 MB source cap protects the overview DECODER, so it only applies
     // when the overview will actually decode — i.e. when omni is not taking
     // this file. The omni path uploads original bytes without decoding and
-    // enforces its own omni.upload.maxFileBytes ceiling (1 GiB default);
+    // enforces its own maxUploadFileBytes ceiling (1 GiB default);
     // gating it here too would reject a 150 MB PNG while delivering a
     // 500 MB GIF, purely on whether the format has an overview renderer.
     if (

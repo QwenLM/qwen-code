@@ -1078,6 +1078,11 @@ export const useGeminiStream = (
                 args: toolArgs,
                 isClientInitiated: true,
                 prompt_id,
+                // Client-direct provenance (omni policy design): slash
+                // commands scheduling a tool are the in-process `client`
+                // channel — subject to the same media-policy modelAccess
+                // gate as model calls, never to fixed-policy semantics.
+                executionOrigin: { kind: 'client' },
               };
               scheduleToolCalls([toolCallRequest], abortSignal);
               return { queryToSend: null, shouldProceed: false };

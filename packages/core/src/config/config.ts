@@ -28,6 +28,10 @@ import {
   selectVisionBridgeModel,
 } from '../services/visionBridge/vision-bridge-service.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
+import type {
+  NormalizedOmniProcessingConfig,
+  OmniPolicyToolsSettings,
+} from '../omni/policy/types.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
@@ -1103,13 +1107,27 @@ export interface ConfigParameters {
    * pipeline (omni-experiment branch). */
   omniEnabled?: boolean;
   /** Per-file byte ceiling for omni media uploads (default 1 GiB). */
-  omniUploadMaxFileBytes?: number;
+  omniMaxUploadFileBytes?: number;
   /** Estimated-token ceiling for omni media (0/unset = guard disabled). */
   omniMaxEstimatedTokens?: number;
   /** Byte ceiling for omni URL downloads (unset = follow upload cap). */
-  omniDownloadMaxFileBytes?: number;
-  /** Upload cache TTL in hours (0 disables the cache; default 47). */
-  omniUploadCacheTtlHours?: number;
+  omniUrlDownloadMaxFileBytes?: number;
+  /** Upload URL TTL in hours (0 disables the cache; default 47). */
+  omniUploadUrlTtlHours?: number;
+  /** Raw `omni.processing.policyTools` map (per-tool settings/runtime/
+   * modelAccess). Normalized lazily by the omni policy modules. */
+  omniPolicyTools?: OmniPolicyToolsSettings;
+  /** Raw `omni.processing.fixedPolicies` map (id → policy | null
+   * tombstone). Normalized at startup against system defaults. */
+  omniFixedPolicies?: Record<string, unknown>;
+  /** Raw `omni.processing.transportGuard.policies` map. */
+  omniTransportGuardPolicies?: Record<string, unknown>;
+  /** Raw `omni.processing.limits` per-root derivation budgets. */
+  omniProcessingLimits?: Record<string, unknown>;
+  /** `omni.storage.quarantine.retentionDays` (default 7). */
+  omniQuarantineRetentionDays?: number;
+  /** `omni.storage.quarantine.maxBytes` (default 5 GiB). */
+  omniQuarantineMaxBytes?: number;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1936,10 +1954,19 @@ export class Config {
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
   private readonly omniEnabled: boolean = false;
-  private readonly omniUploadMaxFileBytes?: number;
+  private readonly omniMaxUploadFileBytes?: number;
   private readonly omniMaxEstimatedTokens?: number;
-  private readonly omniDownloadMaxFileBytes?: number;
-  private readonly omniUploadCacheTtlHours?: number;
+  private readonly omniUrlDownloadMaxFileBytes?: number;
+  private readonly omniUploadUrlTtlHours?: number;
+  private readonly omniPolicyTools?: OmniPolicyToolsSettings;
+  private readonly omniFixedPolicies?: Record<string, unknown>;
+  private readonly omniTransportGuardPolicies?: Record<string, unknown>;
+  private readonly omniProcessingLimits?: Record<string, unknown>;
+  private readonly omniQuarantineRetentionDays?: number;
+  private readonly omniQuarantineMaxBytes?: number;
+  /** Normalized `omni.processing` view; set once during initialize()
+   * (after the tool registry exists) when omni is enabled. */
+  private omniProcessingConfig?: NormalizedOmniProcessingConfig;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2216,10 +2243,16 @@ export class Config {
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
     this.omniEnabled = params.omniEnabled ?? false;
-    this.omniUploadMaxFileBytes = params.omniUploadMaxFileBytes;
+    this.omniMaxUploadFileBytes = params.omniMaxUploadFileBytes;
     this.omniMaxEstimatedTokens = params.omniMaxEstimatedTokens;
-    this.omniDownloadMaxFileBytes = params.omniDownloadMaxFileBytes;
-    this.omniUploadCacheTtlHours = params.omniUploadCacheTtlHours;
+    this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
+    this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
+    this.omniPolicyTools = params.omniPolicyTools;
+    this.omniFixedPolicies = params.omniFixedPolicies;
+    this.omniTransportGuardPolicies = params.omniTransportGuardPolicies;
+    this.omniProcessingLimits = params.omniProcessingLimits;
+    this.omniQuarantineRetentionDays = params.omniQuarantineRetentionDays;
+    this.omniQuarantineMaxBytes = params.omniQuarantineMaxBytes;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -2952,6 +2985,28 @@ export class Config {
       strict: options?.lenientToolWarmup !== true,
     });
     recordStartupEvent('config_initialize_tool_warmup_end');
+
+    // Normalize the omni fixed-policy configuration now that the tool
+    // registry can resolve policy-tool references. A violation throws
+    // OmniPolicyConfigError and aborts startup — a mis-configured
+    // transport guard must never degrade into sending over-limit media.
+    if (this.isOmniEnabled()) {
+      const { normalizeOmniProcessingConfig } = await import(
+        '../omni/policy/config.js'
+      );
+      this.omniProcessingConfig = normalizeOmniProcessingConfig(
+        {
+          fixedPolicies: this.omniFixedPolicies,
+          transportGuardPolicies: this.omniTransportGuardPolicies,
+          limits: this.omniProcessingLimits,
+          policyTools: this.omniPolicyTools,
+          maxUploadFileBytes: this.omniMaxUploadFileBytes,
+          maxEstimatedTokens: this.omniMaxEstimatedTokens,
+          urlTtlHours: this.omniUploadUrlTtlHours,
+        },
+        this.toolRegistry,
+      );
+    }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -6375,25 +6430,58 @@ export class Config {
   }
 
   isOmniEnabled(): boolean {
+    // Bare mode means the minimal toolset and no experimental pipelines:
+    // gating here (the single choke point) keeps every omni surface off —
+    // tool registration, content normalization, the ffmpeg runtime
+    // assertion, and the delivery gate — and deliberately wins over the
+    // env-var opt-in below.
+    if (this.bareMode) return false;
     // Omni is experimental and opt-in: enabled via settings or env var.
     if (process.env['QWEN_CODE_ENABLE_OMNI'] === '1') return true;
     return this.omniEnabled;
   }
 
-  getOmniUploadMaxFileBytes(): number | undefined {
-    return this.omniUploadMaxFileBytes;
+  getOmniMaxUploadFileBytes(): number | undefined {
+    return this.omniMaxUploadFileBytes;
   }
 
   getOmniMaxEstimatedTokens(): number | undefined {
     return this.omniMaxEstimatedTokens;
   }
 
-  getOmniDownloadMaxFileBytes(): number | undefined {
-    return this.omniDownloadMaxFileBytes;
+  getOmniUrlDownloadMaxFileBytes(): number | undefined {
+    return this.omniUrlDownloadMaxFileBytes;
   }
 
-  getOmniUploadCacheTtlHours(): number | undefined {
-    return this.omniUploadCacheTtlHours;
+  getOmniUploadUrlTtlHours(): number | undefined {
+    return this.omniUploadUrlTtlHours;
+  }
+
+  getOmniPolicyToolsSettings(): OmniPolicyToolsSettings | undefined {
+    return this.omniPolicyTools;
+  }
+
+  /** Normalized `omni.processing` view. Undefined until initialize()
+   * completes (or when omni is disabled). */
+  getOmniProcessingConfig(): NormalizedOmniProcessingConfig | undefined {
+    return this.omniProcessingConfig;
+  }
+
+  getOmniQuarantineRetentionDays(): number {
+    // A zero/negative/NaN setting would make the recovery sweep treat the
+    // whole quarantine as expired (or break its cutoff comparisons) —
+    // fall back to the default instead of propagating nonsense.
+    const days = this.omniQuarantineRetentionDays;
+    return typeof days === 'number' && Number.isFinite(days) && days > 0
+      ? days
+      : 7;
+  }
+
+  getOmniQuarantineMaxBytes(): number {
+    const bytes = this.omniQuarantineMaxBytes;
+    return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0
+      ? bytes
+      : 5 * 1024 * 1024 * 1024;
   }
 
   resolveImageGenerationModel(
@@ -8040,6 +8128,77 @@ export class Config {
         '../tools/computer-use/index.js'
       );
       await registerComputerUseTools(registerLazy, this);
+    }
+
+    // Omni media-policy tools: always registered when omni is enabled (the
+    // fixed-policy orchestrator must be able to find them), but hidden from
+    // every model-facing surface unless
+    // `omni.processing.policyTools.<name>.modelAccess.enabled` opens them up
+    // (see omni/policy/model-access.ts).
+    if (this.isOmniEnabled()) {
+      // Table-driven: each entry pairs the registered name with a lazy
+      // import-and-construct factory (the module loads on first use).
+      const omniPolicyToolFactories: Array<[ToolName, ToolFactory]> = [
+        [
+          ToolNames.OMNI_DOWNSAMPLE_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/downsample-image.js')
+            ).OmniDownsampleImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_DOWNSCALE_VIDEO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/downscale-video.js')
+            ).OmniDownscaleVideoTool(this),
+        ],
+        [
+          ToolNames.OMNI_DOWNSAMPLE_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/downsample-audio.js')
+            ).OmniDownsampleAudioTool(this),
+        ],
+        [
+          ToolNames.OMNI_EXTRACT_KEYFRAMES,
+          async () =>
+            new (
+              await import('../omni/policy/tools/extract-keyframes.js')
+            ).OmniExtractKeyframesTool(this),
+        ],
+        [
+          ToolNames.OMNI_EXTRACT_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/extract-audio.js')
+            ).OmniExtractAudioTool(this),
+        ],
+        [
+          ToolNames.OMNI_CLIP_VIDEO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/clip-video.js')
+            ).OmniClipVideoTool(this),
+        ],
+        [
+          ToolNames.OMNI_CONVERT_IMAGE,
+          async () =>
+            new (
+              await import('../omni/policy/tools/convert-image.js')
+            ).OmniConvertImageTool(this),
+        ],
+        [
+          ToolNames.OMNI_TRANSCRIBE_AUDIO,
+          async () =>
+            new (
+              await import('../omni/policy/tools/transcribe-audio.js')
+            ).OmniTranscribeAudioTool(this),
+        ],
+      ];
+      for (const [name, factory] of omniPolicyToolFactories) {
+        await registerLazy(name, factory);
+      }
     }
 
     // Register monitor tool

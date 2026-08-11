@@ -2436,6 +2436,7 @@ export class GeminiChat {
           transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
         let transportStreamRetryCount = 0;
         let reactiveCompressionAttempted = false;
+        let omniMediaDegradeAttempts = 0;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
 
@@ -2677,6 +2678,69 @@ export class GeminiChat {
 
             const contextOverflow = getContextLengthExceededInfo(error);
             if (contextOverflow.isExceeded) {
+              // Server-limit fallback for omni media (server-feedback-driven
+              // transport guard): a request carrying oss:// media that the
+              // server rejected as over its input limit is retried with the
+              // media degraded one guard-ladder rung further. Runs BEFORE
+              // reactive compression — history compression cannot shrink
+              // media tokens, which dominate these rejections. Bounded by
+              // the guard's maxTransportPasses and only armed when a
+              // normalized omni processing config exists (omni sessions).
+              const omniDegradeMaxAttempts =
+                self.config.getOmniProcessingConfig?.()?.limits
+                  .maxTransportPasses ?? 0;
+              if (
+                !exactRoute &&
+                omniMediaDegradeAttempts < omniDegradeMaxAttempts
+              ) {
+                const degradeAttempt = omniMediaDegradeAttempts++;
+                let degradeOutcome:
+                  | { replacedParts: number; degradedResources: number }
+                  | undefined;
+                try {
+                  // Dynamic import keeps the omni pipeline out of the send
+                  // path for non-omni sessions (mirrors fileUtils).
+                  const { degradeOmniMediaAfterServerReject } = await import(
+                    '../omni/reactive-degrade.js'
+                  );
+                  degradeOutcome = await degradeOmniMediaAfterServerReject(
+                    self.config,
+                    self.history,
+                    degradeAttempt,
+                    {
+                      signal: params.config?.abortSignal,
+                      observedLimitTokens: contextOverflow.limitTokens,
+                    },
+                  );
+                } catch (degradeError) {
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(degradeError)
+                  ) {
+                    throw degradeError;
+                  }
+                  debugLogger.warn(
+                    'Omni media degradation fallback failed.',
+                    degradeError,
+                  );
+                }
+                if (degradeOutcome && degradeOutcome.replacedParts > 0) {
+                  self.popPendingPartialAssistantTurn();
+                  requestContents = self.getRequestHistoryForRoute(
+                    currentUserContent,
+                    requestModalities,
+                  );
+                  debugLogger.warn(
+                    `Server input limit exceeded; degraded ` +
+                      `${degradeOutcome.degradedResources} omni media ` +
+                      `resource(s) in place (attempt ${degradeAttempt + 1}/` +
+                      `${omniDegradeMaxAttempts}); retrying.`,
+                  );
+                  yield { type: StreamEventType.RETRY };
+                  suppressNextRetryEvent = true;
+                  continue;
+                }
+              }
               if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
                 const reactiveOriginalTokenCount =

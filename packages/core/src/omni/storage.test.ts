@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { OmniObjectStore } from './storage.js';
+import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
 
 describe('OmniObjectStore', () => {
   let qwenDir: string;
@@ -99,6 +99,47 @@ describe('OmniObjectStore', () => {
     );
   });
 
+  describe('objectPathFor validates cache-sourced components (path traversal)', () => {
+    const sha256 = 'a'.repeat(64);
+
+    it.each([
+      [
+        'traversal hash',
+        '../../../../etc/passwd',
+        '.mp4',
+        /invalid object hash/,
+      ],
+      ['uppercase hash', 'A'.repeat(64), '.mp4', /invalid object hash/],
+      ['short hash', 'abc123', '.mp4', /invalid object hash/],
+      [
+        'traversal extension',
+        sha256,
+        '/../../../../tmp/evil',
+        /invalid object extension/,
+      ],
+      [
+        'multi-segment extension',
+        sha256,
+        '.jpg/../x',
+        /invalid object extension/,
+      ],
+      ['dotless extension', sha256, 'jpg', /invalid object extension/],
+      ['double-dot extension', sha256, '..', /invalid object extension/],
+      ['overlong extension', sha256, '.abcdefghi', /invalid object extension/],
+    ])('throws on %s', (_label, hash, ext, message) => {
+      expect(() => store.objectPathFor(hash, ext)).toThrow(message);
+    });
+
+    it('accepts every extension recognition can emit', () => {
+      for (const ext of ['.mp4', '.webp', '.m4a', '.bin', '.jpg']) {
+        const p = store.objectPathFor(sha256, ext);
+        expect(p).toBe(
+          path.join(store.getObjectsDir(), 'aa', `${sha256}${ext}`),
+        );
+      }
+    });
+  });
+
   it('propagates copy failures without leaving temp files', async () => {
     const missing = path.join(qwenDir, 'does-not-exist.mp4');
     const sha256 = createHash('sha256').update('missing').digest('hex');
@@ -158,5 +199,179 @@ describe('OmniObjectStore', () => {
     } finally {
       await fs.rm(linkedQwen, { recursive: true, force: true });
     }
+  });
+
+  describe('staging and quarantine areas', () => {
+    const INVOCATION_ID = '0123456789abcdef';
+
+    it('ensureLayout creates staging/ and quarantine/ with 0o700', async () => {
+      await store.ensureLayout();
+      for (const dir of [store.getStagingDir(), store.getQuarantineDir()]) {
+        const st = await fs.stat(dir);
+        expect(st.isDirectory()).toBe(true);
+        if (process.platform !== 'win32') {
+          expect(st.mode & 0o777).toBe(0o700);
+        }
+      }
+      expect(store.getStagingDir()).toBe(path.join(qwenDir, 'omni', 'staging'));
+      expect(store.getQuarantineDir()).toBe(
+        path.join(qwenDir, 'omni', 'quarantine'),
+      );
+    });
+
+    it('creates an exclusive per-invocation staging directory', async () => {
+      const dir = await store.createStagingDir(INVOCATION_ID);
+      expect(dir).toBe(path.join(store.getStagingDir(), INVOCATION_ID));
+      const st = await fs.stat(dir);
+      expect(st.isDirectory()).toBe(true);
+      if (process.platform !== 'win32') {
+        expect(st.mode & 0o777).toBe(0o700);
+      }
+      // A second create with the same id must fail, never silently reuse.
+      await expect(store.createStagingDir(INVOCATION_ID)).rejects.toThrow();
+    });
+
+    it.each([
+      ['path traversal', '../../escape00'],
+      ['uppercase hex', '0123456789ABCDEF'],
+      ['wrong length', '0123456789abcde'],
+      ['separator smuggling', '0123456789abcde/'],
+    ])('rejects an invalid invocation id: %s', async (_label, id) => {
+      await expect(store.createStagingDir(id)).rejects.toThrow(
+        /Invalid omni policy invocation id/,
+      );
+      await expect(store.removeStagingDir(id)).rejects.toThrow(
+        /Invalid omni policy invocation id/,
+      );
+      await expect(
+        store.quarantineInvocation(id, {
+          policyId: 'p',
+          toolName: 't',
+          reason: 'r',
+        }),
+      ).rejects.toThrow(/Invalid omni policy invocation id/);
+    });
+
+    it('removeStagingDir deletes the invocation directory recursively', async () => {
+      const dir = await store.createStagingDir(INVOCATION_ID);
+      await fs.mkdir(path.join(dir, 'nested'));
+      await fs.writeFile(path.join(dir, 'nested', 'artifact.webp'), 'bytes');
+      await store.removeStagingDir(INVOCATION_ID);
+      await expect(fs.lstat(dir)).rejects.toThrow();
+      // Idempotent on a missing directory.
+      await expect(
+        store.removeStagingDir(INVOCATION_ID),
+      ).resolves.toBeUndefined();
+    });
+
+    it('quarantineInvocation moves artifacts and writes reason.json', async () => {
+      const dir = await store.createStagingDir(INVOCATION_ID);
+      await fs.writeFile(path.join(dir, 'partial.mp4'), 'half-transcoded');
+      const quarantineDir = await store.quarantineInvocation(INVOCATION_ID, {
+        policyId: 'video-downscale-v1',
+        toolName: 'omni_downscale_video',
+        reason: 'required output missing',
+      });
+
+      expect(quarantineDir).toBe(
+        path.join(store.getQuarantineDir(), INVOCATION_ID),
+      );
+      // Staging entry is gone; artifacts moved with original names.
+      await expect(fs.lstat(dir)).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(quarantineDir, 'partial.mp4'), 'utf8'),
+      ).resolves.toBe('half-transcoded');
+      const reason = JSON.parse(
+        await fs.readFile(path.join(quarantineDir, 'reason.json'), 'utf8'),
+      );
+      expect(reason).toMatchObject({
+        policyId: 'video-downscale-v1',
+        toolName: 'omni_downscale_video',
+        reason: 'required output missing',
+      });
+      expect(new Date(reason.failedAt).getTime()).not.toBeNaN();
+    });
+
+    it('quarantineInvocation fails when the staging directory is missing', async () => {
+      await store.ensureLayout();
+      await expect(
+        store.quarantineInvocation(INVOCATION_ID, {
+          policyId: 'p',
+          toolName: 't',
+          reason: 'r',
+        }),
+      ).rejects.toThrow();
+    });
+
+    it('quarantineInvocation refuses a symlinked staging entry', async () => {
+      await store.ensureLayout();
+      const outside = path.join(qwenDir, 'outside-staging');
+      await fs.mkdir(outside);
+      await fs.symlink(
+        outside,
+        path.join(store.getStagingDir(), INVOCATION_ID),
+      );
+      await expect(
+        store.quarantineInvocation(INVOCATION_ID, {
+          policyId: 'p',
+          toolName: 't',
+          reason: 'r',
+        }),
+      ).rejects.toThrow(/not a real directory/);
+      // Nothing was written through the link.
+      await expect(fs.readdir(outside)).resolves.toEqual([]);
+    });
+  });
+});
+
+describe('prepareOmniDownloadsDir', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-dl-prep-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('creates a missing downloads dir with 0o700 and returns its path', async () => {
+    const dir = path.join(root, 'omni', 'downloads');
+    await expect(prepareOmniDownloadsDir(dir)).resolves.toBe(dir);
+    const st = await fs.stat(dir);
+    expect(st.isDirectory()).toBe(true);
+    if (process.platform !== 'win32') {
+      expect(st.mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it('is idempotent over an existing real directory', async () => {
+    const dir = path.join(root, 'downloads');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'keep.part'), 'x');
+    await expect(prepareOmniDownloadsDir(dir)).resolves.toBe(dir);
+    // Existing contents survive — prepare never wipes the staging area.
+    await expect(
+      fs.readFile(path.join(dir, 'keep.part'), 'utf8'),
+    ).resolves.toBe('x');
+  });
+
+  it('refuses a symlink planted at the downloads path (mkdir succeeds silently on it)', async () => {
+    const outside = path.join(root, 'outside-target');
+    await fs.mkdir(outside);
+    const dir = path.join(root, 'downloads');
+    await fs.symlink(outside, dir);
+    await expect(prepareOmniDownloadsDir(dir)).rejects.toThrow(
+      /not a real directory/,
+    );
+    // Nothing was created through the link.
+    await expect(fs.readdir(outside)).resolves.toEqual([]);
+  });
+
+  it('refuses a regular file planted at the downloads path', async () => {
+    const dir = path.join(root, 'downloads');
+    await fs.writeFile(dir, 'not a directory');
+    // mkdir itself fails with EEXIST/ENOTDIR here — either way it must throw.
+    await expect(prepareOmniDownloadsDir(dir)).rejects.toThrow();
   });
 });

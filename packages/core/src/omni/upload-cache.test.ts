@@ -55,6 +55,28 @@ describe('OmniUploadCache', () => {
     expect(await cache.get(SHA, 'model-b')).toBeNull();
   });
 
+  it('replaces a symlink at the cache path instead of writing through it', async () => {
+    // A link planted at the cache path (same-UID malware, dotfile
+    // managers) must never redirect the save onto its target: the atomic
+    // rename replaces the link itself, leaving the victim file untouched.
+    // The target holds VALID cache JSON so the operation takes the normal
+    // load→save path (invalid content would divert into corrupt-backup,
+    // which renames the link away before any write).
+    const victimContent = JSON.stringify({ version: 1, entries: {} });
+    const victim = path.join(root, 'victim.txt');
+    await fs.writeFile(victim, victimContent, { mode: 0o644 });
+    const cachePath = path.join(root, 'upload-cache.json');
+    await fs.symlink(victim, cachePath);
+
+    const cache = new OmniUploadCache(root);
+    await cache.put(SHA, 'm', 'oss://bucket/x');
+
+    expect(await fs.readFile(victim, 'utf8')).toBe(victimContent);
+    const st = await fs.lstat(cachePath);
+    expect(st.isSymbolicLink()).toBe(false);
+    expect(await cache.get(SHA, 'm')).toBe('oss://bucket/x');
+  });
+
   it('keys by scope — a different scope is a miss, same scope hits', async () => {
     const cacheA = new OmniUploadCache(root, 47, 'scope-a');
     const cacheB = new OmniUploadCache(root, 47, 'scope-b');
@@ -79,6 +101,34 @@ describe('OmniUploadCache', () => {
     expect(await cache.get(SHA, 'm')).toBeNull();
     const after = JSON.parse(await fs.readFile(file, 'utf8'));
     expect(after.entries[`${SHA}|m|`]).toBeUndefined(); // pruned
+  });
+
+  it('findSha256ByUrl reverse-maps a delivered URL to its object hash', async () => {
+    const cache = new OmniUploadCache(root, 47, 'scope-a');
+    await cache.put(SHA, 'm1', 'oss://bucket/key1');
+    await cache.put('b'.repeat(64), 'm1', 'oss://bucket/key2');
+    expect(await cache.findSha256ByUrl('oss://bucket/key1')).toBe(SHA);
+    expect(await cache.findSha256ByUrl('oss://bucket/key2')).toBe(
+      'b'.repeat(64),
+    );
+    expect(await cache.findSha256ByUrl('oss://bucket/unknown')).toBeNull();
+    // Scope-agnostic like invalidateByUrl: the caller knows only the URL.
+    const otherScope = new OmniUploadCache(root, 47, 'scope-b');
+    expect(await otherScope.findSha256ByUrl('oss://bucket/key1')).toBe(SHA);
+  });
+
+  it('findSha256ByUrl still resolves expired entries (the URL was just sent)', async () => {
+    const cache = new OmniUploadCache(root);
+    await cache.put(SHA, 'm', 'oss://bucket/old');
+    const file = path.join(root, 'upload-cache.json');
+    const data = JSON.parse(await fs.readFile(file, 'utf8'));
+    for (const entry of Object.values(data.entries) as Array<{
+      expiresAt: string;
+    }>) {
+      entry.expiresAt = new Date(Date.now() - 1000).toISOString();
+    }
+    await fs.writeFile(file, JSON.stringify(data));
+    expect(await cache.findSha256ByUrl('oss://bucket/old')).toBe(SHA);
   });
 
   it('invalidateByUrl drops every entry with that URL', async () => {
@@ -322,7 +372,7 @@ describe('OmniUploadCache', () => {
       // content must be byte-identical.
       expect(await fs.readFile(file, 'utf8')).toBe(before);
       const names = await fs.readdir(root);
-      expect(names.filter((n) => n.includes('.tmp-'))).toEqual([]);
+      expect(names.filter((n) => n.endsWith('.tmp'))).toEqual([]);
       expect(await cache.get(SHA, 'm')).toBe('oss://bucket/original');
     },
   );

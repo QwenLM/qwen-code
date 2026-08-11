@@ -6765,6 +6765,9 @@ describe('useGeminiStream', () => {
               name: 'save_memory',
               args: { fact: 'test fact' },
               isClientInitiated: true,
+              // Slash-command scheduling is the in-process `client`
+              // channel — the media-policy modelAccess gate keys on this.
+              executionOrigin: { kind: 'client' },
             }),
           ],
           expect.any(AbortSignal),

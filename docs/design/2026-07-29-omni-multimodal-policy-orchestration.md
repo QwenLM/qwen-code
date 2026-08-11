@@ -502,20 +502,25 @@ priority 排序。
 
 ### 8.3 匹配条件
 
-`when` 使用受限条件 DSL，不接受任意 JavaScript 或 JSONPath。条件由 `all`、`any`
-和 comparison 递归组成；comparison 支持 `gt`、`gte`、`lt`、`lte`、`eq`，左右两侧
-都可以是字段或字面量：
+`when` 使用受限的表达式条件 DSL（Mapbox style-spec 风格的表达式数组），不接受
+任意 JavaScript 或 JSONPath。表达式形如 `[operator, ...operands]`：comparison
+支持 `>`、`>=`、`<`、`<=`、`==`、`!=`，恰好两个操作数，操作数是
+`["field", "<namespace.field>"]` 字段引用或裸字面量；组合子 `["all", <expr>, ...]`、
+`["any", <expr>, ...]`、`["!", <expr>]` 递归嵌套：
 
 ```ts
-type ConditionOperand =
-  | { field: FixedPolicyField }
-  | { value: number | string | boolean };
+type ConditionOperand = ['field', FixedPolicyField] | number | string | boolean;
 
-interface ComparisonCondition {
-  left: ConditionOperand;
-  operator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq';
-  right: ConditionOperand;
-}
+type ComparisonCondition = [
+  '>' | '>=' | '<' | '<=' | '==' | '!=',
+  ConditionOperand,
+  ConditionOperand,
+];
+
+type FixedPolicyCondition =
+  | ComparisonCondition
+  | ['all' | 'any', ...FixedPolicyCondition[]]
+  | ['!', FixedPolicyCondition];
 ```
 
 可读字段分为三个自然命名空间：
@@ -547,20 +552,15 @@ availableContextTokens = max(
 
 ```jsonc
 {
-  "when": {
-    "all": [
-      {
-        "left": { "field": "resource.estimatedTokenCount" },
-        "operator": "gt",
-        "right": { "field": "session.availableContextTokens" },
-      },
-      {
-        "left": { "field": "session.contextWindowTokens" },
-        "operator": "gte",
-        "right": { "value": 131072 },
-      },
+  "when": [
+    "all",
+    [
+      ">",
+      ["field", "resource.estimatedTokenCount"],
+      ["field", "session.availableContextTokens"],
     ],
-  },
+    [">=", ["field", "session.contextWindowTokens"], 131072],
+  ],
 }
 ```
 
@@ -1204,27 +1204,14 @@ normalizer，并用配置 snapshot 测试防止两处示例漂移。
             "mediaTypes": ["image"],
           },
           // 定义触发该 Fixed Policy 的 metadata 条件。
-          "when": {
+          "when": [
             // 任意一个条件成立即可执行。
-            "any": [
-              {
-                // 检查图片宽度。
-                "left": { "field": "resource.width" },
-                // 使用大于比较。
-                "operator": "gt",
-                // 宽度超过 2000 像素时命中。
-                "right": { "value": 2000 },
-              },
-              {
-                // 检查图片高度。
-                "left": { "field": "resource.height" },
-                // 使用大于比较。
-                "operator": "gt",
-                // 高度超过 2000 像素时命中。
-                "right": { "value": 2000 },
-              },
-            ],
-          },
+            "any",
+            // 图片宽度超过 2000 像素时命中。
+            [">", ["field", "resource.width"], 2000],
+            // 图片高度超过 2000 像素时命中。
+            [">", ["field", "resource.height"], 2000],
+          ],
           // 执行图片降采样的 Tool 名。
           "tool": "omni_downsample_image",
           // 固定调用时使用的降采样参数。
@@ -1264,33 +1251,19 @@ normalizer，并用配置 snapshot 测试防止两处示例漂移。
             "mediaTypes": ["video"],
           },
           // 比较本轮全部媒体的预估 token 与当前 session 可用上下文。
-          "when": {
+          "when": [
             // 所有条件均满足时才执行。
-            "all": [
-              {
-                // 左值是本轮待发送媒体的预估 token 总量。
-                "left": {
-                  "field": "request.totalEstimatedMediaTokens",
-                },
-                // 当预估媒体 token 大于可用上下文时命中。
-                "operator": "gt",
-                // 可用上下文由窗口、已用 prompt 和预留输出 token 计算。
-                "right": {
-                  "field": "session.availableContextTokens",
-                },
-              },
-              {
-                // 确认当前视频本身具有可用的 token 估算值。
-                "left": {
-                  "field": "resource.estimatedTokenCount",
-                },
-                // 大于零表示该资源已完成有效估算。
-                "operator": "gt",
-                // 零是估算值有效性的下界。
-                "right": { "value": 0 },
-              },
+            "all",
+            // 本轮待发送媒体的预估 token 总量大于可用上下文时命中；
+            // 可用上下文由窗口、已用 prompt 和预留输出 token 计算。
+            [
+              ">",
+              ["field", "request.totalEstimatedMediaTokens"],
+              ["field", "session.availableContextTokens"],
             ],
-          },
+            // 确认当前视频本身具有可用的 token 估算值（大于零表示有效）。
+            [">", ["field", "resource.estimatedTokenCount"], 0],
+          ],
           // 条件依赖值不可用时跳过，不误判为条件不成立。
           "onConditionUnavailable": "skip",
           // 执行视频关键帧提取的 Tool 名。

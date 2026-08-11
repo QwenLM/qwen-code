@@ -1751,6 +1751,24 @@ describe('handleAtCommand', () => {
 
     vi.mock('@qwen-code/qwen-code-core/omni', () => ({
       ...omniMocks,
+      // Deterministic stand-ins for the shared formatters: the tests assert
+      // the WIRING (which formatter, which arguments, part ordering), while
+      // the formatters' own wording is covered by their core unit tests.
+      formatOmissionText: (name: string, reason: string) =>
+        `[omission ${name}: ${reason}]`,
+      formatDisclosureText: (name: string, disclosure: string) =>
+        `[disclosure ${name}: ${disclosure}]`,
+      // Deterministic stand-in for the shared multi-output materializer:
+      // one marker part per extra. The real builder's output shape is
+      // covered by its core unit tests; these tests pin the wiring (that
+      // the funnel calls it and splices its parts after the primary slot).
+      buildAdditionalMediaParts: (name: string, extras?: unknown[]) =>
+        (extras ?? []).map((_, i) => ({ text: `[extra ${name} ${i}]` })),
+      // Same wiring-only stand-in for the shared transcript materializer.
+      buildTranscriptParts: (name: string, transcripts?: unknown[]) =>
+        (transcripts ?? []).map((_, i) => ({
+          text: `[transcript ${name} ${i}]`,
+        })),
       OmniObjectStore: class {
         getOmniRootDir() {
           return path.join(os.tmpdir(), 'omni-at-test');
@@ -1914,6 +1932,115 @@ describe('handleAtCommand', () => {
       });
       const parts = result.processedQuery as Array<Record<string, unknown>>;
       expect(parts.filter((p) => 'fileData' in p)).toHaveLength(1);
+    });
+
+    it('replaces the media with an omission notice when the transport guard withholds it', async () => {
+      // Policy design §10.2: an omission is a successful delivery whose
+      // content IS the notice — no fileData part, no error card.
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        omission: { reason: 'video exceeds the 500MB transport limit' },
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 706,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      expect(parts).toContainEqual({
+        text: '[omission clip.mp4: video exceeds the 500MB transport limit]',
+      });
+      expect(parts.some((p) => 'fileData' in p)).toBe(false);
+      expect(result.toolDisplays![0]).toMatchObject({
+        name: 'Fetch Media URL',
+        status: ToolCallStatus.Success,
+        resultDisplay: 'Media omitted by the omni transport guard: clip.mp4',
+      });
+    });
+
+    it('places the degradation disclosure text immediately before the fileData part (D8)', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        degraded: true,
+        disclosure: '原 1080p → 480p，细节受损',
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 707,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const disclosureIdx = parts.findIndex(
+        (p) => p['text'] === '[disclosure clip.mp4: 原 1080p → 480p，细节受损]',
+      );
+      const fileDataIdx = parts.findIndex((p) => 'fileData' in p);
+      expect(disclosureIdx).toBeGreaterThan(-1);
+      expect(fileDataIdx).toBe(disclosureIdx + 1);
+      expect(
+        (result.toolDisplays![0] as { resultDisplay: string }).resultDisplay,
+      ).toContain('(degraded by media policy)');
+    });
+
+    it('splices additionalMedia parts after the primary fileData part (multi-output policies)', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        additionalMedia: [
+          { fileUri: 'oss://bucket/frame2', mimeType: 'image/jpeg' },
+          { fileUri: 'oss://bucket/frame3', mimeType: 'image/jpeg' },
+        ],
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 708,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const fileDataIdx = parts.findIndex((p) => 'fileData' in p);
+      expect(fileDataIdx).toBeGreaterThan(-1);
+      // The materialized extras follow the primary media part directly.
+      expect(parts[fileDataIdx + 1]).toEqual({ text: '[extra clip.mp4 0]' });
+      expect(parts[fileDataIdx + 2]).toEqual({ text: '[extra clip.mp4 1]' });
+    });
+
+    it('splices additionalMedia parts after the omission notice when the primary is withheld', async () => {
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        omission: { reason: 'video exceeds the transport limit' },
+        additionalMedia: [
+          { fileUri: 'oss://bucket/frame2', mimeType: 'image/jpeg' },
+        ],
+      });
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 709,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const omissionIdx = parts.findIndex(
+        (p) =>
+          p['text'] ===
+          '[omission clip.mp4: video exceeds the transport limit]',
+      );
+      expect(omissionIdx).toBeGreaterThan(-1);
+      expect(parts[omissionIdx + 1]).toEqual({ text: '[extra clip.mp4 0]' });
     });
 
     it('ends the turn quietly (shouldProceed=false) on a user abort mid-download', async () => {

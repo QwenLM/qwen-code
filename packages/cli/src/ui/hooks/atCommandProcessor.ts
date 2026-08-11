@@ -623,6 +623,69 @@ export async function resolveAtCommandQuery({
           // the opaque staging path the download landed under.
           { signal, displayName: urlBase },
         );
+        // §6.2/D8 ordering contract documented on buildTranscriptParts.
+        const transcriptParts = core.buildTranscriptParts(
+          urlBase,
+          delivery.transcripts,
+        );
+        // Additional media Parts (multi-output fixed policies): follow the
+        // primary media slot in every branch below.
+        const additionalParts = core.buildAdditionalMediaParts(
+          urlBase,
+          delivery.additionalMedia,
+        );
+        if (delivery.omission) {
+          // Explicit omission (policy design §10.2): the media is withheld
+          // and the omission notice text stands in its place — mirroring
+          // readMediaViaOmniDelivery. Not an error: the fetch succeeded;
+          // the transport guard's verdict is the content.
+          urlMediaParts.push({
+            text: core.formatOmissionText(urlBase, delivery.omission.reason),
+          });
+          urlMediaParts.push(...additionalParts);
+          urlMediaParts.push(...transcriptParts);
+          urlMediaLabels.push(ref.url);
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Downloaded ${ref.url}`,
+            status: ToolCallStatus.Success,
+            resultDisplay: `Media omitted by the omni transport guard: ${urlBase}`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        if (!delivery.fileUri && transcriptParts.length > 0) {
+          // Pure-transcript delivery (§6.2): the policies replaced the
+          // media with text-only deliverables — no media Part is emitted
+          // for the primary (additional deliverables, if any, still are).
+          // The primary disclosure (chained prior lossy steps, decision
+          // D8) still renders: the transcript was derived through them.
+          if (delivery.disclosure) {
+            urlMediaParts.push({
+              text: core.formatDisclosureText(urlBase, delivery.disclosure),
+            });
+          }
+          urlMediaParts.push(...additionalParts);
+          urlMediaParts.push(...transcriptParts);
+          urlMediaLabels.push(ref.url);
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Downloaded ${ref.url}`,
+            status: ToolCallStatus.Success,
+            resultDisplay: `Localized ${urlBase} and delivered as transcript (omni policy).`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        // Disclosure IMMEDIATELY before its media part (decision D8):
+        // provider converters that relocate media move the pair together.
+        if (delivery.disclosure) {
+          urlMediaParts.push({
+            text: core.formatDisclosureText(urlBase, delivery.disclosure),
+          });
+        }
         urlMediaParts.push({
           fileData: {
             fileUri: delivery.fileUri,
@@ -630,13 +693,15 @@ export async function resolveAtCommandQuery({
             displayName: urlBase,
           },
         });
+        urlMediaParts.push(...additionalParts);
+        urlMediaParts.push(...transcriptParts);
         urlMediaLabels.push(ref.url);
         urlMediaDisplays.push({
           callId,
           name: 'Fetch Media URL',
           description: `Downloaded ${ref.url}`,
           status: ToolCallStatus.Success,
-          resultDisplay: `Localized ${urlBase} (${delivery.recognized.modality}, ${(delivery.recognized.sizeBytes / 1024 / 1024).toFixed(1)}MB) and delivered via omni upload.`,
+          resultDisplay: `Localized ${urlBase} (${delivery.recognized.modality}, ${(delivery.recognized.sizeBytes / 1024 / 1024).toFixed(1)}MB) and delivered via omni upload${delivery.degraded ? ' (degraded by media policy)' : ''}.`,
           confirmationDetails: undefined,
         });
       } catch (error) {

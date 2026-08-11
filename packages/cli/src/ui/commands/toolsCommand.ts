@@ -10,6 +10,7 @@ import {
   CommandKind,
 } from './types.js';
 import { MessageType, type HistoryItemToolsList } from '../types.js';
+import { isMediaPolicyToolHiddenFromModel } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 export const toolsCommand: SlashCommand = {
@@ -38,6 +39,7 @@ export const toolsCommand: SlashCommand = {
       );
       return;
     }
+    const config = context.services.config!;
 
     const tools = toolRegistry.getAllTools();
     // Filter out MCP tools by checking for the absence of a serverName property
@@ -49,6 +51,13 @@ export const toolsCommand: SlashCommand = {
         name: tool.name,
         displayName: tool.displayName,
         description: tool.description,
+        // Omni media-policy tools without modelAccess.enabled are stripped
+        // from the model's declarations but stay listed here for the human;
+        // the flag renders a "fixed-only" marker so the discrepancy between
+        // /tools and what the model can call is visible, not confusing.
+        ...(isMediaPolicyToolHiddenFromModel(config, tool)
+          ? { fixedOnly: true }
+          : {}),
       })),
       showDescriptions: useShowDescriptions,
     };

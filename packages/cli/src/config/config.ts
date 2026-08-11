@@ -38,6 +38,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type OmniPolicyToolsSettings,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
@@ -2192,10 +2193,27 @@ export async function loadCliConfig(
         }
       : undefined,
     omniEnabled: settings.omni?.enabled ?? false,
-    omniUploadMaxFileBytes: settings.omni?.upload?.maxFileBytes,
-    omniMaxEstimatedTokens: settings.omni?.transport?.maxEstimatedTokens,
-    omniDownloadMaxFileBytes: settings.omni?.download?.maxFileBytes,
-    omniUploadCacheTtlHours: settings.omni?.upload?.cacheTtlHours,
+    omniMaxUploadFileBytes:
+      settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
+    omniMaxEstimatedTokens:
+      settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniUrlDownloadMaxFileBytes:
+      settings.omni?.ingestion?.localization?.url?.maxFileBytes,
+    omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
+    omniPolicyTools: settings.omni?.processing?.policyTools as
+      | OmniPolicyToolsSettings
+      | undefined,
+    omniFixedPolicies: settings.omni?.processing?.fixedPolicies as
+      | Record<string, unknown>
+      | undefined,
+    omniTransportGuardPolicies: settings.omni?.processing?.transportGuard
+      ?.policies as Record<string, unknown> | undefined,
+    omniProcessingLimits: settings.omni?.processing?.limits as
+      | Record<string, unknown>
+      | undefined,
+    omniQuarantineRetentionDays:
+      settings.omni?.storage?.quarantine?.retentionDays,
+    omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.

@@ -12,7 +12,7 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
-import type { ToolResult } from './tools.js';
+import type { MediaPolicyToolDescriptor, ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
 import { CronListTool } from './cron-list.js';
@@ -250,6 +250,95 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('Not found: missing');
     expect(registry.isDeferredToolRevealed('alpha')).toBe(true);
     expect(registry.isDeferredToolRevealed('bravo')).toBe(true);
+  });
+
+  describe('media-policy tool hiding', () => {
+    class MockMediaPolicyTool extends MockTool {
+      override get mediaPolicyDescriptor(): MediaPolicyToolDescriptor {
+        return {
+          kind: 'media_policy',
+          inputMediaTypes: ['image'],
+          outputs: [{ kind: 'media', required: true }],
+        };
+      }
+    }
+
+    const registerPolicyTool = (reg: ToolRegistry) => {
+      reg.registerTool(
+        new MockMediaPolicyTool({
+          name: 'omni_compress_image',
+          description: 'compress an image to a target size',
+          shouldDefer: true,
+        }),
+      );
+    };
+
+    function makeEnabledConfigWithRegistry(): {
+      config: Config;
+      registry: ToolRegistry;
+    } {
+      const enabledConfig = new Config({
+        ...baseConfigParams,
+        omniPolicyTools: {
+          omni_compress_image: { modelAccess: { enabled: true } },
+        },
+      });
+      const enabledRegistry = new ToolRegistry(enabledConfig);
+      vi.spyOn(enabledConfig, 'getToolRegistry').mockReturnValue(
+        enabledRegistry,
+      );
+      vi.spyOn(enabledConfig, 'getGeminiClient').mockReturnValue({
+        setTools: vi.fn().mockResolvedValue(undefined),
+      } as never);
+      return { config: enabledConfig, registry: enabledRegistry };
+    }
+
+    it('keyword search never surfaces a hidden media-policy tool', async () => {
+      registerPolicyTool(registry);
+
+      const tool = new ToolSearchTool(config);
+      const result = await tool
+        .build({ query: 'compress image' })
+        .execute(new AbortController().signal);
+
+      expect(String(result.llmContent)).toContain('No tools found');
+      expect(String(result.llmContent)).not.toContain('omni_compress_image');
+    });
+
+    it('select: mode blocks a hidden media-policy tool without revealing it', async () => {
+      registerPolicyTool(registry);
+
+      const tool = new ToolSearchTool(config);
+      const result = await tool
+        .build({ query: 'select:omni_compress_image' })
+        .execute(new AbortController().signal);
+
+      const content = String(result.llmContent);
+      expect(content).toContain('media policy tool');
+      expect(content).not.toContain('<functions>');
+      expect(result.error?.message).toContain('media policy tool');
+      expect(registry.isDeferredToolRevealed('omni_compress_image')).toBe(
+        false,
+      );
+    });
+
+    it('surfaces the tool in both modes once modelAccess.enabled is true', async () => {
+      const { config: enabledConfig, registry: enabledRegistry } =
+        makeEnabledConfigWithRegistry();
+      registerPolicyTool(enabledRegistry);
+
+      const tool = new ToolSearchTool(enabledConfig);
+      const keywordResult = await tool
+        .build({ query: 'compress image' })
+        .execute(new AbortController().signal);
+      expect(String(keywordResult.llmContent)).toContain(
+        '"name":"omni_compress_image"',
+      );
+
+      expect(
+        enabledRegistry.isDeferredToolRevealed('omni_compress_image'),
+      ).toBe(true);
+    });
   });
 
   it('keyword search returns top-N ranked tools', async () => {

@@ -1,0 +1,60 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Disclosure text delivery (decision D8): a lossy policy derivative must
+ * reach the model with its disclosure IMMEDIATELY adjacent to the media
+ * Part, so provider converters that relocate media (splitToolMedia) can
+ * move the pair together and the model can attribute the disclosure to
+ * the right resource.
+ *
+ * Deliberately a leaf module — imported by both the omni pipeline and the
+ * OpenAI converter, so it must not pull in either side.
+ */
+
+/** Marks a text Part as a media-degradation disclosure. Converters key on
+ * this prefix to keep the disclosure adjacent to its media part. */
+export const OMNI_DISCLOSURE_TEXT_PREFIX = '【媒体降质】';
+
+/** Model-facing disclosure text for one degraded resource. */
+export function formatDisclosureText(
+  displayName: string,
+  disclosure: string,
+): string {
+  return `${OMNI_DISCLOSURE_TEXT_PREFIX}${displayName}：${disclosure}`;
+}
+
+/** Whether a text is a disclosure emitted by {@link formatDisclosureText}. */
+export function isDisclosureText(text: string): boolean {
+  return text.startsWith(OMNI_DISCLOSURE_TEXT_PREFIX);
+}
+
+/** Marks a text Part as an explicit-omission notice: the transport guard
+ * could not bring a resource within limits, so the media was withheld and
+ * this text stands in its place (policy design §10.2). */
+export const OMNI_OMISSION_TEXT_PREFIX = '【媒体省略】';
+
+/** Model-facing omission notice for one withheld resource. */
+export function formatOmissionText(
+  displayName: string,
+  reason: string,
+): string {
+  return `${OMNI_OMISSION_TEXT_PREFIX}${displayName}：${reason}`;
+}
+
+/** Marks a text Part as a media transcript: a text derivative (upstream P
+ * §6.2 transcript protocol, `metadata.omniRole: 'transcript'`) produced by
+ * a fixed policy and delivered as text instead of (or alongside) the media
+ * Part. */
+export const OMNI_TRANSCRIPT_TEXT_PREFIX = '【媒体转写】';
+
+/** Model-facing transcript text for one media resource. */
+export function formatTranscriptText(
+  displayName: string,
+  transcript: string,
+): string {
+  return `${OMNI_TRANSCRIPT_TEXT_PREFIX}${displayName}：${transcript}`;
+}

@@ -3650,107 +3650,371 @@ const SETTINGS_SCHEMA = {
           'endpoints. Can also be enabled via QWEN_CODE_ENABLE_OMNI=1.',
         showInDialog: true,
       },
-      upload: {
+      processing: {
         type: 'object',
-        label: 'Omni Upload',
-        category: 'Experimental',
-        requiresRestart: true,
-        default: {},
-        description: 'Upload-channel limits for omni media delivery.',
-        showInDialog: false,
-        properties: {
-          maxFileBytes: {
-            type: 'number',
-            label: 'Max Upload File Bytes',
-            category: 'Experimental',
-            requiresRestart: true,
-            default: 1073741824,
-            description:
-              'Per-file byte ceiling for omni media uploads. Defaults to ' +
-              '1 GiB, the DashScope temporary-upload per-file cap. Inputs ' +
-              'above the limit fail closed with an explanatory error.',
-            showInDialog: false,
-            jsonSchemaOverride: {
-              type: 'number',
-              minimum: 1,
-              default: 1073741824,
-            },
-          },
-          cacheTtlHours: {
-            type: 'number',
-            label: 'Upload Cache TTL (hours)',
-            category: 'Experimental',
-            requiresRestart: true,
-            default: 47,
-            description:
-              'Validity horizon for cached oss:// upload URLs. DashScope ' +
-              'temporary uploads live 48h; the default keeps a 1h margin. ' +
-              '0 disables the upload cache (every delivery re-uploads).',
-            showInDialog: false,
-            jsonSchemaOverride: {
-              type: 'number',
-              minimum: 0,
-              default: 47,
-            },
-          },
-        },
-      },
-      transport: {
-        type: 'object',
-        label: 'Omni Transport Guard',
+        label: 'Omni Processing',
         category: 'Experimental',
         requiresRestart: true,
         default: {},
         description:
-          'Transport guard dimensions beyond the byte ceiling for omni ' +
-          'media delivery.',
+          'Media policy processing: fixed-policy orchestration, transport ' +
+          'guard, per-root derivation limits, and policy tool overrides.',
         showInDialog: false,
         properties: {
-          maxEstimatedTokens: {
-            type: 'number',
-            label: 'Max Estimated Tokens',
+          limits: {
+            type: 'object',
+            label: 'Omni Processing Limits',
             category: 'Experimental',
             requiresRestart: true,
-            default: 0,
+            default: {},
             description:
-              'Estimated-token ceiling for a single omni media input, ' +
-              'checked before upload using the versioned raw-resource ' +
-              'estimator. 0 disables the token guard — the estimation ' +
-              'formula is pending confirmation with the model provider; ' +
-              'set a positive threshold to enforce fail-closed rejection.',
+              'Per-invocation derivation budgets. Exceeding a budget stops ' +
+              'further derivation for that root resource (already committed ' +
+              'artifacts stand).',
             showInDialog: false,
-            jsonSchemaOverride: {
-              type: 'number',
-              minimum: 0,
-              default: 0,
+            properties: {
+              maxConcurrentResources: {
+                type: 'number',
+                label: 'Max Concurrent Resources',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 1,
+                description:
+                  'Number of media resources processed by policies in ' +
+                  'parallel within one request.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 1 },
+              },
+              reservedOutputTokens: {
+                type: 'number',
+                label: 'Reserved Output Tokens',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 8192,
+                description:
+                  'Tokens reserved for model output when computing ' +
+                  'session.availableContextTokens for when-conditions.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 8192,
+                },
+              },
+              maxLineageDepth: {
+                type: 'number',
+                label: 'Max Lineage Depth',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 8,
+                description:
+                  'Maximum derivation chain length from a root resource.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 8 },
+              },
+              maxPolicyRunsPerRoot: {
+                type: 'number',
+                label: 'Max Policy Runs Per Root',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 64,
+                description:
+                  'Maximum policy invocations attributable to one root ' +
+                  'resource within a single orchestrator run.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 64 },
+              },
+              maxArtifactsPerRoot: {
+                type: 'number',
+                label: 'Max Artifacts Per Root',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 256,
+                description:
+                  'Maximum derived artifacts attributable to one root ' +
+                  'resource within a single orchestrator run.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 256,
+                },
+              },
+              maxDerivedBytesPerRoot: {
+                type: 'number',
+                label: 'Max Derived Bytes Per Root',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 1073741824,
+                description:
+                  'Byte budget for derived artifacts per root resource ' +
+                  'within a single orchestrator run. Defaults to 1 GiB.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 1073741824,
+                },
+              },
+              maxTransportPasses: {
+                type: 'number',
+                label: 'Max Transport Passes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 3,
+                description:
+                  'Maximum transport-guard policy passes per resource before ' +
+                  'the media is removed with an explicit omission note.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 3 },
+              },
+            },
+          },
+          fixedPolicies: {
+            type: 'object',
+            label: 'Omni Fixed Policies',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {} as Record<string, Record<string, unknown> | null>,
+            description:
+              'User fixed policies keyed by policy id. There are no ' +
+              'built-in default policies: nothing runs unless configured ' +
+              'here. Across settings scopes entries merge by id ' +
+              '(whole-entry replacement); a null entry tombstones a policy ' +
+              'from a lower-priority scope. Validated and normalized at ' +
+              'startup.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+          },
+          transportGuard: {
+            type: 'object',
+            label: 'Omni Transport Guard',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Delivery-boundary enforcement: hard limits plus mandatory ' +
+              'guard policies applied when the final delivery set still ' +
+              'exceeds limits. Cannot be disabled.',
+            showInDialog: false,
+            properties: {
+              maxUploadFileBytes: {
+                type: 'number',
+                label: 'Max Upload File Bytes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 1073741824,
+                description:
+                  'Per-file byte ceiling for omni media uploads. Defaults ' +
+                  'to 1 GiB, the DashScope temporary-upload per-file cap ' +
+                  '(values above it are a startup configuration error). ' +
+                  'Media still above the limit after guard policies fail ' +
+                  'closed with an explanatory error.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  maximum: 1073741824,
+                  default: 1073741824,
+                },
+              },
+              maxEstimatedTokens: {
+                type: 'number',
+                label: 'Max Estimated Tokens',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 0,
+                description:
+                  'Estimated-token ceiling for a single omni media input, ' +
+                  'checked at the delivery boundary using the versioned ' +
+                  'raw-resource estimator. 0 disables the token guard — the ' +
+                  'estimation formula is pending confirmation with the ' +
+                  'model provider; set a positive threshold to enforce ' +
+                  'fail-closed rejection.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 0,
+                },
+              },
+              policies: {
+                type: 'object',
+                label: 'Omni Transport Guard Policies',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {} as Record<string, Record<string, unknown> | null>,
+                description:
+                  'Guard policies keyed by policy id, run only when the ' +
+                  'final delivery set exceeds transport limits. Merged with ' +
+                  'system defaults by id. The merged set must cover image, ' +
+                  'video, and audio and must not be empty; every policy ' +
+                  'output must use source: omit.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+              },
+            },
+          },
+          policyTools: {
+            type: 'object',
+            label: 'Omni Policy Tools',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {} as Record<string, Record<string, unknown> | null>,
+            description:
+              'Per-tool overrides keyed by policy tool name: settings ' +
+              '(default arguments), runtime (timeoutMs), ' +
+              'and modelAccess (enabled, defaultArguments, lockedArguments, ' +
+              'parameterSchema, output).',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+          },
+        },
+      },
+      delivery: {
+        type: 'object',
+        label: 'Omni Delivery',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'Model-delivery settings for omni media.',
+        showInDialog: false,
+        properties: {
+          upload: {
+            type: 'object',
+            label: 'Omni Delivery Upload',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Upload-channel delivery settings.',
+            showInDialog: false,
+            properties: {
+              urlTtlHours: {
+                type: 'number',
+                label: 'Upload URL TTL (hours)',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 47,
+                description:
+                  'Validity horizon for cached oss:// upload URLs. ' +
+                  'DashScope temporary uploads live 48h; the default keeps ' +
+                  'a 1h margin. 0 disables the upload cache (every ' +
+                  'delivery re-uploads).',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 47,
+                },
+              },
             },
           },
         },
       },
-      download: {
+      ingestion: {
         type: 'object',
-        label: 'Omni Download',
+        label: 'Omni Ingestion',
         category: 'Experimental',
         requiresRestart: true,
         default: {},
-        description: 'URL media localization limits for omni delivery.',
+        description: 'Media input ingestion settings for omni delivery.',
         showInDialog: false,
         properties: {
-          maxFileBytes: {
-            type: 'number',
-            label: 'Max Download File Bytes',
+          localization: {
+            type: 'object',
+            label: 'Omni Ingestion Localization',
             category: 'Experimental',
             requiresRestart: true,
-            default: 0,
-            description:
-              'Byte ceiling for downloading URL media inputs. 0 or unset ' +
-              'follows omni.upload.maxFileBytes (downloading more than the ' +
-              'upload channel can deliver is pointless).',
+            default: {},
+            description: 'Remote-media localization settings.',
             showInDialog: false,
-            jsonSchemaOverride: {
-              type: 'number',
-              minimum: 0,
-              default: 0,
+            properties: {
+              url: {
+                type: 'object',
+                label: 'Omni URL Localization',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {},
+                description: 'URL media download settings.',
+                showInDialog: false,
+                properties: {
+                  maxFileBytes: {
+                    type: 'number',
+                    label: 'Max Download File Bytes',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 0,
+                    description:
+                      'Byte ceiling for downloading URL media inputs. 0 or ' +
+                      'unset follows ' +
+                      'omni.processing.transportGuard.maxUploadFileBytes ' +
+                      '(downloading more than the upload channel can ' +
+                      'deliver is pointless).',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 0,
+                      default: 0,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      storage: {
+        type: 'object',
+        label: 'Omni Storage',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description: 'Managed storage settings under .qwen/omni/.',
+        showInDialog: false,
+        properties: {
+          quarantine: {
+            type: 'object',
+            label: 'Omni Quarantine',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Retention for failed policy invocations moved to ' +
+              '.qwen/omni/quarantine/ for diagnosis. Quarantined content ' +
+              'is never recalled into recognition or delivery.',
+            showInDialog: false,
+            properties: {
+              retentionDays: {
+                type: 'number',
+                label: 'Quarantine Retention (days)',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 7,
+                description:
+                  'Days a quarantined invocation directory is kept before ' +
+                  'startup recovery removes it. Must be at least 1; ' +
+                  'non-positive values fall back to the default.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 7 },
+              },
+              maxBytes: {
+                type: 'number',
+                label: 'Quarantine Max Bytes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 5368709120,
+                description:
+                  'Total byte budget for the quarantine directory. Startup ' +
+                  'recovery removes oldest entries first until within ' +
+                  'budget. Defaults to 5 GiB. Must be at least 1; ' +
+                  'non-positive values fall back to the default.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 5368709120,
+                },
+              },
             },
           },
         },

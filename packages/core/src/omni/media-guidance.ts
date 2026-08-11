@@ -1,0 +1,109 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Progressive media understanding guidance (system-prompt layer).
+ *
+ * The delivery pipeline degrades media to fit transport/context limits and
+ * discloses each transformation next to the media Part (decision D8). The
+ * disclosures state WHAT was done; this module supplies the missing WHY
+ * and the follow-up contract: degradation is a context-budget-driven
+ * progressive-understanding strategy, the degraded delivery is an
+ * overview/entry point rather than the complete content, and the model
+ * should proactively fetch higher-fidelity / more complete evidence with
+ * the media policy tools when the task needs it.
+ *
+ * Injected once per session as a STABLE system-prompt layer (see
+ * client.ts getMainSessionSystemInstruction): the disclosure texts arrive
+ * mid-conversation at unpredictable points, so per-delivery preambles
+ * would repeat across three assembly sites (atCommandProcessor,
+ * fileUtils, tool-result-media) and would still miss the reactive
+ * server-reject swaps; one durable contract in the prompt covers all of
+ * them. Kept as a leaf module (no pipeline imports) so prompt assembly
+ * stays lightweight.
+ */
+
+import type { Config } from '../config/config.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { isOmniDeliveryActive } from './delivery-gate.js';
+import { resolveMediaPolicyModelAccess } from './policy/model-access.js';
+import {
+  OMNI_DISCLOSURE_TEXT_PREFIX,
+  OMNI_OMISSION_TEXT_PREFIX,
+  OMNI_TRANSCRIPT_TEXT_PREFIX,
+} from './disclosure.js';
+
+/** One-line capability summaries for the model-callable media tools.
+ * Deliberately terse: the full parameter schema ships with the tool
+ * declaration; this list only tells the model WHEN to reach for each. */
+const MEDIA_TOOL_CAPABILITIES: ReadonlyArray<[string, string]> = [
+  [
+    ToolNames.OMNI_CLIP_VIDEO,
+    'cut a specific time range out of a video (startSec/durationSec) — the primary way to inspect parts of a long video that were not delivered',
+  ],
+  [
+    ToolNames.OMNI_EXTRACT_KEYFRAMES,
+    'extract still frames from a video (clip a range first to sample frames from a specific segment)',
+  ],
+  [
+    ToolNames.OMNI_DOWNSCALE_VIDEO,
+    're-encode a video at lower resolution / frame rate to fit transport limits',
+  ],
+  [
+    ToolNames.OMNI_EXTRACT_AUDIO,
+    'extract the audio track from a video for listening or transcription',
+  ],
+  [
+    ToolNames.OMNI_TRANSCRIBE_AUDIO,
+    'transcribe speech in an audio file to text',
+  ],
+  [
+    ToolNames.OMNI_DOWNSAMPLE_AUDIO,
+    're-encode audio at a lower bitrate/sample rate',
+  ],
+  [ToolNames.OMNI_DOWNSAMPLE_IMAGE, 'shrink an image to a smaller resolution'],
+  [ToolNames.OMNI_CONVERT_IMAGE, 'convert an image to another format'],
+];
+
+/**
+ * Build the progressive media understanding section for the system
+ * prompt, or `null` when omni delivery is inactive (no disclosures will
+ * ever reach the model, so the contract would be noise).
+ *
+ * The tool list only names tools whose
+ * `omni.processing.policyTools.<name>.modelAccess.enabled` is true —
+ * directing the model at tools the scheduler would reject teaches it a
+ * dead end. With no tools enabled, the section instead instructs the
+ * model to state what evidence is missing rather than extrapolate.
+ */
+export function buildOmniMediaGuidanceSection(config: Config): string | null {
+  if (!isOmniDeliveryActive(config)) return null;
+
+  const enabledTools = MEDIA_TOOL_CAPABILITIES.filter(
+    ([name]) => resolveMediaPolicyModelAccess(config, name).enabled,
+  );
+
+  const toolGuidance =
+    enabledTools.length > 0
+      ? `- When the task needs evidence beyond what was delivered — later time ranges, finer visual detail, more frames, a fuller transcript — do not stop at the delivered subset: fetch the evidence yourself with the media tools below, then read the produced file(s) to bring them into context. Work in targeted excerpts (a specific time range or region at a time) so each request stays within limits, and iterate until you have seen enough to complete the task.
+- Available media tools:
+${enabledTools.map(([name, capability]) => `  - ${name}: ${capability}`).join('\n')}`
+      : `- No media tools are enabled in this session. When the delivered evidence does not cover what the task needs, say explicitly which part of the media you could not observe instead of extrapolating from the delivered subset.`;
+
+  return `# Media Delivery (Progressive Understanding)
+
+Media files in this session reach you through a preprocessing pipeline that must fit them into transport and context-window limits. Large or long media is therefore delivered in reduced form on purpose: this is a progressive-understanding strategy — you first get an affordable overview, then fetch the specific higher-fidelity evidence the task needs. Every transformation is disclosed in a text part placed immediately BEFORE the media it describes:
+
+- ${OMNI_DISCLOSURE_TEXT_PREFIX}<file>: the adjacent media is a degraded derivative (clipped, downscaled, resampled, or keyframes); the marker states exactly what was reduced.
+- ${OMNI_OMISSION_TEXT_PREFIX}<file>: the media could not be delivered at all; the notice stands in its place.
+- ${OMNI_TRANSCRIPT_TEXT_PREFIX}<file>: text derived from the media (e.g. a speech transcript), possibly delivered instead of the media itself.
+
+Interpret delivered media under this contract:
+
+- A degraded delivery is an OVERVIEW or entry point, not the complete content. The original file on disk is untouched and remains fully available for further processing.
+- Never conclude that content outside the delivered portion does not exist, and never present conclusions drawn from a partial delivery as covering the whole file. Read each disclosure quantitatively: a clip marker covering [0s–600s] of a 4882s video means 4282s exist that you have NOT seen; a keyframe marker tells you which timestamps you actually saw.
+${toolGuidance}`;
+}

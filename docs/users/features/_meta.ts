@@ -25,4 +25,5 @@ export default {
   'status-line': 'Status Line',
   'scheduled-tasks': 'Scheduled Tasks',
   tips: 'Contextual Tips',
+  'omni-media-policies': 'Omni Media Policies',
 };

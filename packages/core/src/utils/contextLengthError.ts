@@ -77,6 +77,18 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // DashScope: "Range of input length should be [1, 196608]" — the upper
+  // bound is the server's REAL input ceiling (observed to differ from the
+  // configured context window), so parse it out for the retry paths.
+  const rangeMatch = text.match(
+    /range of input length should be\s*\[\s*\d[\d,]*\s*,\s*(\d[\d,]*)\s*\]/i,
+  );
+  if (rangeMatch) {
+    return {
+      limitTokens: parseInteger(rangeMatch[1]!),
+    };
+  }
+
   return {};
 }
 

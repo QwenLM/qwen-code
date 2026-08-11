@@ -16,7 +16,7 @@ import type { RecognizedMedia } from './recognition.js';
 
 function cfg(overrides: { maxBytes?: number; maxTokens?: number }): Config {
   return {
-    getOmniUploadMaxFileBytes: vi.fn().mockReturnValue(overrides.maxBytes),
+    getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(overrides.maxBytes),
     getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(overrides.maxTokens),
   } as unknown as Config;
 }
@@ -53,7 +53,9 @@ describe('byte guard', () => {
   it('rejects above the configured limit with an explanatory message', () => {
     expect(() =>
       assertWithinByteLimit(cfg({ maxBytes: 1000 }), 2000, 'clip.mp4'),
-    ).toThrow(/clip\.mp4.*2000 bytes > 1000 bytes.*omni\.upload\.maxFileBytes/);
+    ).toThrow(
+      /clip\.mp4.*2000 bytes > 1000 bytes.*omni\.processing\.transportGuard\.maxUploadFileBytes/,
+    );
   });
 
   it('passes at or below the limit', () => {
@@ -81,7 +83,7 @@ describe('token guard', () => {
     expect(() =>
       assertWithinTokenLimit(cfg({ maxTokens: 196_608 }), VIDEO_8MIN, 'p3.mp4'),
     ).toThrow(
-      /p3\.mp4.*raw-resource-v1.*196608.*omni\.transport\.maxEstimatedTokens/,
+      /p3\.mp4.*raw-resource-v1.*196608.*omni\.processing\.transportGuard\.maxEstimatedTokens/,
     );
   });
 

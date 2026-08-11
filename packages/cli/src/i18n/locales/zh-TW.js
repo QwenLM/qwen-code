@@ -214,6 +214,16 @@ export default {
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.DownsampleImage': '降採樣圖像',
+  'toolDisplayName.DownscaleVideo': '降採樣影片',
+  'toolDisplayName.DownsampleAudio': '降採樣音訊',
+  'toolDisplayName.ExtractKeyframes': '擷取關鍵影格',
+  'toolDisplayName.ExtractAudio': '擷取音軌',
+  'toolDisplayName.ClipVideo': '剪輯影片',
+  'toolDisplayName.ConvertImage': '轉換圖像',
+  'toolDisplayName.TranscribeAudio': '轉寫音訊',
+  '[fixed-only: runs via media policies, not the model]':
+    '［僅固定策略：由媒體策略調用，不開放給模型］',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',

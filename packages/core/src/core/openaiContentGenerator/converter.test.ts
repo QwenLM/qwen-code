@@ -1502,6 +1502,126 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('moves an omni degradation disclosure together with its media part when splitting tool media', () => {
+      // The omni pipeline emits a disclosure text Part IMMEDIATELY before
+      // each lossy derivative's media Part. When splitToolMedia relocates
+      // the media into the follow-up user message, the disclosure must move
+      // WITH it — stranded in the text-only tool message, the model could
+      // not attribute it to the media. Ordinary text parts stay behind.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'Image content' },
+                  parts: [
+                    { text: 'ordinary tool text' },
+                    { text: '【媒体降质】photo.png：downsampled to 1568px' },
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'base64encodedimagedata',
+                      },
+                    },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage?.content).toBe('Image content\nordinary tool text');
+
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+      ]);
+      expect(userContent[0].text).toBe(
+        '(attached media from previous tool call)',
+      );
+      // Disclosure sits immediately before its media part.
+      expect(userContent[1].text).toBe(
+        '【媒体降质】photo.png：downsampled to 1568px',
+      );
+      expect(userContent[2].image_url?.url).toBe(
+        'data:image/png;base64,base64encodedimagedata',
+      );
+    });
+
+    it('gives a disclosure only to the media part directly following it', () => {
+      // Two media parts after one disclosure: only the adjacent one owns
+      // it — the second media part must not pull the disclosure past the
+      // first (prev-tracking, not "last disclosure seen").
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'call_1', name: 'Read', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'Read',
+                  response: { output: 'two images' },
+                  parts: [
+                    { text: '【媒体降质】a.png：lossy' },
+                    { inlineData: { mimeType: 'image/png', data: 'first' } },
+                    { inlineData: { mimeType: 'image/png', data: 'second' } },
+                  ] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request, {
+        ...requestContext,
+        splitToolMedia: true,
+      });
+      const userMessage = messages.find((m) => m.role === 'user');
+      const userContent = userMessage?.content as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(userContent.map((p) => p.type)).toEqual([
+        'text',
+        'text',
+        'image_url',
+        'image_url',
+      ]);
+      expect(userContent[1].text).toBe('【媒体降质】a.png：lossy');
+      expect(userContent[2].image_url?.url).toBe('data:image/png;base64,first');
+    });
+
     it('should keep all tool messages contiguous and merge split media into a single follow-up user message for parallel tool calls (issue #3616)', () => {
       // Two assistant tool calls in parallel. Both responses come back in the
       // same `user` content as separate functionResponse parts. The first

@@ -19,6 +19,34 @@ export interface PutObjectResult {
   deduped: boolean;
 }
 
+/** Why a policy invocation's staging directory was quarantined; persisted
+ * as `reason.json` beside the failed artifacts for debugging. */
+export interface QuarantineReason {
+  /** The fixed policy whose invocation failed. */
+  policyId: string;
+  /** The media policy tool that ran (or failed to run). */
+  toolName: string;
+  /** Human-readable failure description. */
+  reason: string;
+}
+
+/** Policy invocation IDs are orchestrator-generated 16-hex tokens; anything
+ * else (path separators, dots, uppercase) is refused before touching the
+ * filesystem so staging/quarantine paths can never escape their area. */
+const INVOCATION_ID_RE = /^[0-9a-f]{16}$/;
+
+/** Object-store extensions are a single dotted alphanumeric component
+ * (".jpg", ".m4a", ".bin" — see extensionForMime). Anything else — path
+ * separators, dots beyond the leading one — is rejected so an extension
+ * can never smuggle traversal segments into an object path. */
+export const OBJECT_EXTENSION_RE = /^\.[A-Za-z0-9]{1,8}$/;
+
+function assertInvocationId(invocationId: string): void {
+  if (!INVOCATION_ID_RE.test(invocationId)) {
+    throw new Error(`Invalid omni policy invocation id: ${invocationId}`);
+  }
+}
+
 /** Reject paths that exist but are not what the store expects (symlinks,
  * devices, …). The store never follows symlinks for its own entries. */
 async function assertRealDirIfExists(p: string): Promise<void> {
@@ -36,13 +64,39 @@ async function assertRealDirIfExists(p: string): Promise<void> {
 }
 
 /**
+ * Prepare a `downloads/` staging area and verify it is a REAL directory
+ * before returning. Every caller that writes `.part` files (the URL
+ * funnel, the tool-result funnel) must go through this:
+ * `mkdir { recursive: true }` succeeds silently when the path already
+ * exists as a symlink to a directory, so a link planted at
+ * `.qwen/omni/downloads` would otherwise redirect the write to an
+ * attacker-chosen location (and outside the recovery sweep, which
+ * deliberately refuses to descend symlinked directories). Fails closed —
+ * callers degrade per their own contract (inline part, delivery error).
+ */
+export async function prepareOmniDownloadsDir(
+  downloadsDir: string,
+): Promise<string> {
+  await fs.mkdir(downloadsDir, { recursive: true, mode: 0o700 });
+  const st = await fs.lstat(downloadsDir);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(
+      `Omni downloads path is not a real directory (symlink or special file refused): ${downloadsDir}`,
+    );
+  }
+  return downloadsDir;
+}
+
+/**
  * Content-addressed, immutable object store under `<project>/.qwen/omni/`.
  *
- * S1 scope: only the `objects/` area exists. Layout:
+ * Layout (storage design §4):
  *
  *   .qwen/omni/
  *   ├── .gitignore            # "*" — self-ignoring
- *   └── objects/sha256/<h[0:2]>/<sha256><ext>
+ *   ├── objects/sha256/<h[0:2]>/<sha256><ext>
+ *   ├── staging/<invocationId>/   # policy tool work dirs (pre-commit)
+ *   └── quarantine/<invocationId>/ # failed invocations + reason.json
  *
  * Write protocol: stream-copy to a sibling `.tmp-*` file in the final
  * directory while re-computing the content hash, verify it matches the
@@ -68,8 +122,34 @@ export class OmniObjectStore {
     return path.join(this.omniRoot, 'objects', 'sha256');
   }
 
-  /** Compute the final object path for a content hash + extension. */
+  /** Root of the policy-invocation work area (stale entries deleted by
+   * startup recovery — anything past the grace window belongs to an
+   * uncommitted, crashed run). */
+  getStagingDir(): string {
+    return path.join(this.omniRoot, 'staging');
+  }
+
+  /** Root of the failed-invocation debris area, kept for debugging under
+   * a retention/size budget and never re-entering recognition/delivery. */
+  getQuarantineDir(): string {
+    return path.join(this.omniRoot, 'quarantine');
+  }
+
+  /**
+   * Compute the final object path for a content hash + extension.
+   *
+   * Both components are validated here, not just at putFile: callers may
+   * feed values read back from on-disk cache files (policy-cache.json),
+   * and a crafted hash or extension ("/../../…") would otherwise turn
+   * this join into a path-traversal primitive pointing outside the store.
+   */
   objectPathFor(sha256: string, extension: string): string {
+    if (!/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new Error(`invalid object hash: ${JSON.stringify(sha256)}`);
+    }
+    if (!OBJECT_EXTENSION_RE.test(extension)) {
+      throw new Error(`invalid object extension: ${JSON.stringify(extension)}`);
+    }
     return path.join(
       this.getObjectsDir(),
       sha256.slice(0, 2),
@@ -87,7 +167,14 @@ export class OmniObjectStore {
       await assertRealDirIfExists(this.omniRoot);
       await assertRealDirIfExists(path.join(this.omniRoot, 'objects'));
       await assertRealDirIfExists(this.getObjectsDir());
+      await assertRealDirIfExists(this.getStagingDir());
+      await assertRealDirIfExists(this.getQuarantineDir());
       await fs.mkdir(this.getObjectsDir(), { recursive: true, mode: 0o700 });
+      await fs.mkdir(this.getStagingDir(), { recursive: true, mode: 0o700 });
+      await fs.mkdir(this.getQuarantineDir(), {
+        recursive: true,
+        mode: 0o700,
+      });
       const gitignorePath = path.join(this.omniRoot, '.gitignore');
       try {
         // 'wx' fails when the file already exists — atomic create-once,
@@ -104,6 +191,71 @@ export class OmniObjectStore {
       throw err;
     });
     return this.layoutReady;
+  }
+
+  /**
+   * Create the exclusive work directory for one policy invocation and
+   * return its absolute path. The directory is the ONLY location the
+   * policy tool is allowed to write to (storage design §4.3). Creation is
+   * non-recursive and exclusive: a pre-existing entry (id collision or a
+   * planted path) fails instead of being silently reused.
+   */
+  async createStagingDir(invocationId: string): Promise<string> {
+    assertInvocationId(invocationId);
+    await this.ensureLayout();
+    const dir = path.join(this.getStagingDir(), invocationId);
+    await fs.mkdir(dir, { mode: 0o700 });
+    return dir;
+  }
+
+  /**
+   * Delete one invocation's staging directory (after a successful commit,
+   * or as the failure path while quarantine is not involved).
+   */
+  async removeStagingDir(invocationId: string): Promise<void> {
+    assertInvocationId(invocationId);
+    await fs.rm(path.join(this.getStagingDir(), invocationId), {
+      recursive: true,
+      force: true,
+    });
+  }
+
+  /**
+   * Move a failed invocation's staging directory into
+   * `quarantine/<invocationId>/`, preserving the artifact files and adding
+   * a `reason.json` (storage design §4.4). The reason file is written into
+   * the staging directory BEFORE the rename so the quarantine entry appears
+   * complete in one atomic step; a crash in between leaves it in staging,
+   * which startup recovery deletes once past the grace window.
+   */
+  async quarantineInvocation(
+    invocationId: string,
+    reason: QuarantineReason,
+  ): Promise<string> {
+    assertInvocationId(invocationId);
+    await this.ensureLayout();
+    const stagingDir = path.join(this.getStagingDir(), invocationId);
+    // The rename source must be a real directory: a symlink here would
+    // make the reason.json write (and the quarantined "content") point
+    // outside the omni root.
+    const st = await fs.lstat(stagingDir);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(
+        `Staging path is not a real directory (symlink or special file refused): ${stagingDir}`,
+      );
+    }
+    await fs.writeFile(
+      path.join(stagingDir, 'reason.json'),
+      JSON.stringify(
+        { ...reason, failedAt: new Date().toISOString() },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+    const quarantineDir = path.join(this.getQuarantineDir(), invocationId);
+    await fs.rename(stagingDir, quarantineDir);
+    return quarantineDir;
   }
 
   /**

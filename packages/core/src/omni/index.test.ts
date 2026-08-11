@@ -72,8 +72,8 @@ describe('sanitizeErrorMessage', () => {
 describe('effectiveMaxDownloadFileBytes', () => {
   const capsConfig = (download?: number, upload?: number): Config =>
     ({
-      getOmniDownloadMaxFileBytes: () => download,
-      getOmniUploadMaxFileBytes: () => upload,
+      getOmniUrlDownloadMaxFileBytes: () => download,
+      getOmniMaxUploadFileBytes: () => upload,
     }) as unknown as Config;
 
   it('never exceeds the upload cap, even when configured higher', () => {
@@ -186,7 +186,7 @@ describe('readMediaViaOmniDelivery result shape', () => {
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getContentGeneratorConfig: vi.fn().mockReturnValue(DASHSCOPE_CGC),
       getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
-      getOmniUploadMaxFileBytes: vi.fn().mockReturnValue(0),
+      getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(0),
       getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
       storage: { getQwenDir: () => '/tmp/omni-test-qwen' },
     } as unknown as Config;
@@ -540,9 +540,9 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
         .fn()
         .mockReturnValue(overrides?.cgc ?? DASHSCOPE_CGC),
       getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
-      getOmniUploadMaxFileBytes: vi.fn().mockReturnValue(0),
+      getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(0),
       getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
-      getOmniUploadCacheTtlHours: vi.fn().mockReturnValue(overrides?.ttlHours),
+      getOmniUploadUrlTtlHours: vi.fn().mockReturnValue(overrides?.ttlHours),
       storage: { getQwenDir: () => tmpDir },
     } as unknown as Config;
   }
@@ -686,5 +686,1143 @@ describe('processMediaForOmniDelivery upload cache integration', () => {
       cacheConfig(),
     );
     await expect(fs.stat(expired)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('processMediaForOmniDelivery fixed-policy integration', () => {
+  // The orchestrator itself is unit-tested in policy/orchestrator.test.ts;
+  // these tests pin the pipeline wiring around it: when it runs, what it
+  // receives, how its output replaces the source, that the transport guard
+  // judges the FINAL delivery (decision D1), and how failures surface.
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-policy-int-'));
+  });
+
+  afterEach(async () => {
+    vi.resetAllMocks();
+    vi.doUnmock('./ffmpeg.js');
+    vi.doUnmock('./recognition.js');
+    vi.doUnmock('./storage.js');
+    vi.doUnmock('./upload.js');
+    vi.doUnmock('./policy/orchestrator.js');
+    vi.doUnmock('./recovery.js');
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  const SOURCE_RECOGNIZED = {
+    modality: 'image',
+    detectedMimeType: 'image/png',
+    sizeBytes: 5000,
+    metadata: { width: 4000, height: 3000 },
+  };
+  const DEGRADED_RECOGNIZED = {
+    modality: 'image',
+    detectedMimeType: 'image/jpeg',
+    sizeBytes: 100,
+    metadata: { width: 1568, height: 1176 },
+  };
+  // Only `.length > 0` matters to the pipeline; the mocked orchestrator
+  // never reads the entries.
+  const POLICY_STUB = [{ id: 'img-downsample' }];
+  // Mirrors DEFAULT_OMNI_PROCESSING_LIMITS (normalization is unit-tested
+  // in policy/config.test.ts; the pipeline dereferences maxTransportPasses
+  // and forwards the object to the orchestrator).
+  const LIMITS_STUB = {
+    maxConcurrentResources: 1,
+    reservedOutputTokens: 8192,
+    maxLineageDepth: 8,
+    maxPolicyRunsPerRoot: 64,
+    maxArtifactsPerRoot: 256,
+    maxDerivedBytesPerRoot: 1073741824,
+    maxTransportPasses: 3,
+  };
+
+  function policyConfig(overrides?: {
+    maxUploadFileBytes?: number;
+    policies?: unknown[];
+    transportGuardPolicies?: unknown[];
+    maxTransportPasses?: number;
+    /** Simulates a stub/embedder config without the accessor. */
+    noProcessingConfig?: boolean;
+    /** Resolved model window for the session.* snapshot. */
+    contextWindowSize?: number;
+    /** Current chat's last prompt token count for the session.* snapshot. */
+    lastPromptTokenCount?: number;
+  }): Config {
+    return {
+      isOmniEnabled: vi.fn().mockReturnValue(true),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      getContentGeneratorConfig: vi.fn().mockReturnValue(
+        overrides?.contextWindowSize !== undefined
+          ? {
+              ...DASHSCOPE_CGC,
+              contextWindowSize: overrides.contextWindowSize,
+            }
+          : DASHSCOPE_CGC,
+      ),
+      ...(overrides?.lastPromptTokenCount !== undefined
+        ? {
+            getGeminiClient: () => ({
+              getChat: () => ({
+                getLastPromptTokenCount: () => overrides.lastPromptTokenCount,
+              }),
+            }),
+          }
+        : {}),
+      getModel: vi.fn().mockReturnValue('qwen3.5-omni-plus'),
+      getOmniMaxUploadFileBytes: vi
+        .fn()
+        .mockReturnValue(overrides?.maxUploadFileBytes ?? 0),
+      getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(0),
+      getOmniProcessingConfig: vi.fn().mockReturnValue(
+        overrides?.noProcessingConfig
+          ? undefined
+          : {
+              fixedPolicies: overrides?.policies ?? POLICY_STUB,
+              transportGuardPolicies: overrides?.transportGuardPolicies ?? [],
+              limits: {
+                ...LIMITS_STUB,
+                ...(overrides?.maxTransportPasses !== undefined
+                  ? { maxTransportPasses: overrides.maxTransportPasses }
+                  : {}),
+              },
+            },
+      ),
+      storage: { getQwenDir: () => tmpDir },
+    } as unknown as Config;
+  }
+
+  async function armPipeline(runFixedPoliciesMock: ReturnType<typeof vi.fn>) {
+    const putFileMock = vi
+      .fn()
+      .mockResolvedValue({ objectPath: '/tmp/obj.jpg', deduped: false });
+    const uploadFileMock = vi.fn().mockResolvedValue('oss://bucket/degraded');
+    const hashFileMock = vi.fn().mockResolvedValue('a'.repeat(64));
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi.fn().mockResolvedValue(SOURCE_RECOGNIZED),
+      hashFileSha256: hashFileMock,
+      extensionForMime: vi.fn().mockReturnValue('.jpg'),
+    }));
+    const objectsDir = path.join(tmpDir, 'objects');
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        putFile = putFileMock;
+        getOmniRootDir() {
+          return tmpDir;
+        }
+        getObjectsDir() {
+          return objectsDir;
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        uploadFile = uploadFileMock;
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    vi.doMock('./policy/orchestrator.js', () => ({
+      runFixedPolicies: runFixedPoliciesMock,
+      OmniPolicyExecutionError: class extends Error {},
+    }));
+    const mod = await import('./index.js');
+    return { putFileMock, uploadFileMock, hashFileMock, mod };
+  }
+
+  async function realFile(name: string): Promise<string> {
+    const filePath = path.join(tmpDir, name);
+    await fs.writeFile(filePath, 'not really media');
+    return filePath;
+  }
+
+  it('replaces the source with the policy derivative and carries its disclosure', async () => {
+    const degradedPath = path.join(tmpDir, 'objects', 'deadbeef.jpg');
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: degradedPath,
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { putFileMock, hashFileMock, mod } = await armPipeline(runMock);
+    const filePath = await realFile('pic.png');
+    const config = policyConfig();
+
+    const result = await mod.processMediaForOmniDelivery(filePath, config);
+
+    // The orchestrator received the source resource with user provenance.
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(runMock).toHaveBeenCalledWith(
+      config,
+      {
+        filePath,
+        recognized: SOURCE_RECOGNIZED,
+        displayName: 'pic.png',
+        origin: 'user',
+      },
+      expect.objectContaining({ policies: POLICY_STUB }),
+    );
+    // Storage/upload operate on the DERIVATIVE under its promotion hash;
+    // the source is never re-hashed (the derivative arrived with one).
+    expect(putFileMock).toHaveBeenCalledWith(
+      degradedPath,
+      'b'.repeat(64),
+      '.jpg',
+      undefined,
+    );
+    expect(hashFileMock).not.toHaveBeenCalled();
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.mimeType).toBe('image/jpeg');
+    expect(result.sha256).toBe('b'.repeat(64));
+    expect(result.recognized).toBe(DEGRADED_RECOGNIZED);
+    expect(result.disclosure).toBe('downsampled to 1568px');
+    expect(result.degraded).toBe(true);
+  });
+
+  // ── session.* condition namespace snapshot (policy design §8.3) ───────
+  it('threads a stub-config session snapshot (reserved tokens only) into the orchestrator', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig(),
+      ),
+    ).rejects.toThrow();
+    // Window size and prompt count are unknown on the stub config: the
+    // snapshot must carry ONLY the reserved-output limit — absent fields
+    // read as `unavailable`, never as zero.
+    expect(runMock.mock.calls[0][2].conditionContext).toEqual({
+      session: { reservedOutputTokens: 8192 },
+    });
+  });
+
+  it('snapshots the full session namespace once and reuses it for the guard pass', async () => {
+    const preprocessedPath = path.join(tmpDir, 'objects', 'pre.jpg');
+    const guardedPath = path.join(tmpDir, 'objects', 'guarded.jpg');
+    const runMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: preprocessedPath,
+            recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+            sha256: 'b'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      })
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: guardedPath,
+            recognized: DEGRADED_RECOGNIZED,
+            sha256: 'c'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      });
+    const { mod } = await armPipeline(runMock);
+    await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [{ id: 'img-guard', mediaTypes: ['image'] }],
+        contextWindowSize: 131072,
+        lastPromptTokenCount: 20000,
+      }),
+    );
+
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(runMock.mock.calls[0][2].conditionContext).toEqual({
+      session: {
+        reservedOutputTokens: 8192,
+        contextWindowTokens: 131072,
+        promptTokenCount: 20000,
+        availableContextTokens: 131072 - 20000 - 8192,
+      },
+    });
+    // The guard pass receives the SAME snapshot object — taken once per
+    // delivery, constant across every pass of that delivery.
+    expect(runMock.mock.calls[1][2].conditionContext).toBe(
+      runMock.mock.calls[0][2].conditionContext,
+    );
+  });
+
+  it('skips the orchestrator entirely when no fixed policies are configured', async () => {
+    const runMock = vi.fn();
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({ policies: [] }),
+    );
+    expect(runMock).not.toHaveBeenCalled();
+    expect(result.disclosure).toBeUndefined();
+    expect(result.degraded).toBeUndefined();
+  });
+
+  it('judges the transport byte guard on the FINAL delivery, not the source', async () => {
+    // Source 5000 bytes, cap 500: without policies this delivery would be
+    // rejected. The derivative is 100 bytes — the reordered pipeline (D1)
+    // must accept it.
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({ maxUploadFileBytes: 500 }),
+    );
+    expect(result.degraded).toBe(true);
+  });
+
+  it('explicitly omits an over-cap FINAL delivery when no guard policy matches its modality', async () => {
+    // Stage B (policy design §10.2): with a processing config present, a
+    // persisting violation is an explicit OMISSION, not a throw. The audio
+    // guard policy does not match an image, so no guard pass runs.
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [{ id: 'guard-audio', mediaTypes: ['audio'] }],
+      }),
+    );
+    // Only the fixed-policy stage ran — never a guard pass.
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      fileUri: '',
+      sha256: 'b'.repeat(64),
+      deduped: false,
+      uploadCacheHit: false,
+      degraded: true,
+    });
+    expect(result.omission?.reason).toContain('900 bytes > 500 bytes');
+    // Nothing was stored or uploaded for an omitted resource.
+    expect(putFileMock).not.toHaveBeenCalled();
+    expect(uploadFileMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the fail-closed throw when there is no processing config at all', async () => {
+    // Stub configs / embedders skipping initialize have no normalized
+    // processing config; the Stage A guard behavior must survive for them.
+    const runMock = vi.fn();
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig({ maxUploadFileBytes: 500, noProcessingConfig: true }),
+      ),
+    ).rejects.toMatchObject({ name: 'OmniTransportGuardError' });
+    expect(runMock).not.toHaveBeenCalled();
+  });
+
+  it('wraps orchestrator failures into a sanitized OmniDeliveryError', async () => {
+    const runMock = vi.fn().mockRejectedValue(new Error('policy blew up'));
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig(),
+      ),
+    ).rejects.toMatchObject({
+      name: 'OmniDeliveryError',
+      message: 'Fixed-policy processing failed for pic.png: policy blew up',
+    });
+  });
+
+  it('rejects a delivery set that is not exactly one resource', async () => {
+    const runMock = vi
+      .fn()
+      .mockResolvedValue({ deliveries: [], records: [], fileDeliveries: [] });
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig(),
+      ),
+    ).rejects.toMatchObject({
+      name: 'OmniDeliveryError',
+      message:
+        'Fixed policies produced 0 media deliverables for pic.png; exactly one is supported.',
+    });
+  });
+
+  // ── Multi-output fixed policies (#8187 多产物投递) ───────────────────
+  const FRAME_2_RECOGNIZED = {
+    modality: 'image',
+    detectedMimeType: 'image/jpeg',
+    sizeBytes: 120,
+    metadata: { width: 640, height: 360 },
+  };
+  const FRAME_3_RECOGNIZED = { ...FRAME_2_RECOGNIZED, sizeBytes: 130 };
+
+  function keyframeDeliveries(tmp: string) {
+    return [
+      {
+        filePath: path.join(tmp, 'objects', 'frame1.jpg'),
+        recognized: DEGRADED_RECOGNIZED,
+        sha256: 'b'.repeat(64),
+        disclosure: '帧 1/3',
+        degraded: true,
+      },
+      {
+        filePath: path.join(tmp, 'objects', 'frame2.jpg'),
+        recognized: FRAME_2_RECOGNIZED,
+        sha256: 'd'.repeat(64),
+        disclosure: '帧 2/3',
+        degraded: true,
+      },
+      {
+        filePath: path.join(tmp, 'objects', 'frame3.jpg'),
+        recognized: FRAME_3_RECOGNIZED,
+        sha256: 'e'.repeat(64),
+        disclosure: '帧 3/3',
+        degraded: true,
+      },
+    ];
+  }
+
+  it('uploads every deliverable of a multi-output policy and carries the extras in additionalMedia', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: keyframeDeliveries(tmpDir),
+      records: [],
+      fileDeliveries: [],
+    });
+    const { putFileMock, uploadFileMock, hashFileMock, mod } =
+      await armPipeline(runMock);
+    uploadFileMock
+      .mockResolvedValueOnce('oss://bucket/frame1')
+      .mockResolvedValueOnce('oss://bucket/frame2')
+      .mockResolvedValueOnce('oss://bucket/frame3');
+
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('vid.mp4'),
+      policyConfig(),
+    );
+
+    // Primary = first deliverable; the rest ride in additionalMedia, in
+    // orchestrator order, each with its own URL/hash/disclosure.
+    expect(result.fileUri).toBe('oss://bucket/frame1');
+    expect(result.sha256).toBe('b'.repeat(64));
+    expect(result.additionalMedia).toEqual([
+      {
+        fileUri: 'oss://bucket/frame2',
+        mimeType: 'image/jpeg',
+        sha256: 'd'.repeat(64),
+        disclosure: '帧 2/3',
+      },
+      {
+        fileUri: 'oss://bucket/frame3',
+        mimeType: 'image/jpeg',
+        sha256: 'e'.repeat(64),
+        disclosure: '帧 3/3',
+      },
+    ]);
+    // Every deliverable went through the SAME store→upload pipeline.
+    expect(putFileMock).toHaveBeenCalledTimes(3);
+    expect(uploadFileMock).toHaveBeenCalledTimes(3);
+    // All arrived with promotion hashes — nothing is re-hashed.
+    expect(hashFileMock).not.toHaveBeenCalled();
+  });
+
+  it('explicitly omits an over-cap ADDITIONAL deliverable while the rest deliver', async () => {
+    const deliveries = keyframeDeliveries(tmpDir);
+    deliveries[1] = {
+      ...deliveries[1],
+      recognized: { ...FRAME_2_RECOGNIZED, sizeBytes: 900 },
+    };
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries,
+      records: [],
+      fileDeliveries: [],
+    });
+    const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
+
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('vid.mp4'),
+      policyConfig({ maxUploadFileBytes: 500 }),
+    );
+
+    // The violating extra becomes an explicit omission entry (policy
+    // design §10.2 — no re-derivation of derivatives); its neighbors and
+    // the primary are unaffected.
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.additionalMedia).toHaveLength(2);
+    expect(result.additionalMedia![0]).toMatchObject({
+      fileUri: '',
+      sha256: 'd'.repeat(64),
+      disclosure: '帧 2/3',
+    });
+    expect(result.additionalMedia![0].omission?.reason).toContain(
+      '900 bytes > 500 bytes',
+    );
+    expect(result.additionalMedia![1]).toMatchObject({
+      fileUri: 'oss://bucket/degraded',
+      sha256: 'e'.repeat(64),
+    });
+    // The omitted extra never touched the store or the upload channel.
+    expect(putFileMock).toHaveBeenCalledTimes(2);
+    expect(uploadFileMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('readMediaViaOmniDelivery materializes extras as [disclosure, fileData] pairs after the primary and before transcripts', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: keyframeDeliveries(tmpDir),
+      records: [],
+      fileDeliveries: [
+        {
+          filePath: '/tmp/objects/t.txt',
+          role: 'transcript',
+          mimeType: 'text/plain',
+          text: '你好，世界',
+          sha256: 'c'.repeat(64),
+          sizeBytes: 15,
+        },
+      ],
+    });
+    const { uploadFileMock, mod } = await armPipeline(runMock);
+    uploadFileMock
+      .mockResolvedValueOnce('oss://bucket/frame1')
+      .mockResolvedValueOnce('oss://bucket/frame2')
+      .mockResolvedValueOnce('oss://bucket/frame3');
+
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('vid.mp4'),
+      config: policyConfig(),
+      displayName: 'vid.mp4',
+      relativePathForDisplay: 'vid.mp4',
+      expectedModality: 'video',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    // [zoom hint, primary disclosure, primary fileData,
+    //  extra1 disclosure, extra1 fileData, extra2 disclosure,
+    //  extra2 fileData, transcript] — D8 adjacency per pair, transcripts
+    // last.
+    expect(parts.map((p) => ('fileData' in p ? 'media' : 'text'))).toEqual([
+      'text',
+      'text',
+      'media',
+      'text',
+      'media',
+      'text',
+      'media',
+      'text',
+    ]);
+    expect(parts[3]!['text']).toBe('【媒体降质】vid.mp4：帧 2/3');
+    expect(parts[4]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/frame2',
+        mimeType: 'image/jpeg',
+        displayName: 'vid.mp4',
+      },
+    });
+    expect(parts[5]!['text']).toBe('【媒体降质】vid.mp4：帧 3/3');
+    expect(parts[6]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/frame3',
+        mimeType: 'image/jpeg',
+        displayName: 'vid.mp4',
+      },
+    });
+    expect(parts[7]!['text']).toBe('【媒体转写】vid.mp4：你好，世界');
+  });
+
+  it('readMediaViaOmniDelivery still materializes extras when the PRIMARY is omitted', async () => {
+    const deliveries = keyframeDeliveries(tmpDir).slice(0, 2);
+    deliveries[0] = {
+      ...deliveries[0],
+      recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+    };
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries,
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('vid.mp4'),
+      config: policyConfig({ maxUploadFileBytes: 500 }),
+      displayName: 'vid.mp4',
+      relativePathForDisplay: 'vid.mp4',
+      expectedModality: 'video',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    expect(parts[0]!['text']).toContain('【媒体省略】vid.mp4');
+    expect(parts[1]!['text']).toBe('【媒体降质】vid.mp4：帧 2/3');
+    expect(parts[2]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/degraded',
+        mimeType: 'image/jpeg',
+        displayName: 'vid.mp4',
+      },
+    });
+  });
+
+  it('readMediaViaOmniDelivery places the disclosure immediately before the fileData part', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig(),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    // Zoom hint shows the DELIVERED image's resolution (the derivative) —
+    // and must not call it "full resolution", which would contradict the
+    // degradation disclosure right below and steer the model away from
+    // zoom_image (the remedy that reads the original from disk).
+    expect(parts[0]!['text']).toContain('delivered at 1568x1176 px');
+    expect(parts[0]!['text']).toContain('after degradation');
+    expect(parts[0]!['text']).not.toContain('full resolution');
+    expect(parts[1]!['text']).toBe(
+      '【媒体降质】pic.png：downsampled to 1568px',
+    );
+    expect(parts[2]).toEqual({
+      fileData: {
+        fileUri: 'oss://bucket/degraded',
+        mimeType: 'image/jpeg',
+        displayName: 'pic.png',
+      },
+    });
+  });
+
+  // ── Transcript delivery (§6.2) ────────────────────────────────────────
+  const TRANSCRIPT_FILE_DELIVERY = {
+    filePath: '/tmp/objects/t.txt',
+    role: 'transcript',
+    mimeType: 'text/plain',
+    text: '你好，世界',
+    sha256: 'c'.repeat(64),
+    sizeBytes: 15,
+    disclosure: '原 63s 音频 → 转写文本 5 字',
+  };
+
+  it('returns a pure-transcript delivery without storing or uploading anything', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { putFileMock, uploadFileMock, mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig(),
+    );
+
+    // No media deliverable → nothing enters objects/ or the upload channel.
+    expect(putFileMock).not.toHaveBeenCalled();
+    expect(uploadFileMock).not.toHaveBeenCalled();
+    expect(result.fileUri).toBe('');
+    expect(result.sha256).toBe('');
+    expect(result.mimeType).toBe('image/png');
+    expect(result.degraded).toBe(true);
+    expect(result.transcripts).toEqual([
+      { text: '你好，世界', disclosure: '原 63s 音频 → 转写文本 5 字' },
+    ]);
+  });
+
+  it('threads transcripts alongside a media deliverable into the upload result', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig(),
+    );
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.transcripts).toEqual([
+      { text: '你好，世界', disclosure: '原 63s 音频 → 转写文本 5 字' },
+    ]);
+  });
+
+  it('readMediaViaOmniDelivery renders a pure-transcript delivery as text parts only', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig(),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    // Disclosure precedes its transcript (D8 adjacency); no fileData part.
+    expect(result.llmContent).toEqual([
+      { text: '【媒体降质】pic.png：原 63s 音频 → 转写文本 5 字' },
+      { text: '【媒体转写】pic.png：你好，世界' },
+    ]);
+    expect(result.returnDisplay).toBe(
+      'Read image as transcript (omni policy): pic.png',
+    );
+    expect(result.error).toBeUndefined();
+  });
+
+  it('readMediaViaOmniDelivery appends transcript parts after the media part', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig(),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(5);
+    expect(parts[0]!['text']).toContain('1568x1176'); // zoom hint
+    expect(parts[1]!['text']).toBe(
+      '【媒体降质】pic.png：downsampled to 1568px',
+    );
+    expect(parts[2]!['fileData']).toBeDefined();
+    expect(parts[3]!['text']).toBe(
+      '【媒体降质】pic.png：原 63s 音频 → 转写文本 5 字',
+    );
+    expect(parts[4]!['text']).toBe('【媒体转写】pic.png：你好，世界');
+  });
+
+  it('readMediaViaOmniDelivery keeps transcripts when the media itself is omitted', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [TRANSCRIPT_FILE_DELIVERY],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig({ maxUploadFileBytes: 500 }),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    expect(parts[0]!['text']).toMatch(/^【媒体省略】pic\.png：/);
+    expect(parts[1]!['text']).toBe(
+      '【媒体降质】pic.png：原 63s 音频 → 转写文本 5 字',
+    );
+    expect(parts[2]!['text']).toBe('【媒体转写】pic.png：你好，世界');
+    expect(result.error).toBeUndefined();
+  });
+
+  // ── Stage B transport-guard pass loop ────────────────────────────────
+  // With `policies: []` the fixed-policy stage is skipped entirely, so
+  // every runFixedPolicies call in these tests is a GUARD pass on the
+  // 5000-byte source (cap 500 → violation).
+  const IMG_GUARD = { id: 'img-guard', mediaTypes: ['image'] };
+
+  it('runs a matching guard policy on a violation and delivers the compliant result', async () => {
+    const guardedPath = path.join(tmpDir, 'objects', 'guarded.jpg');
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: guardedPath,
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          disclosure: 'downsampled to 1568px',
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const filePath = await realFile('pic.png');
+    const config = policyConfig({
+      policies: [],
+      maxUploadFileBytes: 500,
+      transportGuardPolicies: [IMG_GUARD],
+    });
+
+    const result = await mod.processMediaForOmniDelivery(filePath, config);
+
+    // One guard pass over the SOURCE, restricted to the matching policies.
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(runMock).toHaveBeenCalledWith(
+      config,
+      {
+        filePath,
+        recognized: SOURCE_RECOGNIZED,
+        displayName: 'pic.png',
+        origin: 'user',
+      },
+      expect.objectContaining({
+        policies: [IMG_GUARD],
+        limits: expect.objectContaining({ maxTransportPasses: 3 }),
+      }),
+    );
+    expect(result.fileUri).toBe('oss://bucket/degraded');
+    expect(result.omission).toBeUndefined();
+    expect(result.degraded).toBe(true);
+    expect(result.disclosure).toBe('downsampled to 1568px');
+  });
+
+  it('chains preprocessing and guard disclosures instead of replacing (D8)', async () => {
+    // Preprocessing degrades once (disclosure A) but the derivative is
+    // still over the byte cap; the guard degrades AGAIN (disclosure B).
+    // Both lossy steps must reach the model — a replaced disclosure would
+    // silently hide the first degradation.
+    const preprocessedPath = path.join(tmpDir, 'objects', 'pre.jpg');
+    const guardedPath = path.join(tmpDir, 'objects', 'guarded.jpg');
+    const runMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: preprocessedPath,
+            recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+            sha256: 'b'.repeat(64),
+            disclosure: 'downsampled to 1568px',
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      })
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: guardedPath,
+            recognized: DEGRADED_RECOGNIZED,
+            sha256: 'c'.repeat(64),
+            disclosure: 're-encoded at quality 60',
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [IMG_GUARD],
+      }),
+    );
+
+    expect(runMock).toHaveBeenCalledTimes(2);
+    // Guard pass ran on the PREPROCESSED derivative, not the source.
+    expect(runMock.mock.calls[1][1]).toMatchObject({
+      filePath: preprocessedPath,
+    });
+    expect(result.omission).toBeUndefined();
+    expect(result.disclosure).toBe(
+      'downsampled to 1568px；re-encoded at quality 60',
+    );
+    expect(result.degraded).toBe(true);
+    expect(result.sha256).toBe('c'.repeat(64));
+  });
+
+  it('stops after maxTransportPasses passes and omits when still violating', async () => {
+    let call = 0;
+    const runMock = vi.fn().mockImplementation(async () => {
+      call += 1;
+      return {
+        deliveries: [
+          {
+            // A NEW path every pass: progress is being made, so only the
+            // pass counter can end the loop.
+            filePath: path.join(tmpDir, 'objects', `pass-${call}.jpg`),
+            recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+            sha256: String(call).repeat(64).slice(0, 64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      };
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        policies: [],
+        maxUploadFileBytes: 500,
+        maxTransportPasses: 2,
+        transportGuardPolicies: [IMG_GUARD],
+      }),
+    );
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(result.omission?.reason).toContain('900 bytes > 500 bytes');
+    expect(result.fileUri).toBe('');
+  });
+
+  it('breaks out of the guard loop when a pass makes no progress', async () => {
+    // Every guard policy no_op'd: the delivery IS the input resource. A
+    // second pass would repeat identical work forever.
+    const runMock = vi.fn().mockImplementation(async (_config, resource) => ({
+      deliveries: [
+        { filePath: resource.filePath, recognized: resource.recognized },
+      ],
+      records: [],
+      fileDeliveries: [],
+    }));
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        policies: [],
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [IMG_GUARD],
+      }),
+    );
+    expect(runMock).toHaveBeenCalledTimes(1);
+    expect(result.omission?.reason).toContain('5000 bytes > 500 bytes');
+  });
+
+  it('fails closed when a guard pass itself fails', async () => {
+    // A guard configuration error must never degrade into sending
+    // over-limit media (policy design §10.2). The error class matters:
+    // OmniTransportGuardError is what tells consumers with an inline
+    // fallback (the tool-result funnel) to WITHHOLD the bytes — a generic
+    // delivery error would fall back to delivering exactly what the guard
+    // rejected.
+    const runMock = vi.fn().mockRejectedValue(new Error('guard blew up'));
+    const { mod } = await armPipeline(runMock);
+    await expect(
+      mod.processMediaForOmniDelivery(
+        await realFile('pic.png'),
+        policyConfig({
+          policies: [],
+          maxUploadFileBytes: 500,
+          transportGuardPolicies: [IMG_GUARD],
+        }),
+      ),
+    ).rejects.toMatchObject({
+      name: 'OmniTransportGuardError',
+      message: 'Transport-guard processing failed for pic.png: guard blew up',
+    });
+  });
+
+  it('re-filters guard policies by modality after a pass changes it', async () => {
+    // Pass 1 transforms the over-limit image into an over-limit AUDIO
+    // derivative (modality change); pass 2 must run the AUDIO guard policy
+    // against it. A pre-loop filter (image only) would find no matching
+    // policy and omit a resource the audio policy can still fix.
+    const imageGuard = { id: 'img-guard', mediaTypes: ['image'] };
+    const audioGuard = { id: 'audio-guard', mediaTypes: ['audio'] };
+    const bigAudioPath = path.join(tmpDir, 'objects', 'audio-big.mp3');
+    await fs.mkdir(path.dirname(bigAudioPath), { recursive: true });
+    await fs.writeFile(bigAudioPath, Buffer.alloc(900));
+    const smallAudioPath = path.join(tmpDir, 'objects', 'audio-small.mp3');
+    await fs.writeFile(smallAudioPath, Buffer.alloc(400));
+    const audioRecognized = (sizeBytes: number) => ({
+      modality: 'audio',
+      detectedMimeType: 'audio/mpeg',
+      sizeBytes,
+      metadata: { durationMs: 60000 },
+    });
+    const runMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: bigAudioPath,
+            recognized: audioRecognized(900),
+            sha256: 'c'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      })
+      .mockResolvedValueOnce({
+        deliveries: [
+          {
+            filePath: smallAudioPath,
+            recognized: audioRecognized(400),
+            sha256: 'd'.repeat(64),
+            degraded: true,
+          },
+        ],
+        records: [],
+        fileDeliveries: [],
+      });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.processMediaForOmniDelivery(
+      await realFile('pic.png'),
+      policyConfig({
+        policies: [],
+        maxUploadFileBytes: 500,
+        transportGuardPolicies: [imageGuard, audioGuard],
+        maxTransportPasses: 3,
+      }),
+    );
+    expect(runMock).toHaveBeenCalledTimes(2);
+    // Pass 1 ran the image policy set; pass 2 must have run the AUDIO set.
+    expect(runMock.mock.calls[0][2].policies).toEqual([imageGuard]);
+    expect(runMock.mock.calls[1][2].policies).toEqual([audioGuard]);
+    expect(result.omission).toBeUndefined();
+    expect(result.fileUri).not.toBe('');
+  });
+
+  it('readMediaViaOmniDelivery renders an omission as the notice text, not an error', async () => {
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: policyConfig({ maxUploadFileBytes: 500 }),
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+    expect(typeof result.llmContent).toBe('string');
+    expect(result.llmContent).toMatch(/^【媒体省略】pic\.png：/);
+    expect(result.llmContent).toContain('900 bytes > 500 bytes');
+    expect(result.returnDisplay).toBe(
+      'Media omitted by the omni transport guard: pic.png',
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.errorType).toBeUndefined();
+  });
+
+  it('threads the quarantine retention settings into startup recovery', async () => {
+    const recoveryMock = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./recovery.js', () => ({
+      runStartupRecoveryOnce: recoveryMock,
+      resetRecoveryLatchForTests: vi.fn(),
+    }));
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const config = {
+      ...policyConfig(),
+      getOmniQuarantineRetentionDays: () => 3,
+      getOmniQuarantineMaxBytes: () => 1024,
+    } as unknown as Config;
+
+    await mod.processMediaForOmniDelivery(await realFile('pic.png'), config);
+
+    expect(recoveryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      {
+        quarantineRetentionDays: 3,
+        quarantineMaxBytes: 1024,
+        // Corrupt-object deletion cascades into the degradation cache.
+        // (Structural match: armPipeline's fresh module graph makes the
+        // class identity differ from this file's static import.)
+        degradationCache: expect.objectContaining({
+          removeByOriginalSha256: expect.any(Function),
+          removeByDegradedSha256: expect.any(Function),
+        }),
+      },
+    );
   });
 });
