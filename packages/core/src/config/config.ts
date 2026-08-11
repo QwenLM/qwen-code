@@ -3709,12 +3709,20 @@ export class Config {
     this.publishModelEnv();
 
     // Re-apply the user's reasoning effort that the provider sync above wiped.
-    if (
+    const targetHasReasoningControls = Boolean(
+      !this.modelsConfig.getActiveRuntimeModelSnapshot() &&
+        getModelReasoningControls(newContentGeneratorConfig.model),
+    );
+    const reasoningEffortToRestore =
       priorReasoningEffort &&
       (!priorModelHasReasoningControls ||
         newContentGeneratorConfig.model === modelId)
-    ) {
-      this.setReasoningEffort(priorReasoningEffort);
+        ? priorReasoningEffort
+        : targetHasReasoningControls
+          ? undefined
+          : this.globalReasoningEffortPreference;
+    if (reasoningEffortToRestore) {
+      this.setReasoningEffort(reasoningEffortToRestore);
     }
     this.applyRegisteredModelReasoning({
       priorThinkingDisabled:

@@ -1531,6 +1531,43 @@ describe('ModelsConfig', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    {
+      authType: AuthType.USE_OPENAI,
+      targetModel: 'custom-model',
+    },
+    {
+      authType: AuthType.QWEN_OAUTH,
+      targetModel: 'coder-model',
+    },
+  ])(
+    'clears a runtime snapshot before a raw switch to $targetModel',
+    async ({ authType, targetModel }) => {
+      const modelsConfig = new ModelsConfig({ initialAuthType: authType });
+      const snapshotId = `$runtime|${authType}|qwen3.8-max`;
+      modelsConfig['runtimeModelSnapshots'].set(snapshotId, {
+        id: snapshotId,
+        authType,
+        modelId: 'qwen3.8-max',
+        apiKey: 'sk-runtime',
+        generationConfig: { reasoning: false },
+        sources: {
+          reasoning: { kind: 'settings', detail: 'runtime preference' },
+        },
+        createdAt: Date.now(),
+      });
+      await modelsConfig.switchToRuntimeModel(snapshotId);
+
+      await modelsConfig.setModel(targetModel);
+
+      expect(modelsConfig.getActiveRuntimeModelSnapshotId()).toBeUndefined();
+      expect(modelsConfig.getGenerationConfig().reasoning).toBeUndefined();
+      expect(
+        modelsConfig.getGenerationConfigSources()['reasoning'],
+      ).toBeUndefined();
+    },
+  );
+
   it('preserves global reasoning when switching between raw model ids', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

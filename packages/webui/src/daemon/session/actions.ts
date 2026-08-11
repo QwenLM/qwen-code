@@ -631,7 +631,7 @@ export function createDaemonSessionActions({
           session.setConfigOption(configId, value),
           'Update session option timed out',
         );
-        if (sessionRef.current?.sessionId !== session.sessionId) {
+        if (sessionRef.current !== session) {
           return;
         }
         const reasoning = mapReasoningConfigOptions(result.configOptions);

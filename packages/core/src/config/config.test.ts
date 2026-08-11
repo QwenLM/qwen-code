@@ -4423,6 +4423,36 @@ describe('Server Config (config.ts)', () => {
       expect(setReasoningEffort).not.toHaveBeenCalled();
     });
 
+    it('restores the parked global effort when auth refresh lands on an unregistered model', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'qwen3.8-max',
+          reasoning: { effort: 'xhigh' },
+        },
+      });
+      (
+        config as unknown as {
+          globalReasoningEffortPreference?: string;
+        }
+      ).globalReasoningEffortPreference = 'high';
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'unregistered-target',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+    });
+
     it('does not apply registered defaults to a same-id runtime snapshot', async () => {
       const config = new Config({
         ...baseParams,

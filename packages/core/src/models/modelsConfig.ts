@@ -383,6 +383,7 @@ export class ModelsConfig {
     ) {
       this.strictModelProviderSelection = false;
       this.currentRegistryBaseUrl = undefined;
+      this.activeRuntimeModelSnapshotId = undefined;
       this.resetRegisteredModelReasoning(this._generationConfig.model);
       this._generationConfig.model = newModel;
       this.generationConfigSources['model'] = {
@@ -417,6 +418,7 @@ export class ModelsConfig {
     try {
       this.strictModelProviderSelection = false;
       this.currentRegistryBaseUrl = undefined;
+      this.activeRuntimeModelSnapshotId = undefined;
       this.resetRegisteredModelReasoning(this._generationConfig.model);
       this._generationConfig.model = newModel;
       this.generationConfigSources['model'] = {

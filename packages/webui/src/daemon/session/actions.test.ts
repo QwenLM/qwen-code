@@ -707,6 +707,33 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('ignores a config-option response after the attachment changes', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const target = createMockSession('session-a', 'client-b');
+    const deferred = createDeferred<{ configOptions: unknown[] }>();
+    source.setConfigOption.mockReturnValueOnce(deferred.promise);
+    const { actions, getConnection, replaceConnection, sessionRef } =
+      createActionsHarness({ session: source });
+
+    const update = actions.setConfigOption('thinking', 'off');
+    sessionRef.current = target as unknown as DaemonSessionClient;
+    replaceConnection({
+      status: 'connected',
+      sessionId: target.sessionId,
+      clientId: target.clientId,
+      reasoning: { thinking: { enabled: true } },
+    });
+    deferred.resolve({
+      configOptions: [{ id: 'thinking', currentValue: 'off' }],
+    });
+    await update;
+
+    expect(getConnection()).toMatchObject({
+      clientId: 'client-b',
+      reasoning: { thinking: { enabled: true } },
+    });
+  });
+
   it('clears the previous model reasoning state after a model switch', async () => {
     const session = createMockSession('session-a');
     session.setModel.mockResolvedValueOnce({ modelId: 'next-model' });
