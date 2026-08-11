@@ -96,6 +96,10 @@ describe('bundled review skill', () => {
     expect(section).toContain('`--all-chunks --round 1`');
     expect(section).toContain('`--all-chunks --round 2`');
     expect(section).toContain('in the same response');
+    // The reporting transition is the fix for the round-0 blocker; a revert
+    // dropping it must fail here, not slip through.
+    expect(section).toContain('wait for BOTH fan-outs');
+    expect(section).toContain('every shard passed as `--round 2`');
   });
 
   it('pins the bounded-tail protocol on the round-cap bullet', () => {
