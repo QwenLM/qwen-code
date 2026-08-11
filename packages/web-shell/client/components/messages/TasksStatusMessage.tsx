@@ -68,9 +68,9 @@ type TasksPanelStep = 'list' | 'detail';
 
 type TaskStatus = DaemonSessionTaskStatus['status'];
 
-function dispatchActive(id: string, active: boolean): void {
+function dispatchActive(id: string, sessionId: string, active: boolean): void {
   window.dispatchEvent(
-    new CustomEvent(ACTIVE_EVENT, { detail: { id, active } }),
+    new CustomEvent(ACTIVE_EVENT, { detail: { id, sessionId, active } }),
   );
 }
 
@@ -460,9 +460,10 @@ export function TasksStatusMessage({
   useEffect(() => {
     if (!manageActiveEvent) return undefined;
     const id = panelIdRef.current;
-    dispatchActive(id, isOpen);
-    return () => dispatchActive(id, false);
-  }, [isOpen, manageActiveEvent]);
+    const sessionId = message.snapshot.sessionId;
+    dispatchActive(id, sessionId, isOpen);
+    return () => dispatchActive(id, sessionId, false);
+  }, [isOpen, manageActiveEvent, message.snapshot.sessionId]);
 
   useEffect(() => {
     if (!manageActiveEvent) return undefined;

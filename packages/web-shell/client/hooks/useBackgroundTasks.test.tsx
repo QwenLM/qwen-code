@@ -12,6 +12,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
+import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMessage';
 import { useBackgroundTasks } from './useBackgroundTasks';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -132,6 +133,71 @@ afterEach(async () => {
 });
 
 describe('useBackgroundTasks', () => {
+  it('keeps polling while an active workflow is waiting to register', async () => {
+    taskActivityKey = 'workflow-call:in_progress';
+    const runningWorkflow = {
+      kind: 'workflow' as const,
+      id: 'wf-live',
+      label: 'Live workflow',
+      description: 'Live workflow',
+      status: 'running' as const,
+      startTime: Date.now(),
+      runtimeMs: 1,
+      isBackgrounded: false,
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    };
+    sdkMock.actions.getTasks
+      .mockResolvedValueOnce(snapshot('session-a'))
+      .mockResolvedValueOnce(snapshot('session-a'))
+      .mockResolvedValue(snapshot('session-a', [runningWorkflow]));
+
+    await renderHarness();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(3);
+    expect(latestTasks).toEqual([runningWorkflow]);
+  });
+
+  it('only pauses polling for a task panel in the same session', async () => {
+    const runningMonitor = monitor('monitor-a', 'running');
+    sdkMock.actions.getTasks.mockResolvedValue(
+      snapshot('session-a', [runningMonitor]),
+    );
+    await renderHarness();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: true, sessionId: 'session-b' },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(TASKS_STATUS_ACTIVE_EVENT, {
+          detail: { active: true, sessionId: 'session-a' },
+        }),
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps polling after a transient task refresh failure', async () => {
     const runningMonitor = monitor('monitor-a', 'running');
     sdkMock.actions.getTasks

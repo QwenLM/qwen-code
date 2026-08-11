@@ -132,6 +132,7 @@ function serializeWorkflowTask(
   return {
     kind: 'workflow',
     id: entry.runId,
+    ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('sourceRunId', entry.sourceRunId),
     ...optionalField('startMode', entry.startMode),
     label: entry.meta?.name ?? entry.description ?? entry.runId,

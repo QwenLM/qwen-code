@@ -2422,6 +2422,8 @@ export type DaemonWorkflowEvent =
 export interface DaemonSessionWorkflowTaskStatus {
   kind: 'workflow';
   id: string;
+  /** Tool call in the parent session that launched this workflow. */
+  toolUseId?: string;
   /** Restored from the project snapshot store; controls are read-only. */
   isHistorical?: boolean;
   sourceRunId?: string;

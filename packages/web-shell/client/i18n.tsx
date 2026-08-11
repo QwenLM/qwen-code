@@ -2403,6 +2403,9 @@ const EN: Messages = {
   'tasks.kind.workflow': 'Workflow',
   'workflow.graph.waiting': 'Waiting for the first agent dispatch…',
   'workflow.graph.notRecorded': 'No execution graph was saved for this run.',
+  'workflow.inline.loading': 'Loading live workflow execution…',
+  'workflow.inline.unavailable':
+    'This workflow run is no longer available in the current session.',
   'workflow.graph.omitted': (v) =>
     `Graph limited for performance: ${v?.lanes ?? 0} phases, ${v?.nodes ?? 0} agents, and ${v?.edges ?? 0} connections omitted.`,
   'workflow.noPhase': 'No phase',
@@ -5197,6 +5200,8 @@ const ZH: Messages = {
   'tasks.kind.workflow': '工作流',
   'workflow.graph.waiting': '等待第一个 Agent 调度…',
   'workflow.graph.notRecorded': '这次运行没有保存执行图。',
+  'workflow.inline.loading': '正在加载 Workflow 实时执行状态…',
+  'workflow.inline.unavailable': '当前会话中已无法读取这次 Workflow 运行。',
   'workflow.graph.omitted': (v) =>
     `为保证性能，执行图已省略 ${v?.lanes ?? 0} 个阶段、${v?.nodes ?? 0} 个 Agent 和 ${v?.edges ?? 0} 条连线。`,
   'workflow.noPhase': '未分阶段',

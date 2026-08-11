@@ -10,6 +10,10 @@ import { isSessionDisconnectedError } from '../utils/sessionErrors';
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
 
+function hasActiveTaskActivity(taskActivityKey: string): boolean {
+  return /:(?:pending|in_progress)(?:\||$)/.test(taskActivityKey);
+}
+
 function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
   return tasks.some(
     (task) =>
@@ -70,6 +74,7 @@ export function useBackgroundTasks(
             return;
           setTasks(snapshot.tasks);
           if (snapshot.tasks.length === 0) {
+            if (hasActiveTaskActivity(taskActivityKey)) return;
             emptyPollsRef.current += 1;
             if (emptyPollsRef.current >= MAX_EMPTY_TASK_POLLS) {
               setPollingActive(false);
@@ -102,14 +107,25 @@ export function useBackgroundTasks(
       disposed = true;
       clearInterval(id);
     };
-  }, [actions, connected, owner, pollingActive, sessionId, tasksPanelActive]);
+  }, [
+    actions,
+    connected,
+    owner,
+    pollingActive,
+    sessionId,
+    taskActivityKey,
+    tasksPanelActive,
+  ]);
 
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
 
   useEffect(() => {
     const onTasksPanelActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ active?: boolean }>).detail;
+      const detail = (
+        event as CustomEvent<{ active?: boolean; sessionId?: string }>
+      ).detail;
+      if (detail?.sessionId !== sessionId) return;
       const active = detail?.active === true;
       setTasksPanelActive(active);
       if (!active && hasActiveTask(tasksRef.current)) {
@@ -119,7 +135,7 @@ export function useBackgroundTasks(
     window.addEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
     return () =>
       window.removeEventListener(TASKS_STATUS_ACTIVE_EVENT, onTasksPanelActive);
-  }, []);
+  }, [sessionId]);
 
   return tasksOwnerRef.current === owner ? tasks : [];
 }

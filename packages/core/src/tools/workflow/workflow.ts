@@ -172,12 +172,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   WorkflowParams,
   WorkflowToolResult
 > {
+  private callId?: string;
+
   constructor(
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions,
     params: WorkflowParams,
   ) {
     super(params);
+  }
+
+  setCallId(callId: string): void {
+    this.callId = callId;
   }
 
   getDescription(): string {
@@ -209,6 +215,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       handle = await WorkflowRunner.start({
         config: this.config,
         signal,
+        toolUseId: this.callId,
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,

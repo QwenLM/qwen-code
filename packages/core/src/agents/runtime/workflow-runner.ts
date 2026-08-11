@@ -35,6 +35,7 @@ import { resolveSavedWorkflowScript } from './workflow-saved.js';
 export interface WorkflowRunnerOptions {
   config: Config;
   signal: AbortSignal;
+  toolUseId?: string;
   script?: string;
   scriptPath?: string;
   args: unknown;
@@ -124,6 +125,7 @@ export class WorkflowRunner {
     try {
       entry = registry?.register({
         runId,
+        toolUseId: options.toolUseId,
         meta: null,
         status: 'running',
         startTime: Date.now(),

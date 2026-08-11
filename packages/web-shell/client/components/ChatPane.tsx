@@ -31,6 +31,7 @@ import {
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
+import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -40,6 +41,7 @@ import {
 import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptImage } from '../adapters/promptTypes';
 import type {
@@ -58,6 +60,7 @@ import {
   isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
+import { getTaskActivityKey } from '../utils/taskActivity';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -247,6 +250,15 @@ export function ChatPane({
   );
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
+  const taskActivityKey = useMemo(
+    () => getTaskActivityKey(messages),
+    [messages],
+  );
+  const sessionTasks = useBackgroundTasks(
+    connection.sessionId,
+    taskActivityKey,
+    connection.status === 'connected',
+  );
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
@@ -961,48 +973,52 @@ export function ChatPane({
           onOpen={openMonitorDetails}
         >
           <SubagentDetailsProvider onOpen={openSubagentDetails}>
-            <MessageList
-              messages={messages}
-              pendingApproval={pendingToolApproval}
-              loadingTranscript={connection.loadingTranscript}
-              catchingUp={connection.catchingUp}
-              hasOlderHistory={transcriptHistory.hasMore}
-              loadingOlderHistory={transcriptHistory.loading}
-              historyCapacityReached={transcriptHistory.capacityReached}
-              historyPaginationError={transcriptHistory.paginationError}
-              onLoadOlderHistory={transcriptHistory.loadMore}
-              transcriptBlockCount={blocks.length}
-              transcriptActivity={store}
-              onReloadTranscript={
-                transcriptReloadSupported ? reloadTranscript : undefined
-              }
-              isResponding={isResponding}
-              workspaceCwd={connection.workspaceCwd || ''}
-              hideSessionTimeline
-              turnFileChanges={
-                visibleTurnOutputKinds.has('file')
-                  ? fileChangesByTurn
-                  : undefined
-              }
-              turnArtifacts={
-                visibleTurnOutputKinds.has('artifact')
-                  ? artifactsByTurn
-                  : undefined
-              }
-              turnScheduledTasks={
-                visibleTurnOutputKinds.has('scheduled_task')
-                  ? scheduledTasksByTurn
-                  : undefined
-              }
-              onTurnOutputOpen={handleRightPanelOpen}
-              onImagePreview={handleImagePreview}
-              onError={reportError}
-              generateContent={
-                connection.capabilities?.features.includes('session_generation')
-                  ? actions.generateSessionContent
-                  : undefined
-              }
-            />
+            <WorkflowDetailsProvider tasks={sessionTasks}>
+              <MessageList
+                messages={messages}
+                pendingApproval={pendingToolApproval}
+                loadingTranscript={connection.loadingTranscript}
+                catchingUp={connection.catchingUp}
+                hasOlderHistory={transcriptHistory.hasMore}
+                loadingOlderHistory={transcriptHistory.loading}
+                historyCapacityReached={transcriptHistory.capacityReached}
+                historyPaginationError={transcriptHistory.paginationError}
+                onLoadOlderHistory={transcriptHistory.loadMore}
+                transcriptBlockCount={blocks.length}
+                transcriptActivity={store}
+                onReloadTranscript={
+                  transcriptReloadSupported ? reloadTranscript : undefined
+                }
+                isResponding={isResponding}
+                workspaceCwd={connection.workspaceCwd || ''}
+                hideSessionTimeline
+                turnFileChanges={
+                  visibleTurnOutputKinds.has('file')
+                    ? fileChangesByTurn
+                    : undefined
+                }
+                turnArtifacts={
+                  visibleTurnOutputKinds.has('artifact')
+                    ? artifactsByTurn
+                    : undefined
+                }
+                turnScheduledTasks={
+                  visibleTurnOutputKinds.has('scheduled_task')
+                    ? scheduledTasksByTurn
+                    : undefined
+                }
+                onTurnOutputOpen={handleRightPanelOpen}
+                onImagePreview={handleImagePreview}
+                onError={reportError}
+                generateContent={
+                  connection.capabilities?.features.includes(
+                    'session_generation',
+                  )
+                    ? actions.generateSessionContent
+                    : undefined
+                }
+              />
+            </WorkflowDetailsProvider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
       </div>

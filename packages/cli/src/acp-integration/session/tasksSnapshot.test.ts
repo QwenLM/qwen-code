@@ -193,6 +193,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       runId: 'wf_graph',
+      toolUseId: 'workflow-call-1',
       description: 'Review and fix',
       meta: { name: 'review-and-fix', description: 'Review and fix' },
       status: 'running',
@@ -290,6 +291,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(task).toMatchObject({
       kind: 'workflow',
       id: 'wf_graph',
+      toolUseId: 'workflow-call-1',
       label: 'review-and-fix',
       currentPhase: 'Review',
       agentsDispatched: 2,

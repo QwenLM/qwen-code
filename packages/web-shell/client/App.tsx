@@ -58,7 +58,9 @@ import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
+import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
+import { getTaskActivityKey } from './utils/taskActivity';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   loadVoiceProviders,
@@ -1118,37 +1120,7 @@ function parseRenameArgument(
   return { type: 'manual', displayName: trimmed };
 }
 
-function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'monitor' || name === 'workflow') return true;
-  if (tool.args?.is_background !== true) return false;
-  return (
-    name === 'shell' ||
-    name === 'bash' ||
-    name === 'run_shell_command' ||
-    name === 'exec'
-  );
-}
-
-export function getTaskActivityKey(messages: readonly Message[]): string {
-  const parts: string[] = [];
-  const visit = (tools: readonly ACPToolCall[]) => {
-    for (const tool of tools) {
-      if (
-        isBackgroundTaskToolCall(tool) ||
-        isBackgroundSubAgentToolCall(tool)
-      ) {
-        parts.push(`${tool.callId}:${tool.status}`);
-      }
-      if (tool.subTools) visit(tool.subTools);
-    }
-  };
-  for (const message of messages) {
-    if (message.role !== 'tool_group') continue;
-    visit(message.tools);
-  }
-  return parts.join('|');
-}
+export { getTaskActivityKey } from './utils/taskActivity';
 
 export function mergeMonitorTaskSnapshot(
   current: DaemonSessionMonitorTaskStatus,
@@ -11248,11 +11220,16 @@ export function App({
                                 }
                               />
                             );
+                            const messageListWithWorkflowDetails = (
+                              <WorkflowDetailsProvider tasks={sessionTasks}>
+                                {messageListContent}
+                              </WorkflowDetailsProvider>
+                            );
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
                               >
-                                {messageListContent}
+                                {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
                             );
                             const messageList = monitorDetailsSupported ? (
