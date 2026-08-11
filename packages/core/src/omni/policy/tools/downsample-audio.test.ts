@@ -141,7 +141,7 @@ describe('OmniDownsampleAudioTool', () => {
         sizeBytes: OUTPUT_SIZE,
         metadata: {
           omniDisclosure:
-            '原 320kbps/48kHz 立体声 → 64kbps/16kHz 单声道，高频细节丢失',
+            '原 320kbps/48kHz 立体声 → 64kbps/16kHz 单声道，高频细节丢失，声道合并',
         },
       },
     ]);
@@ -165,7 +165,30 @@ describe('OmniDownsampleAudioTool', () => {
     const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
     expect(args.join(' ')).toContain('-b:a 96k -ar 24000 -ac 2');
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
-      '原 256kbps/48kHz 6声道 → 96kbps/24kHz 立体声，高频细节丢失',
+      '原 256kbps/48kHz 6声道 → 96kbps/24kHz 立体声，高频细节丢失，声道合并',
+    );
+  });
+
+  it('clamps every target to the probed source (never "upsamples") and discloses only the re-encode', async () => {
+    // Source already below every default: 24kbps/8kHz/mono.
+    probe({ bitRate: 24_000, sampleRateHz: 8000, channels: 1 });
+    const { result } = await run();
+    const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+    expect(args.join(' ')).toContain('-b:a 24k -ar 8000 -ac 1');
+    // No frequency content above the source's own Nyquist was lost —
+    // claiming 高频细节丢失 here would be a false disclosure (D8).
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 24kbps/8kHz 单声道 → 24kbps/8kHz 单声道，重新编码压缩',
+    );
+  });
+
+  it('discloses 声道合并 (not 高频细节丢失) when only the channel count drops', async () => {
+    probe({ bitRate: 48_000, sampleRateHz: 16_000, channels: 2 });
+    const { result } = await run();
+    const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
+    expect(args.join(' ')).toContain('-b:a 48k -ar 16000 -ac 1');
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 48kbps/16kHz 立体声 → 48kbps/16kHz 单声道，声道合并',
     );
   });
 
