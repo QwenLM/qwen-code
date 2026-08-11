@@ -1,25 +1,24 @@
 # Selective session restore implementation plan
 
-- Status: Proposed; as of 2026-08-11, #8691 and #8833 are merged and #8882
-  remains open; the design may land independently, but implementation must land
-  after #8882
+- Status: Proposed; as of 2026-08-11, #8691, #8833, and #8882 are merged;
+  exact-shape restore coalescing is implemented in Draft PR #8933, and selective
+  implementation starts from fresh `main` after #8933 lands
 - Design: `docs/design/2026-08-08-selective-session-restore.md`
 - Tracks: #8678
 
 ## Delivery rule
 
-The delivery order is merged #8691 and #8833, transactional cross-session
-switching in #8882, this selective-restore implementation, and then the durable
+The delivery order is merged #8691, #8833, and #8882; exact-shape restore
+coalescing in #8933; this selective-restore implementation; and then the durable
 checkpoint. #8824 was superseded by this split series. #8883's legacy watchdog
 retry fix and the later PR3c/PR3d resync/repair and branch-adoption slices are not
 prerequisites for this bounded-hydration implementation.
 
-Development may begin on a separate Draft branch stacked from an exact recorded
-#8882 head. Do not add selective commits to #8882 itself, and do not merge or
-present the implementation as independent of that base. Record the base head SHA
-in the implementation PR. After #8882 lands, rebase onto the final `main`,
-retarget the implementation PR, inspect the selective-only diff, and rerun all
-transactional switching regressions before the implementation can land.
+Do not start the selective implementation from an unmerged prerequisite head.
+After #8933 lands, create a separate Draft branch from fresh `main`, confirm its
+diff contains #8882 and #8933, and rerun their transactional and request-shape
+regressions before adding projection code. Do not add selective commits to
+#8743, #8882, or #8933.
 
 Implement selective restore as one end-to-end daemon fix. Reviewable commits may
 follow the phases below, but do not merge an intermediate PR that only removes a
@@ -183,31 +182,22 @@ consumer, and returns the requested replay semantics.
 - Keep internal load-replay envelope version 1, add optional
   `anchorRecordId?: string`, validate/strip it in the bridge, and use it only as
   the last fallback for the existing public history anchor.
-- Normalize the bridge in-flight key as discriminated `all`, `recent(limit)`, or
-  `none` replay plus action, response/stream mode, and inherited-history policy.
-  Coalesce only identical shapes; omitted versus explicit page size and unequal
-  recent limits return `restore_in_progress`.
-- Align #8882's outer WebUI transition coordinator with the same equivalence
-  boundary. Capture the operation and effective page size when creating an
-  intent, and include `load/all`, `load/recent(limit)`, or `resume/none` in its
-  key beside normalized session/workspace identity. Identical shapes may still
-  coalesce. Load versus resume or unequal effective limits must remain distinct
-  and use the existing supersede/serialize and stale-target retirement path,
-  rather than reusing another request's replay. Land this correction in #8882
-  while it is open. If #8882 merges first, use a narrow prerequisite follow-up
-  from final `main` and rebase the selective branch onto that fix; do not leave
-  the coordinator correction owned by the selective implementation PR.
-- Normalize the restore shape at bridge ingress before live lookup, admission,
-  or coalescing. Validate a meaningful response-load `historyPageSize` with the
-  same integer range as REST and ACP; streamed load and resume normalize to their
-  existing all/none shape even if a direct programmatic caller supplies the
-  otherwise unused field. The REST route retains its existing
-  `400 invalid_transcript_limit` mapping, while a meaningful invalid direct value
-  receives local bridge input validation. Apply the normalized shape before
-  both warm and cold lookup so the ignored field cannot change meaning with
-  residency. Fix the stale bridge request type comment that says omitted
-  `historyReplay` defaults to bulk response; the current and retained default is
-  streamed load, and a regression test must cover that omitted-field behavior.
+- Consume, but do not reimplement, prerequisite #8933. It normalizes the bridge
+  in-flight key as discriminated `all`, `recent(limit)`, or `none` replay plus
+  action, response/stream mode, and inherited-history policy; only identical
+  shapes coalesce, while omitted versus explicit pages and unequal limits return
+  `restore_in_progress`.
+- Preserve #8933's #8882 coordinator correction. The operation and effective
+  page are captured with the intent, `load/all`, `load/recent(limit)`, or
+  `resume/none` participates in its normalized key, and a non-identical shape
+  permanently fences the obsolete raw result while retaining same-shape timeout
+  retry. Selective implementation must not add another coordinator.
+- Preserve #8933's bridge ingress validation before live lookup, admission, or
+  coalescing. Meaningful response-load `historyPageSize` uses the REST/ACP integer
+  range; streamed load and resume ignore the unused field for warm and cold
+  Sessions. The bridge request type correctly documents omitted `historyReplay`
+  as streamed load. Selective code adds the projection-mode mapping and replay
+  limits behind this established normalized shape.
 - Audit every production restore caller. Change scheduled-task startup
   rehydration/keepalive and both direct and daemon-backed channel restoration to
   ACP/SDK resume because they ignore replay. Preserve all replay for generic
@@ -361,15 +351,14 @@ consumer, and returns the requested replay semantics.
   receive post-resume updates, including available-command refresh. None may
   collect historical replay frames. Generic load and branch clients retain
   their explicit replay behavior.
-- A Draft implementation may start from an exact recorded #8882 head. After
-  #8882 merges, rebase and retarget to `main` containing its final implementation,
-  review the selective-only diff, and run its transactional integration coverage
-  with selective-restore 409, 413, timeout/504, cancellation, and staging
-  failures on the modern `client_identity` path. Assert the committed session-id
-  and workspace-cwd source tuple remains attached and usable, and successful
-  adoption changes transcript, connection, metadata, and ownership atomically.
-  Preserve #8882's legacy detach-first behavior when that capability is
-  explicitly absent.
+- After #8933 merges, create the implementation from fresh `main` containing the
+  final #8882 and #8933 code, review the selective-only diff, and run their
+  integration coverage with selective-restore 409, 413, timeout/504,
+  cancellation, and staging failures on the modern `client_identity` path.
+  Assert the committed session-id and workspace-cwd source tuple remains
+  attached and usable, and successful adoption changes transcript, connection,
+  metadata, and ownership atomically. Preserve #8882's legacy detach-first
+  behavior when that capability is explicitly absent.
 - Run `npm run build && npm run typecheck` from the repository root.
 - Record a benchmark-only full-loader baseline and run the selective projection
   on 64 KiB, 1 MiB, and 4 MiB fixtures under the same runtime. Report absolute
@@ -396,11 +385,13 @@ consumer, and returns the requested replay semantics.
 
 - [x] #8691 has landed.
 - [x] #8833 attachment-identity hardening has landed.
-- [ ] A Draft implementation may be stacked on an exact recorded #8882 head,
-      but #8882 transactional WebUI session switching has landed with green CI
-      and maintainer approval before selective restore merges. The implementation
-      is then rebased and retargeted to `main` containing its final attach
-      lifecycle, and its selective-only diff is reviewed again.
+- [x] #8882 transactional WebUI session switching has landed with green CI and
+      maintainer approval.
+- [x] #8933 implements exact-shape WebUI and bridge coalescing, effective-page
+      snapshotting, ingress validation, and focused real-daemon regression
+      coverage without adding selective runtime code.
+- [ ] #8933 has landed; the selective implementation branch is then created from
+      fresh `main` containing both #8882 and #8933.
 - [ ] Projection acquisition, runtime-consumer migration, and old-loader removal
       ship as one end-to-end implementation; no intermediate production PR leaves
       an unused projection or removes the post-lease authoritative read without
@@ -523,18 +514,16 @@ consumer, and returns the requested replay semantics.
       successful switch commits transcript, connection, metadata, and ownership
       atomically. Explicitly unsupported-capability fallback retains legacy
       detach-first behavior.
-- [ ] In-flight bridge coalescing distinguishes omitted/full, explicit recent
-      limits, none, action, stream/response mode, and inherited-history policy;
-      only identical shapes share a restore and its typed result.
-- [ ] #8882's outer coordinator also snapshots and keys the effective replay
-      shape: identical target/mode/page requests coalesce, while load versus
-      resume and unequal page sizes remain distinct and never reuse another
-      request's replay result.
-- [ ] Bridge ingress rejects invalid/non-finite/out-of-range page sizes before
-      live lookup or coalescing when the field is meaningful. Streamed load and
-      resume ignore the field consistently for warm and cold Sessions. The
-      bridge request type documents, and a regression test proves, that omitted
-      `historyReplay` defaults to streamed load rather than bulk response.
+- [x] #8933 in-flight bridge coalescing distinguishes omitted/full, explicit
+      recent limits, none, action, stream/response mode, and inherited-history
+      policy; only identical shapes share a restore and its typed result.
+- [x] #8933's WebUI coordinator snapshots and keys the effective replay shape:
+      identical target/mode/page requests coalesce, while load versus resume and
+      unequal page sizes remain distinct and never reuse a superseded result.
+- [x] #8933 bridge ingress rejects invalid/non-finite/out-of-range page sizes
+      before live lookup or coalescing when meaningful. Streamed load and resume
+      ignore the field consistently for warm and cold Sessions. The bridge type
+      documents omitted `historyReplay` as streamed load.
 - [ ] Scheduled-task rehydration/keepalive and direct/daemon channel restoration
       use resume/none and collect no historical replay. Scheduled tasks retain
       cron/Goal recovery; channels retain prompt/live-update and

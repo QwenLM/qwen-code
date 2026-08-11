@@ -2,8 +2,10 @@
 
 - Status: Draft for review
 - Tracks: #8678
-- Prerequisite status on 2026-08-11: #8691 and attachment-identity hardening in
-  #8833 are merged; transactional cross-session switching in #8882 remains open
+- Prerequisite status on 2026-08-11: #8691, attachment-identity hardening in
+  #8833, and transactional cross-session switching in #8882 are merged;
+  exact-shape restore coalescing is implemented in Draft PR #8933 and must land
+  before selective implementation starts
 
 ## Scope and ordering
 
@@ -13,23 +15,22 @@ durable checkpoint. This document uses selective runtime projection to implement
 the bounded-hydration slice without leaving full runtime materialization in
 place.
 
-PR #8691 has merged. The original transactional prototype in #8824 was closed
-and split: attachment-identity hardening in #8833 has merged, while ordinary and
-controlled cross-session transactions continue in #8882. The design document may
-land before #8882. Development may also begin as a separate stacked Draft branch
-from an exact recorded #8882 head, without modifying or adding selective-restore
-commits to #8882 itself. Record that base head SHA in the implementation PR. The
-selective-restore PR must not land before #8882; once #8882 merges, rebase the
-implementation onto the final `main`, retarget the PR, review only the selective
-diff, and rerun the transactional regression suite before checkpoint work. The
-boundaries are distinct: #8691 fences timeouts and late results; #8833 fences
-stale attachment work; on the modern `client_identity` path, #8882 keeps the
-current UI session attached until a fully staged target wins its final
-identity/environment/lifecycle/deadline checks and commits; selective restore
-removes the leased mode's duplicate full read and reduces reconstruction,
-materialization, and replay cost but does not replace transactional commit
-semantics or make a slow restore responsive by itself. The lease-off path still
-scans the frozen transcript once.
+PRs #8691, #8833, and #8882 have merged. The original transactional prototype in
+#8824 was closed and split into those narrower ownership and switching slices.
+The final #8882 implementation keeps the current UI session attached until a
+fully staged target wins its identity, environment, lifecycle, and deadline
+checks and commits. Review after merge found one remaining correctness boundary:
+the WebUI coordinator and ACP bridge could still coalesce non-equivalent replay
+requests. Draft PR #8933 implements exact-shape coalescing, page snapshotting,
+bridge ingress validation, and the associated unit and real-daemon regression
+coverage. Selective implementation begins from fresh `main` only after #8933
+lands; it must not duplicate that coordinator or bridge fix. The boundaries are
+distinct: #8691 fences timeouts and late results; #8833 fences stale attachment
+work; #8882 owns transactional target commit; #8933 owns restore request-shape
+correctness; selective restore removes the leased mode's duplicate full read and
+reduces reconstruction, materialization, and replay cost but does not replace
+transactional commit semantics or make a slow restore responsive by itself. The
+lease-off path still scans the frozen transcript once.
 
 #8883 repairs retry after the existing watchdog expires on the legacy switching
 path. It is related but is not an implementation prerequisite for selective
@@ -102,12 +103,12 @@ index machinery.
   the transcript once and remains O(file bytes).
 - Making restore proportional only to the JSONL tail. That is the checkpoint
   follow-up.
-- Implementing transactional WebUI session switching. #8833 owns attachment
-  identity and #8882 owns the restore/stage/guarded-commit boundary. A stacked
-  implementation may depend on an exact recorded #8882 head, but #8882 must land
-  before the selective-restore PR. This design does not change attach, detach,
-  or WebUI commit ownership, including its legacy detach-first fallback when
-  `client_identity` is explicitly unavailable.
+- Implementing transactional WebUI session switching or restore-shape
+  coalescing. #8833 owns attachment identity, #8882 owns the
+  restore/stage/guarded-commit boundary, and #8933 owns exact-shape admission.
+  This design does not change attach, detach, WebUI commit ownership, or the
+  legacy detach-first fallback when `client_identity` is explicitly
+  unavailable.
 - Changing TUI `--resume`, `--continue`, session export, archive reads, fork, or
   branch behavior.
 - Changing the standalone legacy `qwen/session/loadUpdates` extension or the
@@ -547,45 +548,38 @@ Map protocol modes explicitly:
 | legacy streamed load                      | `all`                  |
 | `resumeSession`                           | `none`                 |
 
-Normalize bridge restore shape before consulting `inFlightRestores`. Preserve
-omission as `{ kind: 'all' }`; an explicit validated page size is
-`{ kind: 'recent', limit }`; resume is `{ kind: 'none' }`. The coalescing key
-also includes action, response/stream replay mode, and `hideInheritedHistory`.
-Only identical discriminated shapes coalesce. Omitted versus explicit page size,
-or two different explicit limits, returns the existing `restore_in_progress`
-conflict instead of receiving the first request's replay page.
+Prerequisite PR #8933 implements bridge restore-shape normalization before
+`inFlightRestores`. Omission remains `{ kind: 'all' }`; an explicit validated
+page size is `{ kind: 'recent', limit }`; resume is `{ kind: 'none' }`. The
+coalescing key also includes action, response/stream replay mode, and
+`hideInheritedHistory`. Only identical discriminated shapes coalesce. Omitted
+versus explicit page size, or two different explicit limits, returns the
+existing `restore_in_progress` conflict instead of receiving the first request's
+replay page.
 
-#8882's outer WebUI transition coordinator must use the same request-equivalence
-boundary before a restore reaches the bridge. Snapshot the operation and
-effective page size when the intent is created, and include the resulting
-`load/all`, `load/recent(limit)`, or `resume/none` shape in the intent key in
-addition to normalized session and workspace identity. The current target-only
-behavior must not coalesce `load` with `resume`, or two loads with different
-effective page sizes. Exactly identical target and replay shapes may still share
-one public intent. A newer non-identical shape follows #8882's existing
-supersede-and-serialize lifecycle, including best-effort retirement of an
-obsolete raw target; do not add a second coordinator or a generic caller-owned
-shape matrix. This correction belongs in #8882 while it is open. If #8882 merges
-first, land the correction as a narrow prerequisite follow-up from final `main`
-and rebase the selective branch onto it; do not make selective restore own the
-transaction coordinator's equivalence bug.
+#8933 also updates #8882's outer WebUI transition coordinator to use the same
+request-equivalence boundary before a restore reaches the bridge. It snapshots
+the operation and effective page size when the intent is created and includes
+the resulting `load/all`, `load/recent(limit)`, or `resume/none` shape beside
+normalized session and workspace identity. Exactly identical target and replay
+shapes may share one public intent. A newer non-identical shape follows #8882's
+supersede-and-serialize lifecycle and permanently fences the obsolete raw result,
+even if a later intent returns to its shape; a timed-out raw request that has not
+been superseded by a different shape may still satisfy an exact-shape retry.
+Selective restore must consume this completed boundary rather than add a second
+coordinator or caller-owned shape matrix.
 
-Normalize the restore shape at bridge ingress before live-entry lookup, capacity
-admission, or in-flight coalescing. When `historyPageSize` is meaningful, validate
-it with the same integer range as the REST route and ACP child. This keeps direct
-bridge callers from creating a `recent(NaN)`/out-of-range key or reaching a
-different live-session path than a cold request. `historyPageSize` has meaning
-only for response-mode `load`; streamed load and resume normalize to their
-existing `all`/`none` shape even if a direct programmatic caller supplies the
-otherwise unused field. The REST route already returns
-`400 invalid_transcript_limit` before entering the bridge;
-meaningful invalid values from a direct bridge caller receive the bridge's local
-input-validation error. Use the normalized shape for live lookup too, so a field
-that is ignored for a cold request cannot become recent merely because the
-Session is resident. Correct the stale `BridgeRestoreSessionRequest.historyReplay`
-API comment at the same time: the implementation defaults an omitted value to
-streamed load, not bulk response. A regression test must lock that omitted-field
-default so the documented shape and bridge behavior cannot diverge again.
+At bridge ingress, #8933 validates meaningful response-load `historyPageSize`
+values with the REST/ACP integer range before live-entry lookup, admission, or
+coalescing. Streamed load and resume normalize to their existing `all`/`none`
+shape even if a direct programmatic caller supplies the otherwise unused field.
+The REST route retains `400 invalid_transcript_limit`; meaningful invalid direct
+bridge values receive local input validation. The normalized field is also used
+for live lookup, so residency cannot change its meaning. #8933 corrects the
+stale `BridgeRestoreSessionRequest.historyReplay` comment: omission defaults to
+streamed load, not bulk response. Selective implementation retains these tests
+and adds only the projection-mode mapping and limits behind the established
+shape.
 
 Classify every production restore caller by whether it consumes replay. Do not
 use compatibility-mode `all` merely to make a runtime resident:
@@ -734,10 +728,10 @@ sequenceDiagram
   B-->>D: "restored session"
 ```
 
-The target construction shown above supplies the restore result consumed by
-#8882's transactional target-staging path. On its modern `client_identity` path,
-the outer switch keeps the previous WebUI session attached until the target is
-ready and commits only after a successful return and final
+The target construction shown above supplies the restore result consumed by the
+merged #8882 transactional target-staging path. On its modern `client_identity`
+path, the outer switch keeps the previous WebUI session attached until the
+target is ready and commits only after a successful return and final
 identity/environment/lifecycle/deadline checks. Its committed identity is the
 session-id and workspace-cwd tuple, so same-id cross-workspace navigation is
 still a real switch. Target-side 409, 413, timeout/504, cancellation, or staging
@@ -1252,7 +1246,7 @@ behavior rather than inventing a new fallback.
   successful adoption changes transcript, connection, metadata, and ownership
   atomically. Its explicitly unsupported-capability fallback retains the legacy
   detach-first behavior.
-- #8882 coordinator tests prove that identical target/mode/page shapes coalesce,
+- #8933 coordinator tests prove that identical target/mode/page shapes coalesce,
   while `load` versus `resume` and unequal effective page sizes serialize as
   distinct intents and never reuse another request's replay result.
 
@@ -1463,13 +1457,13 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 ## Rollout and follow-ups
 
 The design document may land before its remaining implementation prerequisite.
-#8691 and #8833 are merged. Selective development may use a separate Draft
-stacked on an exact recorded #8882 head, but the implementation lands only after
-#8882's transactional switching and a final rebase to `main`, followed by the
-durable checkpoint. #8883 and the later PR3c/PR3d ownership slices are not
-prerequisites for this bounded hydration path. Keep selective restore as one
-end-to-end implementation PR, using reviewable commits for the phases below; do
-not land an unused projection API or a partial early-paging step.
+#8691, #8833, and #8882 are merged; #8933 contains the completed request-shape
+fix and must merge next. Start selective development from fresh `main` after
+#8933 lands, followed by the durable checkpoint. #8883 and the later PR3c/PR3d
+ownership slices are not prerequisites for this bounded hydration path. Keep
+selective restore as one end-to-end implementation PR, using reviewable commits
+for the phases below; do not land an unused projection API or a partial
+early-paging step.
 `historyPageSize` cannot bound pre-materialization I/O without the consumer
 projection, and the writer-lease path's post-acquisition read remains
 authoritative.
