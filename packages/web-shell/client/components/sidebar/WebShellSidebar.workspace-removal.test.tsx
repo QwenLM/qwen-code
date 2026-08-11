@@ -75,6 +75,9 @@ const {
       status: 'connected',
       sessionId: null as string | null,
       workspaceCwd: '/tmp/project',
+      supportedCommands: undefined as
+        | { workflowsEnabled?: boolean }
+        | undefined,
       capabilities: undefined as
         | {
             qwenCodeVersion: string;
@@ -328,6 +331,7 @@ function renderSidebar(
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
     onOpenGoals?: () => void;
+    onOpenWorkflows?: () => void;
     onOpenAddWorkspace?: () => void;
     onNewSession?: (workspaceCwd?: string) => boolean;
     workspaces?: DaemonWorkspaceCapability[];
@@ -364,6 +368,7 @@ function renderSidebar(
           onOpenSettings={() => {}}
           onOpenDaemonStatus={() => {}}
           onOpenScheduledTasks={() => {}}
+          onOpenWorkflows={overrides.onOpenWorkflows ?? (() => {})}
           onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
@@ -567,6 +572,7 @@ beforeEach(() => {
   root = createRoot(container);
   connection.sessionId = null;
   connection.workspaceCwd = '/tmp/project';
+  connection.supportedCommands = undefined;
   connection.capabilities = capabilities;
   workspace.capabilities = capabilities;
   workspace.refreshCapabilities.mockReset();
@@ -3036,6 +3042,37 @@ describe('WebShellSidebar goals entry', () => {
     expect(button).not.toBeNull();
     click(button!);
     expect(onOpenGoals).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar workflows entry', () => {
+  it('opens the workflow runs page from primary navigation', () => {
+    const onOpenWorkflows = vi.fn();
+    workspace.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.primary ? { ...entry, workflowsEnabled: true } : entry,
+      ),
+    };
+    connection.capabilities = workspace.capabilities;
+    connection.supportedCommands = { workflowsEnabled: false };
+    renderSidebar({ onOpenWorkflows });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Workflows"]',
+    );
+    expect(button).not.toBeNull();
+
+    click(button!);
+
+    expect(onOpenWorkflows).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides workflows when the current session has not enabled them', () => {
+    renderSidebar();
+
+    expect(
+      container.querySelector('button[aria-label="Workflows"]'),
+    ).toBeNull();
   });
 });
 

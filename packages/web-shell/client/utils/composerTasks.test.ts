@@ -52,6 +52,21 @@ describe('isComposerTask', () => {
         },
         true,
       ],
+      [
+        {
+          ...base,
+          kind: 'workflow',
+          isBackgrounded: true,
+          phaseVisits: [],
+          dispatches: [],
+          agentsDispatched: 0,
+          agentsCompleted: 0,
+          tokensSpent: 0,
+          recentLogs: [],
+          pendingApprovalCount: 0,
+        },
+        true,
+      ],
     ];
 
     for (const [task, expected] of tasks) {

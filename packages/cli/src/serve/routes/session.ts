@@ -3212,16 +3212,62 @@ export function registerSessionRoutes(
         }
         const body = safeBody(req);
         const kind = body['kind'];
-        if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
-          res
-            .status(400)
-            .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+        if (
+          kind !== 'agent' &&
+          kind !== 'shell' &&
+          kind !== 'monitor' &&
+          kind !== 'workflow'
+        ) {
+          res.status(400).json({
+            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+          });
           return;
         }
         res
           .status(200)
           .json(
             await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/tasks/:taskId/workflow-action',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/tasks/:taskId/workflow-action',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        const action = safeBody(req)['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          res.status(400).json({
+            error:
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionWorkflowTask(
+              sessionId,
+              taskId,
+              action,
+            ),
           );
       },
     ),

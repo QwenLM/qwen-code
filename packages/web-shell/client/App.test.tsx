@@ -38,6 +38,7 @@ type MockConnection = {
   models: Array<{ id: string; label?: string }>;
   commands: unknown[];
   skills: string[];
+  supportedCommands?: { workflowsEnabled?: boolean };
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
@@ -1391,6 +1392,15 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
     },
   };
 });
+vi.doMock('./components/workflows/WorkflowRunsPage', async () => {
+  const React = await import('react');
+  return {
+    WorkflowRunsPage: () =>
+      React.createElement('div', {
+        'data-testid': 'workflow-runs-content',
+      }),
+  };
+});
 vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
   const React = await import('react');
   return {
@@ -1589,7 +1599,7 @@ describe('mergeSideTaskCatalog', () => {
 });
 
 describe('task activity key', () => {
-  it('includes background shells in any tool-call state', () => {
+  it('includes task-bearing tool calls in any state', () => {
     const messages = [
       {
         id: 'tools',
@@ -1633,12 +1643,18 @@ describe('task activity key', () => {
             status: 'completed',
             args: { command: 'npm run dev --watch' },
           },
+          {
+            callId: 'workflow-call',
+            toolName: 'workflow',
+            status: 'in_progress',
+            args: {},
+          },
         ],
       },
     ] satisfies Message[];
 
     expect(getTaskActivityKey(messages)).toBe(
-      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|monitor-call:completed',
+      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|monitor-call:completed|workflow-call:in_progress',
     );
   });
 
@@ -4405,6 +4421,7 @@ beforeEach(() => {
   mockConnection.missingSession = false;
   mockConnection.commands = [];
   mockConnection.skills = [];
+  mockConnection.supportedCommands = undefined;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   mockConnection.capabilities = {
@@ -16038,6 +16055,89 @@ describe('App prompt send failure retry', () => {
     expect(
       document.querySelector('[data-testid="failed-prompt-retry"]'),
     ).toBeNull();
+  });
+});
+
+describe('App workflow history entry', () => {
+  it('opens workflows from a session-less enabled workspace', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          workflowsEnabled: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.supportedCommands = { workflowsEnabled: false };
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.supportedCommands = { workflowsEnabled: false };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+  });
+
+  it('opens the workflow runs page for a bare /workflows command', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-content"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    mockConnection.supportedCommands = { workflowsEnabled: false };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+  });
+
+  it('does not expose the local workflow page when workflows are disabled', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('button[aria-label="Workflows"]'),
+    ).toBeNull();
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/workflows',
+      expect.any(Object),
+    );
   });
 });
 

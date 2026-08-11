@@ -154,7 +154,7 @@ const WORKFLOW_PARAM_SCHEMA = {
       type: 'boolean',
       default: false,
       description:
-        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
+        'Optional. When true, start the workflow under a session with an active completion channel and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Supported by the interactive TUI and Web Shell. Defaults to false.',
     },
   },
   // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
@@ -541,7 +541,7 @@ Reach for one to be comprehensive (decompose the work and cover every part in pa
 
 **Runtime** — see the \`script\` parameter for the detailed authoring contract.
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script anywhere. Default \`max(1, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script anywhere. Default \`max(1, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree' })\` covers structured-output contracts, declarative-agent selection, model override, and git-worktree-isolated subagents. \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in clients with an active completion channel, including the interactive TUI and Web Shell, and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
 
 **Scout first, then orchestrate**
 
@@ -615,11 +615,8 @@ export class WorkflowTool extends BaseDeclarativeTool<
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
     if (params.run_in_background === true) {
-      if (
-        !this.config.isInteractive() ||
-        this.config.getExperimentalZedIntegration?.() === true
-      ) {
-        return 'WorkflowTool: `run_in_background` is available only in the interactive TUI.';
+      if (this.config.getExperimentalZedIntegration?.() === true) {
+        return 'WorkflowTool: `run_in_background` is not available in the Zed integration.';
       }
       if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
         return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';

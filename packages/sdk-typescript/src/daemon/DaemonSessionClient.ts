@@ -722,6 +722,22 @@ export class DaemonSessionClient {
     );
   }
 
+  async controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>['status'];
+    taskId?: string;
+  }> {
+    return await this.client.sessionWorkflowTaskAction(
+      this.sessionId,
+      taskId,
+      action,
+      this.clientId,
+    );
+  }
+
   async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
     return await this.client.sessionGoalClear(this.sessionId, this.clientId);
   }

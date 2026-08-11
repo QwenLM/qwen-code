@@ -219,6 +219,7 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellWorkflowTask,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';

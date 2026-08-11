@@ -102,12 +102,18 @@ export function getTaskPillLabel(
   const composerTasks = tasks.filter(isComposerTask);
   if (composerTasks.length === 0) return '';
 
-  const running = composerTasks.filter((task) => task.status === 'running');
+  const running = composerTasks.filter(
+    (task) =>
+      task.status === 'running' ||
+      task.status === 'pausing' ||
+      task.status === 'paused',
+  );
   if (running.length > 0) {
-    const counts = { shell: 0, monitor: 0 };
+    const counts = { shell: 0, monitor: 0, workflow: 0 };
     for (const task of running) {
       if (task.kind === 'shell') counts.shell += 1;
       if (task.kind === 'monitor') counts.monitor += 1;
+      if (task.kind === 'workflow') counts.workflow += 1;
     }
     const parts: string[] = [];
     if (counts.shell > 0) {
@@ -121,6 +127,16 @@ export function getTaskPillLabel(
           counts.monitor,
           'tasks.pill.monitor',
           'tasks.pill.monitors',
+          t,
+        ),
+      );
+    }
+    if (counts.workflow > 0) {
+      parts.push(
+        formatCount(
+          counts.workflow,
+          'tasks.pill.workflow',
+          'tasks.pill.workflows',
           t,
         ),
       );

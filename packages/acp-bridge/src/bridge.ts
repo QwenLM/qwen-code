@@ -62,6 +62,7 @@ import {
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
   type ServeSessionTasksStatus,
+  type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceMcpToolsStatus,
@@ -8260,6 +8261,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
         { taskId, taskKind },
       );
+    },
+
+    async controlSessionWorkflowTask(sessionId, taskId, action) {
+      return requestSessionStatus<{
+        changed: boolean;
+        status?: ServeSessionWorkflowTaskStatus['status'];
+        taskId?: string;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+        taskId,
+        action,
+      });
     },
 
     async clearSessionGoal(sessionId) {

@@ -490,6 +490,12 @@
   opacity: 0.55;
 }
 
+.primaryActionButton {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
 .dangerButton {
   color: var(--error-color);
 }

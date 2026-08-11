@@ -425,6 +425,7 @@ export interface CapabilitiesEnvelope {
     displayName?: string;
     primary: boolean;
     trusted: boolean;
+    workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
   }>;

@@ -12,7 +12,10 @@ const MAX_EMPTY_TASK_POLLS = 2;
 
 function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
   return tasks.some(
-    (task) => task.status === 'running' || task.status === 'paused',
+    (task) =>
+      task.status === 'running' ||
+      task.status === 'pausing' ||
+      task.status === 'paused',
   );
 }
 

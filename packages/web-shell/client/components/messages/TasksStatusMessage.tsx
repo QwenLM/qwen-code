@@ -24,6 +24,7 @@ import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { PlanExecutionView } from './PlanExecutionView';
+import { WorkflowExecutionView } from './WorkflowExecutionView';
 import {
   localizeAgentTypeName,
   localizeToolDisplayName,
@@ -43,6 +44,8 @@ const MAX_DISPLAYED_ACTIVITIES = 5;
 export interface SerializedTasksMessage {
   snapshot: DaemonSessionTasksStatus;
 }
+
+export type TasksStatusView = 'all' | 'workflow-active' | 'workflow-history';
 
 const {
   serialize: serializeTasksStatusMessage,
@@ -72,7 +75,11 @@ function dispatchActive(id: string, active: boolean): void {
 }
 
 function isActive(task: DaemonSessionTaskStatus): boolean {
-  return task.status === 'running' || task.status === 'paused';
+  return (
+    task.status === 'running' ||
+    task.status === 'pausing' ||
+    task.status === 'paused'
+  );
 }
 
 function sortTasks(
@@ -91,7 +98,7 @@ function sortTasks(
  * Display order for the panel: active-first sort, then each nested agent
  * grouped under its parent as a tree. The reorder is a post-pass so a tree
  * spanning the active/terminal buckets stays contiguous at whichever
- * position its root earned. Every `setTasks` site must use this (not bare
+ * position its root earned. Every visible task list must use this (not bare
  * `sortTasks`) — selection is index-based, so list order IS the contract.
  */
 function arrangeTasks(
@@ -100,11 +107,62 @@ function arrangeTasks(
   return reorderChildrenUnderParents(sortTasks(tasks));
 }
 
+function tasksForView(
+  tasks: DaemonSessionTaskStatus[],
+  view: TasksStatusView,
+): DaemonSessionTaskStatus[] {
+  if (view === 'all') return arrangeTasks(tasks);
+  return arrangeTasks(
+    tasks.filter(
+      (task) =>
+        task.kind === 'workflow' &&
+        (view === 'workflow-active' ? isActive(task) : !isActive(task)),
+    ),
+  );
+}
+
+function findWorkflowSourceTask(
+  task: DaemonSessionTaskStatus,
+  tasks: DaemonSessionTaskStatus[],
+): Extract<DaemonSessionTaskStatus, { kind: 'workflow' }> | undefined {
+  if (
+    task.kind !== 'workflow' ||
+    !task.sourceRunId ||
+    task.sourceRunId === task.id
+  ) {
+    return undefined;
+  }
+  const source = tasks.find(
+    (candidate) =>
+      candidate.kind === 'workflow' && candidate.id === task.sourceRunId,
+  );
+  return source?.kind === 'workflow' ? source : undefined;
+}
+
+function findWorkflowHistoryTasks(
+  task: DaemonSessionTaskStatus,
+  tasks: DaemonSessionTaskStatus[],
+): Array<Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>> {
+  if (task.kind !== 'workflow') return [];
+  return tasks
+    .filter(
+      (
+        candidate,
+      ): candidate is Extract<DaemonSessionTaskStatus, { kind: 'workflow' }> =>
+        candidate.kind === 'workflow' &&
+        candidate.id !== task.id &&
+        candidate.label === task.label,
+    )
+    .sort((a, b) => b.startTime - a.startTime);
+}
+
 function statusClassName(status: TaskStatus): string {
   switch (status) {
     case 'running':
       return styles.success;
     case 'paused':
+      return styles.warning;
+    case 'pausing':
       return styles.warning;
     case 'completed':
       return styles.success;
@@ -132,6 +190,8 @@ function statusLabel(
       return t('tasks.cancelled');
     case 'paused':
       return t('tasks.paused');
+    case 'pausing':
+      return t('tasks.pausing');
     default:
       return status;
   }
@@ -140,6 +200,8 @@ function statusLabel(
 function terminalStatusIcon(status: TaskStatus): string | null {
   switch (status) {
     case 'paused':
+      return '⏸';
+    case 'pausing':
       return '⏸';
     case 'completed':
       return '✓';
@@ -184,6 +246,8 @@ function rowLabel(task: DaemonSessionTaskStatus, blocking: boolean): string {
       return `[shell] ${task.command}`;
     case 'monitor':
       return `[monitor] ${task.description}`;
+    case 'workflow':
+      return `[workflow] ${task.label}`;
   }
 }
 
@@ -243,6 +307,12 @@ export function TasksStatusMessage({
   message,
   embedded = false,
   manageActiveEvent = true,
+  keyboardShortcuts = true,
+  syncSnapshot = false,
+  taskView = 'all',
+  emptyLabel,
+  onWorkflowRunStarted,
+  onTasksChange,
   onClose,
   planTodos = [],
   agentTools = [],
@@ -252,6 +322,12 @@ export function TasksStatusMessage({
   message: SerializedTasksMessage;
   embedded?: boolean;
   manageActiveEvent?: boolean;
+  keyboardShortcuts?: boolean;
+  syncSnapshot?: boolean;
+  taskView?: TasksStatusView;
+  emptyLabel?: string;
+  onWorkflowRunStarted?: () => void;
+  onTasksChange?: (snapshot: DaemonSessionTasksStatus) => void;
   onClose?: () => void;
   planTodos?: readonly TodoItem[];
   agentTools?: readonly ACPToolCall[];
@@ -260,8 +336,10 @@ export function TasksStatusMessage({
 }) {
   const { t } = useI18n();
   const actions = useActions();
-  const [tasks, setTasks] = useState(() =>
-    arrangeTasks(message.snapshot.tasks),
+  const [allTasks, setAllTasks] = useState(message.snapshot.tasks);
+  const tasks = useMemo(
+    () => tasksForView(allTasks, taskView),
+    [allTasks, taskView],
   );
   const [isOpen, setIsOpen] = useState(true);
   const [step, setStep] = useState<TasksPanelStep>('list');
@@ -276,6 +354,10 @@ export function TasksStatusMessage({
     taskId: string;
     status: TaskStatus;
   } | null>(null);
+
+  useEffect(() => {
+    if (syncSnapshot) setAllTasks(message.snapshot.tasks);
+  }, [message.snapshot, syncSnapshot]);
 
   const clampedSelectedIndex =
     tasks.length === 0 ? 0 : Math.min(selectedIndex, tasks.length - 1);
@@ -295,7 +377,8 @@ export function TasksStatusMessage({
       actions
         .getTasks()
         .then((snapshot) => {
-          setTasks(arrangeTasks(snapshot.tasks));
+          setAllTasks(snapshot.tasks);
+          onTasksChange?.(snapshot);
           setRefreshError(false);
         })
         .catch((error: unknown) => {
@@ -312,7 +395,7 @@ export function TasksStatusMessage({
     };
     const id = setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [isOpen, actions]);
+  }, [isOpen, actions, onTasksChange]);
 
   useEffect(() => {
     if (tasks.length === 0 && selectedIndex !== 0) {
@@ -344,7 +427,12 @@ export function TasksStatusMessage({
       return;
     }
 
-    if (initial.status === 'running' && selectedTask.status !== 'running') {
+    if (
+      (initial.status === 'running' ||
+        initial.status === 'pausing' ||
+        initial.status === 'paused') &&
+      !isActive(selectedTask)
+    ) {
       setPendingCancelId(null);
       setStep('list');
     }
@@ -379,7 +467,8 @@ export function TasksStatusMessage({
       if (busy) return;
       const isRunning = task.status === 'running';
       const isAbandonable = task.kind === 'agent' && task.status === 'paused';
-      if (!isRunning && !isAbandonable) return;
+      const isActiveWorkflow = task.kind === 'workflow' && isActive(task);
+      if (!isRunning && !isAbandonable && !isActiveWorkflow) return;
       // Two-step confirm only when cancelling would end the USER's turn —
       // the same chain-aware verdict as the `[blocking]` row prefix. A
       // foreground child awaited by a *background* parent unblocks that
@@ -400,7 +489,9 @@ export function TasksStatusMessage({
           return;
         }
         const snapshot = await actions.getTasks();
-        setTasks(arrangeTasks(snapshot.tasks));
+        setAllTasks(snapshot.tasks);
+        onTasksChange?.(snapshot);
+        if (taskView === 'workflow-active') setStep('list');
         setActionError(null);
       } catch (error: unknown) {
         console.warn('[web-shell] failed to cancel task:', error);
@@ -409,12 +500,75 @@ export function TasksStatusMessage({
         setBusy(false);
       }
     },
-    [actions, busy, blockingIds, pendingCancelId, t],
+    [actions, busy, blockingIds, onTasksChange, pendingCancelId, t, taskView],
+  );
+
+  const handleWorkflowAction = useCallback(
+    async (
+      task: Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>,
+      action: 'pause' | 'resume' | 'retry' | 'rerun',
+    ) => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        const result = await actions.controlWorkflowTask(task.id, action);
+        if (!result.changed) {
+          setActionError(t('workflow.action.unavailable'));
+          return;
+        }
+        const snapshot = await actions.getTasks();
+        const nextTasks = tasksForView(snapshot.tasks, taskView);
+        setAllTasks(snapshot.tasks);
+        onTasksChange?.(snapshot);
+        if (result.taskId) {
+          onWorkflowRunStarted?.();
+          const nextIndex = nextTasks.findIndex(
+            (candidate) => candidate.id === result.taskId,
+          );
+          if (nextIndex >= 0) setSelectedIndex(nextIndex);
+        }
+        setActionError(null);
+      } catch (error: unknown) {
+        console.warn('[web-shell] failed to control workflow:', error);
+        setActionError(t('workflow.action.failed'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [actions, busy, onTasksChange, onWorkflowRunStarted, t, taskView],
+  );
+
+  const handleWorkflowHistoryDelete = useCallback(
+    async (runId: string) => {
+      if (busy) return;
+      setBusy(true);
+      try {
+        const result = await actions.controlWorkflowTask(
+          runId,
+          'delete-history',
+        );
+        if (!result.changed) {
+          setActionError(t('workflow.history.deleteUnavailable'));
+          return;
+        }
+        const snapshot = await actions.getTasks();
+        setAllTasks(snapshot.tasks);
+        onTasksChange?.(snapshot);
+        if (selectedTask?.id === runId) setStep('list');
+        setActionError(null);
+      } catch (error: unknown) {
+        console.warn('[web-shell] failed to delete workflow history:', error);
+        setActionError(t('workflow.history.deleteFailed'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [actions, busy, onTasksChange, selectedTask?.id, t],
   );
 
   useDelayedGlobalKeyDown(
     (event: KeyboardEvent) => {
-      if (!isOpen) return;
+      if (!keyboardShortcuts || !isOpen) return;
 
       if (
         event.key !== 'Escape' &&
@@ -499,6 +653,7 @@ export function TasksStatusMessage({
     },
     [
       embedded,
+      keyboardShortcuts,
       isOpen,
       step,
       tasks.length,
@@ -523,13 +678,10 @@ export function TasksStatusMessage({
   } else {
     listHints.push(t('tasks.shortcut.select'));
     listHints.push(t('tasks.shortcut.view'));
-    if (selectedTask?.status === 'running') {
-      listHints.push(t('tasks.shortcut.stop'));
-    } else if (
-      selectedTask?.kind === 'agent' &&
-      selectedTask?.status === 'paused'
-    ) {
+    if (selectedTask?.kind === 'agent' && selectedTask?.status === 'paused') {
       listHints.push(t('tasks.shortcut.abandon'));
+    } else if (selectedTask && isActive(selectedTask)) {
+      listHints.push(t('tasks.shortcut.stop'));
     }
     listHints.push(t('tasks.shortcut.listClose'));
   }
@@ -541,13 +693,10 @@ export function TasksStatusMessage({
   } else {
     detailHints.push(t('tasks.shortcut.detailBack'));
     detailHints.push(t('tasks.shortcut.detailClose'));
-    if (selectedTask?.status === 'running') {
-      detailHints.push(t('tasks.shortcut.stop'));
-    } else if (
-      selectedTask?.kind === 'agent' &&
-      selectedTask?.status === 'paused'
-    ) {
+    if (selectedTask?.kind === 'agent' && selectedTask?.status === 'paused') {
       detailHints.push(t('tasks.shortcut.abandon'));
+    } else if (selectedTask && isActive(selectedTask)) {
+      detailHints.push(t('tasks.shortcut.stop'));
     }
   }
 
@@ -577,7 +726,9 @@ export function TasksStatusMessage({
           onOpenSubagent={onOpenSubagent}
         />
         <div>
-          <div className={styles.secondary}>{t('tasks.empty')}</div>
+          <div className={styles.secondary}>
+            {emptyLabel ?? t('tasks.empty')}
+          </div>
         </div>
         {!embedded && (
           <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
@@ -726,6 +877,22 @@ export function TasksStatusMessage({
                       busy={busy}
                       showCancelConfirm={pendingCancelId === task.id}
                       onCancel={() => void handleCancel(task)}
+                      sourceWorkflowTask={findWorkflowSourceTask(
+                        task,
+                        allTasks,
+                      )}
+                      workflowHistoryTasks={findWorkflowHistoryTasks(
+                        task,
+                        allTasks,
+                      )}
+                      onWorkflowAction={(action) =>
+                        task.kind === 'workflow'
+                          ? void handleWorkflowAction(task, action)
+                          : undefined
+                      }
+                      onDeleteWorkflowHistory={(runId) =>
+                        void handleWorkflowHistoryDelete(runId)
+                      }
                       onCancelConfirmDismiss={() => setPendingCancelId(null)}
                     />
                   </div>
@@ -750,6 +917,19 @@ export function TasksStatusMessage({
             busy={busy}
             showCancelConfirm={pendingCancelId === selectedTask.id}
             onCancel={() => void handleCancel(selectedTask)}
+            sourceWorkflowTask={findWorkflowSourceTask(selectedTask, allTasks)}
+            workflowHistoryTasks={findWorkflowHistoryTasks(
+              selectedTask,
+              allTasks,
+            )}
+            onWorkflowAction={(action) =>
+              selectedTask.kind === 'workflow'
+                ? void handleWorkflowAction(selectedTask, action)
+                : undefined
+            }
+            onDeleteWorkflowHistory={(runId) =>
+              void handleWorkflowHistoryDelete(runId)
+            }
             onCancelConfirmDismiss={() => setPendingCancelId(null)}
           />
         </>
@@ -781,6 +961,8 @@ function detailTitle(
       return `${t('tasks.kind.shell')} › ${task.command}`;
     case 'monitor':
       return `${t('tasks.kind.monitor')} › ${task.description}`;
+    case 'workflow':
+      return `${t('tasks.kind.workflow')} › ${task.label}`;
   }
 }
 
@@ -1093,6 +1275,10 @@ function TaskDetail({
   busy = false,
   showCancelConfirm = false,
   onCancel,
+  sourceWorkflowTask,
+  workflowHistoryTasks,
+  onWorkflowAction,
+  onDeleteWorkflowHistory,
   onCancelConfirmDismiss,
 }: {
   task: DaemonSessionTaskStatus;
@@ -1101,12 +1287,35 @@ function TaskDetail({
   busy?: boolean;
   showCancelConfirm?: boolean;
   onCancel?: () => void;
+  sourceWorkflowTask?: Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>;
+  workflowHistoryTasks?: Array<
+    Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>
+  >;
+  onWorkflowAction?: (action: 'pause' | 'resume' | 'retry' | 'rerun') => void;
+  onDeleteWorkflowHistory?: (runId: string) => void;
   onCancelConfirmDismiss?: () => void;
 }) {
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
   const isAbandonable = task.kind === 'agent' && task.status === 'paused';
-  const canCancel = task.status === 'running' || isAbandonable;
+  const canCancel =
+    task.status === 'running' ||
+    isAbandonable ||
+    (task.kind === 'workflow' &&
+      (task.status === 'pausing' || task.status === 'paused'));
+  const canPause =
+    task.kind === 'workflow' &&
+    task.isBackgrounded &&
+    task.status === 'running';
+  const canResume = task.kind === 'workflow' && task.status === 'paused';
+  const canRetry =
+    task.kind === 'workflow' && !task.isHistorical && task.status === 'failed';
+  const canRerun =
+    task.kind === 'workflow' &&
+    !task.isHistorical &&
+    (task.status === 'completed' ||
+      task.status === 'failed' ||
+      task.status === 'cancelled');
   const cancelLabel = isAbandonable
     ? t('tasks.action.abandon')
     : t('tasks.action.stop');
@@ -1139,6 +1348,18 @@ function TaskDetail({
     });
   }
 
+  if (task.kind === 'workflow' && task.tokensSpent > 0) {
+    subtitleParts.push(
+      t('tasks.detail.tokens', {
+        count: formatContextTokens(task.tokensSpent),
+      }),
+    );
+    compactFields.push({
+      label: t('tasks.detail.tokenCount'),
+      value: formatContextTokens(task.tokensSpent),
+    });
+  }
+
   if (task.kind === 'agent' && task.stats?.toolUses !== undefined) {
     subtitleParts.push(
       t('tasks.detail.toolCalls', {
@@ -1151,7 +1372,10 @@ function TaskDetail({
     });
   }
 
-  if (task.kind !== 'agent' && task.pid !== undefined) {
+  if (
+    (task.kind === 'shell' || task.kind === 'monitor') &&
+    task.pid !== undefined
+  ) {
     subtitleParts.push(`pid ${task.pid}`);
   }
 
@@ -1174,8 +1398,9 @@ function TaskDetail({
   const promptLines =
     task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
   const actionControls =
-    canCancel && onCancel ? (
-      <div className={styles.actionBar}>
+    (canCancel && onCancel) ||
+    ((canPause || canResume || canRetry || canRerun) && onWorkflowAction) ? (
+      <div className={styles.actionBar} data-plan-interactive>
         {showCancelConfirm ? (
           <>
             <span className={styles.actionHint}>
@@ -1198,14 +1423,50 @@ function TaskDetail({
             </button>
           </>
         ) : (
-          <button
-            type="button"
-            className={`${styles.actionButton} ${styles.dangerButton}`}
-            disabled={busy}
-            onClick={onCancel}
-          >
-            {cancelLabel}
-          </button>
+          <>
+            {(canPause || canResume) && onWorkflowAction && (
+              <button
+                type="button"
+                className={styles.actionButton}
+                disabled={busy}
+                onClick={() => onWorkflowAction(canPause ? 'pause' : 'resume')}
+              >
+                {canPause
+                  ? t('workflow.action.pause')
+                  : t('workflow.action.resume')}
+              </button>
+            )}
+            {canRetry && onWorkflowAction && (
+              <button
+                type="button"
+                className={`${styles.actionButton} ${styles.primaryActionButton}`}
+                disabled={busy}
+                onClick={() => onWorkflowAction('retry')}
+              >
+                {t('workflow.action.retry')}
+              </button>
+            )}
+            {canRerun && onWorkflowAction && (
+              <button
+                type="button"
+                className={styles.actionButton}
+                disabled={busy}
+                onClick={() => onWorkflowAction('rerun')}
+              >
+                {t('workflow.action.rerun')}
+              </button>
+            )}
+            {canCancel && onCancel && (
+              <button
+                type="button"
+                className={`${styles.actionButton} ${styles.dangerButton}`}
+                disabled={busy}
+                onClick={onCancel}
+              >
+                {cancelLabel}
+              </button>
+            )}
+          </>
         )}
       </div>
     ) : null;
@@ -1348,6 +1609,16 @@ function TaskDetail({
             <div className={styles.error}>{task.resumeBlockedReason}</div>
           </div>
         )}
+
+      {task.kind === 'workflow' && (
+        <WorkflowExecutionView
+          task={task}
+          sourceTask={sourceWorkflowTask}
+          historyTasks={workflowHistoryTasks}
+          historyActionBusy={busy}
+          onDeleteHistory={onDeleteWorkflowHistory}
+        />
+      )}
 
       {task.error && (
         <div className={styles.detailField}>

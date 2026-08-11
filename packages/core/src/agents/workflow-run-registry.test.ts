@@ -64,6 +64,49 @@ function approvalEvent(
 }
 
 describe('WorkflowRunRegistry', () => {
+  it('records rerun lineage and notifies status observers', () => {
+    const r = new WorkflowRunRegistry();
+    const onStatusChange = vi.fn();
+    r.setStatusChangeCallback(onStatusChange);
+    r.register(reg('wf_rerun'));
+    onStatusChange.mockClear();
+
+    expect(r.setLineage('wf_rerun', 'wf_source', 'rerun')).toBe(true);
+    expect(r.get('wf_rerun')).toMatchObject({
+      sourceRunId: 'wf_source',
+      startMode: 'rerun',
+    });
+    expect(onStatusChange).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'wf_rerun' }),
+    );
+    expect(r.setLineage('wf_missing', 'wf_source', 'rerun')).toBe(false);
+  });
+
+  it('binds a pending approval to the dispatch that owns its event channel', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_dispatch_approval'));
+    r.setApprovalChangeCallback(() => {});
+    r.onDispatchQueued('wf_dispatch_approval', {
+      id: 'dispatch-1',
+      prompt: 'Review the change',
+      label: 'Correctness',
+      dependsOn: [],
+      queuedAt: 1_700_000_000_010,
+    });
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_dispatch_approval', emitter, 'dispatch-1');
+
+    emitter.emit(
+      AgentEventType.TOOL_WAITING_APPROVAL,
+      approvalEvent({ subagentId: 'correctness-agent-1' }),
+    );
+
+    expect(r.get('wf_dispatch_approval')?.dispatches[0]).toMatchObject({
+      id: 'dispatch-1',
+      subagentId: 'correctness-agent-1',
+    });
+  });
+
   it('parks a workflow-agent approval and resolves it exactly once', async () => {
     const r = new WorkflowRunRegistry();
     r.register(reg('wf_approval'));
@@ -102,6 +145,14 @@ describe('WorkflowRunRegistry', () => {
     expect(approval).not.toHaveProperty('args');
     expect(approval).not.toHaveProperty('respond');
     expect(onApprovalChange).toHaveBeenCalledTimes(1);
+    expect(r.get('wf_approval')?.events).toEqual([
+      {
+        id: 'event-1',
+        type: 'approval-requested',
+        at: 1_700_000_000_100,
+        name: 'Shell',
+      },
+    ]);
 
     await expect(
       r.resolvePendingApproval(
@@ -122,6 +173,14 @@ describe('WorkflowRunRegistry', () => {
       ToolConfirmationOutcome.ProceedOnce,
       undefined,
     );
+    expect(r.get('wf_approval')?.events[1]).toMatchObject({
+      id: 'event-2',
+      type: 'approval-settled',
+      name: 'Shell',
+    });
+    expect(r.get('wf_approval')?.events[1]).not.toHaveProperty('approvalId');
+    expect(r.get('wf_approval')?.events[1]).not.toHaveProperty('callId');
+    expect(r.get('wf_approval')?.events[1]).not.toHaveProperty('description');
     cleanup();
   });
 
@@ -786,6 +845,179 @@ describe('WorkflowRunRegistry', () => {
     const e = r.get('wf_1')!;
     expect(e.agentsDispatched).toBe(2);
     expect(e.agentsCompleted).toBe(1);
+  });
+
+  it('records phase visits and dispatch lifecycle without inferring dependencies', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_graph'));
+
+    r.onPhaseStarted(entry.runId, 'Inspect', 1_100);
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-1',
+      label: 'Scope mapper',
+      prompt: 'Inspect the repository',
+      dependsOn: [],
+      queuedAt: 1_110,
+    });
+    r.onDispatchStarted(entry.runId, 'dispatch-1', 1_120);
+    r.onDispatchSettled(entry.runId, 'dispatch-1', undefined, 1_180);
+    r.onPhaseStarted(entry.runId, 'Review', 1_200);
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-2',
+      label: 'Correctness',
+      prompt: 'Review correctness',
+      dependsOn: ['dispatch-1'],
+      queuedAt: 1_210,
+    });
+
+    expect(entry.phaseVisits).toEqual([
+      {
+        id: 'phase-1',
+        index: 0,
+        title: 'Inspect',
+        startedAt: 1_100,
+        endedAt: 1_200,
+      },
+      {
+        id: 'phase-2',
+        index: 1,
+        title: 'Review',
+        startedAt: 1_200,
+      },
+    ]);
+    expect(entry.dispatches).toEqual([
+      expect.objectContaining({
+        id: 'dispatch-1',
+        phaseVisitId: 'phase-1',
+        status: 'completed',
+        startedAt: 1_120,
+        endedAt: 1_180,
+        dependsOn: [],
+      }),
+      expect.objectContaining({
+        id: 'dispatch-2',
+        phaseVisitId: 'phase-2',
+        status: 'queued',
+        dependsOn: ['dispatch-1'],
+      }),
+    ]);
+  });
+
+  it('records the runtime sequence used by workflow replay', () => {
+    const r = new WorkflowRunRegistry();
+    const onStatusChange = vi.fn();
+    r.setStatusChangeCallback(onStatusChange);
+    const entry = r.register(reg('wf_events'));
+    onStatusChange.mockClear();
+
+    r.onPhaseStarted(entry.runId, 'Inspect', 1_100);
+    r.onLogAppended(entry.runId, 'repository loaded', 1_105);
+    expect(onStatusChange).toHaveBeenCalledTimes(1);
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-1',
+      label: 'Correctness',
+      prompt: 'Review correctness',
+      dependsOn: [],
+      queuedAt: 1_110,
+    });
+    r.onDispatchStarted(entry.runId, 'dispatch-1', 1_120);
+    r.onDispatchSettled(entry.runId, 'dispatch-1', undefined, 1_180);
+    r.complete(entry.runId, 'done', 1_200);
+
+    expect(entry.recentLogs).toEqual(['repository loaded']);
+    expect(entry.events).toEqual([
+      {
+        id: 'event-1',
+        type: 'phase-started',
+        at: 1_100,
+        phaseVisitId: 'phase-1',
+        title: 'Inspect',
+      },
+      {
+        id: 'event-2',
+        type: 'log',
+        at: 1_105,
+        message: 'repository loaded',
+      },
+      {
+        id: 'event-3',
+        type: 'dispatch-queued',
+        at: 1_110,
+        dispatchId: 'dispatch-1',
+      },
+      {
+        id: 'event-4',
+        type: 'dispatch-started',
+        at: 1_120,
+        dispatchId: 'dispatch-1',
+      },
+      {
+        id: 'event-5',
+        type: 'dispatch-completed',
+        at: 1_180,
+        dispatchId: 'dispatch-1',
+      },
+      {
+        id: 'event-6',
+        type: 'phase-completed',
+        at: 1_200,
+        phaseVisitId: 'phase-1',
+      },
+      {
+        id: 'event-7',
+        type: 'workflow-completed',
+        at: 1_200,
+      },
+    ]);
+  });
+
+  it('keeps the workflow terminal event last while late dispatches drain', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_late_dispatch'));
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-1',
+      prompt: 'Fire and forget',
+      dependsOn: [],
+      queuedAt: 1_100,
+    });
+    r.onDispatchStarted(entry.runId, 'dispatch-1', 1_200);
+    r.complete(entry.runId, 'done', 1_300);
+
+    r.onDispatchSettled(entry.runId, 'dispatch-1', undefined, 1_400);
+
+    expect(entry.dispatches[0]).toMatchObject({
+      status: 'completed',
+      endedAt: 1_400,
+    });
+    expect(entry.events.at(-1)).toMatchObject({
+      type: 'workflow-completed',
+      at: 1_300,
+    });
+    expect(entry.events).not.toContainEqual(
+      expect.objectContaining({ type: 'dispatch-completed', at: 1_400 }),
+    );
+  });
+
+  it('marks live dispatches cancelled when the workflow is stopped', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_graph_cancel'));
+    r.onPhaseStarted(entry.runId, 'Fix', 1_100);
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-1',
+      label: 'Fix boundary',
+      prompt: 'Fix it',
+      dependsOn: [],
+      queuedAt: 1_110,
+    });
+    r.onDispatchStarted(entry.runId, 'dispatch-1', 1_120);
+
+    r.cancel(entry.runId, 1_200);
+
+    expect(entry.dispatches[0]).toMatchObject({
+      status: 'cancelled',
+      endedAt: 1_200,
+    });
+    expect(entry.phaseVisits[0]).toMatchObject({ endedAt: 1_200 });
   });
 
   it.each(['running', 'pausing', 'paused'] as const)(

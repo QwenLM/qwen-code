@@ -1464,6 +1464,59 @@ export function createDaemonSessionActions({
       }
     },
 
+    async controlWorkflowTask(
+      taskId: string,
+      action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+    ) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Control workflow failed',
+        'control_workflow',
+      );
+      try {
+        return await withActionTimeout(
+          session.controlWorkflowTask(taskId, action),
+          'Control workflow timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Control workflow failed',
+          error,
+          'control_workflow',
+        );
+      }
+    },
+
+    async runSavedWorkflow(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Run saved workflow failed',
+        'run_saved_workflow',
+      );
+      try {
+        const { changed, ...result } = await withActionTimeout(
+          session.client.sessionWorkflowTaskAction(
+            session.sessionId,
+            name,
+            'run-saved',
+            session.clientId,
+          ),
+          'Run saved workflow timed out',
+        );
+        return { started: changed, ...result };
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Run saved workflow failed',
+          error,
+          'run_saved_workflow',
+        );
+      }
+    },
+
     async clearGoal() {
       requireStableSession();
       const session = requireSessionForAction(

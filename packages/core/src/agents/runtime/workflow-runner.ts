@@ -115,7 +115,8 @@ export class WorkflowRunner {
         controller.signal,
         (outputTokens) => budget.recordSpent(outputTokens),
         registry
-          ? (emitter) => registry.bridgeApprovalEvents(runId, emitter)
+          ? (emitter, dispatchId) =>
+              registry.bridgeApprovalEvents(runId, emitter, dispatchId)
           : undefined,
       );
     const orchestrator = new WorkflowOrchestrator(dispatch);
@@ -131,6 +132,13 @@ export class WorkflowRunner {
         tokenBudgetTotal: budget.total,
         script,
         scriptPath,
+        args: options.args,
+        ...(options.resumeFromRunId
+          ? {
+              sourceRunId: options.resumeFromRunId,
+              startMode: 'retry' as const,
+            }
+          : {}),
         isBackgrounded: runInBackground,
       });
     } catch (error) {
@@ -159,9 +167,21 @@ export class WorkflowRunner {
         // updates together (avoids 2x TUI redraws per agent).
         registry?.onAgentCompleted(runId);
       },
-      // Deliberate no-op: logs are snapshotted at terminal via
-      // setRecentLogs; per-line emit would cause up to 10k TUI redraws.
-      logAppended: () => {},
+      dispatchQueued: (event) => {
+        registry?.onDispatchQueued(runId, event);
+        emitUpdate();
+      },
+      dispatchStarted: (dispatchId, startedAt) => {
+        registry?.onDispatchStarted(runId, dispatchId, startedAt);
+        emitUpdate();
+      },
+      dispatchSettled: (dispatchId, error, endedAt) => {
+        registry?.onDispatchSettled(runId, dispatchId, error, endedAt);
+        emitUpdate();
+      },
+      // The registry records this without firing a status update, avoiding a
+      // TUI redraw per line while retaining the real replay timestamp.
+      logAppended: (line) => registry?.onLogAppended(runId, line),
       budgetUpdated: (spent, total) => {
         registry?.onBudgetUpdated(runId, spent, total);
         emitUpdate();
@@ -252,6 +272,7 @@ export class WorkflowRunner {
               tokens_spent: entry.tokensSpent,
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
             });
+            await journal?.drain();
             await writeWorkflowSnapshot(config, entry);
             try {
               logWorkflowRun(config, telemetryEvent);

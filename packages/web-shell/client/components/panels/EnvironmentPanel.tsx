@@ -8,6 +8,7 @@ import {
   BotIcon,
   ChevronRightIcon,
   CircleCheckIcon,
+  CirclePauseIcon,
   CircleStopIcon,
   CircleXIcon,
   FileDiffIcon,
@@ -16,6 +17,7 @@ import {
   LoaderCircleIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
+  WorkflowIcon,
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
@@ -65,6 +67,8 @@ function taskLabel(task: DaemonSessionTaskStatus): string {
       return task.command;
     case 'monitor':
       return task.description;
+    case 'workflow':
+      return task.label;
   }
 }
 
@@ -76,6 +80,8 @@ function taskIcon(task: DaemonSessionTaskStatus) {
       return <SquareTerminalIcon />;
     case 'monitor':
       return <SquareActivityIcon />;
+    case 'workflow':
+      return <WorkflowIcon />;
   }
 }
 
@@ -85,11 +91,12 @@ function taskStatusKey(status: DaemonSessionTaskStatus['status']) {
 
 function taskStatusIcon(status: DaemonSessionTaskStatus['status']) {
   if (status === 'completed') return <CircleCheckIcon />;
-  if (status === 'running') {
+  if (status === 'running' || status === 'pausing') {
     return <LoaderCircleIcon className={styles.statusRunning} />;
   }
   if (status === 'failed') return <CircleXIcon />;
   if (status === 'cancelled') return <CircleStopIcon />;
+  if (status === 'paused') return <CirclePauseIcon />;
   return null;
 }
 

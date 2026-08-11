@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -112,4 +113,35 @@ describe('StatusBar goal pill', () => {
     expect(goalButton()).toBeNull();
     expect(document.body.textContent).toContain('/goal active');
   });
+});
+
+describe('StatusBar workflow pill', () => {
+  it.each(['pausing', 'paused'] as const)(
+    'keeps a %s workflow visible as active work',
+    (status) => {
+      const task: DaemonSessionWorkflowTaskStatus = {
+        kind: 'workflow',
+        id: 'workflow-1',
+        label: 'review-and-fix',
+        description: 'Review and fix',
+        status,
+        startTime: 1_000,
+        runtimeMs: 500,
+        isBackgrounded: true,
+        currentPhase: 'Review',
+        phaseVisits: [],
+        dispatches: [],
+        agentsDispatched: 2,
+        agentsCompleted: 1,
+        tokensSpent: 100,
+        recentLogs: [],
+        pendingApprovalCount: 0,
+      };
+
+      mount({ tasks: [task], onOpenTasks: vi.fn() });
+
+      expect(document.body.textContent).toContain('1 workflow');
+      expect(document.body.textContent).not.toContain('1 task done');
+    },
+  );
 });

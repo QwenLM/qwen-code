@@ -119,6 +119,9 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
+  type WorkflowParams,
+  listSavedWorkflows,
+  listWorkflowSnapshots,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -7190,19 +7193,39 @@ class QwenAgent implements Agent {
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
     const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
     const { availableCommands, availableSkills } =
-      await buildAvailableCommandsSnapshot(session.getConfig());
+      await buildAvailableCommandsSnapshot(config);
+    const workflowsEnabled = config.isWorkflowsEnabled();
+    const savedWorkflows =
+      workflowsEnabled &&
+      !config.getBareMode() &&
+      (!config.getFolderTrustFeature() || config.getFolderTrust())
+        ? (await listSavedWorkflows(config)).map(({ name, source }) => ({
+            name,
+            source,
+          }))
+        : [];
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       availableCommands,
       availableSkills: availableSkills ?? [],
+      workflowsEnabled,
+      savedWorkflows,
     };
   }
 
-  private buildSessionTasksStatus(sessionId: string): ServeSessionTasksStatus {
+  private async buildSessionTasksStatus(
+    sessionId: string,
+  ): Promise<ServeSessionTasksStatus> {
     const session = this.sessionOrThrow(sessionId);
-    return buildSessionTasksStatus(sessionId, session.getConfig());
+    return buildSessionTasksStatus(
+      sessionId,
+      session.getConfig(),
+      Date.now(),
+      await session.refreshWorkflowHistory(),
+    );
   }
 
   private buildSessionLspStatus(sessionId: string): ServeSessionLspStatus {
@@ -8179,10 +8202,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        return this.buildSessionTasksStatus(sessionId) as unknown as Record<
-          string,
-          unknown
-        >;
+        return (await this.buildSessionTasksStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
         const sessionId = params['sessionId'];
@@ -10430,11 +10452,12 @@ class QwenAgent implements Agent {
         if (
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
-          taskKind !== 'monitor'
+          taskKind !== 'monitor' &&
+          taskKind !== 'workflow'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", or "monitor"',
+            'taskKind must be "agent", "shell", "monitor", or "workflow"',
           );
         }
         debugLogger.info(
@@ -10495,11 +10518,175 @@ class QwenAgent implements Agent {
             );
             return { cancelled: true, status: task.status };
           }
+          case 'workflow': {
+            const registry = config.getWorkflowRunRegistry();
+            const task = registry.get(taskId);
+            if (
+              !task ||
+              (task.status !== 'running' &&
+                task.status !== 'pausing' &&
+                task.status !== 'paused')
+            ) {
+              const reason = task ? 'not_running' : 'not_found';
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=${reason} status=${task?.status ?? 'missing'}`,
+              );
+              return { cancelled: false, reason, status: task?.status };
+            }
+            registry.cancel(taskId, Date.now());
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
+            );
+            return { cancelled: true, status: task.status };
+          }
           default: {
             const exhaustive: never = taskKind;
             throw new Error(`Unhandled task kind: ${exhaustive}`);
           }
         }
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const action = params['action'];
+        if (
+          action !== 'pause' &&
+          action !== 'resume' &&
+          action !== 'retry' &&
+          action !== 'rerun' &&
+          action !== 'delete-history' &&
+          action !== 'run-saved'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        if (action === 'delete-history') {
+          return { changed: await session.deleteWorkflowHistory(taskId) };
+        }
+        const config = session.getConfig();
+        const registry = config.getWorkflowRunRegistry();
+        if (action === 'run-saved') {
+          if (
+            !config.isWorkflowsEnabled() ||
+            config.getBareMode() ||
+            (config.getFolderTrustFeature() && !config.getFolderTrust())
+          ) {
+            return { changed: false };
+          }
+          const savedWorkflow = (await listSavedWorkflows(config)).find(
+            (entry) => entry.name === taskId,
+          );
+          if (!savedWorkflow) return { changed: false };
+          const workflowTool = config
+            .getToolRegistry()
+            .getTool(ToolNames.WORKFLOW);
+          if (!workflowTool) {
+            throw RequestError.invalidParams(
+              undefined,
+              'The workflow tool is unavailable; cannot run this saved workflow.',
+            );
+          }
+          const existingRunIds = new Set(
+            registry.list().map((entry) => entry.runId),
+          );
+          await workflowTool
+            .build({
+              scriptPath: savedWorkflow.scriptPath,
+              run_in_background: true,
+            } satisfies WorkflowParams)
+            .execute(new AbortController().signal);
+          const startedTask = registry
+            .list()
+            .find(
+              (entry) =>
+                !existingRunIds.has(entry.runId) &&
+                entry.scriptPath === savedWorkflow.scriptPath,
+            );
+          return startedTask
+            ? {
+                changed: true,
+                status: startedTask.status,
+                taskId: startedTask.runId,
+              }
+            : { changed: false };
+        }
+        const task = registry.get(taskId);
+        if (!task) return { changed: false };
+        if (action === 'retry' || action === 'rerun') {
+          const canStart =
+            action === 'retry'
+              ? task.status === 'failed' && !registry.getHandle(taskId)
+              : task.status === 'completed' ||
+                task.status === 'failed' ||
+                task.status === 'cancelled';
+          if (!canStart || !task.script) {
+            return { changed: false, status: task.status };
+          }
+          const workflowTool = config
+            .getToolRegistry()
+            .getTool(ToolNames.WORKFLOW);
+          if (!workflowTool) {
+            throw RequestError.invalidParams(
+              undefined,
+              `The workflow tool is unavailable; cannot ${action} this run.`,
+            );
+          }
+          const startParams: WorkflowParams = {
+            script: task.script,
+            args: task.args,
+            ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
+            run_in_background: true,
+          };
+          const existingRunIds =
+            action === 'rerun'
+              ? new Set(registry.list().map((entry) => entry.runId))
+              : undefined;
+          await workflowTool
+            .build(startParams)
+            .execute(new AbortController().signal);
+          if (action === 'rerun') {
+            const rerunTask = registry
+              .list()
+              .find(
+                (entry) =>
+                  !existingRunIds?.has(entry.runId) &&
+                  entry.script === task.script &&
+                  entry.args === task.args,
+              );
+            if (rerunTask) {
+              registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+            }
+            return rerunTask
+              ? {
+                  changed: true,
+                  status: rerunTask.status,
+                  taskId: rerunTask.runId,
+                }
+              : { changed: false, status: task.status };
+          }
+          return {
+            changed: true,
+            status: registry.get(taskId)?.status,
+          };
+        }
+        const changed =
+          action === 'pause' ? registry.pause(taskId) : registry.resume(taskId);
+        return { changed, status: task.status };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalClear: {
         const sessionId = params['sessionId'];
@@ -12128,12 +12315,14 @@ class QwenAgent implements Agent {
       );
     }
 
+    const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
       sessionId,
       config,
       this.connection,
       settings,
       () => this.activeWorkReporter?.notifyChanged(),
+      workflowHistory,
     );
     this.sessions.set(sessionId, session);
     // The Session set itself is part of the snapshot: publish so the daemon

@@ -398,7 +398,7 @@ export interface NotificationRecordPayload {
   backgroundTask?: {
     taskId: string;
     status: string;
-    kind: 'agent' | 'monitor' | 'shell';
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow';
     toolUseId?: string;
   };
 }

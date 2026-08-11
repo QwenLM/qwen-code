@@ -695,14 +695,17 @@ describe('createWorkflowSandbox security', () => {
 
   // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
+    const emitted: string[] = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
+      emitter: { logAppended: (line) => emitted.push(line) },
     });
     await sandbox.run(`for (let i = 0; i < 10100; i++) log(i); return 0;`);
     const logs = sandbox.getLogs();
     expect(logs.length).toBe(10_001); // 10_000 entries + 1 truncation marker
     expect(logs[10_000]).toMatch(/truncated/);
+    expect(emitted.at(-1)).toBe(logs[10_000]);
   });
 
   // FIX-C5 (SEC-2-I1): same cap pattern for phases array — protects host

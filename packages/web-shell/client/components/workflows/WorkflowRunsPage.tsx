@@ -1,0 +1,286 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type {
+  DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
+  DaemonSessionTaskStatus,
+} from '@qwen-code/sdk/daemon';
+import { useActions, useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  CirclePlayIcon,
+  FileCode2Icon,
+  HistoryIcon,
+  PlayIcon,
+  RefreshCwIcon,
+  WorkflowIcon,
+} from 'lucide-react';
+import { useI18n } from '../../i18n';
+import { TasksStatusMessage } from '../messages/TasksStatusMessage';
+import { Badge } from '../ui/badge';
+import { Button } from '../ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
+import styles from './WorkflowRunsPage.module.css';
+
+type WorkflowTab = 'saved' | 'active' | 'history';
+type SavedWorkflow = NonNullable<
+  DaemonSessionSupportedCommandsStatus['savedWorkflows']
+>[number];
+
+function isActiveStatus(status: DaemonSessionTaskStatus['status']): boolean {
+  return status === 'running' || status === 'pausing' || status === 'paused';
+}
+
+export function WorkflowRunsPage() {
+  const { t } = useI18n();
+  const actions = useActions();
+  const connection = useConnection();
+  const [tab, setTab] = useState<WorkflowTab>('saved');
+  const [snapshot, setSnapshot] = useState<DaemonSessionTasksStatus | null>(
+    null,
+  );
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [startingName, setStartingName] = useState<string | null>(null);
+  const [startError, setStartError] = useState(false);
+
+  const reload = useCallback(async () => {
+    if (!connection.sessionId) {
+      setSnapshot(null);
+      setLoadError(false);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [nextSnapshot] = await Promise.all([
+        actions.getTasks(),
+        actions.refreshCommands(),
+      ]);
+      setSnapshot(nextSnapshot);
+      setLoadError(false);
+    } catch (error: unknown) {
+      console.warn('[web-shell] failed to load workflow runs:', error);
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [actions, connection.sessionId]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const counts = useMemo(() => {
+    let active = 0;
+    let history = 0;
+    for (const task of snapshot?.tasks ?? []) {
+      if (task.kind !== 'workflow') continue;
+      if (isActiveStatus(task.status)) active += 1;
+      else history += 1;
+    }
+    return { active, history };
+  }, [snapshot]);
+
+  const savedWorkflows = useMemo(
+    () => connection.supportedCommands?.savedWorkflows ?? [],
+    [connection.supportedCommands?.savedWorkflows],
+  );
+
+  const runSavedWorkflow = useCallback(
+    async (workflow: SavedWorkflow) => {
+      setStartingName(workflow.name);
+      setStartError(false);
+      try {
+        const result = await actions.runSavedWorkflow(workflow.name);
+        if (!result.started) {
+          setStartError(true);
+          return;
+        }
+        setTab('active');
+        await reload();
+      } catch {
+        setStartError(true);
+      } finally {
+        setStartingName(null);
+      }
+    },
+    [actions, reload],
+  );
+
+  return (
+    <div className={styles.root}>
+      <div className={styles.intro}>
+        <div className={styles.introIcon} aria-hidden="true">
+          <WorkflowIcon />
+        </div>
+        <div className={styles.introCopy}>
+          <div className={styles.introTitle}>{t('workflowRuns.heading')}</div>
+          <div className={styles.introDescription}>
+            {t('workflowRuns.subtitle')}
+          </div>
+        </div>
+        <svg
+          className={styles.traceRail}
+          viewBox="0 0 184 48"
+          aria-hidden="true"
+        >
+          <path d="M12 24h34M46 24 72 9h34M46 24l26 15h34M106 9l28 15h38M106 39l28-15" />
+          <circle cx="12" cy="24" r="4" />
+          <circle cx="46" cy="24" r="4" />
+          <circle cx="106" cy="9" r="4" />
+          <circle cx="106" cy="39" r="4" />
+          <circle cx="172" cy="24" r="5" />
+        </svg>
+      </div>
+
+      <Tabs
+        className={styles.tabs}
+        value={tab}
+        onValueChange={(value) => setTab(value as WorkflowTab)}
+      >
+        <div className={styles.toolbar}>
+          <TabsList variant="line">
+            <TabsTrigger value="saved">
+              <FileCode2Icon data-icon="inline-start" />
+              {t('workflowRuns.saved')}
+              <Badge variant="secondary">{savedWorkflows.length}</Badge>
+            </TabsTrigger>
+            <TabsTrigger value="active">
+              <CirclePlayIcon data-icon="inline-start" />
+              {t('workflowRuns.active')}
+              <Badge variant="secondary">{counts.active}</Badge>
+            </TabsTrigger>
+            <TabsTrigger value="history">
+              <HistoryIcon data-icon="inline-start" />
+              {t('workflowRuns.history')}
+              <Badge variant="secondary">{counts.history}</Badge>
+            </TabsTrigger>
+          </TabsList>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void reload()}
+            disabled={loading || !connection.sessionId}
+            aria-label={t('workflowRuns.refresh')}
+            title={t('workflowRuns.refresh')}
+          >
+            <RefreshCwIcon data-icon="inline-start" />
+            <span className={styles.refreshLabel}>
+              {t('workflowRuns.refresh')}
+            </span>
+          </Button>
+        </div>
+
+        {loadError && (
+          <div className={styles.error} role="alert">
+            {t('workflowRuns.loadFailed')}
+          </div>
+        )}
+
+        {!connection.sessionId ? (
+          <div className={styles.emptyState}>{t('workflowRuns.noSession')}</div>
+        ) : loading && !snapshot ? (
+          <div className={styles.loading}>{t('workflowRuns.loading')}</div>
+        ) : (
+          snapshot && (
+            <>
+              <TabsContent value="saved" className={styles.content}>
+                {startError && (
+                  <div className={styles.error} role="alert">
+                    {t('workflowRuns.startFailed')}
+                  </div>
+                )}
+                {savedWorkflows.length === 0 ? (
+                  <div className={styles.savedEmpty}>
+                    <FileCode2Icon aria-hidden="true" />
+                    <div>
+                      <div className={styles.savedEmptyTitle}>
+                        {t('workflowRuns.emptySaved')}
+                      </div>
+                      <div className={styles.savedEmptyDescription}>
+                        {t('workflowRuns.emptySavedHint')}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={styles.savedList}>
+                    {savedWorkflows.map((workflow) => (
+                      <div
+                        key={`${workflow.source}:${workflow.name}`}
+                        className={styles.savedCard}
+                        data-scope={workflow.source}
+                      >
+                        <div className={styles.savedIdentity}>
+                          <div className={styles.savedName}>
+                            /{workflow.name}
+                          </div>
+                          <div className={styles.savedDescription}>
+                            {workflow.source === 'project'
+                              ? t('workflowRuns.projectDescription')
+                              : t('workflowRuns.userDescription')}
+                          </div>
+                        </div>
+                        <Badge variant="outline">
+                          {workflow.source === 'project'
+                            ? t('workflowRuns.project')
+                            : t('workflowRuns.user')}
+                        </Badge>
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => void runSavedWorkflow(workflow)}
+                          disabled={startingName !== null}
+                          aria-label={t('workflowRuns.runNamed', {
+                            name: workflow.name,
+                          })}
+                        >
+                          {startingName === workflow.name ? (
+                            <RefreshCwIcon
+                              className={styles.startingIcon}
+                              data-icon="inline-start"
+                            />
+                          ) : (
+                            <PlayIcon data-icon="inline-start" />
+                          )}
+                          {startingName === workflow.name
+                            ? t('workflowRuns.starting')
+                            : t('workflowRuns.run')}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </TabsContent>
+              <TabsContent value="active" className={styles.content}>
+                <TasksStatusMessage
+                  message={{ snapshot }}
+                  embedded
+                  keyboardShortcuts={false}
+                  manageActiveEvent={false}
+                  syncSnapshot
+                  taskView="workflow-active"
+                  emptyLabel={t('workflowRuns.emptyActive')}
+                  onTasksChange={setSnapshot}
+                  onWorkflowRunStarted={() => setTab('active')}
+                />
+              </TabsContent>
+              <TabsContent value="history" className={styles.content}>
+                <TasksStatusMessage
+                  message={{ snapshot }}
+                  embedded
+                  keyboardShortcuts={false}
+                  manageActiveEvent={false}
+                  syncSnapshot
+                  taskView="workflow-history"
+                  emptyLabel={t('workflowRuns.emptyHistory')}
+                  onTasksChange={setSnapshot}
+                  onWorkflowRunStarted={() => setTab('active')}
+                />
+              </TabsContent>
+            </>
+          )
+        )}
+      </Tabs>
+    </div>
+  );
+}

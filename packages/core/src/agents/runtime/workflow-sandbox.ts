@@ -453,6 +453,19 @@ export interface WorkflowOrchestratorEmitter {
   agentDispatched?(label?: string): void;
   /** `dispatch(...)` settled (success or thrown). `error` set on rejection. */
   agentCompleted?(label?: string, error?: string): void;
+  /** A dispatch was issued and joined to the runtime dependency graph. */
+  dispatchQueued?(event: {
+    id: string;
+    label?: string;
+    prompt: string;
+    dependsOn: string[];
+    queuedAt: number;
+    cached?: boolean;
+  }): void;
+  /** A queued dispatch acquired a scheduler slot. */
+  dispatchStarted?(id: string, startedAt: number): void;
+  /** A dispatch reached a terminal state. */
+  dispatchSettled?(id: string, error?: string, endedAt?: number): void;
   /**
    * P5: cumulative `spent` re-snapshot after each successful agent
    * completion. `total` is `null` when no per-run cap is set
@@ -667,13 +680,7 @@ export interface WorkflowSandbox {
   getPhases(): string[];
   /** Log lines emitted by the script in order. */
   getLogs(): string[];
-  /**
-   * Append a log line produced by a nested workflow run. Nested logs
-   * reach no production surface on their own (the nested sandbox's
-   * buffer is never read by the orchestrator), so the orchestrator
-   * merges them into the parent run's logs at nested settlement —
-   * including the nested unconsumed-rejection mirror lines.
-   */
+  /** Merge a nested workflow log into the parent buffer without re-emitting. */
   appendLog(line: string): void;
   /**
    * The script's `export const meta = {...}` declaration, validated and
@@ -734,20 +741,26 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   const phases: string[] = [];
   const logs: string[] = [];
 
-  const safeLog = (msg: unknown): void => {
+  const emitLog = (line: string): void => {
+    try {
+      opts.emitter?.logAppended?.(line);
+    } catch (e) {
+      debugLogger.warn('emitter.logAppended threw:', e);
+    }
+  };
+
+  const safeLog = (msg: unknown, notify = true): void => {
     if (logs.length < MAX_LOG_LINES) {
       const line = String(msg);
       logs.push(line);
       // P4b: emit to host-side subscriber (registry). Defensive try/catch
       // because a subscriber error must not interrupt script execution
       // — the script body has no business knowing about UI plumbing.
-      try {
-        opts.emitter?.logAppended?.(line);
-      } catch (e) {
-        debugLogger.warn('emitter.logAppended threw:', e);
-      }
+      if (notify) emitLog(line);
     } else if (logs.length === MAX_LOG_LINES) {
-      logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
+      const line = `[workflow log truncated at ${MAX_LOG_LINES} lines]`;
+      logs.push(line);
+      if (notify) emitLog(line);
     }
   };
 
@@ -1831,7 +1844,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     },
     getPhases: () => [...phases],
     getLogs: () => [...logs],
-    appendLog: (line: string) => safeLog(line),
+    appendLog: (line: string) => safeLog(line, false),
     getMeta: () => extractedMeta,
   };
 }

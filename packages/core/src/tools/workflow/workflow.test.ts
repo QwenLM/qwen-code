@@ -57,6 +57,12 @@ describe('WorkflowTool', () => {
     expect(schema.properties.run_in_background.description).toContain(
       'cooperatively pause/resume',
     );
+    expect(schema.properties.run_in_background.description).toContain(
+      'Web Shell',
+    );
+    expect(schema.properties.run_in_background.description).not.toContain(
+      'TUI only',
+    );
   });
 
   // The description is what makes the model pick pipeline() over a barrier
@@ -113,6 +119,7 @@ describe('WorkflowTool', () => {
     // and the base merge conflicted exactly here. Nothing else asserts the
     // control set, so dropping one on the next merge would be silent.
     expect(description).toMatch(/cooperative pause\/resume/);
+    expect(description).toMatch(/active completion channel.*Web Shell/);
     // #8690 asked the text to speak this project's own vocabulary. Without
     // a location, "runs a saved workflow" leaves the model no way to reach
     // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
@@ -185,20 +192,22 @@ describe('WorkflowTool', () => {
     expect(invocation.getDescription()).toContain('deep-research.js');
   });
 
-  it('rejects background runs outside an interactive completion channel', () => {
-    const headlessRegistry = new WorkflowRunRegistry();
-    headlessRegistry.setCompletionCallback(vi.fn());
-    const headlessConfig = {
+  it('accepts background runs owned by a non-interactive completion channel', () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
       isInteractive: () => false,
-      getWorkflowRunRegistry: () => headlessRegistry,
+      getWorkflowRunRegistry: () => registry,
     } as unknown as Config;
     expect(() =>
-      new WorkflowTool(headlessConfig).build({
+      new WorkflowTool(config).build({
         script: 'return 1',
         run_in_background: true,
       }),
-    ).toThrow(/interactive TUI/i);
+    ).not.toThrow();
+  });
 
+  it('rejects background runs without a completion channel or in Zed', () => {
     const interactiveRegistry = new WorkflowRunRegistry();
     const interactiveConfig = {
       isInteractive: () => true,
@@ -222,7 +231,7 @@ describe('WorkflowTool', () => {
         script: 'return 1',
         run_in_background: true,
       }),
-    ).toThrow(/interactive TUI/i);
+    ).toThrow(/Zed integration/i);
   });
 
   it('does not register a background run when the caller is already aborted', async () => {

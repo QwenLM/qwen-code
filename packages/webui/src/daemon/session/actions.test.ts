@@ -922,6 +922,28 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
+  it('starts a saved workflow through the session workflow action', async () => {
+    const session = createMockSession('session-a');
+    session.client.sessionWorkflowTaskAction.mockResolvedValueOnce({
+      changed: true,
+      status: 'running',
+      taskId: 'wf_5678efab',
+    });
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.runSavedWorkflow('deep-review')).resolves.toEqual({
+      started: true,
+      status: 'running',
+      taskId: 'wf_5678efab',
+    });
+    expect(session.client.sessionWorkflowTaskAction).toHaveBeenCalledWith(
+      'session-a',
+      'deep-review',
+      'run-saved',
+      'client-session-a',
+    );
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -1431,6 +1453,7 @@ function createMockSession(
       })),
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
+      sessionWorkflowTaskAction: vi.fn(),
     },
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),

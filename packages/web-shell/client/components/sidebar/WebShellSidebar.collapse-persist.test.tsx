@@ -222,6 +222,7 @@ function renderSidebar() {
           onOpenSettings={() => {}}
           onOpenDaemonStatus={() => {}}
           onOpenScheduledTasks={() => {}}
+          onOpenWorkflows={() => {}}
           onOpenGoals={() => {}}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
