@@ -3310,6 +3310,30 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(keysOf(2)).toHaveLength(3);
   });
 
+  it('the 3B pair: round 2 builds every chunk with round 1 still in flight (no round-1 transcripts)', () => {
+    // The convergence pair on 3B — the latency lever: rounds 1 and 2 are
+    // launched together, so round 2's builder runs BEFORE round 1's auditors
+    // have returned any transcript. Round 2 must still fan out to every chunk
+    // (the retirement schedule only reads history at k >= 3, so nothing here
+    // depends on round 1's records existing) and stamp its own admission, so
+    // the two rounds' auditors run concurrently instead of one round-wall
+    // apart. Pins the mechanism the SKILL 3B-pair orchestration relies on.
+    const r1 = runRound(1); // built, but no transcripts written for it
+    expect(r1).toContain('3 auditors required this round — one per chunk.');
+    const r2 = runRound(2); // round 1's records are empty at this point
+    expect(r2).toContain('3 auditors required this round — one per chunk.');
+    expect(r2).not.toContain('retirement:');
+    expect(keysOf(1)).toHaveLength(3);
+    expect(keysOf(2)).toHaveLength(3);
+    // Both admissions are stamped, so the deadline gate prices each and the
+    // clock advances a round per stamp.
+    const rounds = readRoundStamps(plan)
+      .map((s) => s.round)
+      .sort();
+    expect(rounds).toContain(1);
+    expect(rounds).toContain(2);
+  });
+
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
