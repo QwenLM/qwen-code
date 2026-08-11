@@ -8,6 +8,7 @@ import { Storage, type Config } from '@qwen-code/qwen-code-core';
 import { RequestError } from '@agentclientprotocol/sdk';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { downloadSkill } from './skill-source-download.js';
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -196,9 +197,17 @@ function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   const lines = frontmatter.split('\n');
   const disabledFields: Array<{ start: number; end: number }> = [];
   const disabledFieldPattern =
-    /^(?:disable-model-invocation|"disable-model-invocation"|'disable-model-invocation')\s*:(.*)$/;
+    /^(disable-model-invocation|"(?:\\.|[^"\\])*"|'(?:''|[^'])*')\s*:/;
   for (let index = 0; index < lines.length; index += 1) {
-    if (!disabledFieldPattern.test(lines[index])) continue;
+    const match = lines[index].match(disabledFieldPattern);
+    if (!match) continue;
+    let parsedKey: unknown;
+    try {
+      parsedKey = parseYaml(match[1], { schema: 'core' });
+    } catch {
+      continue;
+    }
+    if (parsedKey !== 'disable-model-invocation') continue;
 
     let end = index;
     let cursor = index + 1;

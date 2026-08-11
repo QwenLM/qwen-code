@@ -414,6 +414,12 @@ describe('managed Skill mutations', () => {
         },
       ]),
       {
+        field: '"disable-model-inv\\u006Fcation": true',
+        enabled: true,
+        expectedDisabled: undefined,
+        initiallyDisabled: true,
+      },
+      {
         field: 'disable-model-invocation:\n  false',
         enabled: false,
         expectedDisabled: true,
