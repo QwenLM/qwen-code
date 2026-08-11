@@ -1040,14 +1040,21 @@ mod tests {
         );
         // A virtual VPN adapter with the same routed address must not win
         // over the physical LAN.
-        let utun = interface(
-            "utun3",
+        let virtual_name = if cfg!(target_os = "macos") {
+            "utun3"
+        } else if cfg!(target_os = "windows") {
+            "vEthernet (Default Switch)"
+        } else {
+            "tun0"
+        };
+        let virtual_interface = interface(
+            virtual_name,
             Ipv4Addr::new(100, 64, 0, 10),
             Some(Ipv4Addr::new(255, 192, 0, 0)),
         );
         let result = select_lan_ipv4(
             Some(Ipv4Addr::new(100, 64, 0, 10)),
-            Some(vec![en0, utun]),
+            Some(vec![en0, virtual_interface]),
         )
         .expect("physical LAN");
         assert_eq!(result.address, routed);
