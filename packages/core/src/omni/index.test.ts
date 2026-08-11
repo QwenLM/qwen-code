@@ -296,6 +296,72 @@ describe('readMediaViaOmniDelivery result shape', () => {
     });
   });
 
+  it('leads with the session resource handle when memory is on', async () => {
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi
+        .fn()
+        .mockResolvedValue(
+          mockRecognized('image', { width: 1920, height: 1080 }),
+        ),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.png'),
+    }));
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        async putFile() {
+          return { objectPath: '/tmp/obj.png', deduped: false };
+        }
+        getOmniRootDir() {
+          return tmpDir;
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        async uploadFile() {
+          return 'oss://bucket/key';
+        }
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
+    const { MediaResourceRegistry } = await import(
+      '../services/media-memory/index.js'
+    );
+    const registry = new MediaResourceRegistry();
+
+    const result = await readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: {
+        ...deliveryConfig(),
+        getOmniMemoryConfig: () => ({
+          collection: { maxInlineTextBytes: 4096 },
+        }),
+        getOmniMediaResourceRegistry: () => registry,
+      } as unknown as Config,
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    // Handle part FIRST — the hint/disclosure chain keeps its adjacency
+    // to the media part (D8), and the model learns the recall handle.
+    const handleText = parts[0]!['text'] as string;
+    expect(handleText).toContain('【媒体资源】pic.png：');
+    const resourceId = handleText.split('：')[1]!;
+    expect(registry.resolve(resourceId)).toMatchObject({
+      mediaType: 'image',
+    });
+    expect(parts[1]!['text']).toContain('zoom_image');
+    expect(parts[2]).toHaveProperty('fileData');
+  });
+
   it('returns a bare fileData part for audio (no zoom hint)', async () => {
     vi.doMock('./ffmpeg.js', () => ({
       isFfmpegAvailable: vi.fn().mockResolvedValue(true),
@@ -1859,7 +1925,7 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
       getOmniMediaResourceRegistry: () => registry,
     } as unknown as Config;
 
-    await mod.processMediaForOmniDelivery(filePath, config);
+    const delivery = await mod.processMediaForOmniDelivery(filePath, config);
 
     // The derivative the model actually received is session-addressable,
     // resolving back to its harness-side locator and memory identity.
@@ -1878,5 +1944,8 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     const source = registry.resolveVersion(sourceBinding!.fileVersionId);
     expect(source?.fileRef).toBe(filePath);
     expect(source?.mediaType).toBe('image');
+    // The delivery discloses the SOURCE handle (M §5.2): the model's way
+    // into recall is the source identity, not the derivative's.
+    expect(delivery.resourceId).toBe(source!.resourceId);
   });
 });

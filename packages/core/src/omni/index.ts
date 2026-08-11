@@ -40,6 +40,7 @@ import { OmniDegradationCache } from './policy/degradation-cache.js';
 import {
   formatDisclosureText,
   formatOmissionText,
+  formatResourceHandleText,
   formatTranscriptText,
 } from './disclosure.js';
 import {
@@ -107,6 +108,7 @@ export {
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   formatDisclosureText,
   formatOmissionText,
+  formatResourceHandleText,
   formatTranscriptText,
   isDisclosureText,
 } from './disclosure.js';
@@ -204,6 +206,11 @@ export interface OmniMediaDelivery {
    * entry as [disclosure?, fileData] (or the omission notice) after the
    * primary media Part and before any transcripts. */
   additionalMedia?: OmniAdditionalMediaDelivery[];
+  /** Opaque session handle for the SOURCE media (M §5.2), present iff
+   * media memory recorded it. Consumers disclose it next to the delivered
+   * content so the model can reference the resource in recall requests —
+   * the handle stands in for the path the model must never see. */
+  resourceId?: string;
 }
 
 /** One extra media deliverable of a multi-output fixed policy. */
@@ -511,8 +518,10 @@ export async function processMediaForOmniDelivery(
     memoryBinding: sourceBinding,
   };
   // The source is always addressable by recall, even when preprocessing
-  // later replaces the delivered bytes with a derivative.
-  bindSessionResource(final);
+  // later replaces the delivered bytes with a derivative. Its handle is
+  // the one disclosed to the model (M §5.2): recall requests and future
+  // evidence-gathering tool calls reference the SOURCE, never a path.
+  const sessionResourceId = bindSessionResource(final)?.resourceId;
   /** Media deliverables beyond the primary (multi-output fixed policies). */
   let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
@@ -545,6 +554,7 @@ export async function processMediaForOmniDelivery(
     uploadCacheHit: false,
     degraded: true,
     transcripts,
+    resourceId: sessionResourceId,
     ...extras,
   });
   const policies = processingConfig?.fixedPolicies ?? [];
@@ -880,6 +890,7 @@ export async function processMediaForOmniDelivery(
       omission: { reason: guard.violation },
       transcripts: transcripts.length > 0 ? transcripts : undefined,
       additionalMedia: await processAdditionalMedia(),
+      resourceId: sessionResourceId,
     };
   }
   const tokenEstimate = guard.estimate;
@@ -896,6 +907,7 @@ export async function processMediaForOmniDelivery(
     degraded: final.degraded,
     transcripts: transcripts.length > 0 ? transcripts : undefined,
     additionalMedia: await processAdditionalMedia(),
+    resourceId: sessionResourceId,
   };
 }
 
@@ -962,6 +974,13 @@ export async function readMediaViaOmniDelivery(params: {
       displayName,
       delivery.additionalMedia,
     );
+    // Session resource handle (M §5.2): leads the part group in every
+    // branch — even an omitted/transcript-only delivery leaves the model
+    // a handle to recall or reprocess the source. Placed FIRST so the
+    // disclosure keeps its D8 adjacency to the media part.
+    const handleParts = delivery.resourceId
+      ? [{ text: formatResourceHandleText(displayName, delivery.resourceId) }]
+      : [];
     if (delivery.omission) {
       // Explicit omission (policy design §10.2): the media is withheld and
       // the omission notice text stands in its place. Not an error — the
@@ -971,8 +990,15 @@ export async function readMediaViaOmniDelivery(params: {
       };
       return {
         llmContent:
-          transcriptParts.length > 0 || additionalParts.length > 0
-            ? [omissionPart, ...additionalParts, ...transcriptParts]
+          transcriptParts.length > 0 ||
+          additionalParts.length > 0 ||
+          handleParts.length > 0
+            ? [
+                ...handleParts,
+                omissionPart,
+                ...additionalParts,
+                ...transcriptParts,
+              ]
             : omissionPart.text,
         returnDisplay: `Media omitted by the omni transport guard: ${relativePathForDisplay}`,
         tokenEstimate: delivery.tokenEstimate,
@@ -989,6 +1015,7 @@ export async function readMediaViaOmniDelivery(params: {
         : [];
       return {
         llmContent: [
+          ...handleParts,
           ...disclosureParts,
           ...additionalParts,
           ...transcriptParts,
@@ -1004,7 +1031,9 @@ export async function readMediaViaOmniDelivery(params: {
         displayName,
       },
     };
-    const parts: Array<{ text: string } | typeof fileDataPart> = [];
+    const parts: Array<{ text: string } | typeof fileDataPart> = [
+      ...handleParts,
+    ];
     const { width, height } = delivery.recognized.metadata;
     if (
       delivery.recognized.modality === 'image' &&

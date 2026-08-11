@@ -16,7 +16,11 @@ import {
   isOmniDeliveryActive,
   processMediaForOmniDelivery,
 } from './index.js';
-import { formatDisclosureText, formatOmissionText } from './disclosure.js';
+import {
+  formatDisclosureText,
+  formatOmissionText,
+  formatResourceHandleText,
+} from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
 import { sniffMediaType } from './recognition.js';
@@ -135,6 +139,16 @@ export async function processToolResultOmniMedia(
       );
       uploadsRemaining -=
         delivery.additionalMedia?.filter((e) => !e.omission).length ?? 0;
+      // Session resource handle (M §5.2): leads the replacement group in
+      // every branch, keeping the disclosure's D8 adjacency to the media
+      // part intact.
+      const handleParts: Part[] = delivery.resourceId
+        ? [
+            {
+              text: formatResourceHandleText(displayName, delivery.resourceId),
+            },
+          ]
+        : [];
       if (delivery.omission) {
         // Explicit omission (policy design §10.2): the transport guard
         // could not bring the part within limits even after the guard
@@ -143,6 +157,7 @@ export async function processToolResultOmniMedia(
         // were already charged above).
         changed = true;
         return [
+          ...handleParts,
           { text: formatOmissionText(displayName, delivery.omission.reason) },
           ...additionalParts,
           ...transcriptParts,
@@ -157,11 +172,12 @@ export async function processToolResultOmniMedia(
         changed = true;
         return delivery.disclosure
           ? [
+              ...handleParts,
               { text: formatDisclosureText(displayName, delivery.disclosure) },
               ...additionalParts,
               ...transcriptParts,
             ]
-          : [...additionalParts, ...transcriptParts];
+          : [...handleParts, ...additionalParts, ...transcriptParts];
       }
       changed = true;
       uploadsRemaining--;
@@ -175,12 +191,18 @@ export async function processToolResultOmniMedia(
       };
       return delivery.disclosure
         ? [
+            ...handleParts,
             { text: formatDisclosureText(displayName, delivery.disclosure) },
             fileDataPart,
             ...additionalParts,
             ...transcriptParts,
           ]
-        : [fileDataPart, ...additionalParts, ...transcriptParts];
+        : [
+            ...handleParts,
+            fileDataPart,
+            ...additionalParts,
+            ...transcriptParts,
+          ];
     } catch (err) {
       if (signal.aborted) throw err;
       if (err instanceof OmniTransportGuardError) {

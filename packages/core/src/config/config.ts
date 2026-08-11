@@ -3021,13 +3021,12 @@ export class Config {
         this.toolRegistry,
       );
 
-      // Same stance for `omni.memory`: normalize once at startup; an
-      // invalid memory configuration (bad budgets, unknown recall mode)
-      // throws OmniMemoryConfigError and aborts startup.
-      const { normalizeOmniMemoryConfig } = await import(
-        '../services/media-memory/config.js'
-      );
-      this.omniMemoryConfig = normalizeOmniMemoryConfig(this.omniMemory);
+      // Same stance for `omni.memory`: normalized once (idempotent —
+      // createToolRegistry already ran it to gate the recall tool's
+      // registration on `recall.mode`); an invalid memory configuration
+      // (bad budgets, unknown recall mode) throws OmniMemoryConfigError
+      // and aborts startup.
+      await this.ensureOmniMemoryConfig();
     }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
@@ -6495,6 +6494,22 @@ export class Config {
     return this.omniMemoryConfig;
   }
 
+  /** Normalize `omni.memory` on first use (idempotent). Called from
+   * createToolRegistry — which runs BEFORE initialize()'s omni
+   * normalization block and needs `recall.mode` to gate the recall
+   * tool's registration (D10) — and again from initialize() as a
+   * no-op backstop. Invalid settings throw OmniMemoryConfigError:
+   * startup-fatal on both paths. */
+  private async ensureOmniMemoryConfig(): Promise<NormalizedOmniMemoryConfig> {
+    if (!this.omniMemoryConfig) {
+      const { normalizeOmniMemoryConfig } = await import(
+        '../services/media-memory/config.js'
+      );
+      this.omniMemoryConfig = normalizeOmniMemoryConfig(this.omniMemory);
+    }
+    return this.omniMemoryConfig;
+  }
+
   /** Session registry binding persistent media-memory identities to the
    * opaque `resourceId` handles the model references (M §5.2). One
    * instance per session; a handle is only meaningful in the session
@@ -8235,6 +8250,23 @@ export class Config {
       ];
       for (const [name, factory] of omniPolicyToolFactories) {
         await registerLazy(name, factory);
+      }
+
+      // Active-mode memory recall (M §9, D10 mutual exclusion): the
+      // normalized `omni.memory` config decides at REGISTRATION time
+      // whether the tool exists at all — in sideQuery mode the passive
+      // selector runs instead and this tool must never be exposed.
+      // Normalized on demand because createToolRegistry runs before
+      // initialize()'s omni normalization block; invalid settings are
+      // startup-fatal on this path too.
+      const memoryConfig = await this.ensureOmniMemoryConfig();
+      if (memoryConfig.recall.mode === 'active') {
+        await registerLazy(ToolNames.OMNI_RECALL_MEDIA_MEMORY, async () => {
+          const { OmniRecallMediaMemoryTool } = await import(
+            '../omni/recall-media-memory-tool.js'
+          );
+          return new OmniRecallMediaMemoryTool(this);
+        });
       }
     }
 

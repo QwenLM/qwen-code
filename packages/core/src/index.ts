@@ -677,6 +677,7 @@ export {
   recognizeMediaFile,
   formatDisclosureText,
   formatOmissionText,
+  formatResourceHandleText,
   buildAdditionalMediaParts,
   buildTranscriptParts,
   OmniObjectStore,
@@ -691,6 +692,14 @@ export {
   type DownloadedMedia,
 } from './omni/index.js';
 export { processToolResultOmniMedia } from './omni/tool-result-media.js';
+export {
+  buildMediaMemoryRecallAdvisor,
+  createMediaMemoryRecallService,
+} from './omni/memory-recall.js';
+export {
+  OmniRecallMediaMemoryTool,
+  type OmniRecallMediaMemoryParams,
+} from './omni/recall-media-memory-tool.js';
 export {
   resolveMediaPolicyModelAccess,
   isMediaPolicyToolHiddenFromModel,

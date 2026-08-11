@@ -58,3 +58,18 @@ export function formatTranscriptText(
 ): string {
   return `${OMNI_TRANSCRIPT_TEXT_PREFIX}${displayName}：${transcript}`;
 }
+
+/** Marks a text Part as a session resource-handle annotation: the opaque
+ * `resourceId` minted for a delivered media resource (memory design M
+ * §5.2). The model references this handle in `omni_recall_media_memory`
+ * requests (and other omni tools that accept a resourceId) — it is the
+ * ONLY identity the model ever sees for the underlying file. */
+export const OMNI_RESOURCE_HANDLE_TEXT_PREFIX = '【媒体资源】';
+
+/** Model-facing resource-handle annotation for one delivered resource. */
+export function formatResourceHandleText(
+  displayName: string,
+  resourceId: string,
+): string {
+  return `${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}${displayName}：${resourceId}`;
+}
