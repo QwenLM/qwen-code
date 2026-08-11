@@ -4979,6 +4979,7 @@ export function App({
           return;
         }
         if (
+          sessionWriteBlockedRef.current ||
           connectionRef.current.sessionId !== sourceSessionId ||
           getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
           composerSourceVersionRef.current !== sourceVersion
@@ -5425,6 +5426,7 @@ export function App({
           })
           .then(() => {
             if (
+              sessionWriteBlockedRef.current ||
               connectionRef.current.sessionId !== sourceSessionId ||
               getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
               composerSourceVersionRef.current !== sourceVersion

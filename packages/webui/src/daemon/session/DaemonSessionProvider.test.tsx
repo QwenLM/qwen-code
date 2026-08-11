@@ -10418,6 +10418,70 @@ describe('DaemonSessionProvider', () => {
     expect(detachFetch).toHaveBeenCalledOnce();
   });
 
+  it('adopts one running B restore across controlled A to B to A to B', async () => {
+    const detachFetch = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(null, { status: 204 }),
+    );
+    vi.stubGlobal('fetch', detachFetch);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['client_identity'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-a', clientId: 'client-a' }),
+    );
+    const target = createDeferred<MockSession>();
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    const renderControlled = (sessionId: string) =>
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId={sessionId}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => target.promise,
+    );
+
+    await act(async () => {
+      renderControlled('session-b');
+      await flushPromises();
+      renderControlled('session-a');
+      await flushPromises();
+      renderControlled('session-b');
+      await flushPromises();
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      target.resolve(
+        createMockSession({ sessionId: 'session-b', clientId: 'client-b' }),
+      );
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-b',
+      clientId: 'client-b',
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
+  });
+
   it('loads controlled sessionId changes', async () => {
     const nextSession = createDeferred<MockSession>();
     sdkMocks.sessions.push(

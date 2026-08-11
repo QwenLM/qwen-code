@@ -93,6 +93,42 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+interface RecordedSessionRequest {
+  method: string;
+  pathname: string;
+  sessionId: string | undefined;
+  clientId: string | undefined;
+}
+
+function installSessionRequestRecorder(
+  respond?: (request: Request) => Response | undefined,
+) {
+  const originalFetch = globalThis.fetch;
+  const requests: RecordedSessionRequest[] = [];
+  let recording = true;
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    const match = url.pathname.match(/^\/session\/([^/]+)\//);
+    if (recording) {
+      requests.push({
+        method: request.method,
+        pathname: url.pathname,
+        sessionId: match?.[1] ? decodeURIComponent(match[1]) : undefined,
+        clientId: request.headers.get('X-Qwen-Client-Id') ?? undefined,
+      });
+    }
+    return respond?.(request) ?? originalFetch(request);
+  };
+  return {
+    requests,
+    stop() {
+      recording = false;
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
 async function waitFor(
   condition: () => boolean,
   description: string,
@@ -179,6 +215,231 @@ describe('qwen serve WebUI transactional session switching', () => {
       getBlocks: () => blocks,
     };
   }
+
+  async function setupActiveSource(options?: { targetLoadTimeout?: boolean }) {
+    const workspace = makeTempWorkspace('webui-session-switching-active');
+    activeDaemon = await spawnDaemon({
+      workspaceCwd: workspace,
+      env: {
+        QWEN_CLI_ENTRY: MOCK_AGENT_PATH,
+        MOCK_ACP_MODE: 'hang',
+      },
+    });
+    const source = await activeDaemon.client.createOrAttachSession({
+      sessionScope: 'thread',
+    });
+    const target = await activeDaemon.client.createOrAttachSession({
+      sessionScope: 'thread',
+    });
+    const resolvedWorkspace = source.workspaceCwd ?? workspace;
+    const recorder = installSessionRequestRecorder((request) => {
+      if (
+        options?.targetLoadTimeout === true &&
+        request.method === 'POST' &&
+        new URL(request.url).pathname.endsWith(
+          `/session/${encodeURIComponent(target.sessionId)}/load`,
+        )
+      ) {
+        return new Response(
+          JSON.stringify({
+            code: 'session_restore_timeout',
+            error: 'Session restore timed out',
+            retryable: true,
+          }),
+          {
+            status: 504,
+            headers: {
+              'Content-Type': 'application/json',
+              'Retry-After': '5',
+            },
+          },
+        );
+      }
+      return undefined;
+    });
+    let actions: ReturnType<typeof useActions> | undefined;
+    let connection: ReturnType<typeof useConnection> | undefined;
+    function Harness() {
+      actions = useActions();
+      connection = useConnection();
+      return null;
+    }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        createElement(
+          DaemonSessionProvider,
+          {
+            autoConnect: true,
+            baseUrl: activeDaemon!.base,
+            token: activeDaemon!.token,
+            sessionId: source.sessionId,
+            workspaceCwd: resolvedWorkspace,
+          },
+          createElement(Harness),
+        ),
+      );
+    });
+    await waitFor(
+      () =>
+        connection?.status === 'connected' &&
+        connection.sessionId === source.sessionId &&
+        connection.capabilities?.features.includes('client_identity') === true,
+      'active source bootstrap',
+    );
+    const admitted = deferred();
+    let promptSettled = false;
+    let promptOutcome!: Promise<unknown>;
+    act(() => {
+      promptOutcome = actions!
+        .sendPrompt('source remains active', {
+          onAdmitted: () => admitted.resolve(),
+        })
+        .then(
+          (result) => {
+            promptSettled = true;
+            return result;
+          },
+          (error: unknown) => {
+            promptSettled = true;
+            return error;
+          },
+        );
+    });
+    await admitted.promise;
+    expect(
+      (await activeDaemon.client.sessionStatus(source.sessionId))
+        .hasActivePrompt,
+    ).toBe(true);
+    return {
+      workspace: resolvedWorkspace,
+      source,
+      target,
+      recorder,
+      container,
+      promptOutcome,
+      isPromptSettled: () => promptSettled,
+      getActions: () => {
+        if (!actions) throw new Error('session actions unavailable');
+        return actions;
+      },
+      getConnection: () => connection,
+    };
+  }
+
+  async function cleanupActiveSource(
+    state: Awaited<ReturnType<typeof setupActiveSource>>,
+  ) {
+    state.recorder.stop();
+    await act(async () => {
+      await activeDaemon?.client
+        .cancel(state.source.sessionId)
+        .catch(() => undefined);
+    });
+    if (root) {
+      await act(async () => root?.unmount());
+      root = undefined;
+    }
+    state.container.remove();
+    await activeDaemon?.dispose();
+    activeDaemon = undefined;
+    fs.rmSync(state.workspace, { recursive: true, force: true });
+  }
+
+  function executionRequests(requests: readonly RecordedSessionRequest[]) {
+    return requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        /\/(?:prompt|cancel|continue|mid-turn-message)$/.test(request.pathname),
+    );
+  }
+
+  it('keeps an active source running across A to B to A navigation', async () => {
+    const state = await setupActiveSource();
+    try {
+      await act(async () => {
+        await state.getActions().loadSession(state.target.sessionId, {
+          workspaceCwd: state.workspace,
+        });
+      });
+      await expect(state.promptOutcome).resolves.toEqual({
+        stopReason: 'cancelled',
+      });
+      expect(state.getConnection()).toMatchObject({
+        status: 'connected',
+        sessionId: state.target.sessionId,
+      });
+      expect(
+        (await activeDaemon!.client.sessionStatus(state.source.sessionId))
+          .hasActivePrompt,
+      ).toBe(true);
+
+      await act(async () => {
+        await state.getActions().loadSession(state.source.sessionId, {
+          workspaceCwd: state.workspace,
+        });
+      });
+      expect(state.getConnection()).toMatchObject({
+        status: 'connected',
+        sessionId: state.source.sessionId,
+      });
+      expect(
+        (await activeDaemon!.client.sessionStatus(state.source.sessionId))
+          .hasActivePrompt,
+      ).toBe(true);
+      expect(executionRequests(state.recorder.requests)).toEqual([
+        expect.objectContaining({
+          pathname: `/session/${state.source.sessionId}/prompt`,
+          sessionId: state.source.sessionId,
+        }),
+      ]);
+    } finally {
+      await cleanupActiveSource(state);
+    }
+  }, 30_000);
+
+  it('keeps an active source and its waiter after a target 504', async () => {
+    const state = await setupActiveSource({ targetLoadTimeout: true });
+    try {
+      let restoreError: unknown;
+      await act(async () => {
+        try {
+          await state.getActions().loadSession(state.target.sessionId, {
+            workspaceCwd: state.workspace,
+          });
+        } catch (error) {
+          restoreError = error;
+        }
+      });
+      expect(restoreError).toMatchObject({
+        status: 504,
+        body: {
+          code: 'session_restore_timeout',
+          retryable: true,
+        },
+      });
+      expect(state.getConnection()).toMatchObject({
+        status: 'connected',
+        sessionId: state.source.sessionId,
+        sessionTransition: { phase: 'failed' },
+      });
+      expect(state.isPromptSettled()).toBe(false);
+      expect(
+        (await activeDaemon!.client.sessionStatus(state.source.sessionId))
+          .hasActivePrompt,
+      ).toBe(true);
+      expect(executionRequests(state.recorder.requests)).toEqual([
+        expect.objectContaining({
+          pathname: `/session/${state.source.sessionId}/prompt`,
+          sessionId: state.source.sessionId,
+        }),
+      ]);
+    } finally {
+      await cleanupActiveSource(state);
+    }
+  }, 30_000);
 
   it('keeps the source usable until a completed target response is released', async () => {
     const originalFetch = globalThis.fetch;
