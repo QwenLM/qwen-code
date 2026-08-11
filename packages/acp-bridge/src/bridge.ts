@@ -702,6 +702,14 @@ interface SessionEntry {
     code?: string;
     errorKind?: string;
   };
+  /**
+   * The journaled `turn_error` event behind `turnError`, when the failed
+   * turn published one. A bounded refresh replays it onto persisted
+   * history so the terminal survives a page refresh; any newer turn
+   * terminal clears it so a stale error is never re-appended. Not part of
+   * the session summary.
+   */
+  turnErrorEvent?: BridgeEvent;
   retryAllowed: boolean;
   /** Prompt id whose `prompt_cancelled` event has already been broadcast. */
   cancelBroadcastPromptId?: string;
@@ -1131,7 +1139,7 @@ function broadcastTurnComplete(
   originatorClientId: string | undefined,
 ): void {
   try {
-    entry.events.publish({
+    const published = entry.events.publish({
       type: 'turn_complete',
       ...(promptId ? { promptId } : {}),
       data: {
@@ -1141,6 +1149,8 @@ function broadcastTurnComplete(
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
+    // A newer turn terminal supersedes any pending refresh-append error.
+    if (published !== undefined) entry.turnErrorEvent = undefined;
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -1202,6 +1212,21 @@ export function extractErrorCode(err: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Event types that may be published after a turn terminal without adding
+ * turn content (prompt-queue bookkeeping and config changes). The bounded
+ * refresh-append guard skips these when deciding whether the in-memory
+ * `turn_error` is still the newest meaningful terminal; any other event
+ * type blocks the append.
+ */
+const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
+  'pending_prompt_added',
+  'pending_prompt_completed',
+  'prompt_cancelled',
+  'model_switched',
+  'approval_mode_changed',
+]);
+
 export function classifyTurnErrorKind(
   message: string,
 ): 'model_stream_interrupted' | undefined {
@@ -1250,7 +1275,7 @@ function broadcastTurnError(
     };
   }
   try {
-    entry.events.publish({
+    const published = entry.events.publish({
       type: 'turn_error',
       ...(promptId ? { promptId } : {}),
       data: {
@@ -1263,6 +1288,15 @@ function broadcastTurnError(
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
+    if (mutateTurnState) {
+      // Undefined when the bus dropped the publish (closed mid-teardown);
+      // the refresh-append guard then simply has nothing to replay.
+      entry.turnErrorEvent = published;
+    } else if (published !== undefined) {
+      // A queued prompt's terminal is a newer turn boundary: the prior
+      // in-memory error must no longer be replayed on refresh.
+      entry.turnErrorEvent = undefined;
+    }
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -4938,22 +4972,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           entry.events.lastEventId === lastEventId
         ) {
           let compactedReplay = page.events;
-          if (entry.turnError) {
-            const replay = entry.events.snapshotReplay();
-            const journal = [
-              ...(replay?.compactedTurns ?? []),
-              ...(replay?.liveJournal ?? []),
-            ];
-            const turnError = [...journal]
-              .reverse()
-              .find((event) => event.type === 'turn_error');
-            // Append only while the in-memory terminal is still the newest
-            // journaled event: automatic turns (cron/background
+          const turnErrorEvent = entry.turnErrorEvent;
+          if (turnErrorEvent) {
+            // Append only while no newer turn content was journaled after
+            // the in-memory terminal: automatic turns (cron/background
             // notification) run without clearing entry.turnError, and
             // re-appending the stale error after their newer content would
-            // misplace it in the refreshed transcript.
-            if (turnError && journal.at(-1)?.id === turnError.id) {
-              compactedReplay = [...page.events, turnError];
+            // misplace it in the refreshed transcript. Bookkeeping events
+            // carry no turn content and must not defeat the append; a
+            // newer turn terminal clears turnErrorEvent at broadcast. The
+            // journal holds exactly the events published since the last
+            // turn boundary (the terminal itself folds into the replay
+            // window), so no history scan is needed.
+            const journal = entry.events.liveJournalSnapshot() ?? [];
+            const hasNewerTurnContent = journal.some(
+              (event) =>
+                !REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type),
+            );
+            if (!hasNewerTurnContent) {
+              compactedReplay = [...page.events, turnErrorEvent];
             }
           }
           return {
@@ -6784,6 +6821,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
+                delete entry.turnErrorEvent;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity();

@@ -500,7 +500,7 @@ const LOOP_DETECTED_SKIP_MESSAGE =
   'Skipped because loop detection stopped the current turn before this tool call could run.';
 const LOOP_DETECTED_CONTEXT_MESSAGE =
   'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
-const LOOP_DETECTED_TURN_ERROR_MESSAGE =
+export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
   'Tool-call loop protection stopped this turn. The session is still available; send a more specific instruction to continue.';
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
@@ -642,6 +642,16 @@ function cancelledOrThrowLoopDetected(
 ): 'cancelled' {
   if (signal.aborted) return 'cancelled';
   throw createLoopDetectedTurnError(loopState);
+}
+
+function isLoopDetectedTurnError(error: unknown): boolean {
+  if (!(error instanceof RequestError)) return false;
+  const data = error.data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { code?: unknown }).code === 'LOOP_DETECTED'
+  );
 }
 
 function recordDaemonToolCalls(
@@ -3061,6 +3071,7 @@ export class Session implements SessionContext {
       resolveCompletion = resolve;
     });
 
+    let rejectedByLoopProtection = false;
     try {
       const result = await this.#executePrompt(
         params,
@@ -3068,6 +3079,10 @@ export class Session implements SessionContext {
         channelDeliveryCapture,
         invocationContext,
         modelPrompt,
+        // Channel turns are non-interactive deliveries: like cron and
+        // background-notification turns they keep the graceful end-turn
+        // handling so the collected response text is still delivered.
+        channelDelivery === undefined,
       );
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -3093,11 +3108,16 @@ export class Session implements SessionContext {
           errorKind: error.errorKind,
         });
       }
+      rejectedByLoopProtection = isLoopDetectedTurnError(error);
       throw error;
     } finally {
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
       const shouldDrainAutomaticQueues =
+        // Loop-detected turns resolved end_turn (and drained) before loop
+        // stops became rejections; keep that invariant on the new path so
+        // queued cron/notification work is not stranded.
+        rejectedByLoopProtection ||
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
         this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -3286,6 +3306,7 @@ export class Session implements SessionContext {
     channelDeliveryCapture?: ChannelDeliveryCapture,
     invocationContext?: InvocationContextV1,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -3308,6 +3329,7 @@ export class Session implements SessionContext {
           pendingSend,
           channelDeliveryCapture,
           modelPrompt,
+          rejectOnLoopDetected,
         ),
       ),
     );
@@ -3318,6 +3340,7 @@ export class Session implements SessionContext {
     pendingSend: AbortController,
     channelDeliveryCapture?: ChannelDeliveryCapture,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -3944,10 +3967,12 @@ export class Session implements SessionContext {
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
-                      stopReason: cancelledOrThrowLoopDetected(
-                        pendingSend.signal,
-                        toolLoopState,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                   if (toolRun.loopDetected) {
@@ -3957,10 +3982,12 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                     return {
-                      stopReason: cancelledOrThrowLoopDetected(
-                        pendingSend.signal,
-                        toolLoopState,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                 }
@@ -3981,7 +4008,7 @@ export class Session implements SessionContext {
                 true,
                 fullTurnModelOverride,
                 channelDeliveryCapture,
-                true, // rejectOnLoopDetected
+                rejectOnLoopDetected,
               );
             } finally {
               logConversationFinishedEvent(

@@ -4156,6 +4156,220 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keeps the turn error on refresh when queue bookkeeping lands after it', async () => {
+    // A queued-then-promoted prompt that trips loop protection publishes
+    // `pending_prompt_completed` AFTER its `turn_error` terminal (the
+    // queue-view bookkeeping from `result.finally`). That bookkeeping must
+    // not defeat the refresh-append of the terminal error.
+    let releaseFirst!: () => void;
+    const firstPrompt = new Promise<{ stopReason: 'end_turn' }>((resolve) => {
+      releaseFirst = () => resolve({ stopReason: 'end_turn' });
+    });
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: () => {
+        promptCalls += 1;
+        if (promptCalls === 1) return firstPrompt;
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-queued-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const seenTypes: string[] = [];
+    const collectUntilQueueBookkeeping = (async () => {
+      for await (const event of iter) {
+        seenTypes.push(event.type);
+        if (
+          event.type === 'pending_prompt_completed' &&
+          event.promptId === 'prompt-loop'
+        ) {
+          return;
+        }
+      }
+      throw new Error('pending_prompt_completed was not published');
+    })();
+
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { promptId: 'prompt-first' },
+    );
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'loop' }],
+      },
+      undefined,
+      { promptId: 'prompt-loop' },
+    );
+    await vi.waitFor(() => {
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+    });
+
+    releaseFirst();
+    await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+    await expect(second).rejects.toThrow('Loop protection stopped this turn');
+    await collectUntilQueueBookkeeping;
+    // The bookkeeping event lands AFTER the terminal — exactly the ordering
+    // that must not hide the error on refresh.
+    expect(seenTypes.indexOf('turn_error')).toBeGreaterThanOrEqual(0);
+    expect(seenTypes.indexOf('turn_error')).toBeLessThan(
+      seenTypes.lastIndexOf('pending_prompt_completed'),
+    );
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay).toHaveLength(2);
+    expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+      type: 'turn_error',
+      promptId: 'prompt-loop',
+      data: expect.objectContaining({
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    });
+
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it('drops the stale turn error on refresh after newer automatic-turn content', async () => {
+    const handle = makeChannel({
+      promptImpl: () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-stale-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'loop' }],
+        },
+        undefined,
+        { promptId: 'prompt-loop' },
+      ),
+    ).rejects.toThrow('Loop protection stopped this turn');
+
+    // An automatic turn (cron/background notification) runs after the loop
+    // error without an interactive dispatch: its content is journaled via
+    // the ordinary session/update fan-in.
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const sawAutomaticContent = (async () => {
+      for await (const event of iter) {
+        if (
+          event.type === 'session_update' &&
+          JSON.stringify(event.data).includes('automatic turn content')
+        ) {
+          return;
+        }
+      }
+      throw new Error('automatic turn content was not published');
+    })();
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'automatic turn content' },
+      },
+    });
+    await sawAutomaticContent;
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay).toHaveLength(1);
+    expect(compactedReplay.some((event) => event.type === 'turn_error')).toBe(
+      false,
+    );
+
+    abort.abort();
+    await bridge.shutdown();
+  });
+
   it('propagates partial and replayError from a bounded refresh', async () => {
     const handle = makeChannel({
       loadSessionImpl: () => ({
@@ -8485,8 +8699,10 @@ describe('createAcpSessionBridge', () => {
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
       });
+      const emittedTypes: string[] = [];
       const turnError = (async () => {
         for await (const event of iter) {
+          emittedTypes.push(event.type);
           if (event.type === 'turn_error') return event;
         }
         throw new Error('turn_error was not published');
@@ -8514,6 +8730,9 @@ describe('createAcpSessionBridge', () => {
           promptId: 'prompt-loop',
         },
       });
+      // Structured rejections already ran on the daemon: the forward-failure
+      // phantom (`prompt_cancelled{forward_failed}`) must be suppressed.
+      expect(emittedTypes).not.toContain('prompt_cancelled');
       expect(bridge.getSessionSummary(session.sessionId).turnError).toEqual({
         message: 'Loop protection stopped this turn',
         code: 'LOOP_DETECTED',

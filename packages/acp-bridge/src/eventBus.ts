@@ -44,6 +44,12 @@ export interface CompactionEngine {
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
   snapshot(): SessionReplaySnapshot;
+  /**
+   * In-flight journal only — events ingested since the last turn
+   * boundary — without flattening the compacted replay window. Optional:
+   * consumers fall back to `snapshot()` semantics when absent.
+   */
+  liveJournalSnapshot?(): BridgeEvent[];
   close(): void;
 }
 
@@ -394,6 +400,16 @@ export class EventBus {
       return { ...snapshot, degraded: true };
     }
     return snapshot;
+  }
+
+  /**
+   * Events ingested since the last turn boundary (the boundary itself is
+   * folded into the replay window), without flattening that window.
+   * Undefined when no compaction engine is wired or it exposes no journal
+   * snapshot.
+   */
+  liveJournalSnapshot(): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.();
   }
 
   private markCompactionDegraded(err: unknown): void {
