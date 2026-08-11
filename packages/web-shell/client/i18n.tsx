@@ -1136,6 +1136,7 @@ const EN: Messages = {
     "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
+  'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
   // Key keeps its historical `review` name; the label moved to "Changes" when
   // the code-review result view (`codeReview.*`) took over the word.
@@ -3918,6 +3919,7 @@ const ZH: Messages = {
     '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
   // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
   // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
