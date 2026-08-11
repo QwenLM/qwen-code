@@ -660,6 +660,48 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('preserves unchanged legacy values in known group fields', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "*": { "requireMention": "yes", "dispatchMode": "collect" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+        groups: { '*': { requireMention: 'yes', dispatchMode: 'steer' } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      groups: { '*': { requireMention: 'yes', dispatchMode: 'steer' } },
+    });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: { '*': { requireMention: 'no', dispatchMode: 'steer' } },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
   it('re-validates an unchanged stored scalar instead of preserving it', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

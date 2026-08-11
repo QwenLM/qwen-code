@@ -340,7 +340,7 @@ export function buildChannelUpsertRequest(
   if (hasDescriptorGroupPolicy(descriptor)) {
     if (config['groupPolicy'] === 'allowlist') {
       assignGroups(config, draft.allowedGroupIds, instance);
-    } else {
+    } else if (instance?.config['groupPolicy'] === 'allowlist') {
       delete config['groups'];
     }
   }

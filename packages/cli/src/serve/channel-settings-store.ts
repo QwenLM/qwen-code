@@ -200,7 +200,14 @@ function assertSharedField(
           (nestedKey === 'groupHistoryLimit' &&
             typeof nestedValue === 'number' &&
             Number.isFinite(nestedValue));
-        if (known && !valid) {
+        if (
+          known &&
+          !valid &&
+          !(
+            Object.hasOwn(previousGroup, nestedKey) &&
+            isDeepStrictEqual(previousGroup[nestedKey], nestedValue)
+          )
+        ) {
           throw invalidConfig(
             `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
           );

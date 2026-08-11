@@ -331,6 +331,32 @@ describe('Channel editor state', () => {
     ).not.toHaveProperty('groups');
   });
 
+  it('preserves stored group settings for an unchanged non-allowlist policy', () => {
+    const groups = {
+      '*': { requireMention: false },
+      'group-a': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    };
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'pairing',
+        groups,
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.values.clientId = 'updated-id';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-pairing',
+        instance,
+      ).config.groups,
+    ).toEqual(groups);
+  });
+
   it('supports explicitly clearing a stored secret', () => {
     const instance = configuredInstance();
     const draft = createChannelEditorDraft(DINGTALK, instance);
