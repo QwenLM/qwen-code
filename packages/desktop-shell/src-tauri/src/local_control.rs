@@ -177,6 +177,10 @@ fn spawn_proxy(
                     if client.set_nonblocking(false).is_err() {
                         continue;
                     }
+                    if !network.contains(peer.ip()) {
+                        let _ = write_rejection(&mut client, 403, "Forbidden (off-network)");
+                        continue;
+                    }
                     let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
                     let Ok(client_guard) = client.try_clone() else {
                         continue;
@@ -474,7 +478,9 @@ fn select_lan_ipv4(
 ) -> Result<LocalNetwork, String> {
     let interfaces =
         interfaces.ok_or_else(|| "Local Control could not inspect IPv4 networks.".to_string())?;
-    let physical = interfaces
+    let mut saw_unverified = false;
+    let mut routed_unverified = false;
+    let physical: Vec<LocalNetwork> = interfaces
         .into_iter()
         .filter(|interface| {
             !interface.internal
@@ -488,16 +494,31 @@ fn select_lan_ipv4(
             Addr::V4(address)
                 if address.broadcast.is_some()
                     && !address.ip.is_loopback()
-                    && !address.ip.is_unspecified() => address
-                .netmask
-                .filter(|netmask| !netmask.is_unspecified())
-                .map(|netmask| LocalNetwork {
-                    address: address.ip,
-                    netmask,
-                }),
+                    && !address.ip.is_unspecified() =>
+            {
+                match address
+                    .netmask
+                    .filter(|netmask| !netmask.is_unspecified() && *netmask != Ipv4Addr::BROADCAST)
+                {
+                    Some(netmask) => Some(LocalNetwork {
+                        address: address.ip,
+                        netmask,
+                    }),
+                    None => {
+                        saw_unverified = true;
+                        routed_unverified |= routed == Some(address.ip);
+                        None
+                    }
+                }
+            }
             _ => None,
         })
         .collect();
+    if routed_unverified || (physical.is_empty() && saw_unverified) {
+        return Err(
+            "Local Control found an IPv4 adapter without a verifiable netmask.".to_string(),
+        );
+    }
     choose_lan_ipv4(routed, physical)
 }
 
@@ -600,6 +621,7 @@ mod tests {
         choose_lan_ipv4, find_header_end, local_control_url, rewrite_request, runtime_socket_addr,
         select_lan_ipv4, spawn_proxy, Connections, LocalNetwork,
     };
+    use network_interface::NetworkInterface;
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -635,6 +657,7 @@ mod tests {
         );
         assert!(enterprise.contains("203.0.113.20".parse().expect("same subnet")));
         assert!(!enterprise.contains("198.51.100.20".parse().expect("other subnet")));
+        assert!(choose_lan_ipv4(None, vec![enterprise]).is_err());
         let routed = Ipv4Addr::new(192, 168, 1, 20);
         assert_eq!(
             choose_lan_ipv4(
@@ -659,12 +682,61 @@ mod tests {
             .expect("narrowest duplicate"),
             network("192.168.1.20", "255.255.255.0"),
         );
+        assert!(choose_lan_ipv4(None, vec![]).is_err());
+        assert!(choose_lan_ipv4(
+            None,
+            vec![
+                network("192.168.1.20", "255.255.255.0"),
+                network("192.168.2.5", "255.255.255.0"),
+            ],
+        )
+        .is_err());
     }
 
     #[test]
     fn rejects_unverified_networks_when_interface_enumeration_fails() {
         let routed = Ipv4Addr::new(192, 168, 1, 20);
         assert!(select_lan_ipv4(Some(routed), None).is_err());
+
+        let interface = |name, address, netmask| {
+            NetworkInterface::new_afinet(name, address, netmask, Some(address), 1, false)
+                .with_mac_addr(Some("00:11:22:33:44:55".to_string()))
+        };
+        assert!(select_lan_ipv4(Some(routed), Some(vec![interface("en0", routed, None)])).is_err());
+        assert!(select_lan_ipv4(
+            Some(routed),
+            Some(vec![interface("en0", routed, Some(Ipv4Addr::UNSPECIFIED))]),
+        )
+        .is_err());
+        assert!(select_lan_ipv4(
+            Some(routed),
+            Some(vec![interface("en0", routed, Some(Ipv4Addr::BROADCAST))]),
+        )
+        .is_err());
+        assert!(select_lan_ipv4(
+            Some(routed),
+            Some(vec![
+                interface("en0", routed, None),
+                interface(
+                    "en1",
+                    Ipv4Addr::new(192, 168, 2, 5),
+                    Some(Ipv4Addr::new(255, 255, 255, 0)),
+                ),
+            ]),
+        )
+        .is_err());
+        assert_eq!(
+            select_lan_ipv4(
+                Some(routed),
+                Some(vec![interface(
+                    "en0",
+                    routed,
+                    Some(Ipv4Addr::new(255, 255, 255, 0)),
+                )]),
+            )
+            .expect("verified network"),
+            network("192.168.1.20", "255.255.255.0"),
+        );
     }
 
     #[test]
@@ -757,6 +829,41 @@ mod tests {
         connections.stopping.store(true, Ordering::SeqCst);
         proxy_thread.join().expect("stop proxy");
         upstream_thread.join().expect("stop upstream");
+    }
+
+    #[test]
+    fn rejects_off_subnet_peers() {
+        let target = TcpListener::bind(("127.0.0.1", 0)).expect("target listener");
+        let target_address = target.local_addr().expect("target address");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("proxy listener");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let connections = Arc::new(Connections {
+            stopping: AtomicBool::new(false),
+            streams: Mutex::new(HashMap::new()),
+        });
+        let proxy_thread = spawn_proxy(
+            listener,
+            target_address,
+            format!("http://{proxy_address}"),
+            "pair-token".to_string(),
+            "runtime-token".to_string(),
+            network("192.168.1.20", "255.255.255.0"),
+            Arc::clone(&connections),
+        );
+
+        let mut client = TcpStream::connect(proxy_address).expect("proxy connection");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read response");
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+
+        connections.stopping.store(true, Ordering::SeqCst);
+        proxy_thread.join().expect("stop proxy");
     }
 
     #[test]
