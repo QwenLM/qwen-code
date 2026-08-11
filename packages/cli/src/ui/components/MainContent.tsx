@@ -406,8 +406,12 @@ export const MainContent = () => {
         <VirtualHistoryItem
           terminalWidth={terminalWidth}
           mainAreaWidth={mainAreaWidth}
-          availableTerminalHeight={staticAreaMaxItemHeight}
-          availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
+          availableTerminalHeight={
+            uiState.constrainHeight ? staticAreaMaxItemHeight : undefined
+          }
+          availableTerminalHeightGemini={
+            uiState.constrainHeight ? MAX_GEMINI_MESSAGE_LINES : undefined
+          }
           item={item}
           isPending={false}
           commands={uiState.slashCommands}
@@ -426,6 +430,7 @@ export const MainContent = () => {
       sourceCopyOffsetsByHistoryItem,
       fullDetail,
       pendingAvailableTerminalHeight,
+      uiState.constrainHeight,
     ],
   );
 

@@ -14,7 +14,8 @@
 <a href="https://qwenlm.github.io/qwen-code-docs/fr/users/overview">français</a> |
 <a href="https://qwenlm.github.io/qwen-code-docs/ja/users/overview">日本語</a> |
 <a href="https://qwenlm.github.io/qwen-code-docs/ru/users/overview">Русский</a> |
-<a href="https://qwenlm.github.io/qwen-code-docs/pt-BR/users/overview">Português (Brasil)</a>
+<a href="https://qwenlm.github.io/qwen-code-docs/pt-BR/users/overview">Português (Brasil)</a> |
+<a href="https://qwenlm.github.io/qwen-code-docs/ko/users/overview">한국어</a>
 
 </div>
 

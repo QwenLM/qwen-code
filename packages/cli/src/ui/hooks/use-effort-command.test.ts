@@ -12,14 +12,16 @@ import { useEffortCommand } from './use-effort-command.js';
 
 describe('useEffortCommand', () => {
   let setReasoningEffort: ReturnType<typeof vi.fn>;
+  let getReasoningEffort: ReturnType<typeof vi.fn>;
   let setValue: ReturnType<typeof vi.fn>;
   let config: Config;
   let settings: LoadedSettings;
 
   beforeEach(() => {
     setReasoningEffort = vi.fn();
+    getReasoningEffort = vi.fn();
     setValue = vi.fn();
-    config = { setReasoningEffort } as unknown as Config;
+    config = { setReasoningEffort, getReasoningEffort } as unknown as Config;
     settings = {
       setValue,
       isTrusted: true,
