@@ -24,6 +24,7 @@ import {
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   MAX_RETAINED_SNAPSHOTS,
+  type WorkflowManifestV2,
 } from './workflow-snapshot.js';
 import type { WorkflowTask } from './workflow-run-registry.js';
 import {
@@ -1046,6 +1047,47 @@ describe('durable workflow manifests', () => {
     await expect(readWorkflowManifest(config, 'wf_bad1')).rejects.toThrow(
       /invalid/i,
     );
+  });
+
+  it('rejects non-string manifest status and journal integrity values', async () => {
+    const config = fakeConfig(projectDir);
+    for (const [runId, mutate] of [
+      [
+        'wf_bad5',
+        (manifest: WorkflowManifestV2) => ({
+          ...manifest,
+          status: ['paused'],
+        }),
+      ],
+      [
+        'wf_bad6',
+        (manifest: WorkflowManifestV2) => ({
+          ...manifest,
+          canResume: false,
+          resumeBlockedReason: 'test fixture',
+          journal: { ...manifest.journal, integrity: ['complete'] },
+        }),
+      ],
+    ] as const) {
+      const manifest = await writeWorkflowManifest(
+        config,
+        task({ runId, status: 'paused' }),
+        { args: null, journal: EMPTY_JOURNAL },
+      );
+      await fs.writeFile(
+        config.storage.getWorkflowRunManifestPath(runId),
+        JSON.stringify(mutate(manifest!)),
+      );
+
+      await expect(readWorkflowManifest(config, runId)).rejects.toThrow(
+        /invalid/i,
+      );
+      expect(
+        (await listWorkflowRunRecords(config)).find(
+          (record) => record.runId === runId,
+        ),
+      ).toMatchObject({ status: 'interrupted', canResume: false });
+    }
   });
 
   it.runIf(process.platform !== 'win32')(
