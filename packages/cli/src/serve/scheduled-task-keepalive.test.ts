@@ -419,6 +419,49 @@ describe('scheduled-task keepalive', () => {
     releaseLoad?.(); // let the hung load settle (cleanup)
   });
 
+  it('does not preempt the default bridge restore deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      await updateCronTasks(workspace, () => [
+        task({ id: 'a', sessionId: 'sess-1' }),
+      ]);
+      let releaseLoad: (() => void) | undefined;
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const restoring = {
+        ...bridge,
+        recordHeartbeat: () => {
+          throw new Error('not resident');
+        },
+        loadSession: async () => {
+          markStarted?.();
+          await new Promise<void>((resolve) => {
+            releaseLoad = resolve;
+          });
+        },
+      };
+      const ka = startScheduledTaskKeepalive({
+        bridge: restoring,
+        boundWorkspace: workspace,
+        intervalMs: 60_000,
+      });
+      let settled = false;
+      const tick = ka.tick().finally(() => {
+        settled = true;
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(settled).toBe(false);
+      releaseLoad?.();
+      await tick;
+      ka.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stop() is idempotent', async () => {
     const ka = startScheduledTaskKeepalive({
       bridge,
@@ -558,6 +601,61 @@ describe('scheduled-task keepalive', () => {
     expect(res.failed).toHaveLength(12); // every session recorded failed...
     expect(res.loaded).toHaveLength(0);
     expect(started).toBe(12); // ...and every queued session was still attempted
+  });
+
+  it('does not preempt the default bridge restore deadline during rehydrate', async () => {
+    vi.useFakeTimers();
+    try {
+      await updateCronTasks(workspace, () => [
+        task({ id: 'a', sessionId: 'sess-1' }),
+      ]);
+      let releaseLoad: (() => void) | undefined;
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const rehydrate = rehydrateScheduledTaskSessions({
+        bridge: {
+          loadSession: async () => {
+            markStarted?.();
+            await new Promise<void>((resolve) => {
+              releaseLoad = resolve;
+            });
+          },
+        },
+        boundWorkspace: workspace,
+      });
+      let settled = false;
+      void rehydrate.finally(() => {
+        settled = true;
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(settled).toBe(false);
+      releaseLoad?.();
+      await expect(rehydrate).resolves.toEqual({
+        loaded: ['sess-1'],
+        failed: [],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('disables an overflowing rehydrate watchdog delay', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+    ]);
+    const res = await rehydrateScheduledTaskSessions({
+      bridge: {
+        loadSession: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        },
+      },
+      boundWorkspace: workspace,
+      loadTimeoutMs: 2_147_483_648,
+    });
+    expect(res).toEqual({ loaded: ['sess-1'], failed: [] });
   });
 
   it('binds an unbound task to a dedicated session and writes sessionId to disk', async () => {

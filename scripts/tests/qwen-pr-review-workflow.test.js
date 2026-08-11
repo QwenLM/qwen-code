@@ -26,6 +26,10 @@ const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
   'utf8',
 );
+const workflowsDir = '.github/workflows';
+const workflowFiles = readdirSync(workflowsDir).filter((f) =>
+  /\.ya?ml$/.test(f),
+);
 
 function runReviewStep() {
   const doc = parse(workflow);
@@ -1431,15 +1435,15 @@ describe('docs-only medium gate', () => {
   });
 
   function floorSource() {
-    const anchor = run.indexOf('# Medium measures at one-third to one-half');
-    expect(anchor).toBeGreaterThan(-1);
-    const start = run.indexOf('EFFECTIVE_TIMEOUT_MINUTES=$((', anchor);
-    // The YAML parser strips the block scalar's base indentation, so the
-    // floor's closing `fi` sits at four spaces in the parsed text.
-    const end = run.indexOf('\n    fi', start) + '\n    fi'.length;
+    // The arithmetic lives in ONE function shared by the docs-only branch
+    // and the micro tightening; extract the definition plus one call, so
+    // these cases execute the same implementation both branches run.
+    const start = run.indexOf('halve_budget_floor() {');
+    const endAnchor = '\n}';
+    const end = run.indexOf(endAnchor, start) + endAnchor.length;
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    return run.slice(start, end);
+    return `${run.slice(start, end)}\nhalve_budget_floor`;
   }
 
   it.each([
@@ -1641,7 +1645,7 @@ describe('docs-only gate and relay, executed', () => {
     return runStep.slice(start, end);
   }
 
-  function runGate({ autoReview, wrapper }) {
+  function runGate({ autoReview, wrapper, prSizeLines, timeoutMinutes }) {
     const dir = mkdtempSync(join(tmpdir(), 'docs-gate-'));
     try {
       const stub = join(dir, '.github/scripts/ci');
@@ -1655,7 +1659,8 @@ describe('docs-only gate and relay, executed', () => {
         `AUTO_REVIEW=${autoReview}`,
         'REPO=o/r',
         'PR_NUMBER=42',
-        'EFFECTIVE_TIMEOUT_MINUTES=360',
+        `EFFECTIVE_TIMEOUT_MINUTES=${timeoutMinutes ?? 360}`,
+        ...(prSizeLines === undefined ? [] : [`PR_SIZE_LINES=${prSizeLines}`]),
         `GITHUB_OUTPUT="${gho}"`,
         gateSource(),
         'printf "timeout=%s" "$EFFECTIVE_TIMEOUT_MINUTES"',
@@ -1676,6 +1681,120 @@ describe('docs-only gate and relay, executed', () => {
       wrapper: '#!/bin/bash\necho docs_only\n',
     });
     expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it("tightens a micro diff's budget without touching its effort or posting", () => {
+    // Below the independent churn bound (25 changed lines — NOT the skill's
+    // SWEEP_FLOOR, which weighs source/unified-diff lines) the automatic run
+    // keeps --effort high and its inline comments — only the kill switch
+    // halves, to the same 90-minute floor the docs downgrade uses.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 24,
+      timeoutMinutes: 180,
+    });
+    expect(r.output).toBe('docs_only_medium=false');
+    expect(r.stdout).toContain('micro diff (24 changed lines)');
+    expect(r.stdout).toContain('keeps --effort high');
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('micro tightening floors at 90 minutes', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 10,
+      timeoutMinutes: 100,
+    });
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('twenty-five changed lines is not micro — the boundary of the churn bound', () => {
+    // The 25 is an independent "small PR" churn bound (NOT the skill's
+    // SWEEP_FLOOR — the two measures differ, so a scattered micro diff may
+    // still run the sweep); the tightening is justified by "90 min is ample
+    // for churn < 25 work", not by the pipeline shrinking. 25 itself must
+    // not tighten.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 25,
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('both downgrades share one halve-with-floor implementation', () => {
+    // Two verbatim copies once let a one-sided divisor edit diverge micro
+    // runs from docs-only runs while the comments claimed they matched —
+    // probe: a / 2 → / 3 mutant survived every test because both micro
+    // inputs land on the floor under any divisor ≥ 2. One named function,
+    // called from both branches, makes the invariant structural.
+    const gate = gateSource();
+    expect(gate.match(/halve_budget_floor\(\)/g)).toHaveLength(1);
+    expect(gate.match(/halve_budget_floor$/gm)).toHaveLength(2);
+    expect(
+      gate.match(
+        /EFFECTIVE_TIMEOUT_MINUTES=\$\(\( EFFECTIVE_TIMEOUT_MINUTES \/ 2 \)\)/g,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('a docs-only micro diff is halved once, by the docs gate, not twice', () => {
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho docs_only\n',
+      prSizeLines: 10,
+      timeoutMinutes: 360,
+    });
+    expect(r.output).toBe('docs_only_medium=true');
+    expect(r.stdout).toContain('timeout=180');
+    expect(r.stdout).not.toContain('micro diff');
+  });
+
+  it('a manually requested review is never tightened, whatever its size', () => {
+    // Production-reachable: an @qwen-code /review comment without --timeout
+    // populates PR_SIZE_LINES but is not an automatic review — its budget
+    // is the caller's. A mutant dropping the AUTO_REVIEW guard survived the
+    // suite until this pin.
+    const r = runGate({
+      autoReview: 'false',
+      wrapper: '#!/bin/bash\necho full\n',
+      prSizeLines: 10,
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
+    expect(r.stdout).toContain('timeout=180');
+  });
+
+  it('a failed docs classification still tightens a micro automatic run', () => {
+    // DOCS_ONLY_MEDIUM stays '' when the classifier fails; the micro guard
+    // keys on != "true", not = "false" — a mutant conflating the two kept
+    // 180 on exactly the runs the tightening exists for.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\nexit 2\n',
+      prSizeLines: 10,
+      timeoutMinutes: 180,
+    });
+    expect(r.output).toBe('docs_only_medium=');
+    expect(r.stdout).toContain('micro diff (10 changed lines)');
+    expect(r.stdout).toContain('timeout=90');
+  });
+
+  it('an unknown size never tightens — and neither does an explicit run', () => {
+    // PR_SIZE_LINES is unset when the size lookup failed or when the caller
+    // passed --timeout (the size block is skipped); both must keep the
+    // budget they have.
+    const r = runGate({
+      autoReview: 'true',
+      wrapper: '#!/bin/bash\necho full\n',
+      timeoutMinutes: 180,
+    });
+    expect(r.stdout).not.toContain('micro diff');
     expect(r.stdout).toContain('timeout=180');
   });
 
@@ -2175,14 +2294,12 @@ describe('workflow expression length', () => {
   // length 21000` (e.g. run 31239579253). CI stayed green the whole time — no
   // test covered this, which is why it is covered here.
   const LIMIT = 21000;
-  const dir = '.github/workflows';
-  const files = readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
 
   it('keeps every templated run block under the limit', () => {
-    expect(files.length).toBeGreaterThan(0);
+    expect(workflowFiles.length).toBeGreaterThan(0);
     const over = [];
-    for (const file of files) {
-      const doc = parse(readFileSync(join(dir, file), 'utf8'));
+    for (const file of workflowFiles) {
+      const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
       for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
         for (const step of job?.steps ?? []) {
           const body = step?.run;
@@ -2272,5 +2389,131 @@ describe('command shape matching', () => {
     expect(firstLine).toBeGreaterThan(-1);
     expect(stripCr).toBeGreaterThan(-1);
     expect(stripCr).toBeGreaterThan(firstLine);
+  });
+});
+
+describe('bot comment markers', () => {
+  // A line that opens with `<!--` starts an HTML block, and that block runs to
+  // the line holding the closing delimiter INCLUSIVE — the rest of that line
+  // stays inside it and is never parsed as Markdown. The queued-ack comment
+  // glued its prose straight onto the marker and reached every PR as raw
+  // source with a dead link. Measured through GitHub's own renderer
+  // (POST /markdown, mode=gfm): marker+text -> 0 <a>/0 <em>; marker+"\n"+text
+  // and marker+"\n\n"+text -> 1 <a>/1 <em>.
+  //
+  // The rule keys off ONE thing: a marker that opens a string literal, and
+  // what remains inside that literal after it. That is what distinguishes
+  // BUILDING a comment body from merely REFERENCING a marker — `jq
+  // contains("<!-- m -->")` and `printf '<!-- m -->' "$VAR"` leave nothing
+  // after the marker and are fine, while `="<!-- m -->prose"` does not. The
+  // scan is bounded to the marker's physical line: a glued body is by
+  // definition on that line, and searching past it would couple the guard to
+  // unrelated quotes elsewhere in the file — a doc example quoting an unclosed
+  // `--body "<!-- m -->` would break the moment any later line gained a `"`.
+  //
+  // Known gaps, stated rather than papered over: bodies split across printf
+  // arguments (`printf '%s%s' '<!-- m -->' 'prose'`) — detecting them means
+  // modelling which literal is the format string, and every cheap
+  // approximation flagged the legitimate `printf '<!-- m -->' "$VAR"` form;
+  // bodies assembled across statements or files (one `echo` per line into a
+  // `--body-file`); markers at physical line start (heredocs, YAML block
+  // scalars); markers mid-literal that only land at a rendered line start
+  // after `\n` expansion (`printf 'x\n<!-- m -->prose'`); multi-line literals
+  // whose closing quote sits on a later line; a line-wrapped printf whose
+  // format opens with the marker (the `\n` exemption reads one physical
+  // line); continuations after a marker-ending literal other than an
+  // adjacent quoted literal or bare `$(…)` — `$VAR` expansion, unquoted
+  // words, `$'…'` literals, backtick substitution, backslash-newline, and
+  // text after the closing `)` of a wrapping subshell assignment
+  // (`BODY="$(printf '<!-- m -->')prose"`); closing that shape needs a
+  // subshell discriminator that false-positives on legitimate jq
+  // `contains("<!-- … -->"))` references inside `$(…)` assignments;
+  // trailing end-of-line comments — the `#` skip only fires when the
+  // comment OPENS the physical line, so a glued marker quoted in a
+  // trailing comment is still flagged; YAML double-quoted scalars
+  // (`body: "<!-- m -->\nprose"`) — YAML expands `\n`, but the scanner
+  // cannot cheaply tell a YAML scalar from a shell literal where `\n`
+  // stays literal; and marker-headed bodies built outside
+  // `.github/workflows` — the `.github/scripts/*.mjs` comment builders
+  // (template literals and pushed marker lines) are not scanned. All are
+  // latent — nothing glues a marker today.
+
+  it('never glues prose onto a comment marker, in any workflow', () => {
+    expect(workflowFiles.length).toBeGreaterThan(0);
+    const offenders = [];
+    for (const file of workflowFiles) {
+      const text = readFileSync(join(workflowsDir, file), 'utf8');
+      // The class excludes `\n` so a `<!--` inside a nearby comment cannot
+      // let one match span lines, swallow the real marker, and get discarded
+      // by the comment skip below — the guard would then pass with the very
+      // regression present. `>` stays allowed inside a marker (lazy match to
+      // the first `-->` on the line) so arrow-style markers are covered too.
+      const re = /<!--[^\n]*?-->/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const lineStart = text.lastIndexOf('\n', m.index) + 1;
+        const prefix = text.slice(lineStart, m.index);
+        // Prose in a YAML or shell comment never reaches a comment body.
+        if (/^\s*#/.test(prefix)) continue;
+        const quote = m.index === lineStart ? null : text[m.index - 1];
+        // Only a marker that OPENS a string literal can be building a body.
+        if (quote !== "'" && quote !== '"') continue;
+        const rest = text.slice(m.index + m[0].length);
+        const lineEnd = rest.indexOf('\n');
+        const line = lineEnd === -1 ? rest : rest.slice(0, lineEnd);
+        const end = line.indexOf(quote);
+        // No closing quote on this line means either the marker ends the line
+        // inside a multi-line literal (a real newline separates the body,
+        // which renders) or the quote is prose in a doc example — neither
+        // glues anything ON the marker's line.
+        if (end === -1) continue;
+        let glued = line.slice(0, end);
+        if (glued === '') {
+          // The literal ended at the marker — but an adjacent literal on the
+          // same line concatenates onto it at runtime, and so does an
+          // unquoted `$(…)` (its output is invisible to this scan).
+          const after = line.slice(end + 1);
+          if (after[0] === "'" || after[0] === '"') {
+            const q2 = after[0];
+            const e2 = after.slice(1).indexOf(q2);
+            glued = e2 === -1 ? '' : after.slice(1, 1 + e2);
+          } else if (after[0] === '$' && after[1] === '(') {
+            glued = after;
+          }
+        }
+        if (glued === '') continue;
+        // The two-character `\n` escape separates only where the shell
+        // expands it: a printf format string or ANSI-C `$'…'` opened at the
+        // END of the prefix — an unrelated printf earlier on the same line
+        // must not bless a plain double-quoted assignment, where `\n` stays
+        // a literal backslash-n and the prose stays on the marker's line.
+        if (
+          glued.startsWith('\\n') &&
+          /printf\s+(?:-\S+\s+(?:\S+\s+)?|--\s+)?['"]$|\$'$/.test(prefix)
+        ) {
+          continue;
+        }
+        offenders.push(
+          `${file}: ${text.slice(m.index, m.index + 56).split('\n')[0]}`,
+        );
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('pins the workflow-run URL into the ack printf', () => {
+    // bash printf with a leftover argument and no conversion spec exits 0
+    // under `set -euo pipefail` and emits `[workflow run]()`, so nothing
+    // else catches a dropped `%s` or `"$RUN_URL"` on the ack line. Assert
+    // the link shape, not bare co-existence: a `%s` displaced out of the
+    // parens keeps both pieces on the line and re-ships the dead link.
+    const ackLine = workflow
+      .split('\n')
+      .find(
+        (l) => l.includes('printf') && l.includes('<!-- qwen-review-ack -->'),
+      );
+    expect(ackLine).toBeDefined();
+    expect(ackLine).toContain('[workflow run](%s)');
+    expect(ackLine).toContain('"$RUN_URL"');
   });
 });
