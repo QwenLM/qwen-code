@@ -436,14 +436,22 @@ describe('ChannelsManagerPage', () => {
     expect(container.textContent).not.toContain('stale start failure');
   });
 
-  it('keeps a lifecycle action busy while a new editor changes workspace', async () => {
-    let finishStart!: () => void;
-    channelState.current.start.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          finishStart = resolve;
-        }),
-    );
+  it('allows an independent lifecycle action after switching workspaces', async () => {
+    let finishPrimaryStart!: () => void;
+    let finishSecondaryStart!: () => void;
+    channelState.current.start
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPrimaryStart = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishSecondaryStart = resolve;
+          }),
+      );
     workspaceState.current = {
       ...workspaceState.current,
       capabilities: {
@@ -500,9 +508,44 @@ describe('ChannelsManagerPage', () => {
       enabled: true,
       workspaceCwd: '/workspace/secondary',
     });
-    expect(start?.disabled).toBe(true);
-    expect(start?.querySelector('[data-slot="spinner"]')).toBeNull();
-    await act(async () => finishStart());
+    const secondaryStart = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.trim() === 'Start');
+    expect(secondaryStart?.disabled).toBe(false);
+    await act(async () => secondaryStart?.click());
+    expect(channelState.current.start).toHaveBeenCalledTimes(2);
+    expect(secondaryStart?.disabled).toBe(true);
+
+    await act(async () => {
+      workspaceTrigger?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const primary = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Main repo');
+    await act(async () => primary?.click());
+    const primaryStart = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Start',
+    );
+    expect(primaryStart?.disabled).toBe(true);
+    expect(primaryStart?.querySelector('[data-slot="spinner"]')).not.toBeNull();
+
+    await act(async () => {
+      workspaceTrigger?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const secondaryAgain = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Secondary repo');
+    await act(async () => secondaryAgain?.click());
+
+    await act(async () => finishPrimaryStart());
+    expect(secondaryStart?.disabled).toBe(true);
+
+    await act(async () => finishSecondaryStart());
+    expect(secondaryStart?.disabled).toBe(false);
   });
 
   it('keeps restart in the overflow menu for a running Channel', async () => {

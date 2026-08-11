@@ -72,6 +72,7 @@ const SESSION_SCOPE_OPTIONS: ReadonlyArray<{
   label: string;
 }> = [
   { value: 'user', label: 'Per User and Chat' },
+  { value: 'thread', label: 'Per Thread (Legacy)' },
   { value: 'chat_thread', label: 'Per Chat and Thread' },
   { value: 'single', label: 'One Shared Session' },
 ];
@@ -92,10 +93,7 @@ function managementFieldsWithSharedControls(
             label: 'Session Scope',
             kind: 'enum' as const,
             required: true,
-            default:
-              defaultSessionScope === 'thread'
-                ? 'chat_thread'
-                : defaultSessionScope,
+            default: defaultSessionScope,
             description:
               'Controls how conversations share persistent agent sessions',
             options: SESSION_SCOPE_OPTIONS,

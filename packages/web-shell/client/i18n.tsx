@@ -2717,11 +2717,15 @@ const EN: Messages = {
   'channels.editor.field.shared.sessionScope.description':
     'Choose how conversations share persistent agent context.',
   'channels.editor.field.shared.sessionScope.option.user': 'By user',
+  'channels.editor.field.shared.sessionScope.option.thread':
+    'By thread (legacy)',
   'channels.editor.field.shared.sessionScope.option.chat_thread':
     'By chat or thread',
   'channels.editor.field.shared.sessionScope.option.single': 'Share all',
   'channels.editor.field.shared.sessionScope.detail.user':
     "The same user's messages continue in one conversation; users stay isolated from each other.",
+  'channels.editor.field.shared.sessionScope.detail.thread':
+    'Preserves the legacy thread routing used by existing Channel sessions.',
   'channels.editor.field.shared.sessionScope.detail.chat_thread':
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
@@ -5446,11 +5450,15 @@ const ZH: Messages = {
   'channels.editor.field.shared.sessionScope.description':
     '选择不同对话如何共享持久化的智能体上下文。',
   'channels.editor.field.shared.sessionScope.option.user': '按用户隔离',
+  'channels.editor.field.shared.sessionScope.option.thread':
+    '按话题隔离（旧版）',
   'channels.editor.field.shared.sessionScope.option.chat_thread':
     '按群/话题隔离',
   'channels.editor.field.shared.sessionScope.option.single': '全部共享',
   'channels.editor.field.shared.sessionScope.detail.user':
     '同一用户的消息进入同一个对话，不同用户互不影响。',
+  'channels.editor.field.shared.sessionScope.detail.thread':
+    '保留已有频道会话使用的旧版话题路由。',
   'channels.editor.field.shared.sessionScope.detail.chat_thread':
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':

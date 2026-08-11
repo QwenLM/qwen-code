@@ -186,11 +186,19 @@ export function ChannelsManagerPage({
     Boolean(workspace.token) &&
     Boolean(activeWorkspaceCwd) &&
     activeWorkspace?.trusted === true;
-  const [busy, setBusy] = useState<{
-    workspaceCwd: string;
-    name: string;
-    action: ChannelAction;
-  } | null>(null);
+  const [busyByWorkspace, setBusyByWorkspace] = useState<
+    Record<
+      string,
+      {
+        workspaceCwd: string;
+        name: string;
+        action: ChannelAction;
+      }
+    >
+  >({});
+  const busy = activeWorkspaceCwd
+    ? (busyByWorkspace[activeWorkspaceCwd] ?? null)
+    : null;
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<{
     workspaceCwd?: string;
@@ -302,7 +310,10 @@ export function ChannelsManagerPage({
       if (!canManage || busy || !activeWorkspaceCwd) return;
       const workspaceCwd = activeWorkspaceCwd;
       const errorKey = actionErrorKey(workspaceCwd, channel.name);
-      setBusy({ workspaceCwd, name: channel.name, action });
+      setBusyByWorkspace((current) => ({
+        ...current,
+        [workspaceCwd]: { workspaceCwd, name: channel.name, action },
+      }));
       setActionErrors((current) => {
         const next = { ...current };
         delete next[errorKey];
@@ -316,13 +327,18 @@ export function ChannelsManagerPage({
           [errorKey]: extractErrorDetail(actionError),
         }));
       } finally {
-        setBusy((current) =>
-          current?.workspaceCwd === workspaceCwd &&
-          current.name === channel.name &&
-          current.action === action
-            ? null
-            : current,
-        );
+        setBusyByWorkspace((current) => {
+          const workspaceBusy = current[workspaceCwd];
+          if (
+            workspaceBusy?.name !== channel.name ||
+            workspaceBusy.action !== action
+          ) {
+            return current;
+          }
+          const next = { ...current };
+          delete next[workspaceCwd];
+          return next;
+        });
       }
     },
     [activeWorkspaceCwd, busy, canManage],

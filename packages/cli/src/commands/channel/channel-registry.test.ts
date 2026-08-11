@@ -690,9 +690,10 @@ describe('channel registry', () => {
     expect(
       entry?.fields.find((field) => field.key === 'sessionScope'),
     ).toMatchObject({
-      default: 'chat_thread',
+      default: 'thread',
       options: [
         { value: 'user' },
+        { value: 'thread' },
         { value: 'chat_thread' },
         { value: 'single' },
       ],
@@ -755,6 +756,7 @@ describe('channel registry', () => {
         default: 'user',
         options: [
           { value: 'user' },
+          { value: 'thread' },
           { value: 'chat_thread' },
           { value: 'single' },
         ],

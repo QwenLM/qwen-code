@@ -358,13 +358,13 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
   });
 
-  it('normalizes the deprecated thread scope to chat_thread', async () => {
+  it('preserves the deprecated thread scope for existing routes', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',
       sessionScope: 'thread',
     });
 
-    expect(result.sessionScope).toBe('chat_thread');
+    expect(result.sessionScope).toBe('thread');
   });
 
   it('uses plugin defaultSessionScope when sessionScope is not configured', async () => {

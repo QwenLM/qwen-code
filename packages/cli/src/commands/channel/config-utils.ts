@@ -466,10 +466,7 @@ export async function parseChannelConfig(
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
-    sessionScope:
-      configuredSessionScope === 'thread'
-        ? 'chat_thread'
-        : configuredSessionScope,
+    sessionScope: configuredSessionScope,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

@@ -90,9 +90,6 @@ function initialFieldValue(
     return '';
   }
   if (field.kind === 'enum') {
-    if (field.key === 'sessionScope' && value === 'thread') {
-      return 'chat_thread';
-    }
     if (typeof value === 'string' && value) return value;
     if (instance) {
       if (field.key === 'senderPolicy') return 'allowlist';

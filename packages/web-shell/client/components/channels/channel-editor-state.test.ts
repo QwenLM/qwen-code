@@ -85,6 +85,7 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
       default: 'user',
       options: [
         { value: 'user', label: 'Per user and chat' },
+        { value: 'thread', label: 'Per thread (legacy)' },
         { value: 'chat_thread', label: 'Per chat and thread' },
         { value: 'single', label: 'One shared session' },
       ],
@@ -199,12 +200,12 @@ describe('Channel editor state', () => {
     });
   });
 
-  it('migrates the deprecated thread scope to chat_thread when editing', () => {
+  it('preserves the deprecated thread scope when editing', () => {
     const instance = configuredInstance();
 
     const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
 
-    expect(draft.values.sessionScope).toBe('chat_thread');
+    expect(draft.values.sessionScope).toBe('thread');
     expect(
       buildChannelUpsertRequest(
         DINGTALK_WITH_ACCESS,
@@ -212,7 +213,7 @@ describe('Channel editor state', () => {
         'revision-session-scope',
         instance,
       ).config.sessionScope,
-    ).toBe('chat_thread');
+    ).toBe('thread');
   });
 
   it('fills safe policy defaults when editing a legacy instance', () => {
