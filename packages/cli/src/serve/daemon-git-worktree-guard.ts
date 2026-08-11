@@ -1788,6 +1788,8 @@ interface EvaluationScope {
   // same-shell body so `outer() { inner; }` can see `inner`.
   readonly definedBodies?: Map<string, { body: string; alias: boolean }>;
   readonly gitShapedNames?: Set<string>;
+  // Names carried by `export -f`, which a child shell (`bash -c`) imports.
+  readonly exportedFunctions?: Set<string>;
 }
 
 /**
@@ -1933,6 +1935,7 @@ async function evaluateCommandWithCwd(
   // replayed verbatim, so the name is recorded as Git-shaped instead and the
   // later bare word answers to the unrecognized-program containment rule.
   const gitShapedNames = scope.gitShapedNames ?? new Set<string>();
+  const exportedFunctions = scope.exportedFunctions ?? new Set<string>();
   let insideDefinition: string | undefined;
   let definitionBody = '';
   // Paths a run in this command may have re-pointed. Any containment the
@@ -1980,6 +1983,51 @@ async function evaluateCommandWithCwd(
     for (const [key, token] of snapshot.locals) shellLocals.set(key, token);
   };
   const subshellCwds: ShellStateSnapshot[] = [];
+  // Replay a recorded alias/function body in the current shell, propagating
+  // its cwd and shell state back — an alias keeps the invocation's trailing
+  // argv, a function receives args through `$@`.
+  const invokeDefinedBody = async (
+    programToken: string,
+    run: GuardToken[],
+  ): Promise<GuardDenial | undefined> => {
+    const defined = definedBodies.get(programToken)!;
+    if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) return denyDynamicRelocation();
+    let replay = defined.body;
+    if (defined.alias) {
+      const programIndex = run.findIndex(
+        (token) => token.text === programToken,
+      );
+      const args = joinArgvTexts(run.slice(programIndex + 1));
+      if (args.length > 0) replay = `${replay} ${args}`;
+    }
+    const nested = await evaluateCommandWithCwd(
+      replay,
+      trackedCwd,
+      entryCwd,
+      activeContext(),
+      depth + 1,
+      {
+        relink: scope.relink,
+        locals: shellLocals,
+        exportedNames,
+        allExport,
+        definedBodies,
+        gitShapedNames,
+      },
+    );
+    if (nested.denial) return nested.denial;
+    trackedCwd = nested.cwdAfter;
+    if (nested.exportedAfter) {
+      exported.relocations.push(...nested.exportedAfter.relocations);
+      if (nested.exportedAfter.unresolved) exported.unresolved = true;
+    }
+    if (nested.allExportAfter !== undefined) allExport = nested.allExportAfter;
+    for (const [key, token] of nested.shellLocalsAfter ?? []) {
+      shellLocals.set(key, token);
+    }
+    return undefined;
+  };
+
   const segments = splitCommands(stripHeredocBodies(command));
   const separators = readTopLevelSeparators(stripHeredocBodies(command));
   // On any disagreement with `splitCommands`, treat every segment of a piped
@@ -1996,6 +2044,13 @@ async function evaluateCommandWithCwd(
   for (const [segmentIndex, segment] of segments.entries()) {
     const pipeComponent = isPipeComponent(segmentIndex);
     const cwdBeforeSegment = trackedCwd;
+    const definedBodiesBefore = pipeComponent
+      ? new Map(definedBodies)
+      : undefined;
+    const gitShapedNamesBefore = pipeComponent
+      ? new Set(gitShapedNames)
+      : undefined;
+    const allExportBefore = allExport;
     const substitutions = extractCommandSubstitutions(segment);
     const tokenized =
       substitutions === null ? null : tokenizeSegment(segment, subshellDepth);
@@ -2029,7 +2084,7 @@ async function evaluateCommandWithCwd(
         const body = (
           closeAt >= 0 ? definitionBody.slice(0, closeAt) : definitionBody
         ).trim();
-        if (body.length > 0) {
+        if (body.length > 0 && !pipeComponent) {
           definedBodies.set(insideDefinition, { body, alias: false });
         }
         insideDefinition = undefined;
@@ -2075,6 +2130,20 @@ async function evaluateCommandWithCwd(
         // its cwd, its exports and its shell-local variables.
         restoreShellState(subshellCwds.pop());
         subshellDepth--;
+      }
+      // A recorded function shadows a builtin or the git program, and bash
+      // resolves it before either. `command`/`builtin` name a different
+      // program word, so they bypass this naturally.
+      const invoked = readProgramWord(run);
+      if (
+        invoked !== undefined &&
+        definedBodies.has(invoked) &&
+        readFunctionName(run) === undefined &&
+        readAliasDefinitions(run).length === 0
+      ) {
+        const denial = await invokeDefinedBody(invoked, run);
+        if (denial) return { denial, cwdAfter: trackedCwd };
+        continue;
       }
       const analysis = analyzeRun(run);
       switch (analysis.kind) {
@@ -2148,8 +2217,18 @@ async function evaluateCommandWithCwd(
                     allExport,
                     definedBodies,
                     gitShapedNames,
+                    exportedFunctions,
                   }
-                : {}),
+                : {
+                    // A `sh -c`/`bash -c` subprocess imports only functions
+                    // carried by `export -f`.
+                    definedBodies: new Map(
+                      [...definedBodies].filter(([name]) =>
+                        exportedFunctions.has(name),
+                      ),
+                    ),
+                    exportedFunctions,
+                  }),
             },
           );
           if (nested.denial) {
@@ -2279,6 +2358,13 @@ async function evaluateCommandWithCwd(
         case 'export': {
           exported.relocations.push(...analysis.state.relocations);
           if (analysis.state.unresolved) exported.unresolved = true;
+          if (analysis.operands.some((op) => op.text === '-f')) {
+            for (const op of analysis.operands) {
+              if (!op.text.startsWith('-') && !op.dynamic) {
+                exportedFunctions.add(op.text);
+              }
+            }
+          }
           // `export GIT_DIR` with no `=` exports whatever an earlier
           // shell-local assignment left in that name — and, because the
           // export *attribute* sticks to the name, whatever a later one puts
@@ -2363,59 +2449,9 @@ async function evaluateCommandWithCwd(
             if (denial) return { denial, cwdAfter: trackedCwd };
             break;
           }
-          const defined =
-            programToken === undefined
-              ? undefined
-              : definedBodies.get(programToken);
-          if (defined !== undefined) {
-            if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
-              return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
-            }
-            // An alias replaces its name with its body and keeps the trailing
-            // argv, so `gg -C <outside> reset --hard` runs `git -C <outside>
-            // reset --hard`. A function receives those args through `$@`
-            // inside its body, so nothing is appended here.
-            let replay = defined.body;
-            if (defined.alias) {
-              const programIndex = run.findIndex(
-                (token) => token.text === programToken,
-              );
-              const args = joinArgvTexts(run.slice(programIndex + 1));
-              if (args.length > 0) replay = `${replay} ${args}`;
-            }
-            // The body runs here, at the cwd this word was reached with.
-            const nested = await evaluateCommandWithCwd(
-              replay,
-              trackedCwd,
-              entryCwd,
-              activeContext(),
-              depth + 1,
-              {
-                relink: scope.relink,
-                locals: shellLocals,
-                exportedNames,
-                allExport,
-                definedBodies,
-                gitShapedNames,
-              },
-            );
-            if (nested.denial) {
-              return { denial: nested.denial, cwdAfter: trackedCwd };
-            }
-            // Both an alias and a function run in the current shell, so a `cd`
-            // or an export in the body survives the call — a later path-free
-            // git mutation is judged against where the body left the shell.
-            trackedCwd = nested.cwdAfter;
-            if (nested.exportedAfter) {
-              exported.relocations.push(...nested.exportedAfter.relocations);
-              if (nested.exportedAfter.unresolved) exported.unresolved = true;
-            }
-            if (nested.allExportAfter !== undefined) {
-              allExport = nested.allExportAfter;
-            }
-            for (const [key, token] of nested.shellLocalsAfter ?? []) {
-              shellLocals.set(key, token);
-            }
+          if (programToken !== undefined && definedBodies.has(programToken)) {
+            const denial = await invokeDefinedBody(programToken, run);
+            if (denial) return { denial, cwdAfter: trackedCwd };
             break;
           }
           if (
@@ -2509,7 +2545,15 @@ async function evaluateCommandWithCwd(
     }
     // Both sides of a pipe run in their own subshell, so whatever this
     // segment did to the shell's directory dies with it.
-    if (pipeComponent) trackedCwd = cwdBeforeSegment;
+    if (pipeComponent) {
+      // A subshell's cwd, option state and definitions die with it.
+      trackedCwd = cwdBeforeSegment;
+      allExport = allExportBefore;
+      definedBodies.clear();
+      for (const [k, v] of definedBodiesBefore!) definedBodies.set(k, v);
+      gitShapedNames.clear();
+      for (const k of gitShapedNamesBefore!) gitShapedNames.add(k);
+    }
   }
   return {
     cwdAfter: trackedCwd,

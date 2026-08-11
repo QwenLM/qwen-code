@@ -1883,6 +1883,41 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  it.each([
+    // A function/alias shadows the git program or a builtin; bash resolves it
+    // before either, so the recorded body must run first.
+    () => `git() { cd ${plainOutsidePath}; command git status; }; git`,
+    () =>
+      `cd() { command cd ${plainOutsidePath}; }; cd nested; git reset --hard`,
+    // A pipeline redefinition runs in a subshell and does not persist.
+    () =>
+      `f() { cd ${plainOutsidePath}; }; f() { :; } | cat; f; git reset --hard`,
+    // `export -f` makes a function visible inside a `bash -c` subprocess.
+    () =>
+      `f() { cd ${plainOutsidePath}; }; export -f f; bash -c "f; git reset --hard"`,
+  ])('resolves a shadowing/exported function correctly %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('does not import an unexported function into a subprocess', async () => {
+    const guard = createDaemonToolGuard();
+
+    // Without `export -f`, `bash -c` does not see `f`, so this is an ordinary
+    // (path-free) git run inside the boundary.
+    await expect(
+      guard(request(`f() { cd ${plainOutsidePath}; }; bash -c 'git status'`)),
+    ).resolves.toEqual({ allowed: true });
+    // `command git` explicitly bypasses a shadowing function.
+    await expect(guard(request('command git status'))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
