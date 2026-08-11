@@ -1,0 +1,50 @@
+########## apps/electron/src/shared/__tests__/ipc-channels.test.ts
+351 | 
+352 |   it('preserves exact wire-format strings (sorted equality)', () => {
+353 |     const actual = flattenValues(RPC_CHANNELS).sort();
+354 |     expect(actual).toEqual(EXPECTED_CHANNELS);
+                         ^
+error: expect(received).toEqual(expected)
+
+@@ -262,6 +262,6 @@
+    "statuses:reorder",
++   "system:copyToClipboard",
+    "system:homeDir",
+    "system:isDebugMode",
+-   "system:copyToClipboard",
+    "system:versions",
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/apps/electron/src/shared/__tests__/ipc-channels.test.ts:354:20)
+(fail) RPC_CHANNELS wire-format stability > preserves exact wire-format strings (sorted equality) [3.30ms]
+
+ 5 pass
+ 1 fail
+ 6 expect() calls
+Ran 6 tests across 1 file. [115.00ms]
+########## apps/electron/src/main/handlers/__tests__/registration.test.ts
+bun test v1.3.14 (0d9b296a)
+
+apps/electron/src/main/handlers/__tests__/registration.test.ts:
+SyntaxError: Export named 'clipboard' not found in module '/private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/node_modules/electron/index.js'.
+(fail) RPC handler registration > registers all declared handled channels exactly once [826.34ms]
+SyntaxError: Export named 'clipboard' not found in module '/private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/node_modules/electron/index.js'.
+(fail) RPC handler registration > keeps onboarding channels in registration coverage [1.06ms]
+
+ 0 pass
+ 2 fail
+Ran 2 tests across 1 file. [846.00ms]
+########## apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts
+bun test v1.3.14 (0d9b296a)
+
+apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts:
+SyntaxError: Export named 'clipboard' not found in module '/private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/node_modules/electron/index.js'.
+(fail) RPC handler profile registration > registerCoreRpcHandlers registers only core channels [568.28ms]
+SyntaxError: Export named 'clipboard' not found in module '/private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/node_modules/electron/index.js'.
+(fail) RPC handler profile registration > registerGuiRpcHandlers registers only gui channels [0.57ms]
+
+ 0 pass
+ 2 fail
+Ran 2 tests across 1 file. [584.00ms]

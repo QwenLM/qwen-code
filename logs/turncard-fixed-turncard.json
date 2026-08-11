@@ -1,0 +1,10 @@
+{
+  "label": "fixed-turncard",
+  "messageCopyButtonFound": true,
+  "clipboardAfterClick": "CLIPBOARD-BEFORE-fixed-turncard",
+  "clipboardMatchesMessage": false,
+  "copyErrorsInConsole": [
+    "[error] [ChatDisplay] Failed to copy user message: NotAllowedError: Failed to execute 'writeText' on 'Clipboard': Write permission denied.",
+    "[debug] 18:36:58.449 (main) › defaultSession: denied non-voice permission 'clipboard-sanitized-write'"
+  ]
+}

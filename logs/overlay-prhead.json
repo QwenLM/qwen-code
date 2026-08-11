@@ -1,0 +1,36 @@
+{
+  "label": "prhead",
+  "copyButtonFound": true,
+  "unfocused": {
+    "windowFocused": false,
+    "buttonTitleAfterClick": "Copy all",
+    "copyTrace": [
+      {
+        "path": "navigator.clipboard.writeText",
+        "text": "# Verification note\n\nCOPY-PAYLOAD-8747-prhead: this markdown"
+      },
+      {
+        "path": "navigator.clipboard.writeText",
+        "result": "rejected: NotAllowedError: Failed to execute 'writeText' on 'Clipboard': Write permission denied."
+      }
+    ],
+    "clipboardAfterClick": "CLIPBOARD-BEFORE-prhead-unfocused",
+    "clipboardMatchesFileContent": false
+  },
+  "focused": {
+    "windowFocused": true,
+    "buttonTitleAfterClick": "Copy all",
+    "copyTrace": [
+      {
+        "path": "navigator.clipboard.writeText",
+        "text": "# Verification note\n\nCOPY-PAYLOAD-8747-prhead: this markdown"
+      },
+      {
+        "path": "navigator.clipboard.writeText",
+        "result": "rejected: NotAllowedError: Failed to execute 'writeText' on 'Clipboard': Write permission denied."
+      }
+    ],
+    "clipboardAfterClick": "CLIPBOARD-BEFORE-prhead-focused",
+    "clipboardMatchesFileContent": false
+  }
+}

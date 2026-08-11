@@ -1,0 +1,17 @@
+{
+  "url": "file:///private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/apps/electron/dist/renderer/index.html?workspaceId=ddce495c-95e9-24e9-f8c9-2d81243f9673",
+  "hasApi": true,
+  "runtimeEnv": "electron",
+  "channelAvailability": {
+    "system:copyToClipboard": false,
+    "system:homeDir": true,
+    "system:versions": true,
+    "system:isDebugMode": true,
+    "shell:openUrl": true
+  },
+  "getHomeDir": "/Users/wenshao",
+  "copyToClipboardCall": "rejected: Error: No handler for: system:copyToClipboard",
+  "sentinel": "RPC-SENTINEL-prhead-1786444034",
+  "clipboardAfterDirectRpc": "CLIPBOARD-BEFORE-prhead",
+  "clipboardContainsSentinel": false
+}

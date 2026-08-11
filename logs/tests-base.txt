@@ -1,0 +1,29 @@
+########## apps/electron/src/shared/__tests__/ipc-channels.test.ts
+bun test v1.3.14 (0d9b296a)
+
+ 6 pass
+ 0 fail
+ 6 expect() calls
+Ran 6 tests across 1 file. [33.00ms]
+########## apps/electron/src/main/handlers/__tests__/registration.test.ts
+bun test v1.3.14 (0d9b296a)
+
+ 2 pass
+ 0 fail
+ 4 expect() calls
+Ran 2 tests across 1 file. [614.00ms]
+########## apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts
++   "window:petSetIgnoreMouse",
++   "window:petFocusSession",
++ ]
+
+- Expected  - 1
++ Received  + 5
+
+      at <anonymous> (/private/tmp/claude-501/-Users-wenshao-git-qwen-code-x3/1ba3ec1c-e156-41b4-8a7b-fe7d4752d6f3/scratchpad/pr8747/packages/desktop/apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts:180:59)
+(fail) RPC handler profile registration > registerGuiRpcHandlers registers only gui channels [0.71ms]
+
+ 0 pass
+ 2 fail
+ 4 expect() calls
+Ran 2 tests across 1 file. [608.00ms]

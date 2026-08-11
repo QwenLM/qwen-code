@@ -1,0 +1,18 @@
+{
+  "label": "fixed",
+  "copyButtonFound": true,
+  "unfocused": {
+    "windowFocused": false,
+    "buttonTitleAfterClick": "Copy all",
+    "copyTrace": [],
+    "clipboardAfterClick": "# Verification note\n\nCOPY-PAYLOAD-8747-fixed: this markdown body is what the overlay Copy button should place on the cli",
+    "clipboardMatchesFileContent": true
+  },
+  "focused": {
+    "windowFocused": true,
+    "buttonTitleAfterClick": "Copy all",
+    "copyTrace": [],
+    "clipboardAfterClick": "# Verification note\n\nCOPY-PAYLOAD-8747-fixed: this markdown body is what the overlay Copy button should place on the cli",
+    "clipboardMatchesFileContent": true
+  }
+}

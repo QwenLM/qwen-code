@@ -1,0 +1,82 @@
+diff --git a/packages/desktop/apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts b/packages/desktop/apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts
+index 397dbad44e..398fe9d9e2 100644
+--- a/packages/desktop/apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts
++++ b/packages/desktop/apps/electron/src/main/handlers/__tests__/registration-profiles.test.ts
+@@ -5,6 +5,7 @@ import type { HandlerDeps } from '../handler-deps';
+ const registeredChannels: string[] = [];
+ 
+ mock.module('electron', () => ({
++  clipboard: { writeText: () => {} },
+   ipcMain: {
+     handle: () => {},
+     on: () => {},
+diff --git a/packages/desktop/apps/electron/src/main/handlers/__tests__/registration.test.ts b/packages/desktop/apps/electron/src/main/handlers/__tests__/registration.test.ts
+index 1b32f36504..8c359d1215 100644
+--- a/packages/desktop/apps/electron/src/main/handlers/__tests__/registration.test.ts
++++ b/packages/desktop/apps/electron/src/main/handlers/__tests__/registration.test.ts
+@@ -6,6 +6,7 @@ import type { HandlerDeps } from '../handler-deps';
+ const registeredChannels: string[] = [];
+ 
+ mock.module('electron', () => ({
++  clipboard: { writeText: () => {} },
+   ipcMain: {
+     handle: () => {},
+     on: () => {},
+diff --git a/packages/desktop/apps/electron/src/main/handlers/system.ts b/packages/desktop/apps/electron/src/main/handlers/system.ts
+index 6ad9515635..0069f2af30 100644
+--- a/packages/desktop/apps/electron/src/main/handlers/system.ts
++++ b/packages/desktop/apps/electron/src/main/handlers/system.ts
+@@ -22,7 +22,6 @@ export const CORE_HANDLED_CHANNELS = [
+   RPC_CHANNELS.system.VERSIONS,
+   RPC_CHANNELS.system.HOME_DIR,
+   RPC_CHANNELS.system.IS_DEBUG_MODE,
+-  RPC_CHANNELS.system.COPY_TO_CLIPBOARD,
+   RPC_CHANNELS.debug.LOG,
+   RPC_CHANNELS.shell.OPEN_URL,
+   RPC_CHANNELS.shell.OPEN_FILE,
+@@ -36,6 +35,7 @@ export const CORE_HANDLED_CHANNELS = [
+ ] as const
+ 
+ export const GUI_HANDLED_CHANNELS = [
++  RPC_CHANNELS.system.COPY_TO_CLIPBOARD,
+   RPC_CHANNELS.update.CHECK,
+   RPC_CHANNELS.update.GET_INFO,
+   RPC_CHANNELS.update.INSTALL,
+@@ -95,10 +95,6 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
+     return !deps.platform.isPackaged
+   })
+ 
+-  server.handle(RPC_CHANNELS.system.COPY_TO_CLIPBOARD, async (_ctx, text: string) => {
+-    clipboard.writeText(text)
+-  })
+-
+   // Release notes
+   server.handle(RPC_CHANNELS.releaseNotes.GET, async () => {
+     const { getCombinedReleaseNotes } = require('@craft-agent/shared/release-notes') as typeof import('@craft-agent/shared/release-notes')
+@@ -275,6 +271,11 @@ export function registerSystemGuiHandlers(server: RpcServer, deps: HandlerDeps):
+   const { sessionManager } = deps
+   const windowManager = deps.windowManager
+ 
++  server.handle(RPC_CHANNELS.system.COPY_TO_CLIPBOARD, async (_ctx, text: string) => {
++    clipboard.writeText(text)
++  })
++
++
+   // Auto-update handlers
+   server.handle(RPC_CHANNELS.update.CHECK, async () => {
+     const { checkForUpdates } = await import('../auto-update')
+diff --git a/packages/desktop/apps/electron/src/shared/__tests__/ipc-channels.test.ts b/packages/desktop/apps/electron/src/shared/__tests__/ipc-channels.test.ts
+index eaca9e2d4e..2a073f6ddd 100644
+--- a/packages/desktop/apps/electron/src/shared/__tests__/ipc-channels.test.ts
++++ b/packages/desktop/apps/electron/src/shared/__tests__/ipc-channels.test.ts
+@@ -274,9 +274,9 @@ const EXPECTED_CHANNELS: string[] = [
+   'statuses:changed',
+   'statuses:list',
+   'statuses:reorder',
++  'system:copyToClipboard',
+   'system:homeDir',
+   'system:isDebugMode',
+-  'system:copyToClipboard',
+   'system:versions',
+   'tasks:getOutput',
+   'theme:appChanged',
