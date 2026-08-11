@@ -5100,6 +5100,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new SessionNotFoundError(
           req.sessionId,
           'The session is closing; retry after close completes',
+          'session_closing',
         );
       }
       const replayFields =
@@ -5114,11 +5115,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (
-        byId.get(req.sessionId) !== existing ||
-        isClosingOrAuthorizingClose(existing)
-      ) {
+      if (byId.get(req.sessionId) !== existing) {
         throw new SessionNotFoundError(req.sessionId);
+      }
+      if (isClosingOrAuthorizingClose(existing)) {
+        throw new SessionNotFoundError(
+          req.sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
+        );
       }
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
@@ -5617,6 +5622,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new SessionNotFoundError(
             req.sessionId,
             'The session is closing; retry after close completes',
+            'session_closing',
           );
         }
         // Self + any coalescers we accumulated while the restore was
@@ -5855,6 +5861,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new SessionNotFoundError(
         sessionId,
         'The session is already closing',
+        'session_closing',
       );
     }
     let originatorClientId: string | undefined;
@@ -6264,6 +6271,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw new SessionNotFoundError(
               existing.sessionId,
               'The session is closing; retry after close completes',
+              'session_closing',
             );
           }
           // BRSCi: bump attach counter BEFORE any await so the
@@ -6531,6 +6539,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           new SessionNotFoundError(
             sessionId,
             'The session is closing; retry after close completes',
+            'session_closing',
           ),
         );
       }
@@ -9427,7 +9436,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       if (isClosingOrAuthorizingClose(entry)) {
-        throw new SessionNotFoundError(sessionId, 'The session is closing');
+        throw new SessionNotFoundError(
+          sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
+        );
       }
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
