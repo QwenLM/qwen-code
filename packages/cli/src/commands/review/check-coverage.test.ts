@@ -2042,6 +2042,35 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(gapText(r)).not.toMatch(/verification/);
   });
 
+  it('ignores workflow-dispatch transcripts, however they match the floor', () => {
+    // Same provenance fence as coverageFromTranscripts, asserted where it
+    // bites: a workflow agent() dispatch launched with the VERBATIM built
+    // prompt, which opened the brief and read the findings file, is the
+    // exact record shape that satisfies the verifier floor. Without the
+    // filter this one record flips the gate to ok while nothing this
+    // review launched ever verified anything.
+    const p = plan();
+    step45(p, 'reverse-audit'); // Step 5 compliant; verification is the subject
+    const key = 'verify--abc123def456';
+    step45(p, key, { findings: true, launch: false });
+    const recordedPrompt = readFileSync(
+      join(promptRecordDir(p), `${key}.txt`),
+      'utf8',
+    );
+    transcript('workflow-agent-deadbeef01', recordedPrompt, {
+      calls: 2,
+      opens: [briefPath(p, key), findingsFilePath(p, key)],
+      agentKind: 'workflow',
+    });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.unverifiedFindings).toBe(true);
+    expect(gapText(r)).toMatch(
+      /verification — its prompt was built, but no agent was launched with it/,
+    );
+  });
+
   it('flags a verifier built but whose agent never opened its brief', () => {
     const p = plan();
     step45(p, 'reverse-audit');
