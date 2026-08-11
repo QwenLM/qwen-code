@@ -7,19 +7,21 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import * as fs from 'node:fs';
+
+const throwMissingPath = vi.hoisted(() => () => {
+  const error = new Error('mocked missing path') as NodeJS.ErrnoException;
+  error.code = 'ENOENT';
+  throw error;
+});
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
     ...actual,
-    realpathSync: vi.fn(() => {
-      const error = new Error('mocked missing path') as NodeJS.ErrnoException;
-      error.code = 'ENOENT';
-      throw error;
-    }),
+    realpathSync: vi.fn(throwMissingPath),
   };
 });
 
@@ -56,6 +58,10 @@ describe('createMockWorkspaceContext filesystem fallback', () => {
       workspace.isPathWithinWorkspace(path.join(rootDir, 'missing.txt')),
     ).toBe(true);
   });
+});
+
+afterEach(() => {
+  vi.mocked(fs.realpathSync).mockImplementation(throwMissingPath);
 });
 
 afterAll(() => {

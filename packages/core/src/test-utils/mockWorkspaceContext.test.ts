@@ -126,4 +126,20 @@ describe('createMockWorkspaceContext', () => {
       rmSync(rootDir, { recursive: true, force: true });
     }
   });
+
+  it('ignores an invalid workspace root when another root is valid', () => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    const cyclePath = path.join(rootDir, 'cycle');
+    const candidatePath = path.join(rootDir, 'inside.txt');
+    symlinkSync('cycle', cyclePath);
+    writeFileSync(candidatePath, 'inside');
+
+    try {
+      const workspace = createMockWorkspaceContext(cyclePath, [rootDir]);
+
+      expect(workspace.isPathWithinWorkspace(candidatePath)).toBe(true);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
 });

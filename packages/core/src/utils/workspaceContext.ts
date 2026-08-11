@@ -299,6 +299,8 @@ export function resolveWorkspacePath(pathToCheck: string): string {
       isNodeError(error) &&
       error.code === 'ENOENT' &&
       error.path &&
+      // realpathSync does not set error.path correctly for symlinks to
+      // non-existent files.
       !isFileSymlink(error.path)
     ) {
       if (
@@ -314,6 +316,9 @@ export function resolveWorkspacePath(pathToCheck: string): string {
   }
 }
 
+/**
+ * Checks if a file path is a symbolic link that points to a file.
+ */
 function isFileSymlink(filePath: string): boolean {
   try {
     return !fs.readlinkSync(filePath).endsWith('/');
