@@ -3421,6 +3421,120 @@
               }
             }
           }
+        },
+        "memory": {
+          "description": "Persistent multimodal media memory (collection of recognized files and policy execution results, plus cross-session recall). Invalid values abort startup.",
+          "type": "object",
+          "properties": {
+            "collection": {
+              "description": "Collection-side budgets.",
+              "type": "object",
+              "properties": {
+                "maxInlineTextBytes": {
+                  "type": "number",
+                  "minimum": 1,
+                  "default": 65536,
+                  "description": "Upper bound for inline text persisted on a memory entry (transcripts, OCR). Longer text is truncated on the entry; the stored artifact keeps the full content."
+                }
+              }
+            },
+            "recall": {
+              "description": "Recall-side exposure and budgets.",
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "active",
+                    "sideQuery"
+                  ],
+                  "default": "active",
+                  "description": "Mutually exclusive recall exposure: \"active\" registers the recall tool for the model; \"sideQuery\" runs a passive selector before the main request instead."
+                },
+                "maxEntries": {
+                  "type": "number",
+                  "minimum": 1,
+                  "default": 12,
+                  "description": "Maximum entries one recall may return."
+                },
+                "maxTextChars": {
+                  "type": "number",
+                  "minimum": 1,
+                  "default": 24000,
+                  "description": "Total character budget across all text in one recall result."
+                },
+                "kinds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "metadata",
+                      "derived_media",
+                      "policy_result",
+                      "execution"
+                    ]
+                  },
+                  "minItems": 1,
+                  "description": "Entry kinds recall may surface. Replaces wholesale when set (never element-merged)."
+                },
+                "includeHistoricalVersions": {
+                  "description": "Whether recall may surface entries for non-current file versions by default.",
+                  "type": "boolean",
+                  "default": false
+                },
+                "active": {
+                  "description": "Budgets for the active recall tool.",
+                  "type": "object",
+                  "properties": {
+                    "maxFilesPerCall": {
+                      "type": "number",
+                      "minimum": 1,
+                      "default": 8,
+                      "description": "Maximum distinct files one recall tool call may query."
+                    }
+                  }
+                },
+                "sideQuery": {
+                  "description": "Budgets for the passive side-query selector.",
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "default": null,
+                      "description": "Model for the passive selector; unset uses the session's active model."
+                    },
+                    "timeoutMs": {
+                      "type": "number",
+                      "minimum": 1,
+                      "default": 30000,
+                      "description": "Side-query timeout; on timeout the turn proceeds with an empty recall."
+                    },
+                    "maxCandidateEntries": {
+                      "type": "number",
+                      "minimum": 1,
+                      "default": 100,
+                      "description": "Maximum candidate entries shown to the selector."
+                    },
+                    "maxSelectedEntries": {
+                      "type": "number",
+                      "minimum": 1,
+                      "default": 12,
+                      "description": "Maximum entries the selector may pick. Must not exceed recall.maxEntries."
+                    },
+                    "maxAttempts": {
+                      "type": "number",
+                      "minimum": 1,
+                      "default": 1,
+                      "description": "Selector attempts before falling back to an empty recall."
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

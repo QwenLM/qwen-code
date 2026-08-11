@@ -32,6 +32,7 @@ import type {
   NormalizedOmniProcessingConfig,
   OmniPolicyToolsSettings,
 } from '../omni/policy/types.js';
+import type { NormalizedOmniMemoryConfig } from '../services/media-memory/config.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
@@ -1128,6 +1129,9 @@ export interface ConfigParameters {
   omniQuarantineRetentionDays?: number;
   /** `omni.storage.quarantine.maxBytes` (default 5 GiB). */
   omniQuarantineMaxBytes?: number;
+  /** Raw `omni.memory` settings (collection/recall). Normalized at
+   * startup; invalid configuration aborts startup. */
+  omniMemory?: Record<string, unknown>;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1964,9 +1968,13 @@ export class Config {
   private readonly omniProcessingLimits?: Record<string, unknown>;
   private readonly omniQuarantineRetentionDays?: number;
   private readonly omniQuarantineMaxBytes?: number;
+  private readonly omniMemory?: Record<string, unknown>;
   /** Normalized `omni.processing` view; set once during initialize()
    * (after the tool registry exists) when omni is enabled. */
   private omniProcessingConfig?: NormalizedOmniProcessingConfig;
+  /** Normalized `omni.memory` view; set once during initialize() when
+   * omni is enabled. */
+  private omniMemoryConfig?: NormalizedOmniMemoryConfig;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2253,6 +2261,7 @@ export class Config {
     this.omniProcessingLimits = params.omniProcessingLimits;
     this.omniQuarantineRetentionDays = params.omniQuarantineRetentionDays;
     this.omniQuarantineMaxBytes = params.omniQuarantineMaxBytes;
+    this.omniMemory = params.omniMemory;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -3006,6 +3015,14 @@ export class Config {
         },
         this.toolRegistry,
       );
+
+      // Same stance for `omni.memory`: normalize once at startup; an
+      // invalid memory configuration (bad budgets, unknown recall mode)
+      // throws OmniMemoryConfigError and aborts startup.
+      const { normalizeOmniMemoryConfig } = await import(
+        '../services/media-memory/config.js'
+      );
+      this.omniMemoryConfig = normalizeOmniMemoryConfig(this.omniMemory);
     }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
@@ -6465,6 +6482,12 @@ export class Config {
    * completes (or when omni is disabled). */
   getOmniProcessingConfig(): NormalizedOmniProcessingConfig | undefined {
     return this.omniProcessingConfig;
+  }
+
+  /** Normalized `omni.memory` view. Undefined until initialize()
+   * completes (or when omni is disabled). */
+  getOmniMemoryConfig(): NormalizedOmniMemoryConfig | undefined {
+    return this.omniMemoryConfig;
   }
 
   getOmniQuarantineRetentionDays(): number {

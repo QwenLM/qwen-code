@@ -4019,6 +4019,259 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      memory: {
+        type: 'object',
+        label: 'Omni Media Memory',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Persistent multimodal media memory (collection of recognized ' +
+          'files and policy execution results, plus cross-session recall). ' +
+          'Invalid values abort startup.',
+        showInDialog: false,
+        properties: {
+          collection: {
+            type: 'object',
+            label: 'Omni Memory Collection',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Collection-side budgets.',
+            showInDialog: false,
+            properties: {
+              maxInlineTextBytes: {
+                type: 'number',
+                label: 'Max Inline Text Bytes',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 65536,
+                description:
+                  'Upper bound for inline text persisted on a memory entry ' +
+                  '(transcripts, OCR). Longer text is truncated on the ' +
+                  'entry; the stored artifact keeps the full content.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 65536,
+                },
+              },
+            },
+          },
+          recall: {
+            type: 'object',
+            label: 'Omni Memory Recall',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: {},
+            description: 'Recall-side exposure and budgets.',
+            showInDialog: false,
+            properties: {
+              mode: {
+                type: 'string',
+                label: 'Recall Mode',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 'active',
+                description:
+                  'Mutually exclusive recall exposure: "active" registers ' +
+                  'the recall tool for the model; "sideQuery" runs a ' +
+                  'passive selector before the main request instead.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'string',
+                  enum: ['active', 'sideQuery'],
+                  default: 'active',
+                },
+              },
+              maxEntries: {
+                type: 'number',
+                label: 'Max Recall Entries',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 12,
+                description: 'Maximum entries one recall may return.',
+                showInDialog: false,
+                jsonSchemaOverride: { type: 'number', minimum: 1, default: 12 },
+              },
+              maxTextChars: {
+                type: 'number',
+                label: 'Max Recall Text Chars',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 24000,
+                description:
+                  'Total character budget across all text in one recall ' +
+                  'result.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 1,
+                  default: 24000,
+                },
+              },
+              kinds: {
+                type: 'array',
+                label: 'Recall Entry Kinds',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: [
+                  'metadata',
+                  'derived_media',
+                  'policy_result',
+                  'execution',
+                ] as string[],
+                description:
+                  'Entry kinds recall may surface. Replaces wholesale when ' +
+                  'set (never element-merged).',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.REPLACE,
+                jsonSchemaOverride: {
+                  type: 'array',
+                  items: {
+                    type: 'string',
+                    enum: [
+                      'metadata',
+                      'derived_media',
+                      'policy_result',
+                      'execution',
+                    ],
+                  },
+                  minItems: 1,
+                },
+              },
+              includeHistoricalVersions: {
+                type: 'boolean',
+                label: 'Include Historical Versions',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: false,
+                description:
+                  'Whether recall may surface entries for non-current file ' +
+                  'versions by default.',
+                showInDialog: false,
+              },
+              active: {
+                type: 'object',
+                label: 'Active Recall',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {},
+                description: 'Budgets for the active recall tool.',
+                showInDialog: false,
+                properties: {
+                  maxFilesPerCall: {
+                    type: 'number',
+                    label: 'Max Files Per Call',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 8,
+                    description:
+                      'Maximum distinct files one recall tool call may ' +
+                      'query.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 1,
+                      default: 8,
+                    },
+                  },
+                },
+              },
+              sideQuery: {
+                type: 'object',
+                label: 'Side-Query Recall',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: {},
+                description: 'Budgets for the passive side-query selector.',
+                showInDialog: false,
+                properties: {
+                  model: {
+                    type: 'string',
+                    label: 'Selector Model',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: undefined as string | undefined,
+                    description:
+                      'Model for the passive selector; unset uses the ' +
+                      "session's active model.",
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: ['string', 'null'],
+                      default: null,
+                    },
+                  },
+                  timeoutMs: {
+                    type: 'number',
+                    label: 'Selector Timeout (ms)',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 30000,
+                    description:
+                      'Side-query timeout; on timeout the turn proceeds ' +
+                      'with an empty recall.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 1,
+                      default: 30000,
+                    },
+                  },
+                  maxCandidateEntries: {
+                    type: 'number',
+                    label: 'Max Candidate Entries',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 100,
+                    description:
+                      'Maximum candidate entries shown to the selector.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 1,
+                      default: 100,
+                    },
+                  },
+                  maxSelectedEntries: {
+                    type: 'number',
+                    label: 'Max Selected Entries',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 12,
+                    description:
+                      'Maximum entries the selector may pick. Must not ' +
+                      'exceed recall.maxEntries.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 1,
+                      default: 12,
+                    },
+                  },
+                  maxAttempts: {
+                    type: 'number',
+                    label: 'Max Selector Attempts',
+                    category: 'Experimental',
+                    requiresRestart: true,
+                    default: 1,
+                    description:
+                      'Selector attempts before falling back to an empty ' +
+                      'recall.',
+                    showInDialog: false,
+                    jsonSchemaOverride: {
+                      type: 'number',
+                      minimum: 1,
+                      default: 1,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     },
   },
 } as const satisfies SettingsSchema;

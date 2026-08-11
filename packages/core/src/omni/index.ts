@@ -49,6 +49,12 @@ import {
 } from './policy/orchestrator.js';
 import { buildSessionConditionNamespace } from './policy/session-context.js';
 import type { OmniProcessingConfigView } from './policy/types.js';
+import {
+  MediaMemoryService,
+  MEDIA_DETECTOR_VERSION,
+  type MediaMemoryBinding,
+  type OmniMemoryConfigView,
+} from '../services/media-memory/index.js';
 
 export {
   assertOmniRuntimeDependencies,
@@ -437,7 +443,55 @@ export async function processMediaForOmniDelivery(
         ),
       }
     : undefined;
-  let final: PolicyDeliveryResource = { filePath, recognized };
+  // Media-memory collection (S5, design M §6). Same structural-view
+  // pattern as the processing config; absent accessor or config = off.
+  // Recording FileRecognized needs the source's content hash NOW, so the
+  // hash is paid upfront and seeded through the pipeline (source →
+  // WorkItem → final) — uploadResource's lazy hash never re-pays it. A
+  // memory failure (hash or store) never blocks delivery: collection is
+  // skipped and the pipeline continues exactly as without memory.
+  const memoryConfig = (config as OmniMemoryConfigView).getOmniMemoryConfig?.();
+  const memoryService = memoryConfig
+    ? new MediaMemoryService(store.getOmniRootDir(), {
+        maxInlineTextBytes: memoryConfig.collection.maxInlineTextBytes,
+      })
+    : undefined;
+  let sourceSha256: string | undefined;
+  let sourceBinding: MediaMemoryBinding | undefined;
+  if (memoryService) {
+    try {
+      sourceSha256 = await hashFileSha256(filePath, signal);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      debugLogger.debug(
+        `omni memory: hashing ${displayName} failed, skipping collection: ` +
+          `${sanitizeErrorMessage(err, [filePath])}`,
+      );
+    }
+    if (sourceSha256) {
+      sourceBinding = await memoryService.recordFileRecognized({
+        fileRef: filePath,
+        sha256: sourceSha256,
+        mediaType: recognized.modality,
+        metadata: recognized.metadata,
+        sizeBytes: recognized.sizeBytes,
+        mimeType: recognized.detectedMimeType,
+        origin: options?.origin ?? 'user',
+        source: { protocol: 'local', locator: displayName },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: MEDIA_DETECTOR_VERSION,
+          probeStatus: 'complete',
+        },
+      });
+    }
+  }
+  let final: PolicyDeliveryResource = {
+    filePath,
+    recognized,
+    sha256: sourceSha256,
+    memoryBinding: sourceBinding,
+  };
   /** Media deliverables beyond the primary (multi-output fixed policies). */
   let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
@@ -484,6 +538,7 @@ export async function processMediaForOmniDelivery(
           recognized,
           displayName,
           origin: options?.origin ?? 'user',
+          sha256: sourceSha256,
         },
         {
           store,
@@ -491,6 +546,9 @@ export async function processMediaForOmniDelivery(
           signal,
           limits: processingConfig?.limits,
           conditionContext,
+          memory: memoryService
+            ? { service: memoryService, sourceBinding }
+            : undefined,
         },
       ));
     } catch (err) {
@@ -702,6 +760,7 @@ export async function processMediaForOmniDelivery(
             recognized: final.recognized,
             displayName,
             origin: options?.origin ?? 'user',
+            sha256: final.sha256,
           },
           {
             store,
@@ -709,6 +768,12 @@ export async function processMediaForOmniDelivery(
             signal,
             limits: processingConfig.limits,
             conditionContext,
+            // The guard pass derives FROM the current final resource, so
+            // its memory lineage hangs off that resource's own binding
+            // (a derivative's version when preprocessing degraded it).
+            memory: memoryService
+              ? { service: memoryService, sourceBinding: final.memoryBinding }
+              : undefined,
           },
         ));
       } catch (err) {

@@ -35,6 +35,11 @@ import {
 import { DEFAULT_OMNI_PROCESSING_LIMITS } from './config.js';
 import { resolvePolicyToolSettings } from './tools/media-policy-tool.js';
 import type {
+  MediaMemoryBinding,
+  MediaMemoryService,
+  PolicyOutputInput,
+} from '../../services/media-memory/index.js';
+import type {
   FixedPolicyOrigin,
   NormalizedFixedPolicy,
   NormalizedOmniProcessingLimits,
@@ -55,6 +60,10 @@ export interface PolicyDeliveryResource {
   disclosure?: string;
   /** True when the resource is a lossy derivative of the user's input. */
   degraded?: boolean;
+  /** Media-memory identity of this resource, when memory collection is
+   * active (S5): threaded so downstream policy passes (transport guard,
+   * reactive ladder) commit onto the same lineage graph. */
+  memoryBinding?: MediaMemoryBinding;
 }
 
 /** Size ceiling for non-media (`kind: 'file'`) policy artifacts — the
@@ -119,6 +128,14 @@ export interface RunFixedPoliciesOptions {
   /** Per-root derivation budgets (decision D11); the system defaults
    * apply when the caller has no normalized processing config. */
   limits?: NormalizedOmniProcessingLimits;
+  /** Media-memory collection (S5). When present, successful executions
+   * commit onto the memory graph; `sourceBinding` is the root resource's
+   * identity when the caller already recorded it. Collection failures
+   * never block delivery (design M §6.4). */
+  memory?: {
+    service: MediaMemoryService;
+    sourceBinding?: MediaMemoryBinding;
+  };
 }
 
 /** Root resource entering the orchestrator. */
@@ -128,6 +145,9 @@ export interface PolicySourceResource {
   /** User-recognizable name for records and error messages. */
   displayName: string;
   origin: Extract<FixedPolicyOrigin, 'user' | 'tool'>;
+  /** Content hash when the caller already computed it (memory
+   * collection records it at recognition time); avoids re-hashing. */
+  sha256?: string;
 }
 
 /** Thrown when a policy invocation fails and the failure must abort the
@@ -152,6 +172,11 @@ interface WorkItem {
   sha256?: string;
   disclosure?: string;
   degraded?: boolean;
+  /** Media-memory identity of this item (S5). Set on the root from
+   * `options.memory.sourceBinding` and on derived items from the commit
+   * of the execution that produced them; absent when memory is off or
+   * the identity is unknown (commit failed). */
+  memoryBinding?: MediaMemoryBinding;
   /** Per-derivation-chain run counts (policy id → runs). Copied — never
    * shared — on derivation, so sibling branches cap independently. */
   lineageRuns: Map<string, number>;
@@ -173,6 +198,8 @@ interface PolicyExecution {
     degraded: boolean;
     /** `metadata.omniRole`, when the tool labeled the artifact. */
     role?: string;
+    /** Media-memory identity, when collection committed this artifact. */
+    memoryBinding?: MediaMemoryBinding;
   }>;
   /** Non-media file artifacts (transcripts). Never re-enter matching. */
   derivedFiles: PolicyFileDelivery[];
@@ -396,6 +423,8 @@ async function runFixedPoliciesUnbounded(
       recognized: source.recognized,
       label: source.displayName,
       origin: source.origin,
+      sha256: source.sha256,
+      memoryBinding: options.memory?.sourceBinding,
       lineageRuns: new Map(),
       depth: 0,
       deliver: true,
@@ -505,6 +534,9 @@ async function runFixedPoliciesUnbounded(
           options.store,
           cache,
           options.signal,
+          options.memory && item.memoryBinding
+            ? { service: options.memory.service, source: item.memoryBinding }
+            : undefined,
         );
         records.push({
           policyId: policy.id,
@@ -612,6 +644,7 @@ async function runFixedPoliciesUnbounded(
         sha256: item.sha256,
         disclosure: item.disclosure,
         degraded: item.degraded,
+        memoryBinding: item.memoryBinding,
       })),
     fileDeliveries,
     records,
@@ -659,6 +692,9 @@ async function executePolicy(
   store: OmniObjectStore,
   cache: OmniDegradationCache,
   signal: AbortSignal | undefined,
+  memory:
+    | { service: MediaMemoryService; source: MediaMemoryBinding }
+    | undefined,
 ): Promise<PolicyExecution> {
   const tool = config.getToolRegistry().getTool(policy.toolName);
   const descriptor = tool?.mediaPolicyDescriptor;
@@ -684,6 +720,10 @@ async function executePolicy(
     effectiveArguments,
     descriptor.version,
   );
+  // Memory collection needs wall-clock execution bounds; captured here so
+  // the cache-hit path (which re-materializes the same execution node)
+  // records honest, if near-zero, durations.
+  const startedAt = new Date().toISOString();
   const hit = await cache.get(item.sha256, fingerprint);
   if (hit) {
     try {
@@ -713,6 +753,41 @@ async function executePolicy(
             debugLogger.debug(
               `degradation cache hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}…`,
             );
+            // A cache hit converges on the same content-keyed execution node
+            // as the original run (design M §11: no duplicate nodes) — the
+            // commit is a no-op when memory already has it, and only writes
+            // when the memory store was wiped while the degradation cache
+            // survived. Never blocks delivery.
+            const commit = memory
+              ? await memory.service.commitPolicySucceeded({
+                  invocationId: 'cache-hit',
+                  source: memory.source,
+                  executionOrigin: {
+                    kind: 'fixed_policy',
+                    policyId: policy.id,
+                    stage: policy.stage,
+                  },
+                  toolName: policy.toolName,
+                  toolVersion: descriptor.version,
+                  finalArguments: effectiveArguments,
+                  omniConfigHash: fingerprint,
+                  startedAt,
+                  completedAt: new Date().toISOString(),
+                  outputs: [
+                    {
+                      kind: 'media',
+                      objectPath,
+                      sha256: hit.degradedSha256,
+                      mediaType: recognized.modality,
+                      metadata: recognized.metadata,
+                      sizeBytes: recognized.sizeBytes,
+                      mimeType: recognized.detectedMimeType,
+                      role: hit.role,
+                      disclosure: hit.disclosure,
+                    },
+                  ],
+                })
+              : undefined;
             return {
               outcome: 'cache_hit',
               derived: [
@@ -723,6 +798,7 @@ async function executePolicy(
                   disclosure: hit.disclosure,
                   degraded: true,
                   role: hit.role,
+                  memoryBinding: commit?.mediaBindings.get(hit.degradedSha256),
                 },
               ],
               derivedFiles: [],
@@ -853,6 +929,58 @@ async function executePolicy(
           sizeBytes: artifact.sizeBytes,
           disclosure: artifact.disclosure,
         });
+      }
+    }
+    // Memory collection (S5, design M §6.4): commit AFTER promotion — the
+    // objects/ bytes the records reference already exist — and in one shot
+    // at the point where every commit input coexists. A collection failure
+    // logs inside the service and returns undefined; delivery proceeds.
+    if (memory) {
+      const outputs: PolicyOutputInput[] = promoted.map(
+        ({ artifact, objectPath }) =>
+          artifact.kind === 'media'
+            ? {
+                kind: 'media' as const,
+                objectPath,
+                sha256: artifact.sha256,
+                mediaType: artifact.recognized.modality,
+                metadata: artifact.recognized.metadata,
+                sizeBytes: artifact.recognized.sizeBytes,
+                mimeType: artifact.recognized.detectedMimeType,
+                role: artifact.role,
+                disclosure: artifact.disclosure,
+              }
+            : {
+                kind: 'text' as const,
+                objectPath,
+                sha256: artifact.sha256,
+                mimeType: artifact.mimeType,
+                text: artifact.text,
+                sizeBytes: artifact.sizeBytes,
+                role: artifact.role,
+                disclosure: artifact.disclosure,
+              },
+      );
+      const commit = await memory.service.commitPolicySucceeded({
+        invocationId,
+        source: memory.source,
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: policy.id,
+          stage: policy.stage,
+        },
+        toolName: policy.toolName,
+        toolVersion: descriptor.version,
+        finalArguments: effectiveArguments,
+        omniConfigHash: fingerprint,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        outputs,
+      });
+      if (commit) {
+        for (const entry of derived) {
+          entry.memoryBinding = commit.mediaBindings.get(entry.sha256);
+        }
       }
     }
     // The cache maps one input to ONE media derivative; multi-output tools
