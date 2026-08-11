@@ -463,10 +463,121 @@ describe('managed Skill mutations', () => {
       expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
         'disable-model-invocation: true',
       ]);
+      const parsed = parser.parseSkillContent(content, skillFile, 'user');
+      expect(parsed.disableModelInvocation).toBe(true);
+      expect(parsed.description).toBe('Create slide decks');
+      expect(parsed.body).toBe('Body');
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('toggles quoted top-level enablement fields', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillDir = path.join(tempHome, 'skills', 'pptx');
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    const config = configWith(managerFor('pptx'));
+    const parser = new SkillManager({} as Config);
+
+    try {
+      for (const quote of ['"', "'"]) {
+        await fs.writeFile(
+          skillFile,
+          `---\nname: pptx\ndescription: Create slide decks\n${quote}disable-model-invocation${quote}: true\n---\nBody\n`,
+          'utf8',
+        );
+        expect(
+          parser.parseSkillContent(
+            await fs.readFile(skillFile, 'utf8'),
+            skillFile,
+            'user',
+          ).disableModelInvocation,
+        ).toBe(true);
+        await setManagedSkillEnabled(config, {
+          skill: { slug: 'pptx', enabled: true },
+        });
+        let content = await fs.readFile(skillFile, 'utf8');
+        expect(
+          parser.parseSkillContent(content, skillFile, 'user')
+            .disableModelInvocation,
+        ).toBeUndefined();
+
+        await fs.writeFile(
+          skillFile,
+          `---\nname: pptx\ndescription: Create slide decks\n${quote}disable-model-invocation${quote}: false\n---\nBody\n`,
+          'utf8',
+        );
+        await setManagedSkillEnabled(config, {
+          skill: { slug: 'pptx', enabled: false },
+        });
+        content = await fs.readFile(skillFile, 'utf8');
+        expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
+          'disable-model-invocation: true',
+        ]);
+        expect(
+          parser.parseSkillContent(content, skillFile, 'user')
+            .disableModelInvocation,
+        ).toBe(true);
+      }
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('toggles enablement fields with next-line values', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillDir = path.join(tempHome, 'skills', 'pptx');
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    const config = configWith(managerFor('pptx'));
+    const parser = new SkillManager({} as Config);
+
+    try {
+      await fs.writeFile(
+        skillFile,
+        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation:\n  false\n---\nBody\n',
+        'utf8',
+      );
+      await setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: false },
+      });
+      let content = await fs.readFile(skillFile, 'utf8');
+      expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
+        'disable-model-invocation: true',
+      ]);
+      const disabledSkill = parser.parseSkillContent(
+        content,
+        skillFile,
+        'user',
+      );
+      expect(disabledSkill.disableModelInvocation).toBe(true);
+      expect(disabledSkill.description).toBe('Create slide decks');
+      expect(disabledSkill.body).toBe('Body');
+
+      await fs.writeFile(
+        skillFile,
+        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation:\n  true\n---\nBody\n',
+        'utf8',
+      );
       expect(
-        parser.parseSkillContent(content, skillFile, 'user')
-          .disableModelInvocation,
+        parser.parseSkillContent(
+          await fs.readFile(skillFile, 'utf8'),
+          skillFile,
+          'user',
+        ).disableModelInvocation,
       ).toBe(true);
+      await setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: true },
+      });
+      content = await fs.readFile(skillFile, 'utf8');
+      expect(content).not.toContain('disable-model-invocation');
+      const enabledSkill = parser.parseSkillContent(content, skillFile, 'user');
+      expect(enabledSkill.disableModelInvocation).toBeUndefined();
+      expect(enabledSkill.description).toBe('Create slide decks');
+      expect(enabledSkill.body).toBe('Body');
     } finally {
       await fs.rm(tempHome, { recursive: true, force: true });
     }

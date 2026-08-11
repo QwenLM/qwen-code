@@ -194,19 +194,42 @@ function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   // corrupt hooks-bearing skills and strip user comments. Working on the raw
   // text leaves every other byte untouched.
   const lines = frontmatter.split('\n');
-  const disabledLineIndexes = lines.flatMap((line, index) =>
-    /^disable-model-invocation\s*:/.test(line) ? [index] : [],
-  );
+  const disabledFields: Array<{ start: number; end: number }> = [];
+  const disabledFieldPattern =
+    /^(?:disable-model-invocation|"disable-model-invocation"|'disable-model-invocation')\s*:(.*)$/;
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(disabledFieldPattern);
+    if (!match) continue;
+
+    let end = index;
+    if (/^\s*(?:#.*)?$/.test(match[1])) {
+      while (
+        end + 1 < lines.length &&
+        (lines[end + 1].trim() === '' || /^[ \t]/.test(lines[end + 1]))
+      ) {
+        end += 1;
+      }
+    }
+    disabledFields.push({ start: index, end });
+    index = end;
+  }
 
   if (enabled) {
-    for (let index = disabledLineIndexes.length - 1; index >= 0; index -= 1) {
-      lines.splice(disabledLineIndexes[index], 1);
+    for (let index = disabledFields.length - 1; index >= 0; index -= 1) {
+      const field = disabledFields[index];
+      lines.splice(field.start, field.end - field.start + 1);
     }
-  } else if (disabledLineIndexes.length > 0) {
-    lines[disabledLineIndexes[0]] = 'disable-model-invocation: true';
-    for (let index = disabledLineIndexes.length - 1; index > 0; index -= 1) {
-      lines.splice(disabledLineIndexes[index], 1);
+  } else if (disabledFields.length > 0) {
+    for (let index = disabledFields.length - 1; index > 0; index -= 1) {
+      const field = disabledFields[index];
+      lines.splice(field.start, field.end - field.start + 1);
     }
+    const firstField = disabledFields[0];
+    lines.splice(
+      firstField.start,
+      firstField.end - firstField.start + 1,
+      'disable-model-invocation: true',
+    );
   } else {
     let insertIndex = lines.length;
     while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
