@@ -1343,6 +1343,7 @@ export class GeminiClient {
   private queueAddedMcpToolsReminder(
     deferredTools: readonly DeferredToolSummary[],
   ): void {
+    const toolRegistry = this.config.getToolRegistry();
     const currentDeferredNames = new Set(
       deferredTools.map((tool) => tool.name),
     );
@@ -1371,7 +1372,10 @@ export class GeminiClient {
       }
     }
     for (const name of this.announcedMcpToolNames) {
-      if (!currentMcpToolNames.has(name)) {
+      if (
+        !currentMcpToolNames.has(name) &&
+        !toolRegistry.isDeferredToolRevealed(name)
+      ) {
         this.pendingRemovedMcpToolNames.add(name);
       }
     }

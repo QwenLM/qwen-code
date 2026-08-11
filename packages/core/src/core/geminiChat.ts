@@ -1611,7 +1611,7 @@ function applyRepair(
   // insert a fresh user turn between this model turn and whatever
   // follows.
   const next = history[adjacentIdx];
-  if (next?.role === 'user') {
+  if (next?.role === 'user' && !isSystemReminderContent(next)) {
     const existing = next.parts ?? [];
     const firstNonFr = existing.findIndex((part) => !part.functionResponse);
     const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;

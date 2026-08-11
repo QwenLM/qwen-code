@@ -12035,6 +12035,43 @@ describe('GeminiChat', async () => {
       expect(history[2]!.parts![1]).toEqual({ text: 'retry prompt' });
     });
 
+    it('keeps a pure system reminder separate from a synthesized response', () => {
+      const restoredSchemaReminder: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: `${SYSTEM_REMINDER_OPEN}\nrestored schema\n</system-reminder>`,
+          },
+        ],
+      };
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_crash_before_reminder',
+                name: 'deferred_tool_call',
+                args: {},
+              },
+            },
+          ],
+        },
+        restoredSchemaReminder,
+      ]);
+
+      chat.repairOrphanedToolUseTurns();
+
+      const history = chat.getHistory();
+      expect(history).toHaveLength(3);
+      expect(history[1]?.parts?.[0]?.functionResponse?.id).toBe(
+        'call_crash_before_reminder',
+      );
+      expect(history[2]).toEqual(restoredSchemaReminder);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+      expect(chat.getHistory()).toEqual(history);
+    });
+
     it('hoists synthetic functionResponse AFTER pre-existing real ones (parallel partial submit)', () => {
       // Parallel tool_use with one real functionResponse already in the
       // user turn — synthetic for the missing callId must slot in

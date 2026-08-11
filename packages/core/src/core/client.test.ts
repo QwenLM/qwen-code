@@ -2877,6 +2877,41 @@ describe('Gemini Client (client.ts)', () => {
       expect(addHistorySpy).toHaveBeenCalledTimes(1);
     });
 
+    it('does not announce a revealed MCP tool as removed', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        isDeferredProxyControlTool(n) ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__server__oversized',
+        description: 'oversized',
+        serverName: 'server',
+      };
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      await client.setTools();
+      await runTurn();
+
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      reg.isDeferredToolRevealed.mockReturnValue(true);
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        [tool.name],
+      );
+    });
+
     it('re-announces an MCP tool after its server disconnects and reconnects', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
