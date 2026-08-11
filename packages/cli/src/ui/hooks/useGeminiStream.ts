@@ -87,6 +87,7 @@ import {
   isSlashCommand,
 } from '../utils/commandUtils.js';
 import { findLastUserItemIndex } from '../utils/historyUtils.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -1303,7 +1304,7 @@ export const useGeminiStream = (
           addItem(
             {
               type: 'notification' as const,
-              text: submittedPrompt ?? trimmedQuery,
+              text: sanitizeTerminalText(submittedPrompt ?? trimmedQuery),
             } as HistoryItemWithoutId,
             userMessageTimestamp,
           );

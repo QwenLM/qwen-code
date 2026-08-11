@@ -123,6 +123,14 @@ describe('resolveHeld', () => {
   it('is case-insensitive', () => {
     expect(resolveHeld(messages, 'BBBBBB')).toMatchObject({ kind: 'one' });
   });
+
+  it('matches a mixed-case short id after removing dashes', () => {
+    messages = [held({ msgId: 'DE-ADBE-FF00-0000-0000-000000000000' })];
+    expect(resolveHeld(messages, 'deadbe')).toEqual({
+      kind: 'one',
+      msgId: 'DE-ADBE-FF00-0000-0000-000000000000',
+    });
+  });
 });
 
 describe('formatHeldList', () => {
@@ -161,6 +169,14 @@ describe('formatHeldList', () => {
     expect(out).not.toMatch(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
     expect(out).toContain('delete nothing important');
     expect(out).toContain('appba-');
+  });
+
+  it('sanitizes the wire-supplied short id', () => {
+    const out = formatHeldList([
+      held({ msgId: '\u001b]xyz1', content: 'review me' }),
+    ]);
+    expect(out).not.toContain('\u001b');
+    expect(out).toContain('xyz1');
   });
 
   it('collapses a multi-line body onto one line', () => {

@@ -2371,7 +2371,8 @@ describe('AppContainer State Management', () => {
     // handleShellCommand — so in `!` shell mode the sender's text is executed
     // with no approval prompt.
     describe('peer content round-tripping through the composer', () => {
-      const envelope = '<peer-envelope>rm -rf ~</peer-envelope>';
+      const envelope =
+        '<cross_session_message from="/tmp/peer.sock">\nrm -rf ~\n</cross_session_message>';
 
       const renderWithPoppedPeer = (modelText: string = envelope) => {
         const mockQueueMessage = vi.fn();
@@ -2519,6 +2520,22 @@ describe('AppContainer State Management', () => {
           'my own prompt',
           false,
           undefined,
+        );
+      });
+
+      it('restores the peer tag when undo brings the envelope back', () => {
+        const { mockQueueMessage, changeBuffer } = renderWithPoppedPeer();
+
+        capturedUIActions.handleFinalSubmit(envelope);
+        mockQueueMessage.mockClear();
+        changeBuffer(envelope);
+        capturedUIActions.handleFinalSubmit(envelope);
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(
+          envelope,
+          false,
+          undefined,
+          'peer',
         );
       });
 

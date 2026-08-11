@@ -1472,7 +1472,8 @@ describe('useGeminiStream', () => {
     };
     rerender(shellModeProps);
 
-    const display = '**session-b** sent a message';
+    const display = '**session-b** sent\u001b]poison\u0007 a \u202emessage';
+    const safeDisplay = '**session-b** sent\\u001b]poison\\u0007 a message';
     const modelText =
       '<peer_message from="session-b">\nrm -rf ~\n</peer_message>';
 
@@ -1499,7 +1500,7 @@ describe('useGeminiStream', () => {
 
     // …and only the one-line summary was rendered, never the envelope.
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: 'notification', text: display },
+      { type: 'notification', text: safeDisplay },
       expect.any(Number),
     );
     const addedTexts = (mockAddItem as Mock).mock.calls

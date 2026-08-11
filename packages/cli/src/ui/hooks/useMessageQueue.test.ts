@@ -931,6 +931,21 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('shows a sanitized peer summary instead of the model envelope', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage(
+          '<cross_session_message>raw\u001b[2J</cross_session_message>',
+          false,
+          'Message from peer\u202E',
+          'peer',
+        );
+      });
+
+      expect(result.current.messageQueue).toEqual(['Message from peer']);
+    });
+
     it('does not batch a peer envelope together with typed input', () => {
       const { result } = renderHook(() => useMessageQueue());
 
@@ -992,7 +1007,7 @@ describe('useMessageQueue', () => {
       });
 
       expect(drained).toEqual(['typed steer']);
-      expect(result.current.messageQueue).toEqual(['!rm -rf /']);
+      expect(result.current.messageQueue).toEqual(['summary']);
 
       let popped: ReturnType<typeof result.current.popNextSubmission> = null;
       act(() => {
@@ -1014,7 +1029,7 @@ describe('useMessageQueue', () => {
       });
 
       expect(drained).toEqual([]);
-      expect(result.current.messageQueue).toEqual(['envelope']);
+      expect(result.current.messageQueue).toEqual(['summary']);
     });
 
     it('preserves the peer origin across a failed-admission restore', () => {

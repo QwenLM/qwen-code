@@ -102,6 +102,7 @@ export class PeerMessaging {
       },
       onHeldChange: (held, added) => messaging.emitHeldChange(held, added),
     });
+    messaging.gate = gate;
 
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
@@ -112,7 +113,6 @@ export class PeerMessaging {
     if (!inbox) return null;
 
     messaging.inbox = inbox;
-    messaging.gate = gate;
 
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses

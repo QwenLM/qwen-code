@@ -1280,6 +1280,9 @@ export const AppContainer = (props: AppContainerProps) => {
       submittedPromptProvenanceUnavailableRef.current = false;
       return;
     }
+    if (/<cross_session_message(?=[\s>])/i.test(text)) {
+      composerHoldsPeerContentRef.current = true;
+    }
     if (
       restoredSubmissionRef.current !== null &&
       restoredSubmissionRef.current.modelText !== text

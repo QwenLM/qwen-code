@@ -44,7 +44,7 @@ export function formatHeldList(held: readonly HeldMessage[]): string {
       entry.frame.fromName ?? entry.frame.from ?? 'unknown session',
     );
     return (
-      `  ${shortId(entry.frame.msgId)}  ${who}\n` +
+      `  ${sanitizeTerminalText(shortId(entry.frame.msgId))}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
       `      held because ${describeHoldCause(entry.cause)}`
     );
@@ -72,7 +72,7 @@ export function resolveHeld(
   const needle = token.toLowerCase();
   const matches = held.filter(
     (entry) =>
-      shortId(entry.frame.msgId).startsWith(needle) ||
+      shortId(entry.frame.msgId).toLowerCase().startsWith(needle) ||
       entry.frame.msgId.toLowerCase().startsWith(needle),
   );
   if (matches.length === 0) return { kind: 'none' };

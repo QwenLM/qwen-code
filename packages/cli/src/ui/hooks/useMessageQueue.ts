@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { useCallback, useRef, useState } from 'react';
 import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 
 export interface QueuedGoalTurn {
   kind: 'goal';
@@ -375,7 +376,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   return {
-    messageQueue: queuedMessages.map(({ text }) => text),
+    messageQueue: queuedMessages.map(({ text, submittedPrompt, origin }) =>
+      origin === 'peer' ? sanitizeTerminalText(submittedPrompt ?? text) : text,
+    ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
     enqueueGoalTurn,
