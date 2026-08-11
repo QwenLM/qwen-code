@@ -978,6 +978,15 @@ describe('composeReview — context-unavailable (clause 2)', () => {
     expect(r.body).not.toMatch(/Reviewed\.\s/);
   });
 
+  it('discloses coverage gaps before the diff-only warning', () => {
+    const r = composeReview(
+      base({ contextUnavailable: true, unreviewedDimensions: ['security'] }),
+    );
+    expect(r.body.indexOf('Partially reviewed')).toBeLessThan(
+      r.body.indexOf('Reviewed diff-only'),
+    );
+  });
+
   it('does not soften a REQUEST_CHANGES', () => {
     const r = composeReview(
       base({ criticalsInline: 1, contextUnavailable: true }),
@@ -1179,9 +1188,16 @@ describe('composeReview — stacked states compose, none erased', () => {
 describe('composeReview — RC carries every applicable disclosure (no clause squeezed out)', () => {
   it('RC + context-unavailable keeps the diff-only trust warning in the body', () => {
     const r = composeReview(
-      base({ criticalsInline: 1, contextUnavailable: true }),
+      base({
+        criticalsInline: 1,
+        contextUnavailable: true,
+        unreviewedDimensions: ['security'],
+      }),
     );
     expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body.indexOf('Partially reviewed')).toBeLessThan(
+      r.body.indexOf('Reviewed diff-only'),
+    );
     expect(r.body).toContain('Reviewed diff-only');
   });
 
@@ -2247,6 +2263,15 @@ describe('coverage is recomputed, never accepted', () => {
 
     expect(r.body).toContain('macos-build…');
     expect(r.body).toContain('linux-build…');
+  });
+
+  it('counts agent labels that truncate to the same public subject', () => {
+    const prefix = `Verify ${'the same long scope '.repeat(5)}`;
+    transcript('p1', `${prefix}macos behavior\n${DIFF}`);
+    transcript('p2', `${prefix}linux behavior\n${DIFF}`);
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain('(×2)');
   });
 
   it('renders prompt-derived labels as inert Markdown', () => {

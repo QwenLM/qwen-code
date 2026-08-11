@@ -1381,20 +1381,35 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
-    const named: string[] = [];
-    const namedZh: string[] = [];
+    const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = /^chunk (\d+)$/.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
       else {
-        named.push(e.publicSubject ?? e.subject);
-        namedZh.push(e.subjectZh ?? e.publicSubject ?? e.subject);
+        const subject = e.publicSubject ?? e.subject;
+        const existing = named.get(subject);
+        if (existing) existing.count++;
+        else
+          named.set(subject, {
+            zh: e.subjectZh ?? subject,
+            count: 1,
+          });
       }
     }
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
-    const shown = [...(gap ? [gap.phrase] : []), ...named];
-    const shownZh = [...(gap ? [gap.phraseZh] : []), ...namedZh];
+    const shown = [
+      ...(gap ? [gap.phrase] : []),
+      ...[...named].map(([subject, { count }]) =>
+        count > 1 ? `${subject} (×${count})` : subject,
+      ),
+    ];
+    const shownZh = [
+      ...(gap ? [gap.phraseZh] : []),
+      ...[...named.values()].map(({ zh, count }) =>
+        count > 1 ? `${zh}（×${count}）` : zh,
+      ),
+    ];
     const reasonZh = reasonZhOf.get(reason) ?? reason;
     notReviewedParts.push({
       en: reason
@@ -1423,6 +1438,31 @@ function composeReviewBody(
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
+
+  const disclosedChunkIds = new Set<number>();
+  for (const e of coverageEntries) {
+    const m = /^chunk (\d+)$/.exec(e.subject);
+    if (m) disclosedChunkIds.add(Number(m[1]));
+  }
+  const nothingCertified =
+    coverageEntries.some((e) => e.subject === 'coverage') ||
+    (plannedChunks.length > 0 &&
+      coveredChunks.every((id) => disclosedChunkIds.has(id)));
+  const hasCoverageGaps =
+    unreviewed.length + coverageEntries.length > 0 ||
+    missingReceipts.length > 0 ||
+    uncoverable.length > 0;
+  const coverageOpener: Bi | undefined = nothingCertified
+    ? {
+        en: '⚠️ This run could not certify that any of this diff was reviewed.',
+        zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+      }
+    : hasCoverageGaps
+      ? {
+          en: 'Partially reviewed — gaps disclosed.',
+          zh: '仅完成部分审查，审查缺口已披露。',
+        }
+      : undefined;
 
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
@@ -1484,6 +1524,7 @@ function composeReviewBody(
     // trust warning (clause 2), an undecided existing Critical (clause 5),
     // or the unread-scope disclosure (clause 6).
     const parts = [
+      ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
@@ -1552,9 +1593,9 @@ function composeReviewBody(
     });
   }
 
-  // 2. Context-unavailable clause — when present, it opens the body and no
-  //    clause may certify "no blockers".
+  // 2. Context-unavailable clause — no later clause may certify "no blockers".
   if (contextUnavailable) {
+    if (coverageOpener) clauses.push(coverageOpener);
     clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
@@ -1569,13 +1610,11 @@ function composeReviewBody(
       !downgradeRequestChanges &&
       c === 0 &&
       cannotTell.length === 0 &&
-      uncoverable.length === 0 &&
-      unreviewed.length + coverageEntries.length === 0 &&
+      !hasCoverageGaps &&
       // A missing receipt caps the event but was left out of certification, so a
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free — and neither
       // can a loop that ended with findings no verifier ever ruled on.
-      missingReceipts.length === 0 &&
       // A disclosed budget gap is not a blocker, but "Reviewed — no
       // blockers." two lines above "Not explored to full depth" is the
       // opener certifying what the disclosure takes back — the exact
@@ -1593,19 +1632,6 @@ function composeReviewBody(
     // `coverage` subject is the no-plan/unreadable-transcripts family — there
     // is no chunk universe to count, and what cannot be counted cannot be
     // certified.
-    const disclosedChunkIds = new Set<number>();
-    for (const e of coverageEntries) {
-      const m = /^chunk (\d+)$/.exec(e.subject);
-      if (m) disclosedChunkIds.add(Number(m[1]));
-    }
-    const nothingCertified =
-      coverageEntries.some((e) => e.subject === 'coverage') ||
-      (plannedChunks.length > 0 &&
-        coveredChunks.every((id) => disclosedChunkIds.has(id)));
-    const hasCoverageGaps =
-      unreviewed.length + coverageEntries.length > 0 ||
-      missingReceipts.length > 0 ||
-      uncoverable.length > 0;
     // Any opener starting with "Reviewed" reads as contradicting the
     // "Not reviewed:" clauses below it — announcing the gaps does not fix
     // it, as the first cut of this wording showed (#8811). When disclosures
@@ -1613,29 +1639,20 @@ function composeReviewBody(
     // reads in one direction; the certifying and the zero-certified openers
     // above keep their exact wording.
     clauses.push(
-      nothingCertified
-        ? {
-            en: '⚠️ This run could not certify that any of this diff was reviewed.',
-            zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
-          }
-        : canCertify
+      coverageOpener ??
+        (canCertify
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
-          : hasCoverageGaps
+          : findingsFileUnreadable
             ? {
-                en: 'Partially reviewed — gaps disclosed.',
-                zh: '仅完成部分审查，审查缺口已披露。',
+                en: 'Review incomplete — findings unavailable.',
+                zh: '审查未完成——发现不可用。',
               }
-            : findingsFileUnreadable
+            : findingsUnverifiedAtCompose
               ? {
-                  en: 'Review incomplete — findings unavailable.',
-                  zh: '审查未完成——发现不可用。',
+                  en: 'Review incomplete — unverified findings disclosed.',
+                  zh: '审查未完成——未验证的发现已披露。',
                 }
-              : findingsUnverifiedAtCompose
-                ? {
-                    en: 'Review incomplete — unverified findings disclosed.',
-                    zh: '审查未完成——未验证的发现已披露。',
-                  }
-                : { en: 'Reviewed.', zh: '已审查。' },
+              : { en: 'Reviewed.', zh: '已审查。' }),
     );
   }
 
