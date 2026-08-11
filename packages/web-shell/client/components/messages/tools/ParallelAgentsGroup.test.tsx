@@ -1121,6 +1121,46 @@ describe('ParallelAgentsGroup activity rendering', () => {
     }
   });
 
+  it('shows a failed count in the collapsed summary', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'done', status: 'completed' }),
+      agent({ callId: 'failed', status: 'failed' }),
+    ]);
+
+    expect(container.textContent).toContain(
+      'Parallel agents·2/2 done·1 failed',
+    );
+    expect(container.textContent).not.toContain('Failed');
+  });
+
+  it('shows the failed count alongside live progress', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = renderExpandedGroup([
+        agent({
+          callId: 'done',
+          status: 'completed',
+          startTime: 1_000,
+          endTime: 5_000,
+        }),
+        agent({
+          callId: 'failed',
+          status: 'failed',
+          startTime: 2_000,
+          endTime: 6_000,
+        }),
+        agent({ callId: 'running', status: 'pending', startTime: 3_000 }),
+      ]);
+
+      expect(container.textContent).toContain(
+        'Parallel agents 7s·2/3 done·1 failed',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the header clock monotonic when the earliest agent finishes', () => {
     vi.useFakeTimers();
     vi.setSystemTime(150_000);

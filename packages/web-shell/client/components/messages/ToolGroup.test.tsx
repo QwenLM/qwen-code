@@ -537,12 +537,51 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
-  it('shows failed status in the collapsed chat summary', () => {
+  it('keeps the failed label out of the collapsed chat summary', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'Shell', status: 'failed' }),
     ]);
 
-    expect(container.querySelector('button')?.textContent).toContain('Failed');
+    const summary = container.querySelector('button');
+    expect(summary?.textContent).toContain('Shell');
+    expect(summary?.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon instead of the failed label on expanded tool rows', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'boom' } }],
+      }),
+      makeTool({ callId: 'call-2', toolName: 'Grep', status: 'completed' }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(errorIcon?.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon in the expanded single-tool card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'boom' } }],
+      }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+    expect(titleRow?.textContent).not.toContain('Failed');
   });
 
   it('renders ANSI shell output as styled spans instead of escape text', () => {
@@ -1114,7 +1153,9 @@ describe('tool row rendering', () => {
 
     act(() => header.click());
 
-    const cardTitle = container.querySelector('[class*="expandedCardTitle"]');
+    const cardTitle = container.querySelector(
+      '[class*="expandedCardTitleRow"] [class*="expandedCardTitle"]',
+    );
     expect(cardTitle?.textContent).toBe('Shell');
   });
 

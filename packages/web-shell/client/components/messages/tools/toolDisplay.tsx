@@ -17,8 +17,33 @@ export function StatusIcon({ status }: { status: string }) {
     case 'cancelled':
     case 'canceled':
       return (
-        <span className={`${styles.icon} ${styles.iconError}`}>
-          {t('tool.status.failed')}
+        <span
+          className={`${styles.icon} ${styles.iconError}`}
+          role="img"
+          aria-label={t('tool.status.failed')}
+          title={t('tool.status.failed')}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            aria-hidden="true"
+          >
+            <circle
+              cx="7"
+              cy="7"
+              r="5.5"
+              stroke="currentColor"
+              strokeWidth="1.25"
+            />
+            <path
+              d="M4.8 4.8l4.4 4.4M9.2 4.8l-4.4 4.4"
+              stroke="currentColor"
+              strokeWidth="1.25"
+              strokeLinecap="round"
+            />
+          </svg>
         </span>
       );
     case 'in_progress':

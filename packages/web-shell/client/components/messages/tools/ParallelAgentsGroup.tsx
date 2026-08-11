@@ -3,12 +3,7 @@ import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
-import {
-  formatElapsed,
-  formatLiveElapsed,
-  StatusIcon,
-  truncateText,
-} from './toolDisplay';
+import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
   getAgentType,
@@ -351,19 +346,15 @@ export function ParallelAgentsGroup({
   const doneCount = agents.filter(
     (a) => a.status === 'completed' || a.status === 'failed',
   ).length;
+  const failedCount = agents.filter(
+    (a) => getAgentDisplayStatus(a) === 'failed',
+  ).length;
   const total = agents.length;
 
   const showGroup = groupExpanded || !!approvalAgent;
   const renderGroup = showGroup || automaticCollapseAnimating;
   const automaticCollapseClosing =
     automaticCollapseAnimating && !hasApprovalAgent;
-  const summaryStatus = agents.some(
-    (a) => getAgentDisplayStatus(a) === 'failed',
-  )
-    ? 'failed'
-    : hasActive
-      ? 'in_progress'
-      : 'completed';
 
   return (
     <div className={styles.wrap} ref={wrapRef}>
@@ -390,15 +381,9 @@ export function ParallelAgentsGroup({
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        {summaryStatus === 'failed' ? (
-          <span className={styles.summaryStatus}>
-            <StatusIcon status={summaryStatus} />
-          </span>
-        ) : (
-          <span className={styles.summaryIcon} aria-hidden="true">
-            <ToolGroupIcon />
-          </span>
-        )}
+        <span className={styles.summaryIcon} aria-hidden="true">
+          <ToolGroupIcon />
+        </span>
         <span
           className={
             hasActive
@@ -410,6 +395,12 @@ export function ParallelAgentsGroup({
           {runningDuration && <> {runningDuration}</>}
           <span className={styles.summaryDot}>·</span>
           {t('parallelAgents.done', { done: doneCount, total })}
+          {failedCount > 0 && (
+            <>
+              <span className={styles.summaryDot}>·</span>
+              {t('parallelAgents.failed', { count: failedCount })}
+            </>
+          )}
         </span>
         <span
           className={showGroup ? styles.chevronDown : styles.chevronRight}

@@ -330,6 +330,13 @@
   padding: 8px 12px 8px;
 }
 
+.expandedCardTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .expandedCardTitle {
   flex-shrink: 0;
   color: var(--foreground);
