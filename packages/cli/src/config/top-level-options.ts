@@ -63,8 +63,7 @@ export const TOP_LEVEL_GLOBAL_OPTIONS = {
   },
   proxy: {
     type: 'string' as const,
-    description:
-      'Proxy for Qwen Code, like schema://user:password@host:port',
+    description: 'Proxy for Qwen Code, like schema://user:password@host:port',
   },
   insecure: {
     type: 'boolean' as const,
@@ -78,6 +77,27 @@ export const TOP_LEVEL_GLOBAL_OPTIONS = {
       'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
   },
 } as const satisfies Record<string, Options>;
+
+export const TOP_LEVEL_DEPRECATED_OPTIONS = {
+  telemetry:
+    'Use the "telemetry.enabled" setting in settings.json instead. This flag will be removed in a future version.',
+  'telemetry-target':
+    'Use the "telemetry.target" setting in settings.json instead. This flag will be removed in a future version.',
+  'telemetry-otlp-endpoint':
+    'Use the "telemetry.otlpEndpoint" setting in settings.json instead. This flag will be removed in a future version.',
+  'telemetry-otlp-protocol':
+    'Use the "telemetry.otlpProtocol" setting in settings.json instead. This flag will be removed in a future version.',
+  'telemetry-log-prompts':
+    'Use the "telemetry.logPrompts" setting in settings.json instead. This flag will be removed in a future version.',
+  'telemetry-outfile':
+    'Use the "telemetry.outfile" setting in settings.json instead. This flag will be removed in a future version.',
+  proxy:
+    'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
+  'sandbox-image':
+    'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
+  prompt:
+    'Use the positional prompt instead. This flag will be removed in a future version.',
+} as const satisfies Record<string, string>;
 
 /**
  * Options registered inside the `$0 [query..]` default command.
@@ -105,8 +125,7 @@ export const DEFAULT_COMMAND_OPTIONS = {
   'prompt-interactive': {
     alias: 'i',
     type: 'string' as const,
-    description:
-      'Execute the provided prompt and continue in interactive mode',
+    description: 'Execute the provided prompt and continue in interactive mode',
   },
   'system-prompt': {
     type: 'string' as const,
@@ -319,6 +338,13 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   'auth-type': {
     type: 'string' as const,
+    choices: [
+      'openai',
+      'anthropic',
+      'qwen-oauth',
+      'gemini',
+      'vertex-ai',
+    ] as const,
     description: 'Authentication type',
   },
 } as const satisfies Record<string, Options>;
@@ -327,9 +353,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
  * All non-hidden CLI options for top-level help display.
  * Flattened for the `qwen --help` fast-path.
  */
-export const TOP_LEVEL_HELP_OPTIONS: ReadonlyArray<
-  readonly [string, Options]
-> = Object.freeze([
-  ...Object.entries(TOP_LEVEL_GLOBAL_OPTIONS),
-  ...Object.entries(DEFAULT_COMMAND_OPTIONS),
-]) as ReadonlyArray<readonly [string, Options]>;
+export const TOP_LEVEL_HELP_OPTIONS: ReadonlyArray<readonly [string, Options]> =
+  Object.freeze([
+    ...Object.entries(TOP_LEVEL_GLOBAL_OPTIONS),
+    ...Object.entries(DEFAULT_COMMAND_OPTIONS),
+  ]) as ReadonlyArray<readonly [string, Options]>;

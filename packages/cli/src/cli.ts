@@ -14,7 +14,11 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv } from 'yargs';
-import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
+import type { Options } from 'yargs';
+import {
+  TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_HELP_OPTIONS,
+} from './config/top-level-options.js';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
@@ -57,49 +61,55 @@ export const MCP_COMMANDS = [
   ['reject [name]', 'Reject a pending MCP server'],
 ] as const;
 
-const VALUE_FLAGS = new Set([
-  '--model',
-  '-m',
-  '--fallback-model',
-  '--prompt',
-  '-p',
-  '--prompt-interactive',
-  '-i',
-  '--output-format',
-  '-o',
-  '--resume',
-  '-r',
-  '--extensions',
-  '-e',
-  '--include-directories',
-  '--add-dir',
-  '--approval-mode',
-  '--auth-type',
-  '--proxy',
-  '--system-prompt',
-  '--sandbox-image',
-  '--channel',
-  '--allowed-mcp-server-names',
-  '--mcp-config',
-  '--allowed-tools',
-  '--openai-logging-dir',
-  '--openai-api-key',
-  '--openai-base-url',
-  '--input-format',
-  '--json-fd',
-  '--json-file',
-  '--json-schema',
-  '--input-file',
-  '--session-id',
-  '--worktree',
-  '--max-session-turns',
-  '--max-wall-time',
-  '--max-tool-calls',
-  '--max-subagent-depth',
-  '--core-tools',
-  '--exclude-tools',
-  '--disabled-slash-commands',
-]);
+function flagName(name: string): string {
+  return name.length === 1 ? `-${name}` : `--${name}`;
+}
+
+function optionAliases(config: Options): string[] {
+  const alias = config.alias;
+  if (!alias) {
+    return [];
+  }
+  return typeof alias === 'string' ? [alias] : [...alias];
+}
+
+function optionFlagNames(option: string, config: Options): string[] {
+  return [flagName(option), ...optionAliases(config).map(flagName)];
+}
+
+const VALUE_FLAGS = new Set(
+  TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
+    config.type === 'string' ||
+    config.type === 'number' ||
+    config.type === 'array'
+      ? optionFlagNames(option, config)
+      : [],
+  ),
+);
+
+const ARRAY_VALUE_FLAGS = new Set(
+  TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
+    config.type === 'array' ? optionFlagNames(option, config) : [],
+  ),
+);
+
+function isValueToken(arg: string | undefined): arg is string {
+  return arg !== undefined && arg !== '--' && !arg.startsWith('-');
+}
+
+function skipOptionValues(argv: readonly string[], index: number): number {
+  if (!VALUE_FLAGS.has(argv[index]!)) {
+    return index;
+  }
+  if (!ARRAY_VALUE_FLAGS.has(argv[index]!)) {
+    return isValueToken(argv[index + 1]) ? index + 1 : index;
+  }
+  let next = index + 1;
+  while (isValueToken(argv[next])) {
+    next++;
+  }
+  return next - 1;
+}
 
 function writeStdoutLine(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
@@ -115,10 +125,7 @@ function hasFlag(
     if (arg === '--') {
       return false;
     }
-    if (VALUE_FLAGS.has(arg)) {
-      i++;
-      continue;
-    }
+    i = skipOptionValues(argv, i);
     if (arg === long || arg === short) {
       return true;
     }
@@ -143,6 +150,11 @@ async function buildTopLevelHelpParser() {
   for (const [option, config] of TOP_LEVEL_HELP_OPTIONS) {
     parser.option(option, config);
   }
+  for (const [option, message] of Object.entries(
+    TOP_LEVEL_DEPRECATED_OPTIONS,
+  )) {
+    parser.deprecateOption(option, message);
+  }
 
   for (const [command, description] of TOP_LEVEL_COMMANDS) {
     parser.command(command, description);
@@ -157,10 +169,7 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
     if (arg === '--') {
       return undefined;
     }
-    if (VALUE_FLAGS.has(arg)) {
-      i++;
-      continue;
-    }
+    i = skipOptionValues(argv, i);
     if (!arg.startsWith('-')) {
       return arg;
     }

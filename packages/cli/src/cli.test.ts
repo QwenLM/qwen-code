@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
+import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
@@ -132,7 +133,29 @@ describe('resolveBootstrapRoute', () => {
   it('does not treat values for global flags as positional commands or bootstrap flags', () => {
     expect(resolveBootstrapRoute(['--model', 'gpt-4', '--help'])).toBe('help');
     expect(resolveBootstrapRoute(['-p', 'hello', '--help'])).toBe('help');
-    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['--approval-mode', 'auto', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['--auth-type', 'qwen-oauth', '--help'])).toBe(
+      'help',
+    );
+    expect(
+      resolveBootstrapRoute(['--append-system-prompt', 'be brief', '--help']),
+    ).toBe('help');
+    expect(resolveBootstrapRoute(['--worktree', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
+  });
+
+  it('matches yargs value scanning for sentinels and array options', () => {
+    expect(resolveBootstrapRoute(['--worktree', '--', '--help'])).toBe(
+      'default',
+    );
+    expect(
+      resolveBootstrapRoute(['--extensions', 'ext1', 'ext2', '--help']),
+    ).toBe('help');
+    expect(
+      resolveBootstrapRoute(['--include-directories', 'one', 'two', '--help']),
+    ).toBe('help');
   });
 
   it('does not treat flags after -- as bootstrap flags', () => {
@@ -246,10 +269,13 @@ describe('runCliEntry', () => {
     expect(helpText).toContain('-s, --sandbox');
     expect(helpText).toContain('-o, --output-format');
     expect(helpText).toContain('-r, --resume');
-    // Verify flags that were historically missing from the bootstrap help
-    // (issue #8897).
-    expect(helpText).toContain('--approval-mode');
-    expect(helpText).toContain('--auth-type');
+    for (const [name] of TOP_LEVEL_HELP_OPTIONS) {
+      expect(helpText).toContain(`--${name}`);
+    }
+    expect(helpText).toContain(
+      '"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+    );
+    expect(helpText).toContain('deprecated');
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();

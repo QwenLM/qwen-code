@@ -65,6 +65,7 @@ import { resolvePath } from '../utils/resolvePath.js';
 import {
   TOP_LEVEL_GLOBAL_OPTIONS,
   DEFAULT_COMMAND_OPTIONS,
+  TOP_LEVEL_DEPRECATED_OPTIONS,
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
@@ -580,38 +581,10 @@ export async function parseArguments(): Promise<CliArgs> {
       TOP_LEVEL_GLOBAL_OPTIONS['telemetry-log-prompts'],
     )
     .option('telemetry-outfile', TOP_LEVEL_GLOBAL_OPTIONS['telemetry-outfile'])
-    .deprecateOption(
-      'telemetry',
-      'Use the "telemetry.enabled" setting in settings.json instead. This flag will be removed in a future version.',
-    )
-    .deprecateOption(
-      'telemetry-target',
-      'Use the "telemetry.target" setting in settings.json instead. This flag will be removed in a future version.',
-    )
-    .deprecateOption(
-      'telemetry-otlp-endpoint',
-      'Use the "telemetry.otlpEndpoint" setting in settings.json instead. This flag will be removed in a future version.',
-    )
-    .deprecateOption(
-      'telemetry-otlp-protocol',
-      'Use the "telemetry.otlpProtocol" setting in settings.json instead. This flag will be removed in a future version.',
-    )
-    .deprecateOption(
-      'telemetry-log-prompts',
-      'Use the "telemetry.logPrompts" setting in settings.json instead. This flag will be removed in a future version.',
-    )
-    .deprecateOption(
-      'telemetry-outfile',
-      'Use the "telemetry.outfile" setting in settings.json instead. This flag will be removed in a future version.',
-    )
     .option('debug', TOP_LEVEL_GLOBAL_OPTIONS.debug)
     .option('bare', TOP_LEVEL_GLOBAL_OPTIONS.bare)
     .option('safe-mode', TOP_LEVEL_GLOBAL_OPTIONS['safe-mode'])
     .option('proxy', TOP_LEVEL_GLOBAL_OPTIONS.proxy)
-    .deprecateOption(
-      'proxy',
-      'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
-    )
     .option('insecure', TOP_LEVEL_GLOBAL_OPTIONS.insecure)
     .option('chat-recording', TOP_LEVEL_GLOBAL_OPTIONS['chat-recording'])
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
@@ -656,14 +629,8 @@ export async function parseArguments(): Promise<CliArgs> {
             'Deprecated: Skills are now enabled by default. This flag is ignored.',
           hidden: true,
         })
-        .option(
-          'experimental-lsp',
-          DEFAULT_COMMAND_OPTIONS['experimental-lsp'],
-        )
-        .option('channel', {
-          ...DEFAULT_COMMAND_OPTIONS.channel,
-          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'] as const,
-        })
+        .option('experimental-lsp', DEFAULT_COMMAND_OPTIONS['experimental-lsp'])
+        .option('channel', DEFAULT_COMMAND_OPTIONS.channel)
         .option('allowed-mcp-server-names', {
           ...DEFAULT_COMMAND_OPTIONS['allowed-mcp-server-names'],
           string: true,
@@ -753,24 +720,7 @@ export async function parseArguments(): Promise<CliArgs> {
           coerce: (names: string[]) =>
             names.flatMap((n) => n.split(',').map((t) => t.trim())),
         })
-        .option('auth-type', {
-          ...DEFAULT_COMMAND_OPTIONS['auth-type'],
-          choices: [
-            AuthType.USE_OPENAI,
-            AuthType.USE_ANTHROPIC,
-            AuthType.QWEN_OAUTH,
-            AuthType.USE_GEMINI,
-            AuthType.USE_VERTEX_AI,
-          ],
-        })
-        .deprecateOption(
-          'sandbox-image',
-          'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'prompt',
-          'Use the positional prompt instead. This flag will be removed in a future version.',
-        )
+        .option('auth-type', DEFAULT_COMMAND_OPTIONS['auth-type'])
         // Ensure validation flows through .fail() for clean UX
         .fail((msg: string, err: Error | undefined, yargs: Argv) => {
           writeStderrLine(msg || err?.message || 'Unknown error');
@@ -898,6 +848,12 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(sessionsCommand)
     // Register update command
     .command(updateCommand);
+
+  for (const [option, message] of Object.entries(
+    TOP_LEVEL_DEPRECATED_OPTIONS,
+  )) {
+    yargsInstance.deprecateOption(option, message);
+  }
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
