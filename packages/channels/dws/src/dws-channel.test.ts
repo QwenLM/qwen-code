@@ -171,6 +171,7 @@ class FakeDwsClient implements DwsClientLike {
 class TestableDwsChannel extends DwsChannel {
   inbound: Envelope[] = [];
   inboundError?: Error;
+  inboundHandler?: (envelope: Envelope) => Promise<void>;
   responseMessageId?: string;
   responseSenderId?: string;
   responseThreadId?: string;
@@ -179,6 +180,7 @@ class TestableDwsChannel extends DwsChannel {
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.inboundError) throw this.inboundError;
+    if (this.inboundHandler) return this.inboundHandler(envelope);
     this.inbound.push(envelope);
   }
 
@@ -507,6 +509,48 @@ describe('DwsChannel', () => {
     expect(channel.inbound.map((item) => item.text)).toEqual(['please retry']);
   });
 
+  it('lets concurrent duplicates retry once after the first dispatch fails', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ imGroupIds: ['cid-1'] }),
+    );
+    const duplicate = message(
+      'user_im_message_receive_at',
+      'message-1',
+      'please retry',
+    );
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let attempts = 0;
+    channel.inboundHandler = async (envelope) => {
+      attempts += 1;
+      if (attempts === 1) {
+        await firstGate;
+        throw new Error('agent unavailable');
+      }
+      channel.inbound.push(envelope);
+    };
+
+    const first = client.emit(0, duplicate);
+    await vi.waitFor(() => expect(attempts).toBe(1));
+    const retry = {
+      ...duplicate,
+      type: 'user_im_message_receive_group',
+      content: '/qwen please retry',
+    } as const;
+    const second = client.emit(1, retry);
+    const third = client.emit(1, retry);
+    releaseFirst();
+
+    await expect(first).rejects.toThrow('agent unavailable');
+    await expect(second).resolves.toBeUndefined();
+    await expect(third).resolves.toBeUndefined();
+    expect(channel.inbound.map((item) => item.text)).toEqual(['please retry']);
+  });
+
   it('does not automatically rerun an event after inbound dispatch fails', async () => {
     vi.useFakeTimers();
     try {
@@ -714,6 +758,70 @@ describe('DwsChannel', () => {
 
     expect(client.listWikiDocuments).toHaveBeenCalledOnce();
     expect(client.listUnresolvedComments).toHaveBeenCalledTimes(2);
+  });
+
+  it('bootstraps a wiki document that disappears and later returns', async () => {
+    const client = new FakeDwsClient();
+    client.comments.set('doc-1', [
+      comment('existing', 'already handled', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+    const channel = await readyChannel(
+      client,
+      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+    );
+
+    await channel.poll();
+    client.wikiDocuments.set('wiki-1', []);
+    await channel.poll();
+    await channel.poll();
+    client.wikiDocuments.set('wiki-1', ['doc-1']);
+    await channel.poll();
+
+    expect(channel.inbound).toHaveLength(0);
+  });
+
+  it('keeps remaining wiki documents live while another document is absent', async () => {
+    const client = new FakeDwsClient();
+    client.wikiDocuments.set('wiki-1', ['doc-1', 'doc-2']);
+    client.comments.set('doc-1', [
+      comment('existing-1', 'already handled one', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+    client.comments.set('doc-2', [
+      comment('existing-2', 'already handled two', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+    const channel = await readyChannel(
+      client,
+      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+    );
+    await channel.poll();
+
+    client.wikiDocuments.set('wiki-1', ['doc-2']);
+    client.comments.get('doc-2')?.push(
+      comment('new-2', 'new work two', {
+        mentionedUserIds: ['user-self'],
+      }),
+    );
+    await channel.poll();
+    await channel.poll();
+
+    client.wikiDocuments.set('wiki-1', ['doc-1', 'doc-2']);
+    client.comments.get('doc-1')?.push(
+      comment('new-1', 'new work one', {
+        mentionedUserIds: ['user-self'],
+      }),
+    );
+    await channel.poll();
+
+    expect(channel.inbound.map((item) => item.text)).toEqual([
+      'new work two',
+      'new work one',
+    ]);
   });
 
   it('scans large knowledge bases with a bounded round-robin budget', async () => {

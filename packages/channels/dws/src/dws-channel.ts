@@ -188,6 +188,10 @@ function documentFingerprint(comment: DwsDocumentComment): string {
   return hash.digest('hex').slice(0, 32);
 }
 
+function documentHistoryKey(documentId: string, fingerprint: string): string {
+  return `${documentId}\0${fingerprint}`;
+}
+
 function messageKey(message: DwsImMessage): string {
   return `${message.conversationId}\0${message.messageId}`;
 }
@@ -771,8 +775,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   ): Promise<void> {
     if (!this.connected) return;
     const key = messageKey(message);
-    const existing = this.processingMessages.get(key);
-    if (existing) await existing;
+    while (true) {
+      const existing = this.processingMessages.get(key);
+      if (!existing) break;
+      await existing.catch(() => undefined);
+    }
     if (this.cursor.processedMessages.includes(key)) return;
     const task = this.processImMessage(source, message, key);
     this.processingMessages.set(key, task);
@@ -867,7 +874,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (signal.aborted || !this.connected) return;
       const fingerprint = documentFingerprint(item.comment);
       currentFingerprints.push(fingerprint);
-      if (known.has(fingerprint) || legacy.has(fingerprint)) {
+      if (
+        known.has(fingerprint) ||
+        legacy.has(fingerprint) ||
+        legacy.has(documentHistoryKey(documentId, fingerprint))
+      ) {
         continue;
       }
       const request = documentRequest(
@@ -995,6 +1006,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         this.initializedDocumentSet.delete(documentId);
       }
     }
+    const removedFingerprints = this.cursor.documentStates.flatMap((state) =>
+      configuredDocuments.has(state.documentId)
+        ? []
+        : state.fingerprints.map((fingerprint) =>
+            documentHistoryKey(state.documentId, fingerprint),
+          ),
+    );
+    this.cursor.processedDocumentFingerprints = [
+      ...this.cursor.processedDocumentFingerprints,
+      ...removedFingerprints,
+    ].slice(-MAX_PROCESSED_ITEMS);
     this.cursor.documentStates = this.cursor.documentStates.filter((state) =>
       configuredDocuments.has(state.documentId),
     );
