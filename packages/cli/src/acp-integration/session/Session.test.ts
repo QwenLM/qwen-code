@@ -8385,6 +8385,49 @@ describe('Session', () => {
           restoreGuardMode();
         }
       });
+
+      it('returns cancelled when cancellation races the repeated-failure stop', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          let enterRewriterWait!: () => void;
+          const rewriterWaitStarted = new Promise<void>((resolve) => {
+            enterRewriterWait = resolve;
+          });
+          let releaseRewriterWait!: () => void;
+          const rewriterWaitGate = new Promise<void>((resolve) => {
+            releaseRewriterWait = resolve;
+          });
+          session.messageRewriter = {
+            interceptUpdate: vi.fn().mockResolvedValue(undefined),
+            waitForPendingRewrites: vi.fn(async () => {
+              enterRewriterWait();
+              await rewriterWaitGate;
+            }),
+          } as unknown as NonNullable<Session['messageRewriter']>;
+          queueMatchingFailureStreak();
+
+          const prompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'run the failing tool' }],
+          });
+          await rewriterWaitStarted;
+          await session.cancelPendingPrompt();
+          releaseRewriterWait();
+
+          await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+            { recordToQwenLogger: false },
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
     });
 
     describe('shell heartbeat forwarding', () => {
@@ -29504,6 +29547,108 @@ describe('Session', () => {
         messageBus.request.mock.calls.some(
           ([request]) => request.eventName === 'Stop',
         ),
+      ).toBe(false);
+    });
+
+    it('keeps a cron turn graceful when its Stop continuation trips loop protection', async () => {
+      let fireCron!: (job: {
+        prompt: string;
+        cronExpr: string;
+        missed?: boolean;
+      }) => void;
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              prompt: string;
+              cronExpr: string;
+              missed?: boolean;
+            }) => void,
+          ) => {
+            fireCron = callback;
+          },
+        ),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'cron-todo',
+                    name: core.ToolNames.TODO_WRITE,
+                    args: { todos: pendingTodos },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'cron-loop-1',
+                    name: 'read_file',
+                    args: { path: 'a' },
+                  },
+                  {
+                    id: 'cron-loop-2',
+                    name: 'read_file',
+                    args: { path: 'b' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      await runGuardPrompt();
+      // Explicit one-call cap: the cron turn's Stop-continuation batch of
+      // two calls trips the per-turn cap inside #runStopContinuation, the
+      // shared path cron and background-notification turns reach through
+      // #handleStopHookLoop.
+      mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+      mockConfig.isMaxToolCallsPerTurnExplicit = vi.fn().mockReturnValue(true);
+      fireCron({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+      });
+      expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+        }),
+        {},
+      );
+      expect(
+        vi.mocked(mockClient.sessionUpdate).mock.calls.some(([params]) => {
+          const update = params.update;
+          return (
+            update.sessionUpdate === 'agent_message_chunk' &&
+            update.content.type === 'text' &&
+            update.content.text.includes('[cron error]')
+          );
+        }),
       ).toBe(false);
     });
 

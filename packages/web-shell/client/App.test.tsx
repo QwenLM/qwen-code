@@ -10833,6 +10833,43 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.disabled).toBe(false);
   });
 
+  it('still reports a loop-detected turn error through turn_complete', async () => {
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    testState.prompt = 'repeat this';
+    await clickSubmit(container);
+    onSessionChange.mockClear();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onSessionChange });
+    });
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-loop',
+          errorKind: 'loop_detected',
+          text: 'internal fallback',
+        },
+      ];
+      testState.streamingState = 'idle';
+      rerender({ onSessionChange });
+    });
+
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'turn_complete',
+      sessionId: 'session-1',
+      error: expect.objectContaining({
+        message: 'Turn error (block turn-error-loop)',
+      }),
+    });
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+  });
+
   it('locks an image retry when its admission response is lost', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const retrySend = deferred<void>();

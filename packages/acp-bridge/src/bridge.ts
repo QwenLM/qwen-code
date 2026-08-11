@@ -1222,7 +1222,7 @@ function broadcastTurnError(
   const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
   const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
   const code =
-    structuredErrorKind === 'loop_detected'
+    structuredErrorKind !== undefined
       ? (extractJsonRpcErrorField(err, 'code') ?? extractErrorCode(err))
       : extractErrorCode(err);
   const loopType = extractJsonRpcErrorField(err, 'loopType');
@@ -4937,19 +4937,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           !entry.promptActive &&
           entry.events.lastEventId === lastEventId
         ) {
-          const replay = entry.events.snapshotReplay();
-          const turnError = entry.turnError
-            ? [
-                ...(replay?.compactedTurns ?? []),
-                ...(replay?.liveJournal ?? []),
-              ]
-                .reverse()
-                .find((event) => event.type === 'turn_error')
-            : undefined;
+          let compactedReplay = page.events;
+          if (entry.turnError) {
+            const replay = entry.events.snapshotReplay();
+            const journal = [
+              ...(replay?.compactedTurns ?? []),
+              ...(replay?.liveJournal ?? []),
+            ];
+            const turnError = [...journal]
+              .reverse()
+              .find((event) => event.type === 'turn_error');
+            // Append only while the in-memory terminal is still the newest
+            // journaled event: automatic turns (cron/background
+            // notification) run without clearing entry.turnError, and
+            // re-appending the stale error after their newer content would
+            // misplace it in the refreshed transcript.
+            if (turnError && journal.at(-1)?.id === turnError.id) {
+              compactedReplay = [...page.events, turnError];
+            }
+          }
           return {
-            compactedReplay: turnError
-              ? [...page.events, turnError]
-              : page.events,
+            compactedReplay,
             liveJournal: [],
             lastEventId,
             ...(page.partial === true ? { partial: true as const } : {}),
@@ -6884,6 +6892,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         writeStderrLine(
                           `sendPrompt: queued prompt removed before agent forward for session ${sessionId}`,
                         );
+                        return;
+                      }
+                      if (extractJsonRpcErrorField(err, 'errorKind')) {
+                        // Structured turn error (e.g. loop_detected): the
+                        // forward succeeded and the daemon rejected the turn
+                        // after running it. The formal turn_error terminal
+                        // already ends the turn visibly; a phantom
+                        // forward-failure line and prompt_cancelled broadcast
+                        // would misreport it.
+                        cancelPendingForSession(sessionId);
                         return;
                       }
                       writeStderrLine(

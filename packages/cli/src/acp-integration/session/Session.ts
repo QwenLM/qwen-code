@@ -635,6 +635,15 @@ function createLoopDetectedTurnError(
   });
 }
 
+// Cancellation takes precedence when it races a loop-detected stop.
+function cancelledOrThrowLoopDetected(
+  signal: AbortSignal,
+  loopState: DaemonToolLoopState,
+): 'cancelled' {
+  if (signal.aborted) return 'cancelled';
+  throw createLoopDetectedTurnError(loopState);
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -3934,10 +3943,12 @@ export class Session implements SessionContext {
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
-                    if (pendingSend.signal.aborted) {
-                      return { stopReason: 'cancelled' };
-                    }
-                    throw createLoopDetectedTurnError(toolLoopState);
+                    return {
+                      stopReason: cancelledOrThrowLoopDetected(
+                        pendingSend.signal,
+                        toolLoopState,
+                      ),
+                    };
                   }
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
@@ -3945,10 +3956,12 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    if (pendingSend.signal.aborted) {
-                      return { stopReason: 'cancelled' };
-                    }
-                    throw createLoopDetectedTurnError(toolLoopState);
+                    return {
+                      stopReason: cancelledOrThrowLoopDetected(
+                        pendingSend.signal,
+                        toolLoopState,
+                      ),
+                    };
                   }
                 }
               }
@@ -3968,6 +3981,7 @@ export class Session implements SessionContext {
                 true,
                 fullTurnModelOverride,
                 channelDeliveryCapture,
+                true, // rejectOnLoopDetected
               );
             } finally {
               logConversationFinishedEvent(
@@ -4007,6 +4021,7 @@ export class Session implements SessionContext {
     allowExternalHooks = true,
     modelOverride?: string,
     channelDeliveryCapture?: ChannelDeliveryCapture,
+    rejectOnLoopDetected = false,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -4072,6 +4087,7 @@ export class Session implements SessionContext {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
               channelDeliveryCapture,
+              rejectOnLoopDetected,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -4171,6 +4187,7 @@ export class Session implements SessionContext {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
                 channelDeliveryCapture,
+                rejectOnLoopDetected,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -4296,6 +4313,7 @@ export class Session implements SessionContext {
           onFullTurnModel,
           getModelOverride: () => modelOverride,
           channelDeliveryCapture,
+          rejectOnLoopDetected,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -4321,6 +4339,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
       channelDeliveryCapture?: ChannelDeliveryCapture;
+      rejectOnLoopDetected?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -4879,16 +4898,18 @@ export class Session implements SessionContext {
         if (toolRun.loopDetected) {
           this.todoStopGuard.suspend();
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
-          if (pendingSend.signal.aborted) {
-            return {
-              kind: 'terminal',
-              stopReason: 'cancelled',
-              ...(supersededAutomaticContinuation
-                ? { supersededAutomaticContinuation: true }
-                : {}),
-            };
-          }
-          throw createLoopDetectedTurnError(toolLoopState);
+          return {
+            kind: 'terminal',
+            // Only the foreground chain rejects a loop-detected stop; cron
+            // and background-notification turns keep the graceful end-turn
+            // handling they had before loop stops became rejections.
+            stopReason: options.rejectOnLoopDetected
+              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
+              : getAbortAwareEndTurnStopReason(pendingSend.signal),
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
         }
         const nextAfterTools = await this.#buildNextMessageAfterToolRun(
           toolRun,
@@ -4898,18 +4919,6 @@ export class Session implements SessionContext {
           options.onFullTurnModel,
         );
         nextMessage = nextAfterTools.message;
-        if (nextAfterTools.stoppedByRepeatedToolFailure) {
-          if (pendingSend.signal.aborted) {
-            return {
-              kind: 'terminal',
-              stopReason: 'cancelled',
-              ...(supersededAutomaticContinuation
-                ? { supersededAutomaticContinuation: true }
-                : {}),
-            };
-          }
-          throw createLoopDetectedTurnError(toolLoopState);
-        }
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;

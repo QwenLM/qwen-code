@@ -53,6 +53,7 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
+import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -3708,6 +3709,7 @@ export function App({
     composerSourceVersionRef.current,
   );
   const retryableTurnErrorIdRef = useRef<string | null>(null);
+  const lastTurnErrorIdRef = useRef<string | null>(null);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
@@ -6048,18 +6050,21 @@ export function App({
   }, [streamingState, sessionActions, reportError, pushToast, t]);
 
   useEffect(() => {
+    let turnErrorId: string | null = null;
     let retryableTurnErrorId: string | null = null;
     for (let i = blocks.length - 1; i >= 0; i--) {
       const block = blocks[i];
       if (block?.kind === 'user') break;
       if (block?.kind === 'error' && block.source === 'turn_error') {
-        if (block.errorKind !== 'loop_detected') {
+        turnErrorId = block.id;
+        if (isRetryableTurnErrorKind(block.errorKind)) {
           retryableTurnErrorId = block.id;
         }
         break;
       }
       if (block?.kind !== 'debug') break;
     }
+    lastTurnErrorIdRef.current = turnErrorId;
     const canRetry =
       connected &&
       retryableTurnErrorId !== null &&
@@ -6076,7 +6081,7 @@ export function App({
     onStreamingStateChange?.(streamingState);
   }, [streamingState, onStreamingStateChange]);
 
-  // Reads retryableTurnErrorIdRef which is set by the blocks effect above.
+  // Reads lastTurnErrorIdRef which is set by the blocks effect above.
   // Declaration order matters: this effect must run after the blocks effect
   // so that within the same render, the ref is already updated before we read it.
   const prevStreamingForTurnCompleteRef = useRef(streamingState);
@@ -6094,8 +6099,8 @@ export function App({
       // a spurious turn_complete for the new session.
       if (!sessionId || sessionId !== streamingSessionIdRef.current) return;
       const turnError =
-        retryableTurnErrorIdRef.current != null
-          ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
+        lastTurnErrorIdRef.current != null
+          ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       dispatchSessionChangeRef.current?.({
         type: 'turn_complete',

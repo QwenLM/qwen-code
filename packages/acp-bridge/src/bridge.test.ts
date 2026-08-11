@@ -4100,7 +4100,17 @@ describe('createAcpSessionBridge', () => {
         return {
           v: 1,
           sessionId: params['sessionId'],
-          events: [],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-page' },
+              },
+            },
+          ],
           hasMore: false,
         };
       },
@@ -4128,17 +4138,20 @@ describe('createAcpSessionBridge', () => {
       historyPageSize: 100,
     });
 
-    expect(refreshed.compactedReplay).toContainEqual(
-      expect.objectContaining({
-        type: 'turn_error',
-        promptId: 'prompt-loop',
-        data: expect.objectContaining({
-          code: 'LOOP_DETECTED',
-          errorKind: 'loop_detected',
-          loopType: 'turn_tool_call_cap',
-        }),
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay).toHaveLength(2);
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+    });
+    expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+      type: 'turn_error',
+      promptId: 'prompt-loop',
+      data: expect.objectContaining({
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
       }),
-    );
+    });
 
     await bridge.shutdown();
   });

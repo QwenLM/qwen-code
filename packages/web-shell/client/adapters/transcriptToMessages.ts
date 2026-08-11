@@ -192,6 +192,14 @@ function isUnrecognizedDaemonDebug(
   );
 }
 
+// Resubmitting a prompt the daemon stopped for loop protection tends to
+// re-loop, so no retry affordance is offered for these turn errors.
+export function isRetryableTurnErrorKind(
+  errorKind: string | undefined,
+): boolean {
+  return errorKind !== 'loop_detected';
+}
+
 function getErrorDisplayText(
   block: DaemonStatusTranscriptBlock,
   labels?: TranscriptMessageLabels,
@@ -780,7 +788,8 @@ export function transcriptBlocksToDaemonMessages(
           content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
           retryable:
-            errorBlock.source === 'turn_error' && errorKind !== 'loop_detected',
+            errorBlock.source === 'turn_error' &&
+            isRetryableTurnErrorKind(errorKind),
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
           ...getErrorMessageData(errorBlock.data, errorKind),
