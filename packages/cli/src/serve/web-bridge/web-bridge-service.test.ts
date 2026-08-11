@@ -242,6 +242,61 @@ describe('WebBridgeService', () => {
     });
   });
 
+  it('removes an owned tab when it becomes borrowed', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 99 })
+      .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true })
+      .mockResolvedValueOnce({ success: true, closed: 0 });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'research',
+    });
+    await service.execute({
+      action: 'find_tab',
+      args: { url: 'https://example.test', active: true },
+      session: 'research',
+    });
+    await service.execute({
+      action: 'close_session',
+      args: {},
+      session: 'research',
+    });
+
+    expect(call).toHaveBeenLastCalledWith('close_session', {
+      _session: 'research',
+      _tabId: 99,
+      _tabIds: [],
+    });
+  });
+
+  it('does not close a borrowed tab', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'find_tab',
+      args: { url: 'https://example.test', active: true },
+      session: 'research',
+    });
+
+    await expect(
+      service.execute({
+        action: 'close_tab',
+        args: {},
+        session: 'research',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(call).toHaveBeenCalledOnce();
+  });
+
   it('keeps a borrowed tab selected after navigating it', async () => {
     const registry = new WebBridgeRegistry();
     const call = vi

@@ -137,6 +137,13 @@ export class WebBridgeService {
     const state = existing ?? {
       ownedTabIds: new Set<number>(),
     };
+    if (
+      command.action === 'close_tab' &&
+      state.currentTabId !== undefined &&
+      state.currentTabId === state.borrowedTabId
+    ) {
+      throw new WebBridgeRequestError('Cannot close a borrowed tab', 409);
+    }
     const injectedArgs = this.injectSessionArgs(command, state);
     let result: unknown;
     try {
@@ -212,6 +219,7 @@ export class WebBridgeService {
       state.currentTabId = tabId;
       if (data['borrowed'] === true) {
         state.borrowedTabId = tabId;
+        state.ownedTabIds.delete(tabId);
       } else {
         state.borrowedTabId = undefined;
         state.ownedTabIds.add(tabId);

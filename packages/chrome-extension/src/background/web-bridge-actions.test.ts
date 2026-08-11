@@ -140,6 +140,25 @@ describe('WebBridge actions', () => {
     expect(chrome.tabs.remove).toHaveBeenCalledWith(17);
   });
 
+  it('rejects a new tab that completes on Chrome error page', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 17,
+      url: 'chrome-error://chromewebdata/',
+      status: 'complete',
+      groupId: -1,
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('navigate', {
+        url: 'https://missing.example.test',
+        newTab: true,
+        _session: 'research',
+      }),
+    ).rejects.toThrow('page failed to load');
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(17);
+  });
+
   it('returns the final URL after navigation redirects', async () => {
     (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       id: 17,
@@ -355,6 +374,38 @@ describe('WebBridge actions', () => {
     await expect(pending).resolves.toMatchObject({
       url: 'https://example.test',
     });
+  });
+
+  it('rejects a reload that commits a Chrome error page', async () => {
+    cdp.send.mockImplementation(async (method: string) =>
+      method === 'Page.getFrameTree'
+        ? {
+            frameTree: {
+              frame: { id: 'frame-1', loaderId: 'loader-old' },
+            },
+          }
+        : {},
+    );
+    const { executeWebBridgeAction } = await loadActions();
+    const pending = executeWebBridgeAction('navigate', {
+      url: 'https://example.test',
+      _tabId: 17,
+    });
+
+    await vi.waitFor(() => expect(cdp.listeners[0]).toBeDefined());
+    cdp.listeners[0]?.(
+      'Page.frameNavigated',
+      {
+        frame: {
+          id: 'frame-1',
+          loaderId: 'loader-new',
+          url: 'chrome-error://chromewebdata/',
+        },
+      },
+      17,
+    );
+
+    await expect(pending).rejects.toThrow('page failed to load');
   });
 
   it('recovers the existing session tab group after a worker restart', async () => {

@@ -129,6 +129,10 @@ async function navigate(args: Args): Promise<unknown> {
     const loaded = new Promise<void>((resolve) => {
       resolveLoaded = resolve;
     });
+    let rejectNavigation!: (error: Error) => void;
+    const navigationFailure = new Promise<never>((_resolve, reject) => {
+      rejectNavigation = reject;
+    });
     let reloadFrom: { frameId: string; loaderId: string } | undefined;
     let directNavigationStarted = false;
     let directNavigationFrameId: string | undefined;
@@ -160,6 +164,10 @@ async function navigate(args: Args): Promise<unknown> {
       const frameId = string(frame['id']);
       const loaderId = string(frame['loaderId']);
       if (frame['parentId'] !== undefined || loaderId === undefined) return;
+      if (string(frame['url'])?.startsWith('chrome-error://')) {
+        rejectNavigation(new Error('navigate: page failed to load'));
+        return;
+      }
       if (
         reloadFrom !== undefined &&
         nextReloadLoader === undefined &&
@@ -210,12 +218,18 @@ async function navigate(args: Args): Promise<unknown> {
         });
         target = await Promise.race([
           nextReloadLoaderPromise,
+          navigationFailure,
           pageLoadTimeout(),
         ]);
       } else {
         refsByTab.delete(currentTabId);
         directNavigationStarted = true;
-        const result = record(await send('Page.navigate', { url }));
+        const result = record(
+          await Promise.race([
+            send('Page.navigate', { url }),
+            navigationFailure,
+          ]),
+        );
         const errorText = string(result['errorText']);
         if (errorText) throw new Error(`navigate: ${errorText}`);
         frameId = string(result['frameId']);
@@ -232,7 +246,7 @@ async function navigate(args: Args): Promise<unknown> {
       }
       expectedLifecycle = JSON.stringify([target.frameId, target.loaderId]);
       if (loadedLifecycles.has(expectedLifecycle)) resolveLoaded();
-      await Promise.race([loaded, pageLoadTimeout()]);
+      await Promise.race([loaded, navigationFailure, pageLoadTimeout()]);
       return frameId;
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
@@ -866,6 +880,9 @@ async function waitForLoad(
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId);
+    if (tab.status === 'complete' && tab.url?.startsWith('chrome-error://')) {
+      throw new Error('navigate: page failed to load');
+    }
     if (
       tab.status === 'complete' &&
       tab.url &&
