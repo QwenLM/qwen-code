@@ -11,7 +11,6 @@ import type {
   AgentViewRosterEntry,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
-  AgentViewWorkerFile,
 } from './protocol.js';
 
 export type AgentViewTaskState =
@@ -83,7 +82,6 @@ export interface AgentViewPresentationInput {
   rosterEntry?: AgentViewRosterEntry;
   launch?: AgentViewLaunchFile;
   activity?: AgentViewActivityFile;
-  worker?: AgentViewWorkerFile;
   now?: Date | string;
 }
 

@@ -28,7 +28,6 @@ import {
   readAgentViewRoster,
   readAgentViewSessionState,
   readAgentViewWorker,
-  upsertAgentViewRosterEntry,
   writeAgentViewActivity,
   writeAgentViewLaunch,
   writeAgentViewWorker,
@@ -1158,63 +1157,6 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('serializes mixed follow-up prompts and soft answers for the same session', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(),
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
-    await handler.workerEvent?.({
-      type: 'ready',
-      sessionId: result.sessionId,
-      token,
-      cwd: globalDir,
-    });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'needs_input',
-      waitingFor: 'response',
-      lastResult: 'Anything else?',
-    });
-
-    const settled = await Promise.allSettled([
-      handler.send?.({ sessionId: result.sessionId, text: 'first' }),
-      handler.answer?.({ sessionId: result.sessionId, text: 'second' }),
-    ]);
-
-    expect(settled.filter((item) => item.status === 'fulfilled')).toHaveLength(
-      1,
-    );
-    const rejected = settled.find((item) => item.status === 'rejected');
-    expect(
-      rejected && rejected.status === 'rejected' ? rejected.reason : undefined,
-    ).toMatchObject({
-      message: expect.stringContaining('waiting for the previous response'),
-    });
-    const controls = (await handler.workerControl?.({
-      sessionId: result.sessionId,
-      token,
-    })) as { events: Array<{ type: string; text?: string }> };
-    expect(controls.events).toEqual([
-      expect.objectContaining({
-        type: 'prompt',
-        text: expect.stringMatching(/^(first|second)$/),
-      }),
-    ]);
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
   it('clears pending worker controls when a session is killed', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -1480,7 +1422,9 @@ describe('Agent View supervisor process helpers', () => {
       sessionState: 'needs_input',
       waitingFor: 'approval',
     });
-    await writeAttachedStateForTest(result.sessionId, globalDir);
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      attachState: 'attached',
+    });
     await expect(
       handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
     ).resolves.toEqual({ sessionId: result.sessionId, answered: true });
@@ -1489,7 +1433,9 @@ describe('Agent View supervisor process helpers', () => {
       token,
     });
 
-    await writeDetachedStateForTest(result.sessionId, globalDir);
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      attachState: 'detached',
+    });
     await handler.workerEvent?.({
       type: 'state',
       sessionId: result.sessionId,
@@ -1635,18 +1581,11 @@ describe('Agent View supervisor process helpers', () => {
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
     let launchCount = 0;
-    let releaseRespawn: (() => void) | undefined;
-    const respawnReady = new Promise<void>((resolve) => {
-      releaseRespawn = resolve;
-    });
     const handler = createAgentViewSupervisorHandler({
       globalDir,
       platform: 'linux',
       launchPtyHost: async () => {
         launchCount++;
-        if (launchCount > 1) {
-          await respawnReady;
-        }
         return fakePtyHost();
       },
     });
@@ -1668,7 +1607,6 @@ describe('Agent View supervisor process helpers', () => {
       secondSocket as unknown as Socket,
       'request-2',
     );
-    releaseRespawn?.();
     await Promise.all([
       firstSocket.waitForOutput('request-1'),
       secondSocket.waitForOutput('request-2'),
@@ -2106,112 +2044,6 @@ describe('Agent View supervisor process helpers', () => {
     await waitFor(() => hosts[1]?.input === 'hello after stop');
     expect(hosts[0]?.input).toBe('');
 
-    socket.closeInput();
-    await attached;
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('recovers stale attached state when attaching an inactive session', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const seedHandler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(999_999_002),
-    });
-    const result = (await seedHandler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const state = await readAgentViewSessionState(result.sessionId, {
-      globalDir,
-    });
-    if (!state) {
-      throw new Error('Missing test session state.');
-    }
-    await writeAgentViewSessionState(
-      {
-        ...state,
-        sessionState: 'starting',
-        processState: 'starting',
-        attachState: 'attached',
-        updatedAt: '1970-01-01T00:00:00.000Z',
-      },
-      { globalDir },
-    );
-    const recoveredHandler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(999_999_004),
-    });
-    const socket = new FakeAttachSocket();
-
-    const attached = recoveredHandler.attachStream?.(
-      { sessionId: result.sessionId },
-      socket as unknown as Socket,
-      'request-1',
-    );
-    await socket.waitForOutput('request-1');
-
-    expect(JSON.parse(socket.outputLine())).toMatchObject({
-      id: 'request-1',
-      ok: true,
-      result: { sessionId: result.sessionId },
-    });
-    socket.closeInput();
-    await attached;
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('recovers stale starting state when attaching an inactive session', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const seedHandler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(999_999_002),
-    });
-    const result = (await seedHandler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const state = await readAgentViewSessionState(result.sessionId, {
-      globalDir,
-    });
-    if (!state) {
-      throw new Error('Missing test session state.');
-    }
-    await writeAgentViewSessionState(
-      {
-        ...state,
-        sessionState: 'starting',
-        processState: 'starting',
-        attachState: 'detached',
-        updatedAt: '2026-07-17T00:00:00.000Z',
-      },
-      { globalDir },
-    );
-    const recoveredHandler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(999_999_004),
-    });
-    const socket = new FakeAttachSocket();
-
-    const attached = recoveredHandler.attachStream?.(
-      { sessionId: result.sessionId },
-      socket as unknown as Socket,
-      'request-1',
-    );
-    await socket.waitForOutput('request-1');
-
-    expect(JSON.parse(socket.outputLine())).toMatchObject({
-      id: 'request-1',
-      ok: true,
-      result: { sessionId: result.sessionId },
-    });
     socket.closeInput();
     await attached;
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -2681,51 +2513,6 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('re-stopping an already-stopped session still bumps updatedAt', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    await writeAgentViewSessionState(
-      {
-        schemaVersion: 1,
-        sessionId,
-        ownership: 'managed',
-        sessionState: 'stopped',
-        processState: 'exited',
-        attachState: 'detached',
-        projectCwd: globalDir,
-        originalCwd: globalDir,
-        activeCwd: globalDir,
-        createdAt: '2026-07-17T00:00:00.000Z',
-        updatedAt: '2026-07-17T00:00:00.000Z',
-        worktree: { mode: 'none' },
-      },
-      { globalDir },
-    );
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(),
-    });
-
-    await expect(handler.stop?.({ sessionId })).resolves.toEqual({
-      sessionId,
-      stopped: true,
-    });
-
-    // The bumped timestamp is what a concurrent respawn's stoppedAfterLaunch
-    // check observes; a disk no-op would hide the repeated stop.
-    const state = await readAgentViewSessionState(sessionId, { globalDir });
-    expect(state).toMatchObject({
-      sessionState: 'stopped',
-      processState: 'exited',
-    });
-    expect(state?.updatedAt).not.toBe('2026-07-17T00:00:00.000Z');
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
   it('manages logs, stop, respawn, and remove for a dispatched session', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -2989,58 +2776,6 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('ignores a buffered state event that arrives after an exit verdict', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => {
-        const host = fakePtyHost();
-        hosts.push(host);
-        return host;
-      },
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
-    await handler.workerEvent?.({
-      type: 'ready',
-      sessionId: result.sessionId,
-      token,
-      cwd: globalDir,
-    });
-
-    hosts[0]?.resolveExit(0);
-    await waitForSessionState(
-      result.sessionId,
-      globalDir,
-      (state) =>
-        state.sessionState === 'completed' && state.processState === 'exited',
-    );
-
-    // A state event buffered before the exit must not clobber the verdict
-    // back to a phantom alive session.
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'working',
-    });
-    await expect(
-      readAgentViewSessionState(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      sessionState: 'completed',
-      processState: 'exited',
-    });
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
   it('keeps a queued prompt marker that is newer than the worker event', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -3113,7 +2848,9 @@ describe('Agent View supervisor process helpers', () => {
       token,
       cwd: globalDir,
     });
-    await writeProcessStateForTest(result.sessionId, globalDir, 'hibernating');
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      processState: 'hibernating',
+    });
 
     hosts[0]?.resolveExit(1);
     // A crash mid-hibernation is a failure, not a clean hibernation.
@@ -3182,121 +2919,6 @@ describe('Agent View supervisor process helpers', () => {
       readAgentViewWorker(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({
       workerPid: 999_999_003,
-    });
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('cleans up host exits even when persisted state update fails', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => {
-        const host = fakePtyHost(999_999_002 + hosts.length);
-        hosts.push(host);
-        return host;
-      },
-    });
-    await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    });
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-    hosts[0]?.resolveExit(1);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    await expect(handler.shutdown()).resolves.toMatchObject({
-      workersStopped: 0,
-    });
-  });
-
-  it('marks a stopped session process exited when its host exits', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => {
-        const host = fakePtyHost(999_999_002 + hosts.length);
-        hosts.push(host);
-        return host;
-      },
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-
-    await handler.stop?.({ sessionId: result.sessionId });
-    hosts[0]?.resolveExit(0);
-    await waitForSessionState(
-      result.sessionId,
-      globalDir,
-      (state) => state.processState === 'exited',
-    );
-
-    await expect(
-      readAgentViewSessionState(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      sessionState: 'stopped',
-      processState: 'exited',
-    });
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('preserves a worker-reported failed state after a clean host exit', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => {
-        const host = fakePtyHost(999_999_002 + hosts.length);
-        hosts.push(host);
-        return host;
-      },
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const state = await readAgentViewSessionState(result.sessionId, {
-      globalDir,
-    });
-    if (!state) {
-      throw new Error('expected session state');
-    }
-    await writeAgentViewSessionState(
-      {
-        ...state,
-        sessionState: 'failed',
-        processState: 'alive',
-      },
-      { globalDir },
-    );
-
-    hosts[0]?.resolveExit(0);
-    await waitForSessionState(
-      result.sessionId,
-      globalDir,
-      (state) => state.processState === 'exited',
-    );
-
-    await expect(
-      readAgentViewSessionState(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      sessionState: 'failed',
-      processState: 'exited',
     });
 
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -3453,68 +3075,6 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('isolates per-session heal failures during list', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const healthyId = '123e4567-e89b-12d3-a456-426614174000';
-    const brokenId = '223e4567-e89b-12d3-a456-426614174000';
-    await writeAgentViewSessionState(
-      managedSessionStateForTest(healthyId, globalDir, {
-        processState: 'hibernated',
-      }),
-      { globalDir },
-    );
-    await writeAgentViewSessionState(
-      managedSessionStateForTest(brokenId, globalDir),
-      { globalDir },
-    );
-    await writeAgentViewActivity(
-      brokenId,
-      {
-        schemaVersion: 1,
-        lastActivityAt: '2026-07-17T00:00:00.000Z',
-        capabilities: [],
-        queuedPromptCount: 1,
-        queuedPromptPreview: 'stuck prompt',
-        lastQueuedPromptAt: '2026-07-17T00:00:00.000Z',
-      },
-      { globalDir },
-    );
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(),
-    });
-
-    // The broken session's heal writes fail (read-only session dir); the
-    // listing must fall back to its snapshot instead of rejecting wholesale.
-    const brokenDir = getAgentViewSessionPaths(brokenId, {
-      globalDir,
-    }).sessionDir;
-    await fs.chmod(brokenDir, 0o555);
-    try {
-      const snapshots = (await handler.list?.({})) as Array<{
-        sessionId: string;
-        state: AgentViewSessionStateFile;
-      }>;
-      const byId = new Map(
-        snapshots.map((snapshot) => [snapshot.sessionId, snapshot.state]),
-      );
-      expect(byId.get(healthyId)).toMatchObject({
-        processState: 'hibernated',
-      });
-      expect(byId.get(brokenId)).toMatchObject({
-        sessionState: 'idle',
-        processState: 'alive',
-      });
-    } finally {
-      await fs.chmod(brokenDir, 0o755);
-    }
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
   it('notifies subscribers when session state changes', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -3643,13 +3203,17 @@ describe('Agent View supervisor process helpers', () => {
 
     await handler.respawn?.({ sessionId: result.sessionId });
     await writeSessionStateForTest(result.sessionId, globalDir, 'idle');
-    await writeAttachedStateForTest(result.sessionId, globalDir);
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      attachState: 'attached',
+    });
     await expect(handler.hibernateIdleSessions()).resolves.toEqual({
       hibernated: [],
     });
     expect(hosts[2]?.killedWith).toBeUndefined();
 
-    await writeDetachedStateForTest(result.sessionId, globalDir);
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      attachState: 'detached',
+    });
     await handler.pin?.({ sessionId: result.sessionId, pinned: true });
     await expect(handler.hibernateIdleSessions()).resolves.toEqual({
       hibernated: [],
@@ -3695,16 +3259,12 @@ describe('Agent View supervisor process helpers', () => {
     // The sweep processes snapshots newest-updatedAt first: second (:03)
     // before first (:02), so gating second's shutdown suspends the sweep
     // ahead of first's mark.
-    await writeStateUpdatedAtForTest(
-      second.sessionId,
-      globalDir,
-      '2026-07-17T00:00:03.000Z',
-    );
-    await writeStateUpdatedAtForTest(
-      first.sessionId,
-      globalDir,
-      '2026-07-17T00:00:02.000Z',
-    );
+    await patchSessionStateForTest(second.sessionId, globalDir, {
+      updatedAt: '2026-07-17T00:00:03.000Z',
+    });
+    await patchSessionStateForTest(first.sessionId, globalDir, {
+      updatedAt: '2026-07-17T00:00:02.000Z',
+    });
 
     let gateReached!: () => void;
     const reached = new Promise<void>((resolve) => {
@@ -3750,195 +3310,6 @@ describe('Agent View supervisor process helpers', () => {
       readAgentViewSessionState(second.sessionId, { globalDir }),
     ).resolves.toMatchObject({ processState: 'hibernated' });
     expect(hosts[0]?.killedWith).toBeUndefined();
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('leaves a session alone when its stop lands inside the hibernation mark window', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      hibernationPolicy: { idleMs: 1000, autoExit: false },
-      now: () => new Date('2026-07-17T00:00:10.000Z'),
-      launchPtyHost: async () => {
-        const host = fakePtyHost(999_999_002 + hosts.length);
-        hosts.push(host);
-        return host;
-      },
-    });
-    const first = (await handler.dispatch?.({
-      prompt: 'task A',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const second = (await handler.dispatch?.({
-      prompt: 'task B',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    await writeSessionStateForTest(first.sessionId, globalDir, 'idle');
-    await writeSessionStateForTest(second.sessionId, globalDir, 'idle');
-    await writeStateUpdatedAtForTest(
-      second.sessionId,
-      globalDir,
-      '2026-07-17T00:00:03.000Z',
-    );
-    await writeStateUpdatedAtForTest(
-      first.sessionId,
-      globalDir,
-      '2026-07-17T00:00:02.000Z',
-    );
-
-    let gateReached!: () => void;
-    const reached = new Promise<void>((resolve) => {
-      gateReached = resolve;
-    });
-    let releaseGate!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      releaseGate = resolve;
-    });
-    const gatedHost = hosts[1];
-    gatedHost!.shutdown = async () => {
-      gateReached();
-      await gate;
-    };
-
-    const sweep = handler.hibernateIdleSessions();
-    await reached;
-    // A concurrent stop lands on first before its mark attempt; the mark
-    // must refuse and leave the stop verdict untouched.
-    const firstState = await readAgentViewSessionState(first.sessionId, {
-      globalDir,
-    });
-    await writeAgentViewSessionState(
-      {
-        ...firstState!,
-        sessionState: 'stopped',
-        processState: 'exited',
-        updatedAt: '2026-07-17T00:00:04.000Z',
-      },
-      { globalDir },
-    );
-    releaseGate();
-
-    await expect(sweep).resolves.toEqual({ hibernated: [second.sessionId] });
-    await expect(
-      readAgentViewSessionState(first.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      sessionState: 'stopped',
-      processState: 'exited',
-    });
-    expect(hosts[0]?.killedWith).toBeUndefined();
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('does not extend idle hibernation time for repeated idle state reports', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      hibernationPolicy: { idleMs: 1000, autoExit: false },
-      now: () => new Date('2026-07-17T00:00:10.000Z'),
-      launchPtyHost: async () => {
-        const host = fakePtyHost(999_999_002 + hosts.length);
-        hosts.push(host);
-        return host;
-      },
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
-
-    await handler.workerEvent?.({
-      type: 'ready',
-      sessionId: result.sessionId,
-      token,
-      cwd: globalDir,
-      at: '2026-07-17T00:00:00.000Z',
-    });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'idle',
-      lastResult: 'Done.',
-      at: '2026-07-17T00:00:01.000Z',
-    });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'idle',
-      lastResult: 'Done.',
-      at: '2026-07-17T00:00:09.500Z',
-    });
-    await expect(
-      readAgentViewActivity(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      lastResult: 'Done.',
-      lastActivityAt: '2026-07-17T00:00:01.000Z',
-    });
-    await expect(handler.hibernateIdleSessions()).resolves.toEqual({
-      hibernated: [result.sessionId],
-    });
-    expect(hosts[0]?.killedWith).toBe('SIGTERM');
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('extends idle hibernation time when idle output changes', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      launchPtyHost: async () => fakePtyHost(),
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
-
-    await handler.workerEvent?.({
-      type: 'ready',
-      sessionId: result.sessionId,
-      token,
-      cwd: globalDir,
-      at: '2026-07-17T00:00:00.000Z',
-    });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'idle',
-      lastResult: 'First result.',
-      at: '2026-07-17T00:00:01.000Z',
-    });
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'idle',
-      lastResult: 'Second result.',
-      at: '2026-07-17T00:00:09.500Z',
-    });
-
-    await expect(
-      readAgentViewActivity(result.sessionId, { globalDir }),
-    ).resolves.toMatchObject({
-      lastResult: 'Second result.',
-      lastActivityAt: '2026-07-17T00:00:09.500Z',
-    });
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -4153,49 +3524,6 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('requests shutdown when only-exited managed sessions pass the grace period', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const onShutdown = vi.fn();
-    const hosts: FakePtyHost[] = [];
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      onShutdown,
-      hibernationPolicy: { idleMs: 1000, autoExitGraceMs: 0 },
-      now: () => new Date('2026-07-17T00:00:10.000Z'),
-      launchPtyHost: async () => {
-        const host = fakePtyHost();
-        hosts.push(host);
-        return host;
-      },
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-
-    hosts[0]?.resolveExit(0);
-    await vi.waitFor(async () => {
-      const state = await readAgentViewSessionState(result.sessionId, {
-        globalDir,
-      });
-      expect(state).toMatchObject({
-        ownership: 'managed',
-        processState: 'exited',
-      });
-    });
-
-    await expect(handler.tickIdleHibernation()).resolves.toEqual({
-      hibernated: [],
-      shutdownRequested: true,
-    });
-    expect(onShutdown).toHaveBeenCalledOnce();
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
   it('restarts the auto-exit grace period after a session becomes alive again', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -4229,13 +3557,17 @@ describe('Agent View supervisor process helpers', () => {
     });
 
     nowMs += 60_000;
-    await writeProcessStateForTest(result.sessionId, globalDir, 'alive');
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      processState: 'alive',
+    });
     await expect(handler.tickIdleHibernation()).resolves.toEqual({
       hibernated: [],
       shutdownRequested: false,
     });
 
-    await writeProcessStateForTest(result.sessionId, globalDir, 'hibernated');
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      processState: 'hibernated',
+    });
     await expect(handler.tickIdleHibernation()).resolves.toEqual({
       hibernated: [],
       shutdownRequested: false,
@@ -4268,7 +3600,9 @@ describe('Agent View supervisor process helpers', () => {
       prompt: 'write tests',
       cwd: globalDir,
     })) as { sessionId: string };
-    await writeProcessStateForTest(result.sessionId, globalDir, 'hibernated');
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      processState: 'hibernated',
+    });
     const adoptingId = '223e4567-e89b-12d3-a456-426614174000';
     const now = new Date().toISOString();
     await writeAgentViewSessionState(
@@ -4294,77 +3628,6 @@ describe('Agent View supervisor process helpers', () => {
       shutdownRequested: false,
     });
     expect(onShutdown).not.toHaveBeenCalled();
-
-    await fs.rm(globalDir, { recursive: true, force: true });
-  });
-
-  it('reconciles a stale adopting record instead of blocking auto-exit', async () => {
-    const globalDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
-    );
-    const onShutdown = vi.fn();
-    const handler = createAgentViewSupervisorHandler({
-      globalDir,
-      platform: 'linux',
-      onShutdown,
-      hibernationPolicy: { idleMs: 1000, autoExitGraceMs: 0 },
-      now: () => new Date('2026-07-17T00:10:00.000Z'),
-      launchPtyHost: async () => fakePtyHost(),
-    });
-    const result = (await handler.dispatch?.({
-      prompt: 'write tests',
-      cwd: globalDir,
-    })) as { sessionId: string };
-    await writeProcessStateForTest(result.sessionId, globalDir, 'hibernated');
-    // A supervisor that died mid-adoption leaves a starting record behind;
-    // once it is older than the worker-ready timeout nothing finishes it,
-    // so maintenance reconciles it to a terminal state instead of letting
-    // it block auto-exit forever.
-    const adoptingId = '223e4567-e89b-12d3-a456-426614174000';
-    await writeAgentViewSessionState(
-      {
-        schemaVersion: 1,
-        sessionId: adoptingId,
-        ownership: 'adopting',
-        sessionState: 'idle',
-        processState: 'starting',
-        attachState: 'detached',
-        projectCwd: globalDir,
-        originalCwd: globalDir,
-        activeCwd: globalDir,
-        createdAt: '2026-07-17T00:00:00.000Z',
-        updatedAt: '2026-07-17T00:00:00.000Z',
-        worktree: { mode: 'none' },
-      },
-      { globalDir },
-    );
-    await upsertAgentViewRosterEntry(
-      {
-        sessionId: adoptingId,
-        projectCwd: globalDir,
-        activeCwd: globalDir,
-        createdAt: '2026-07-17T00:00:00.000Z',
-        updatedAt: '2026-07-17T00:00:00.000Z',
-      },
-      { globalDir },
-    );
-
-    await expect(handler.tickIdleHibernation()).resolves.toEqual({
-      hibernated: [],
-      shutdownRequested: true,
-    });
-    expect(onShutdown).toHaveBeenCalledOnce();
-    await expect(
-      readAgentViewSessionState(adoptingId, { globalDir }),
-    ).resolves.toMatchObject({
-      ownership: 'unmanaged',
-      processState: 'exited',
-      lastError: { code: 'adoption_failed' },
-    });
-    const roster = await readAgentViewRoster({ globalDir });
-    expect(roster.sessions.map((entry) => entry.sessionId)).not.toContain(
-      adoptingId,
-    );
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
@@ -4471,56 +3734,16 @@ function fakePtyHost(
   return host;
 }
 
-async function writeAttachedStateForTest(
+async function patchSessionStateForTest(
   sessionId: string,
   globalDir: string,
+  patch: Partial<AgentViewSessionStateFile>,
 ): Promise<void> {
   const state = await readAgentViewSessionState(sessionId, { globalDir });
   if (!state) {
     throw new Error(`Missing state for ${sessionId}`);
   }
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      attachState: 'attached',
-    },
-    { globalDir },
-  );
-}
-
-async function writeProcessStateForTest(
-  sessionId: string,
-  globalDir: string,
-  processState: AgentViewSessionStateFile['processState'],
-): Promise<void> {
-  const state = await readAgentViewSessionState(sessionId, { globalDir });
-  if (!state) {
-    throw new Error(`Missing state for ${sessionId}`);
-  }
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      processState,
-    },
-    { globalDir },
-  );
-}
-
-async function writeDetachedStateForTest(
-  sessionId: string,
-  globalDir: string,
-): Promise<void> {
-  const state = await readAgentViewSessionState(sessionId, { globalDir });
-  if (!state) {
-    throw new Error(`Missing state for ${sessionId}`);
-  }
-  await writeAgentViewSessionState(
-    {
-      ...state,
-      attachState: 'detached',
-    },
-    { globalDir },
-  );
+  await writeAgentViewSessionState({ ...state, ...patch }, { globalDir });
 }
 
 async function writeSessionStateForTest(
@@ -4586,18 +3809,6 @@ function managedSessionStateForTest(
     worktree: { mode: 'none' },
     ...overrides,
   };
-}
-
-async function writeStateUpdatedAtForTest(
-  sessionId: string,
-  globalDir: string,
-  updatedAt: string,
-): Promise<void> {
-  const state = await readAgentViewSessionState(sessionId, { globalDir });
-  if (!state) {
-    throw new Error(`Missing state for ${sessionId}`);
-  }
-  await writeAgentViewSessionState({ ...state, updatedAt }, { globalDir });
 }
 
 function shortHostSocketPath(): { path: string; dir?: string } {

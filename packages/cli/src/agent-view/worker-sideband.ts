@@ -106,6 +106,10 @@ export async function sendAgentViewWorkerEvent(
   if (!sideband) return undefined;
   return callAgentViewSupervisor(sideband.sidebandEndpoint, 'workerEvent', {
     ...event,
+    // Stamp at emit time so the dequeue ordering guard (event.at vs
+    // lastQueuedPromptAt) protects in production — worker events are
+    // otherwise built without an `at` field.
+    at: new Date().toISOString(),
     sessionId: sideband.sessionId,
     token: sideband.token,
   });

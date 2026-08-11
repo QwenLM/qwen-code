@@ -115,6 +115,7 @@ describe('worker sideband env', () => {
         type: 'ready',
         cwd: '/repo',
         capabilities: ['ready'],
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -136,6 +137,7 @@ describe('worker sideband env', () => {
       'workerEvent',
       {
         type: 'detach',
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -238,6 +240,7 @@ describe('worker sideband env', () => {
         cwd: '/repo',
         summary: 'Waiting for Bash',
         waitingFor: 'Bash',
+        at: expect.any(String),
         sessionId: 'session-1',
         token: 'token-1',
       },
@@ -345,6 +348,7 @@ describe('worker sideband env', () => {
         'workerEvent',
         {
           type: 'heartbeat',
+          at: expect.any(String),
           sessionId: 'session-1',
           token: 'token-1',
         },

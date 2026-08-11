@@ -13,6 +13,7 @@ import {
   getAgentViewStorePaths,
   listAgentViewSessionSnapshots,
   listAgentViewSessionStates,
+  patchAgentViewSessionState,
   readAgentViewRoster,
   readAgentViewSessionState,
   removeAgentViewRosterEntry,
@@ -261,6 +262,42 @@ describe('agent view supervisor store', () => {
         getAgentViewSessionPaths('session-1', { globalDir: tempDir }).tmpDir,
       ),
     ).toBe(true);
+  });
+
+  it('patches only the specified session state fields', async () => {
+    await writeAgentViewSessionState(
+      sessionState('session-1', {
+        customState: 'keep',
+        sessionState: 'idle',
+      }),
+      { globalDir: tempDir },
+    );
+
+    await patchAgentViewSessionState(
+      'session-1',
+      { sessionState: 'completed', updatedAt: '2026-07-16T00:00:01.000Z' },
+      { globalDir: tempDir },
+    );
+
+    await expect(
+      readAgentViewSessionState('session-1', { globalDir: tempDir }),
+    ).resolves.toMatchObject({
+      sessionId: 'session-1',
+      sessionState: 'completed',
+      processState: 'alive',
+      customState: 'keep',
+      updatedAt: '2026-07-16T00:00:01.000Z',
+    });
+  });
+
+  it('does nothing when patching a session that has no state file', async () => {
+    await expect(
+      patchAgentViewSessionState(
+        'missing',
+        { sessionState: 'completed' },
+        { globalDir: tempDir },
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it('lists valid session states sorted by most recent update', async () => {
