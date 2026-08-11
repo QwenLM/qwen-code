@@ -1120,6 +1120,65 @@ describe('<MainContent />', () => {
       expect(secondRenderItem).toBe(firstRenderItem);
     });
 
+    it('releases static item height caps when show-more mode is enabled', () => {
+      scrollableListPropsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      const stableHistory: UIState['history'] = [
+        { id: 1, type: 'gemini_content', text: 'long output' },
+      ];
+      const stablePending: UIState['pendingHistoryItems'] = [];
+      const stableSlashCommands: UIState['slashCommands'] = [];
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          constrainHeight: true,
+          history: stableHistory,
+          pendingHistoryItems: stablePending,
+          slashCommands: stableSlashCommands,
+        }),
+      );
+
+      const firstRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({
+          availableTerminalHeight: 100,
+          availableTerminalHeightGemini: 65536,
+        }),
+      );
+
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                constrainHeight: false,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const secondRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(secondRenderItem).not.toBe(firstRenderItem);
+      expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({
+          availableTerminalHeight: undefined,
+          availableTerminalHeightGemini: undefined,
+        }),
+      );
+    });
+
     it('re-renders pending items when virtual viewport height constraints change', () => {
       scrollableListPropsSpy.mockClear();
       historyItemDisplayPropsSpy.mockClear();

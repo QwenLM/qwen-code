@@ -6,8 +6,6 @@ import type {
 } from './TurnOutputs';
 import { isSamePath, normalizePath } from './artifactUtils';
 
-const MAX_LINE_STAT_COMPARISONS = 1_000_000;
-
 function getToolCallIds(tool: ACPToolCall): string[] {
   const ids = new Set<string>();
   if (tool.callId) ids.add(tool.callId);
@@ -461,13 +459,25 @@ function getFinalFullContentDiff(diffs: TurnOutputFileChange['diffs']) {
   return finalDiff?.fullContent ? finalDiff : undefined;
 }
 
+// Counts changed lines as a multiset difference rather than an exact LCS
+// alignment: O(n+m) is fast enough for any file size (a 1000-line LCS is
+// already ~1M comparisons), and for display stats it only miscounts when
+// identical lines move to a different position.
 function countChangedLines(oldText: string, newText: string) {
   const oldLines = splitDiffLines(oldText);
   const newLines = splitDiffLines(newText);
-  if (oldLines.length * newLines.length > MAX_LINE_STAT_COMPARISONS) {
-    return undefined;
+  const oldLineCounts = new Map<string, number>();
+  for (const line of oldLines) {
+    oldLineCounts.set(line, (oldLineCounts.get(line) ?? 0) + 1);
   }
-  const commonLines = countLongestCommonSubsequence(oldLines, newLines);
+  let commonLines = 0;
+  for (const line of newLines) {
+    const count = oldLineCounts.get(line) ?? 0;
+    if (count > 0) {
+      commonLines++;
+      oldLineCounts.set(line, count - 1);
+    }
+  }
   return {
     additions: newLines.length - commonLines,
     deletions: oldLines.length - commonLines,
@@ -477,24 +487,6 @@ function countChangedLines(oldText: string, newText: string) {
 function splitDiffLines(text: string) {
   if (!text) return [];
   return text.replace(/\r?\n$/, '').split(/\r\n|\r|\n/);
-}
-
-function countLongestCommonSubsequence(left: string[], right: string[]) {
-  const previous = new Array(right.length + 1).fill(0);
-  const current = new Array(right.length + 1).fill(0);
-  for (const leftLine of left) {
-    for (let index = 0; index < right.length; index++) {
-      current[index + 1] =
-        leftLine === right[index]
-          ? previous[index] + 1
-          : Math.max(previous[index + 1], current[index]);
-    }
-    for (let index = 0; index < current.length; index++) {
-      previous[index] = current[index];
-    }
-    current.fill(0);
-  }
-  return previous[right.length] ?? 0;
 }
 
 function isSameWorkspacePath(
