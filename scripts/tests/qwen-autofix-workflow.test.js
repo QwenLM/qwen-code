@@ -11965,6 +11965,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.rejection).toContain('run npm run build before typecheck/tests');
+    // Like its sibling exits, this one names its verdict — an oncall must
+    // distinguish "the comparison itself failed" from "baseline is green"
+    // without re-running the A/B.
+    expect(r.rejection).toContain('signature comparison failed');
     expect(r.headAfter).toBe('feature');
   });
 
