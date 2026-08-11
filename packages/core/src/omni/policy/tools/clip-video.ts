@@ -120,6 +120,22 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
           `startSec (${formatSeconds(startSec)}) is at or beyond the end of the video (${formatSeconds(totalSeconds)})`,
         );
       }
+      // Detectable full-span no-op: the effective window covers the whole
+      // video, so "clipping" would only run a lossy re-encode and the
+      // disclosure would falsely claim content outside the span was
+      // discarded. This is a time-axis cut, NOT a degradation tool.
+      if (
+        totalSeconds !== undefined &&
+        startSec === 0 &&
+        durationSec !== undefined &&
+        durationSec >= totalSeconds
+      ) {
+        return mediaPolicyToolError(
+          `the requested span [0–${formatSeconds(durationSec)}] covers the ` +
+            `entire video (${formatSeconds(totalSeconds)}) — a no-op clip ` +
+            `that would only re-encode (and damage) the input`,
+        );
+      }
 
       const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
       // Input-side -ss/-t plus a full re-encode: frame-accurate cuts
@@ -225,10 +241,17 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
   ): string | null {
     const ioError = super.validateToolParamValues(params);
     if (ioError) return ioError;
-    // Both absent = a no-op invocation (full-length "clip"); reject at
-    // the parameter layer instead of burning a transcode on it.
+    // A no-op invocation (full-length "clip") must be rejected at the
+    // parameter layer instead of burning a full lossy re-encode on it:
+    // both absent, or an explicit startSec of 0 with no duration bound.
     if (params.startSec === undefined && params.durationSec === undefined) {
       return 'at least one of startSec / durationSec must be provided';
+    }
+    if (params.startSec === 0 && params.durationSec === undefined) {
+      return (
+        'startSec: 0 without durationSec selects the whole video — a no-op ' +
+        'clip that would only re-encode (and damage) the input'
+      );
     }
     return null;
   }

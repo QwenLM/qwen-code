@@ -229,6 +229,7 @@ describe('OmniClipVideoTool', () => {
 
   it.each([
     ['both startSec and durationSec absent', {}],
+    ['explicit startSec 0 without durationSec (no-op clip)', { startSec: 0 }],
     ['negative startSec', { startSec: -1 }],
     ['zero durationSec', { durationSec: 0 }],
     ['relative outputDir', { startSec: 10, outputDir: 'staging' }],
@@ -237,5 +238,14 @@ describe('OmniClipVideoTool', () => {
     expect(() =>
       tool.build({ inputPath, outputDir, ...overrides } as never),
     ).toThrow();
+  });
+
+  it('rejects a probed full-span request without transcoding', async () => {
+    // startSec 0 + a duration covering the whole video is a no-op clip:
+    // nothing outside the span exists to discard, only re-encode damage.
+    probe({ durationMs: 63_000 });
+    const { result } = await run({ startSec: 0, durationSec: 63 });
+    expect(result.error?.message).toMatch(/covers the entire video/);
+    expect(mocks.runFfmpeg).not.toHaveBeenCalled();
   });
 });
