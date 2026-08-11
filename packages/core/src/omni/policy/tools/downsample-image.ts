@@ -209,7 +209,7 @@ export class OmniDownsampleImageTool extends BaseMediaPolicyTool<DownsampleImage
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,

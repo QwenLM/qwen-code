@@ -608,4 +608,131 @@ describe('evaluateMediaPolicyToolCall', () => {
     });
     expect(fixed).toEqual({ outcome: 'pass', args });
   });
+
+  describe('resourceId input resolution (M §5.2)', () => {
+    const registryWith = (bindings: Record<string, string>) => ({
+      resolve: (id: string) =>
+        bindings[id] !== undefined
+          ? {
+              resourceId: id,
+              fileId: 'f1',
+              fileVersionId: 'v1',
+              rootFileId: 'f1',
+              fileRef: bindings[id],
+              mediaType: 'video' as const,
+            }
+          : undefined,
+    });
+    const enabledConfig = (bindings: Record<string, string>) => ({
+      ...configWith({
+        omni_compress_image: { modelAccess: { enabled: true } },
+      }),
+      getOmniMediaResourceRegistry: () => registryWith(bindings) as never,
+    });
+
+    it('resolves a session handle to inputPath and drops resourceId', () => {
+      const result = evaluateMediaPolicyToolCall({
+        config: enabledConfig({ 'media-1-ab': '/media/movie.mkv' }),
+        tool: policyTool(),
+        args: { resourceId: 'media-1-ab', outputDir: '/out' },
+        executionOrigin: { kind: 'model' },
+      });
+      expect(result).toEqual({
+        outcome: 'pass',
+        args: { inputPath: '/media/movie.mkv', outputDir: '/out' },
+      });
+    });
+
+    it('rejects a handle this session never issued', () => {
+      const result = evaluateMediaPolicyToolCall({
+        config: enabledConfig({}),
+        tool: policyTool(),
+        args: { resourceId: 'media-9-zz', outputDir: '/out' },
+        executionOrigin: { kind: 'model' },
+      });
+      expect(result).toMatchObject({
+        outcome: 'reject',
+        reason: 'invalid_params',
+      });
+      expect((result as { message: string }).message).toContain(
+        'not issued in this session',
+      );
+    });
+
+    it('rejects a call on a config with no session registry', () => {
+      const result = evaluateMediaPolicyToolCall({
+        config: configWith({
+          omni_compress_image: { modelAccess: { enabled: true } },
+        }),
+        tool: policyTool(),
+        args: { resourceId: 'media-1-ab', outputDir: '/out' },
+        executionOrigin: { kind: 'model' },
+      });
+      expect(result).toMatchObject({
+        outcome: 'reject',
+        reason: 'invalid_params',
+      });
+    });
+
+    it('rejects naming both inputPath and resourceId', () => {
+      const result = evaluateMediaPolicyToolCall({
+        config: enabledConfig({ 'media-1-ab': '/media/movie.mkv' }),
+        tool: policyTool(),
+        args: {
+          resourceId: 'media-1-ab',
+          inputPath: '/elsewhere.png',
+          outputDir: '/out',
+        },
+        executionOrigin: { kind: 'model' },
+      });
+      expect(result).toMatchObject({
+        outcome: 'reject',
+        reason: 'invalid_params',
+      });
+      expect((result as { message: string }).message).toContain('exactly one');
+    });
+
+    it('cannot sidestep an operator-pinned inputPath via a handle', () => {
+      const result = evaluateMediaPolicyToolCall({
+        config: {
+          ...configWith({
+            omni_compress_image: {
+              modelAccess: {
+                enabled: true,
+                lockedArguments: { inputPath: '/pinned.png' },
+              },
+            },
+          }),
+          getOmniMediaResourceRegistry: () =>
+            registryWith({ 'media-1-ab': '/media/movie.mkv' }) as never,
+        },
+        tool: policyTool(),
+        args: { resourceId: 'media-1-ab', outputDir: '/out' },
+        executionOrigin: { kind: 'model' },
+      });
+      // The resolved inputPath collides with the locked key — rejected
+      // exactly like naming the locked key directly.
+      expect(result).toMatchObject({
+        outcome: 'reject',
+        reason: 'invalid_params',
+      });
+    });
+
+    it('never resolves handles for fixed_policy calls (args pass untouched)', () => {
+      const args = { resourceId: 'media-1-ab', outputDir: '/out' };
+      const result = evaluateMediaPolicyToolCall({
+        config: enabledConfig({ 'media-1-ab': '/media/movie.mkv' }),
+        tool: policyTool(),
+        args,
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: 'p1',
+          stage: 'preprocessing',
+        },
+      });
+      // RESERVED_ARGUMENT_KEYS already bans resourceId in fixed-policy
+      // arguments; the gate's job is only to leave fixed calls alone.
+      expect(result).toEqual({ outcome: 'pass', args });
+    });
+  });
 });

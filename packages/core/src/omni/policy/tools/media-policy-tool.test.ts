@@ -120,6 +120,17 @@ describe('validateMediaPolicyIoParams', () => {
       pattern,
     );
   });
+
+  it('asks for inputPath or resourceId when neither was supplied', () => {
+    // Schema-level `required` deliberately omits inputPath (the gated
+    // model surface passes resourceId, resolved before validation) — so
+    // the neither-provided case must fail HERE with an actionable hint.
+    expect(
+      validateMediaPolicyIoParams({
+        outputDir: '/b/staging',
+      } as unknown as Parameters<typeof validateMediaPolicyIoParams>[0]),
+    ).toMatch(/inputPath.*or resourceId/);
+  });
 });
 
 describe('assertMediaPolicyIo', () => {

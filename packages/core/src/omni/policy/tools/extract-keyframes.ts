@@ -504,7 +504,7 @@ export class OmniExtractKeyframesTool extends BaseMediaPolicyTool<ExtractKeyfram
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,

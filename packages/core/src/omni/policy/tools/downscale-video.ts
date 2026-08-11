@@ -218,9 +218,7 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
           : []),
       ];
       const lossClause =
-        drops.length === 2
-          ? '分辨率与帧率下降'
-          : (drops[0] ?? '重新编码压缩');
+        drops.length === 2 ? '分辨率与帧率下降' : (drops[0] ?? '重新编码压缩');
       const disclosure = `原 ${probe.height}p${originalRate}/${formatBytesShort(inputSizeBytes)} → ${targetHeight}p${fps}/${formatBytesShort(outputSizeBytes)}，${lossClause}，细节受损`;
 
       return mediaPolicyToolSuccess({
@@ -256,7 +254,7 @@ export class OmniDownscaleVideoTool extends BaseMediaPolicyTool<DownscaleVideoPa
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,
