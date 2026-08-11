@@ -467,16 +467,26 @@ function normalizePolicy(
   // UTF-8 text/plain file output.
   {
     const producibleKinds = new Set<string>();
-    const producibleRoles = new Set<string>();
+    // role → declaring output spec (first declaration wins, matching the
+    // outputs-order semantics of a find): one structure serves BOTH the
+    // role-selector existence check and the transcript shape check below.
+    const producibleRoleSpecs = new Map<
+      string,
+      (typeof descriptor.outputs)[number]
+    >();
     for (const o of descriptor.outputs) {
       if (o.kind === 'media') {
         for (const mimeType of o.mimeTypes ?? []) {
           producibleKinds.add(mimeType.split('/')[0]);
         }
-        if (o.role) producibleRoles.add(o.role);
+        if (o.role && !producibleRoleSpecs.has(o.role)) {
+          producibleRoleSpecs.set(o.role, o);
+        }
       } else if (o.kind === 'file') {
         producibleKinds.add('file');
-        if (o.role) producibleRoles.add(o.role);
+        if (o.role && !producibleRoleSpecs.has(o.role)) {
+          producibleRoleSpecs.set(o.role, o);
+        }
       }
     }
     for (const selector of Object.keys(artifacts)) {
@@ -492,9 +502,7 @@ function normalizePolicy(
         continue;
       }
       const role = selector.slice('role:'.length);
-      const spec = descriptor.outputs.find(
-        (o) => o.kind !== 'text' && o.role === role,
-      );
+      const spec = producibleRoleSpecs.get(role);
       if (!spec) {
         fail(
           `${at}: tool "${toolName}" declares no artifact output with ` +
