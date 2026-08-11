@@ -193,6 +193,8 @@ interface CrossSessionTarget {
 }
 interface CrossSessionIntent extends CrossSessionTarget {
   key: string;
+  effectiveHistoryPageSize?: number;
+  resultSuperseded?: true;
   source: DaemonSessionClient;
   baseUrl: string;
   token?: string;
@@ -213,8 +215,16 @@ const STAGING_BATCH_SIZE = 512;
 function crossSessionKey(
   sessionId: string,
   workspaceCwd: string | undefined,
+  mode: CrossSessionTarget['mode'],
+  historyPageSize: number | undefined,
 ): string {
-  return `${sessionId}\0${normalizeWorkspaceIdentity(workspaceCwd)}`;
+  const replayShape =
+    mode === 'resume'
+      ? 'resume:none'
+      : historyPageSize === undefined
+        ? 'load:all'
+        : `load:recent:${historyPageSize}`;
+  return `${sessionId}\0${normalizeWorkspaceIdentity(workspaceCwd)}\0${replayShape}`;
 }
 function transitionState(
   target: CrossSessionTarget,
@@ -3433,10 +3443,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       {
         workspaceCwd: intent.workspaceCwd,
         timeoutMs,
-        ...(intent.mode === 'load' &&
-        historyPageSizeRef.current !== undefined &&
-        capabilities.features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE)
-          ? { historyPageSize: historyPageSizeRef.current }
+        ...(intent.effectiveHistoryPageSize !== undefined
+          ? { historyPageSize: intent.effectiveHistoryPageSize }
           : {}),
       },
       requestClientId,
@@ -3459,8 +3467,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           return;
         }
         if (
+          intent.resultSuperseded === true ||
           latest?.key !== intent.key ||
-          latest?.environmentGeneration !== intent.environmentGeneration
+          latest.environmentGeneration !== intent.environmentGeneration
         ) {
           retireAttachment(candidate, intent);
           return;
@@ -3605,7 +3614,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ),
         );
       }
-      const key = crossSessionKey(request.sessionId, request.workspaceCwd);
+      const effectiveHistoryPageSize =
+        request.mode === 'load' &&
+        historyPageSizeRef.current !== undefined &&
+        capabilities.features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE)
+          ? historyPageSizeRef.current
+          : undefined;
+      const key = crossSessionKey(
+        request.sessionId,
+        request.workspaceCwd,
+        request.mode,
+        effectiveHistoryPageSize,
+      );
+      const raw = rawTransitionRef.current;
+      if (raw && raw.key !== key) raw.resultSuperseded = true;
       const current = desiredTransitionRef.current;
       if (current?.key === key) return current.promise;
       if (current) {
@@ -3630,6 +3652,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           : Date.now() + timeouts.watchdogTimeoutMs;
       const intent: CrossSessionIntent = {
         key,
+        ...(effectiveHistoryPageSize !== undefined
+          ? { effectiveHistoryPageSize }
+          : {}),
         ...request,
         source,
         baseUrl: resolvedBaseUrl,

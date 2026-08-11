@@ -29,6 +29,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -2589,6 +2590,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   interface InFlightRestore {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
+    historyPageSize?: number;
     hideInheritedHistory: boolean;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
@@ -5087,6 +5089,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     const historyReplay =
       action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
+    const historyPageSize =
+      action === 'load' && historyReplay === 'response'
+        ? req.historyPageSize
+        : undefined;
+    if (
+      historyPageSize !== undefined &&
+      (!Number.isSafeInteger(historyPageSize) ||
+        historyPageSize < 1 ||
+        historyPageSize > SESSION_TRANSCRIPT_MAX_LIMIT)
+    ) {
+      throw new Error(
+        `Invalid historyPageSize; expected 1..${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      );
+    }
     const hideInheritedHistory =
       action === 'load' && req.hideInheritedHistory === true;
 
@@ -5103,8 +5119,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
       }
       const replayFields =
-        action === 'load' && req.historyPageSize !== undefined
-          ? await refreshedReplayFieldsFor(existing, req.historyPageSize)
+        historyPageSize !== undefined
+          ? await refreshedReplayFieldsFor(existing, historyPageSize)
           : replayFieldsFor(existing, action);
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
@@ -5156,16 +5172,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
-      // Cross-action races BOTH ways must reject. A `resume` arriving
-      // while a `load` is in flight cannot quietly coalesce: load
-      // returns compacted replay + watermark while resume returns only
-      // a watermark — mixing the two on a shared EventBus would give
-      // the resume client unexpected replay data or the load client a
-      // missing snapshot. Same-action coalescing is unaffected.
+      // Cold restores only coalesce when their effective request shapes
+      // match. Sharing across actions, replay transports, response pages, or
+      // inherited-history policies can return replay selected for another
+      // caller. Same-shape coalescing is unaffected.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
+        historyPageSize !== inFlight.historyPageSize ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
@@ -5482,10 +5497,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ...(historyReplay === 'response'
                     ? {
                         [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
-                        ...(req.historyPageSize !== undefined
+                        ...(historyPageSize !== undefined
                           ? {
-                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
-                                req.historyPageSize,
+                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]: historyPageSize,
                             }
                           : {}),
                       }
@@ -5713,7 +5727,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             restoredArtifactSnapshot === undefined || artifactRestoreFailed,
         });
         if (
-          req.historyPageSize !== undefined &&
+          historyPageSize !== undefined &&
           entry.events
             .snapshotReplay()
             ?.compactedTurns.some((event) => event.type === 'history_truncated')
@@ -5829,6 +5843,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     inFlightRestores.set(req.sessionId, {
       action,
       historyReplay,
+      ...(historyPageSize !== undefined ? { historyPageSize } : {}),
       hideInheritedHistory,
       publicPromise: promise,
       settlementPromise,
