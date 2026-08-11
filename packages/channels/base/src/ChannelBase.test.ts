@@ -2089,6 +2089,9 @@ describe('ChannelBase', () => {
           chatId: 'chat1',
         })),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -8613,6 +8616,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -8646,6 +8652,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -8679,6 +8688,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -8711,6 +8723,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -8755,6 +8770,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -8799,6 +8817,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -8822,6 +8843,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
       const newBridge = createBridge();
@@ -8863,6 +8887,9 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
+        setSessionActivityChecker: vi.fn(),
+        onSessionRotated: vi.fn().mockReturnValue(() => {}),
       };
       const ch = createChannel({}, {
         router,
@@ -12277,6 +12304,81 @@ describe('ChannelBase', () => {
       expect(promptText).not.toContain('\n');
       // only the tag's own [ ] survive — the crafted brackets are stripped
       expect((promptText.match(/[[\]]/g) ?? []).length).toBe(2);
+    });
+  });
+
+  describe('session rotation', () => {
+    it('registers rotation bounds on a supplied router', () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const spy = vi.spyOn(router, 'setChannelRotation');
+
+      createChannel({ sessionRotation: { maxTurns: 100 } }, { router });
+
+      expect(spy).toHaveBeenCalledWith('test-chan', { maxTurns: 100 });
+    });
+
+    it('registers rotation bounds on a self-created router', () => {
+      const spy = vi.spyOn(SessionRouter.prototype, 'setChannelRotation');
+
+      createChannel({ sessionRotation: { maxAgeHours: 24 } });
+
+      expect(spy).toHaveBeenCalledWith('test-chan', { maxAgeHours: 24 });
+      spy.mockRestore();
+    });
+
+    it('announces rotation and discards the retired session', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      ch.sent = [];
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+
+      const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[1]!;
+      expect(secondPrompt[0]).not.toBe(retiredId);
+      expect(ch.sent.some((m) => m.text.includes('rotated'))).toBe(true);
+      expect(bridge.discardSession).toHaveBeenCalledWith(retiredId);
+    });
+
+    it('defers rotation while the outgoing turn is still running', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      let settleFirst!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          settleFirst = resolve;
+        }),
+      );
+
+      const firstTurn = ch.handleInbound(envelope({ text: 'first' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // Rotation is due, but the session is mid-turn: the second message
+      // queues behind it instead of retiring it.
+      const secondTurn = ch.handleInbound(envelope({ text: 'second' }));
+      // Let the second message resolve and queue behind the running turn;
+      // a rotation would have created a second session by now.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).not.toHaveBeenCalled();
+
+      settleFirst('done');
+      await firstTurn;
+      await secondTurn;
+
+      // The deferred message reused the outgoing session ...
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+      // ... and the next message rotates it.
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(bridge.discardSession).toHaveBeenCalledWith(sessionId);
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
     });
   });
 

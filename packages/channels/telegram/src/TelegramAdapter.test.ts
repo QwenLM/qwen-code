@@ -101,7 +101,12 @@ function createChannel(
     { ...config, ...configOverrides },
     {} as ChannelAgentBridge,
     {
-      router: router as never,
+      router: {
+        setChannelRotation: () => {},
+        setSessionActivityChecker: () => {},
+        onSessionRotated: () => () => {},
+        ...(router as Record<string, unknown>),
+      } as never,
     },
   );
 }

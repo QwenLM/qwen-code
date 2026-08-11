@@ -4,6 +4,7 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { isValidRotationBound } from '@qwen-code/channel-base';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -182,13 +183,13 @@ function parseSessionRotationConfig(
   rawConfig: Record<string, unknown>,
 ): ChannelConfig['sessionRotation'] {
   const raw = rawConfig['sessionRotation'];
-  if (raw === undefined) return undefined;
+  if (raw === undefined || raw === null) return undefined;
   const parsed = requireObjectField(channelName, 'sessionRotation', raw);
 
   const bound = (field: 'maxTurns' | 'maxAgeHours'): number | undefined => {
     const value = parsed[field];
     if (value === undefined) return undefined;
-    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    if (!isValidRotationBound(value)) {
       throw new Error(
         `Channel "${channelName}" field "sessionRotation.${field}" must be a positive number.`,
       );

@@ -178,7 +178,6 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
   })),
 );
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
-const mockRouterSetChannelRotation = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterRestoreRoutes = vi.hoisted(() =>
@@ -194,7 +193,6 @@ const mockSessionRouter = vi.hoisted(() =>
       _persistPath?: string,
     ) => ({
       setChannelScope: mockRouterSetChannelScope,
-      setChannelRotation: mockRouterSetChannelRotation,
       setChannelApprovalMode: mockRouterSetChannelApprovalMode,
       clearAll: mockRouterClearAll,
       restoreRoutes: mockRouterRestoreRoutes,
@@ -1094,11 +1092,7 @@ describe('runChannelDaemonWorker', () => {
     mockParseConfiguredChannels.mockResolvedValueOnce([
       {
         ...parsedTelegram,
-        config: {
-          ...parsedTelegram.config,
-          approvalMode: 'yolo',
-          sessionRotation: { maxTurns: 200 },
-        },
+        config: { ...parsedTelegram.config, approvalMode: 'yolo' },
       },
       parsedFeishu,
     ]);
@@ -1121,13 +1115,6 @@ describe('runChannelDaemonWorker', () => {
       'thread',
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('feishu', 'single');
-    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith('telegram', {
-      maxTurns: 200,
-    });
-    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith(
-      'feishu',
-      undefined,
-    );
     expect(mockRouterSetChannelApprovalMode).not.toHaveBeenCalled();
   });
 

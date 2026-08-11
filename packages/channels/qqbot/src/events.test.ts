@@ -82,7 +82,6 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   SessionRouter: class {
-    setChannelRotation(): void {}
     restoreSessions(): Promise<void> {
       return Promise.resolve();
     }

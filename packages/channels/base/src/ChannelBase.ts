@@ -397,6 +397,8 @@ export abstract class ChannelBase {
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
   private sessionQueues: Map<string, Promise<void>> = new Map();
+  /** Sessions with a turn running or queued; rotation defers while non-zero. */
+  private sessionPendingTurns = new Map<string, number>();
   private readonly registerBridgeEvents: boolean;
   private readonly bridgeRecovery?: () => Promise<void> | undefined;
   /**
@@ -847,11 +849,16 @@ export abstract class ChannelBase {
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
-    // In gateway mode the caller registers rotation for every channel it owns;
-    // a standalone channel owns its router, so it registers its own.
-    if (!options?.router) {
-      this.router.setChannelRotation(this.name, config.sessionRotation);
-    }
+    // Registration is idempotent and name-keyed, so the channel owning the
+    // config is the single owner of this invariant — gateway callers pass the
+    // same parsed config and need not mirror it.
+    this.router.setChannelRotation(this.name, config.sessionRotation);
+    this.router.setSessionActivityChecker(this.name, (sessionId) =>
+      this.hasPendingTurns(sessionId),
+    );
+    this.router.onSessionRotated((sessionId, target) => {
+      this.handleSessionRotated(sessionId, target);
+    });
 
     this.registerSharedCommands();
     if (this.loopController) {
@@ -1763,6 +1770,7 @@ export abstract class ChannelBase {
       sessionId,
       current.then(() => undefined).catch(() => {}),
     );
+    this.trackSessionTurn(sessionId, current);
     return current;
   }
 
@@ -2039,6 +2047,7 @@ export abstract class ChannelBase {
       sessionId,
       current.then(() => undefined).catch(() => undefined),
     );
+    this.trackSessionTurn(sessionId, current);
     return await current;
   }
 
@@ -2280,9 +2289,55 @@ export abstract class ChannelBase {
 
   onSessionDied(sessionId: string): void {
     this.router.handleSessionDied(sessionId);
+    this.purgeSessionState(sessionId);
+  }
+
+  private purgeSessionState(sessionId: string): void {
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
+  }
+
+  /**
+   * The router retired a session by rotation: purge the per-session state
+   * a death would clean up, and tell the chat its context is starting fresh —
+   * rotation is automatic, so participants get no other signal.
+   */
+  private handleSessionRotated(
+    sessionId: string,
+    target: SessionTarget | undefined,
+  ): void {
+    if (target?.channelName !== this.name) return;
+    this.purgeSessionState(sessionId);
+    void this.sendThreadMessage(
+      target.chatId,
+      target.threadId,
+      'This conversation reached its configured limit and was rotated; starting a fresh session.',
+    ).catch((err: unknown) => {
+      process.stderr.write(
+        `[${this.name}] failed to announce session rotation in chat ${sanitizeLogText(target.chatId, 64)}: ${this.lifecycleError(err)}\n`,
+      );
+    });
+  }
+
+  private hasPendingTurns(sessionId: string): boolean {
+    return (this.sessionPendingTurns.get(sessionId) ?? 0) > 0;
+  }
+
+  private trackSessionTurn(sessionId: string, turn: Promise<unknown>): void {
+    this.sessionPendingTurns.set(
+      sessionId,
+      (this.sessionPendingTurns.get(sessionId) ?? 0) + 1,
+    );
+    const finish = (): void => {
+      const remaining = (this.sessionPendingTurns.get(sessionId) ?? 1) - 1;
+      if (remaining <= 0) {
+        this.sessionPendingTurns.delete(sessionId);
+      } else {
+        this.sessionPendingTurns.set(sessionId, remaining);
+      }
+    };
+    void turn.then(finish, finish);
   }
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
@@ -5818,6 +5873,7 @@ export abstract class ChannelBase {
       sessionId,
       current.catch(() => {}),
     );
+    this.trackSessionTurn(sessionId, current);
     await current;
   }
 

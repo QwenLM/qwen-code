@@ -430,6 +430,39 @@ describe('WorkspaceChannelSettingsStore', () => {
         clientSecret: { operation: 'replace', value: 'secret' } as const,
       },
     },
+    {
+      label: 'sessionRotation with a non-positive bound',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 0 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation with an unknown bound',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: { maxTurns: 10, maxMessages: 5 },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'sessionRotation not an object',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionRotation: 'daily',
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
   ])('rejects $label without writing', async ({ config, secrets }) => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const before = fs.readFileSync(settingsPath, 'utf8');
@@ -463,6 +496,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         groupHistoryLimit: 25,
         blockStreaming: 'on',
         identity: { id: 'ops', displayName: 'Ops' },
+        sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
       },
       secrets: {
         clientSecret: {
@@ -485,6 +519,7 @@ describe('WorkspaceChannelSettingsStore', () => {
       groupHistoryLimit: 25,
       blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
     });
   });
 

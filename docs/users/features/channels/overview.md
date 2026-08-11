@@ -116,7 +116,7 @@ By default a route keeps the same session forever, so a long-lived route — a b
 
 Set either, both, or neither; whichever bound is hit first rotates. Both must be positive numbers. Omitting `sessionRotation` keeps the previous behavior of never rotating.
 
-Rotation is a context reset, not a cleanup: the new session starts empty, so the bot no longer remembers the earlier conversation on that route. Counters are stored alongside the routes and survive a daemon restart. Sessions that were already routed before you enabled rotation start their clock at the first message after the upgrade.
+Rotation is a context reset, not a cleanup: the new session starts empty, so the bot no longer remembers the earlier conversation on that route. The channel posts a short notice in the affected chat or thread when a rotation happens, and the daemon logs the rotated route. Counters are stored alongside the routes and survive a daemon restart. Sessions that were already routed before you enabled rotation start their clock at the first message after the upgrade. A route that still has a turn running or queued rotates on the next message after it settles instead of mid-turn.
 
 ### Channel Memory
 

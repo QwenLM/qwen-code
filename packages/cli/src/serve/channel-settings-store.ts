@@ -191,6 +191,22 @@ function assertSharedField(key: string, value: unknown): boolean {
     assertNumberRecord(key, value, new Set(['idleMs']));
     return true;
   }
+  if (key === 'sessionRotation') {
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${key}" must be an object.`);
+    }
+    for (const [nestedKey, nestedValue] of Object.entries(value)) {
+      const validBound =
+        (nestedKey === 'maxTurns' || nestedKey === 'maxAgeHours') &&
+        typeof nestedValue === 'number' &&
+        Number.isFinite(nestedValue) &&
+        nestedValue > 0;
+      if (!validBound) {
+        throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
+      }
+    }
+    return true;
+  }
   if (key === 'memoryScope') {
     if (!isRecord(value)) {
       throw invalidConfig(`Channel field "${key}" must be an object.`);

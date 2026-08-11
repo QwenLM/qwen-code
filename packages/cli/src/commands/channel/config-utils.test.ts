@@ -131,6 +131,26 @@ describe('parseChannelConfig', () => {
     ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive number');
   });
 
+  it('treats an explicit null sessionRotation as unset', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+      sessionRotation: null,
+    });
+
+    expect(result['sessionRotation']).toBeUndefined();
+  });
+
+  it('throws when sessionRotation is not an object', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: 'daily',
+      }),
+    ).rejects.toThrow(/sessionRotation/);
+  });
+
   it('throws when plugin-required fields are missing', async () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),
