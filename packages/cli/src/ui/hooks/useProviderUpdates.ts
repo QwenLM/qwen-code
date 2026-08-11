@@ -276,6 +276,8 @@ export function useProviderUpdates(
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
         ]!['version'] = pending.currentVersion;
         delete installPlan.env;
+        // Template updates never change the selected model.
+        delete installPlan.modelSelection;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
@@ -285,14 +287,6 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
-        );
-        // Only the active provider may migrate model selection.
-        if (!updatesActiveProvider || previousModelStillAvailable) {
-          delete installPlan.modelSelection;
-        }
         const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
