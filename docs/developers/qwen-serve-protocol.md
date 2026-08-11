@@ -67,10 +67,14 @@ with status `400`.
 `SessionNotFoundError` for an unknown session id returns:
 
 ```json
-{ "error": "No session with id \"<sid>\"", "sessionId": "<sid>" }
+{
+  "error": "No session with id \"<sid>\"",
+  "sessionId": "<sid>",
+  "code": "session_not_found"
+}
 ```
 
-with status `404`.
+with status `404`. A concurrent close uses `code: "session_closing"`.
 
 `WorkspaceMismatchError` for a `POST /session` whose `cwd` doesn't canonicalize to a registered workspace returns `400` with:
 
