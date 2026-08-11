@@ -208,8 +208,12 @@ export function buildSessionTasksStatus(
   config: Config,
   now = Date.now(),
   workflowHistory: readonly WorkflowSnapshot[] = [],
+  options: { includeWorkflows?: boolean } = {},
 ): ServeSessionTasksStatus {
-  const workflowTasks = config.getWorkflowRunRegistry().list();
+  const includeWorkflows = options.includeWorkflows === true;
+  const workflowTasks = includeWorkflows
+    ? config.getWorkflowRunRegistry().list()
+    : [];
   const inMemoryWorkflowIds = new Set(
     workflowTasks.map((entry) => entry.runId),
   );
@@ -226,10 +230,14 @@ export function buildSessionTasksStatus(
       .getMonitorRegistry()
       .getAll()
       .map((entry) => serializeMonitorTask(entry, now)),
-    ...workflowTasks.map((entry) => serializeWorkflowTask(entry, now)),
-    ...workflowHistory
-      .filter((snapshot) => !inMemoryWorkflowIds.has(snapshot.runId))
-      .map(serializeWorkflowSnapshot),
+    ...(includeWorkflows
+      ? workflowTasks.map((entry) => serializeWorkflowTask(entry, now))
+      : []),
+    ...(includeWorkflows
+      ? workflowHistory
+          .filter((snapshot) => !inMemoryWorkflowIds.has(snapshot.runId))
+          .map(serializeWorkflowSnapshot)
+      : []),
   ].sort((a, b) => a.startTime - b.startTime);
 
   return {

@@ -7057,10 +7057,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const legacyTasks = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTasks,
+      { sessionId },
+    );
     const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
       sessionId,
+      includeWorkflows: true,
     });
 
+    expect(legacyTasks).toMatchObject({ sessionId, tasks: [] });
     expect(tasks).toMatchObject({
       sessionId,
       tasks: [
@@ -8969,15 +8975,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('cancels active workflow tasks', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
-    const cancel = vi.fn();
+    const task = {
+      id: 'wf-1',
+      runId: 'wf-1',
+      kind: 'workflow' as const,
+      status: 'paused' as 'paused' | 'cancelled',
+    };
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const cancel = vi.fn(() => {
+      task.status = 'cancelled';
+    });
     Object.assign(innerConfig, {
       getWorkflowRunRegistry: vi.fn().mockReturnValue({
-        get: vi.fn().mockReturnValue({
-          id: 'wf-1',
-          runId: 'wf-1',
-          kind: 'workflow',
-          status: 'paused',
-        }),
+        get: vi.fn().mockReturnValue(task),
+        getHandle: vi.fn().mockReturnValue({ completion }),
         cancel,
       }),
     });
@@ -8996,13 +9010,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+    let settled = false;
+    const request = agent
+      .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
         sessionId,
         taskId: 'wf-1',
         taskKind: 'workflow',
-      }),
-    ).resolves.toEqual({ cancelled: true, status: 'paused' });
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveCompletion();
+    await expect(request).resolves.toEqual({
+      cancelled: true,
+      status: 'cancelled',
+    });
     expect(cancel).toHaveBeenCalledWith('wf-1', expect.any(Number));
 
     mockConnectionState.resolve();
@@ -9072,7 +9097,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('starts a saved workflow in the owning session runtime', async () => {
+  it('uses the exact run id when a concurrent saved workflow uses the same script', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     const tasks: Array<{
@@ -9081,20 +9106,22 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       scriptPath: string;
     }> = [];
     const registry = {
-      list: vi.fn(() => tasks),
+      get: vi.fn((runId: string) =>
+        tasks.find((candidate) => candidate.runId === runId),
+      ),
     };
     const execute = vi.fn().mockImplementation(async () => {
       tasks.push({
         runId: 'wf_concurrent',
         status: 'running',
-        scriptPath: '/tmp/.qwen/workflows/other.js',
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       });
       tasks.push({
         runId: 'wf_5678efab',
         status: 'running',
         scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       });
-      return { llmContent: 'started' };
+      return { llmContent: 'started', workflowRunId: 'wf_5678efab' };
     });
     const build = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {
@@ -9227,6 +9254,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_5678efab',
       status: 'running' as const,
     };
+    const concurrentRerun = {
+      ...task,
+      id: 'wf_concurrent',
+      runId: 'wf_concurrent',
+      status: 'running' as const,
+    };
     const tasks = [task];
     const setLineage = vi.fn(
       (runId: string, sourceRunId: string, startMode: 'rerun') => {
@@ -9241,12 +9274,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         tasks.find((candidate) => candidate.runId === runId),
       ),
       getHandle: vi.fn(() => undefined),
-      list: vi.fn(() => tasks),
       setLineage,
     };
     const execute = vi.fn().mockImplementation(async () => {
-      tasks.push(rerun);
-      return { llmContent: 'started' };
+      tasks.push(concurrentRerun, rerun);
+      return { llmContent: 'started', workflowRunId: rerun.runId };
     });
     const build = vi.fn().mockReturnValue({ execute });
     Object.assign(innerConfig, {

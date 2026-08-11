@@ -343,13 +343,17 @@ export function TasksStatusMessage({
   );
   const [isOpen, setIsOpen] = useState(true);
   const [step, setStep] = useState<TasksPanelStep>('list');
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
+    () => tasksForView(message.snapshot.tasks, taskView)[0]?.id ?? null,
+  );
   const [pendingCancelId, setPendingCancelId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [refreshError, setRefreshError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const panelIdRef = useRef(`tasks-${Math.random().toString(36).slice(2)}`);
   const refreshInFlightRef = useRef(false);
+  const expectedSessionIdRef = useRef(message.snapshot.sessionId);
+  expectedSessionIdRef.current = message.snapshot.sessionId;
   const initialDetailStatusRef = useRef<{
     taskId: string;
     status: TaskStatus;
@@ -359,9 +363,18 @@ export function TasksStatusMessage({
     if (syncSnapshot) setAllTasks(message.snapshot.tasks);
   }, [message.snapshot, syncSnapshot]);
 
-  const clampedSelectedIndex =
-    tasks.length === 0 ? 0 : Math.min(selectedIndex, tasks.length - 1);
-  const selectedTask = tasks[clampedSelectedIndex] ?? null;
+  useEffect(() => {
+    setBusy(false);
+    setActionError(null);
+    setPendingCancelId(null);
+    setStep('list');
+  }, [message.snapshot.sessionId]);
+
+  const selectedIndex = selectedTaskId
+    ? tasks.findIndex((task) => task.id === selectedTaskId)
+    : -1;
+  const clampedSelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+  const selectedTask = selectedIndex >= 0 ? tasks[selectedIndex] : null;
 
   // Tree metadata is computed on the full task list (not the windowed
   // slice) so a row's indent doesn't shift when the window scrolls past
@@ -374,14 +387,22 @@ export function TasksStatusMessage({
     const refresh = () => {
       if (refreshInFlightRef.current) return;
       refreshInFlightRef.current = true;
+      const requestedSessionId = expectedSessionIdRef.current;
       actions
         .getTasks()
         .then((snapshot) => {
+          if (
+            expectedSessionIdRef.current !== requestedSessionId ||
+            snapshot.sessionId !== requestedSessionId
+          ) {
+            return;
+          }
           setAllTasks(snapshot.tasks);
           onTasksChange?.(snapshot);
           setRefreshError(false);
         })
         .catch((error: unknown) => {
+          if (expectedSessionIdRef.current !== requestedSessionId) return;
           if (isSessionDisconnectedError(error)) {
             setRefreshError(false);
             return;
@@ -398,13 +419,11 @@ export function TasksStatusMessage({
   }, [isOpen, actions, onTasksChange]);
 
   useEffect(() => {
-    if (tasks.length === 0 && selectedIndex !== 0) {
-      setSelectedIndex(0);
-    }
-    if (selectedIndex >= tasks.length && tasks.length > 0) {
-      setSelectedIndex(tasks.length - 1);
-    }
-  }, [tasks.length, selectedIndex]);
+    if (selectedIndex >= 0) return;
+    setPendingCancelId(null);
+    if (step === 'detail') setStep('list');
+    setSelectedTaskId(tasks[0]?.id ?? null);
+  }, [selectedIndex, step, tasks]);
 
   useEffect(() => {
     if (!isOpen || step !== 'detail') {
@@ -465,6 +484,7 @@ export function TasksStatusMessage({
   const handleCancel = useCallback(
     async (task: DaemonSessionTaskStatus) => {
       if (busy) return;
+      const sessionId = expectedSessionIdRef.current;
       const isRunning = task.status === 'running';
       const isAbandonable = task.kind === 'agent' && task.status === 'paused';
       const isActiveWorkflow = task.kind === 'workflow' && isActive(task);
@@ -484,20 +504,28 @@ export function TasksStatusMessage({
       setBusy(true);
       try {
         const result = await actions.cancelTask(task.id, task.kind);
+        if (expectedSessionIdRef.current !== sessionId) return;
         if (!result.cancelled) {
           setActionError(t('tasks.alreadyStopped'));
           return;
         }
         const snapshot = await actions.getTasks();
+        if (
+          expectedSessionIdRef.current !== sessionId ||
+          snapshot.sessionId !== sessionId
+        ) {
+          return;
+        }
         setAllTasks(snapshot.tasks);
         onTasksChange?.(snapshot);
         if (taskView === 'workflow-active') setStep('list');
         setActionError(null);
       } catch (error: unknown) {
+        if (expectedSessionIdRef.current !== sessionId) return;
         console.warn('[web-shell] failed to cancel task:', error);
         setActionError(t('tasks.cancelFailed'));
       } finally {
-        setBusy(false);
+        if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
     },
     [actions, busy, blockingIds, onTasksChange, pendingCancelId, t, taskView],
@@ -509,30 +537,38 @@ export function TasksStatusMessage({
       action: 'pause' | 'resume' | 'retry' | 'rerun',
     ) => {
       if (busy) return;
+      const sessionId = expectedSessionIdRef.current;
       setBusy(true);
       try {
         const result = await actions.controlWorkflowTask(task.id, action);
+        if (expectedSessionIdRef.current !== sessionId) return;
         if (!result.changed) {
           setActionError(t('workflow.action.unavailable'));
           return;
         }
         const snapshot = await actions.getTasks();
+        if (
+          expectedSessionIdRef.current !== sessionId ||
+          snapshot.sessionId !== sessionId
+        ) {
+          return;
+        }
         const nextTasks = tasksForView(snapshot.tasks, taskView);
         setAllTasks(snapshot.tasks);
         onTasksChange?.(snapshot);
         if (result.taskId) {
           onWorkflowRunStarted?.();
-          const nextIndex = nextTasks.findIndex(
-            (candidate) => candidate.id === result.taskId,
-          );
-          if (nextIndex >= 0) setSelectedIndex(nextIndex);
+          if (nextTasks.some((candidate) => candidate.id === result.taskId)) {
+            setSelectedTaskId(result.taskId);
+          }
         }
         setActionError(null);
       } catch (error: unknown) {
+        if (expectedSessionIdRef.current !== sessionId) return;
         console.warn('[web-shell] failed to control workflow:', error);
         setActionError(t('workflow.action.failed'));
       } finally {
-        setBusy(false);
+        if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
     },
     [actions, busy, onTasksChange, onWorkflowRunStarted, t, taskView],
@@ -541,26 +577,35 @@ export function TasksStatusMessage({
   const handleWorkflowHistoryDelete = useCallback(
     async (runId: string) => {
       if (busy) return;
+      const sessionId = expectedSessionIdRef.current;
       setBusy(true);
       try {
         const result = await actions.controlWorkflowTask(
           runId,
           'delete-history',
         );
+        if (expectedSessionIdRef.current !== sessionId) return;
         if (!result.changed) {
           setActionError(t('workflow.history.deleteUnavailable'));
           return;
         }
         const snapshot = await actions.getTasks();
+        if (
+          expectedSessionIdRef.current !== sessionId ||
+          snapshot.sessionId !== sessionId
+        ) {
+          return;
+        }
         setAllTasks(snapshot.tasks);
         onTasksChange?.(snapshot);
         if (selectedTask?.id === runId) setStep('list');
         setActionError(null);
       } catch (error: unknown) {
+        if (expectedSessionIdRef.current !== sessionId) return;
         console.warn('[web-shell] failed to delete workflow history:', error);
         setActionError(t('workflow.history.deleteFailed'));
       } finally {
-        setBusy(false);
+        if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
     },
     [actions, busy, onTasksChange, selectedTask?.id, t],
@@ -613,9 +658,11 @@ export function TasksStatusMessage({
         event.stopPropagation();
         if (tasks.length === 0) return;
         const delta = event.key === 'ArrowUp' ? -1 : 1;
-        setSelectedIndex((current) =>
-          Math.min(Math.max(current + delta, 0), tasks.length - 1),
+        const nextIndex = Math.min(
+          Math.max(clampedSelectedIndex + delta, 0),
+          tasks.length - 1,
         );
+        setSelectedTaskId(tasks[nextIndex]?.id ?? null);
         setPendingCancelId(null);
         return;
       }
@@ -657,6 +704,7 @@ export function TasksStatusMessage({
       isOpen,
       step,
       tasks.length,
+      clampedSelectedIndex,
       selectedTask,
       handleCancel,
       onOpenMonitor,
@@ -809,6 +857,14 @@ export function TasksStatusMessage({
                 ? t('tasks.row.from', { parent: task.parentName })
                 : t('tasks.row.nested')
               : null;
+            const activateTask = () => {
+              setSelectedTaskId(task.id);
+              if (embedded && task.kind === 'monitor' && onOpenMonitor) {
+                onOpenMonitor(task);
+              } else {
+                setStep(embedded && expanded ? 'list' : 'detail');
+              }
+            };
             return (
               <div
                 key={task.id}
@@ -822,16 +878,22 @@ export function TasksStatusMessage({
                       ? `${styles.row} ${styles.selected}`
                       : styles.row
                   }
-                  onClick={() => {
-                    setSelectedIndex(index);
-                    if (embedded && task.kind === 'monitor' && onOpenMonitor) {
-                      onOpenMonitor(task);
-                    } else {
-                      setStep(embedded && expanded ? 'list' : 'detail');
-                    }
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={
+                    embedded && !(task.kind === 'monitor' && onOpenMonitor)
+                      ? expanded
+                      : undefined
+                  }
+                  onClick={activateTask}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    activateTask();
                   }}
+                  onFocus={() => setSelectedTaskId(task.id)}
                   onMouseEnter={() => {
-                    if (!embedded) setSelectedIndex(index);
+                    if (!embedded) setSelectedTaskId(task.id);
                   }}
                 >
                   <span className={styles.pointer}>

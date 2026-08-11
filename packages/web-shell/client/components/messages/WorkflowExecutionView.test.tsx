@@ -9,6 +9,7 @@ import {
   buildWorkflowReplayEvents,
   buildWorkflowGraphLayout,
   projectWorkflowReplay,
+  WORKFLOW_GRAPH_RENDER_LIMITS,
   WorkflowExecutionView,
 } from './WorkflowExecutionView';
 
@@ -626,6 +627,77 @@ describe('WorkflowExecutionView', () => {
     ]);
   });
 
+  it('keeps a large workflow graph bounded and reports omitted content', () => {
+    const phaseVisits = Array.from({ length: 80 }, (_, index) => ({
+      id: `large-phase-${index}`,
+      index,
+      title: `Phase ${index}`,
+      startedAt: 1_000 + index,
+      endedAt: 2_000 + index,
+    }));
+    const dispatches = Array.from({ length: 300 }, (_, index) => ({
+      id: `large-dispatch-${index}`,
+      phaseVisitId: `large-phase-${index % phaseVisits.length}`,
+      label: `Agent ${index}`,
+      prompt: `Prompt ${index}`,
+      status: 'completed' as const,
+      dependsOn: Array.from(
+        { length: index },
+        (_, dependencyIndex) => `large-dispatch-${dependencyIndex}`,
+      ),
+      queuedAt: 1_000 + index,
+      startedAt: 1_100 + index,
+      endedAt: 1_200 + index,
+    }));
+    const task = workflowTask({
+      phaseVisits,
+      dispatches,
+      agentsDispatched: dispatches.length,
+      agentsCompleted: dispatches.length,
+    });
+
+    const layout = buildWorkflowGraphLayout(task);
+
+    expect(layout.lanes).toHaveLength(WORKFLOW_GRAPH_RENDER_LIMITS.lanes);
+    expect(layout.nodes).toHaveLength(WORKFLOW_GRAPH_RENDER_LIMITS.nodes);
+    expect(layout.edges).toHaveLength(WORKFLOW_GRAPH_RENDER_LIMITS.edges);
+    expect(layout.omittedLanes).toBe(16);
+    expect(layout.omittedNodes).toBe(60);
+    expect(layout.omittedEdges).toBeGreaterThan(0);
+    expect(layout.dispatchCountByLaneId.get('large-phase-0')).toBe(4);
+    expect(layout.dispatchStatusById.get('large-dispatch-299')).toBe(
+      'completed',
+    );
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowExecutionView task={task} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelectorAll('[data-workflow-lane]')).toHaveLength(
+      WORKFLOW_GRAPH_RENDER_LIMITS.lanes,
+    );
+    expect(container.querySelectorAll('[data-workflow-dispatch]')).toHaveLength(
+      WORKFLOW_GRAPH_RENDER_LIMITS.nodes,
+    );
+    expect(container.querySelectorAll('[data-workflow-edge]')).toHaveLength(
+      WORKFLOW_GRAPH_RENDER_LIMITS.edges,
+    );
+    const omission = container.querySelector('[data-workflow-graph-omission]');
+    expect(omission?.textContent).toContain('16 phases');
+    expect(omission?.textContent).toContain('60 agents');
+    expect(omission?.textContent).toContain(
+      `${layout.omittedEdges} connections`,
+    );
+  });
+
   it('shows the selected dispatch prompt when a node is chosen', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -827,6 +899,11 @@ describe('WorkflowExecutionView', () => {
     expect(comparison?.textContent).toContain('wf-current');
     expect(comparison?.textContent).toContain('3/4');
     expect(comparison?.textContent).toContain('4.0k');
+
+    act(() => failedRun!.click());
+
+    expect(container.querySelector('[data-run-comparison]')).toBeNull();
+    expect(failedRun?.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('filters saved runs and exports only the visible history', async () => {

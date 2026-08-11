@@ -122,10 +122,7 @@ function agentTask(): DaemonSessionAgentTaskStatus {
   };
 }
 
-async function renderPage(snapshot: DaemonSessionTasksStatus) {
-  getTasksMock.mockResolvedValue(snapshot);
-  refreshCommandsMock.mockResolvedValue(undefined);
-  runSavedWorkflowMock.mockResolvedValue({ started: true });
+async function mountPage() {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -140,6 +137,13 @@ async function renderPage(snapshot: DaemonSessionTasksStatus) {
   });
 
   return container;
+}
+
+async function renderPage(snapshot: DaemonSessionTasksStatus) {
+  getTasksMock.mockResolvedValue(snapshot);
+  refreshCommandsMock.mockResolvedValue(undefined);
+  runSavedWorkflowMock.mockResolvedValue({ started: true });
+  return mountPage();
 }
 
 async function selectTab(container: HTMLElement, label: string) {
@@ -220,6 +224,59 @@ describe('WorkflowRunsPage', () => {
     expect(container.textContent).toContain('deep-review');
   });
 
+  it('ignores a saved-workflow completion from the previous session', async () => {
+    connectionMock.supportedCommands.savedWorkflows = [
+      { name: 'deep-review', source: 'project' },
+    ];
+    const container = await renderPage({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [],
+    });
+    let resolveStart!: (value: { started: boolean }) => void;
+    runSavedWorkflowMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+    const runButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Run deep-review"]',
+    );
+    act(() => runButton?.click());
+
+    connectionMock.sessionId = 'session-2';
+    connectionMock.supportedCommands.sessionId = 'session-2';
+    getTasksMock.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-2',
+      now: 11_000,
+      tasks: [],
+    });
+    const root = mounted.at(-1)!.root;
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowRunsPage />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveStart({ started: true });
+      await Promise.resolve();
+    });
+
+    const savedTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Saved'));
+    expect(savedTab?.getAttribute('aria-selected')).toBe('true');
+    expect(container.textContent).not.toContain(
+      'Workflow could not be started',
+    );
+  });
+
   it('asks for a session instead of reporting a load failure on the welcome page', async () => {
     connectionMock.sessionId = undefined;
     const container = await renderPage({
@@ -260,6 +317,52 @@ describe('WorkflowRunsPage', () => {
 
     expect(container.textContent).toContain('new-review');
     expect(container.textContent).not.toContain('old-review');
+  });
+
+  it('ignores a stale workflow load after switching sessions', async () => {
+    const sessionA: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-a',
+      now: 10_000,
+      tasks: [workflowTask('workflow-a', 'session-a-review')],
+    };
+    const sessionB: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-b',
+      now: 11_000,
+      tasks: [workflowTask('workflow-b', 'session-b-review')],
+    };
+    let resolveSessionA!: (snapshot: DaemonSessionTasksStatus) => void;
+    const pendingSessionA = new Promise<DaemonSessionTasksStatus>((resolve) => {
+      resolveSessionA = resolve;
+    });
+    connectionMock.sessionId = 'session-a';
+    getTasksMock
+      .mockReturnValueOnce(pendingSessionA)
+      .mockResolvedValueOnce(sessionB);
+    refreshCommandsMock.mockResolvedValue(undefined);
+    const container = await mountPage();
+
+    connectionMock.sessionId = 'session-b';
+    const root = mounted.at(-1)!.root;
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowRunsPage />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+    await selectTab(container, 'Running');
+    expect(container.textContent).toContain('session-b-review');
+
+    await act(async () => {
+      resolveSessionA(sessionA);
+      await pendingSessionA;
+    });
+
+    expect(container.textContent).toContain('session-b-review');
+    expect(container.textContent).not.toContain('session-a-review');
   });
 
   it('keeps the page list visible when Escape is pressed', async () => {

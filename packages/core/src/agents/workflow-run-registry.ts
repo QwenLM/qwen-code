@@ -1070,6 +1070,7 @@ export class WorkflowRunRegistry {
     entry.status = 'completed';
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
+    this.cancelLiveDispatches(entry, endTime);
     entry.result = result;
     this.appendEvent(entry, { type: 'workflow-completed', at: endTime });
     entry.notified = true;
@@ -1086,6 +1087,7 @@ export class WorkflowRunRegistry {
     entry.status = 'failed';
     entry.endTime = endTime;
     this.closeCurrentPhase(entry, endTime);
+    this.cancelLiveDispatches(entry, endTime);
     entry.error = message;
     this.appendEvent(entry, {
       type: 'workflow-failed',

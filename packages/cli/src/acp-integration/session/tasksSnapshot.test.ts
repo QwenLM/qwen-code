@@ -177,6 +177,17 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('omits workflow tasks unless the caller opts in', () => {
+    const snapshot = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [workflowSnapshot()],
+    );
+
+    expect(snapshot.tasks).toEqual([]);
+  });
+
   it('exposes phase visits and dispatch dependencies from the workflow registry', () => {
     const workflow = {
       kind: 'workflow',
@@ -269,6 +280,8 @@ describe('buildSessionTasksStatus workflow graph', () => {
       'session-1',
       configWith([], [workflow]),
       2_000,
+      [],
+      { includeWorkflows: true },
     );
     const task = snapshot.tasks.find(
       (candidate) => candidate.kind === 'workflow',
@@ -331,6 +344,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       configWith([]),
       2_000,
       [workflowSnapshot()],
+      { includeWorkflows: true },
     );
 
     expect(snapshot.tasks).toEqual([
@@ -392,6 +406,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       configWith([], [workflow]),
       2_000,
       [workflowSnapshot()],
+      { includeWorkflows: true },
     );
     const workflows = snapshot.tasks.filter(
       (candidate) => candidate.kind === 'workflow',

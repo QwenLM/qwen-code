@@ -24,7 +24,11 @@ const NODE_WIDTH = 172;
 const NODE_HEIGHT = 58;
 const NODE_GAP = 22;
 const CANVAS_PADDING = 22;
-const MAX_RENDERED_EDGES = 500;
+export const WORKFLOW_GRAPH_RENDER_LIMITS = {
+  lanes: 64,
+  nodes: 240,
+  edges: 400,
+} as const;
 const MAX_REPLAY_MARKERS = 160;
 const REPLAY_OVERVIEW_MS = 6_000;
 
@@ -48,6 +52,11 @@ export interface WorkflowGraphLayout {
   lanes: Array<{ id: string | null; title: string; index: number }>;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
+  dispatchCountByLaneId: ReadonlyMap<string | null, number>;
+  dispatchStatusById: ReadonlyMap<string, DaemonWorkflowDispatchStatus>;
+  omittedLanes: number;
+  omittedNodes: number;
+  omittedEdges: number;
 }
 
 export type WorkflowReplayEventKind =
@@ -381,9 +390,13 @@ export function buildWorkflowGraphLayout(
   const hasUnphased = task.dispatches.some(
     (dispatch) => dispatch.phaseVisitId === null,
   );
+  const phaseLaneLimit = Math.max(
+    0,
+    WORKFLOW_GRAPH_RENDER_LIMITS.lanes - (hasUnphased ? 1 : 0),
+  );
   const lanes = [
     ...(hasUnphased ? [{ id: null, title: 'No phase', index: 0 }] : []),
-    ...task.phaseVisits.map((visit, index) => ({
+    ...task.phaseVisits.slice(0, phaseLaneLimit).map((visit, index) => ({
       id: visit.id,
       title: visit.title,
       index: index + (hasUnphased ? 1 : 0),
@@ -392,22 +405,42 @@ export function buildWorkflowGraphLayout(
   if (lanes.length === 0) lanes.push({ id: null, title: 'No phase', index: 0 });
 
   const laneIndexById = new Map(lanes.map((lane) => [lane.id, lane.index]));
+  const dispatchCountByLaneId = new Map<string | null, number>();
+  const dispatchStatusById = new Map<string, DaemonWorkflowDispatchStatus>();
+  for (const dispatch of task.dispatches) {
+    dispatchCountByLaneId.set(
+      dispatch.phaseVisitId,
+      (dispatchCountByLaneId.get(dispatch.phaseVisitId) ?? 0) + 1,
+    );
+    dispatchStatusById.set(dispatch.id, dispatch.status);
+  }
   const rowByLane = new Map<number, number>();
-  const nodes = task.dispatches.map((dispatch) => {
-    const laneIndex = laneIndexById.get(dispatch.phaseVisitId) ?? 0;
-    const row = rowByLane.get(laneIndex) ?? 0;
-    rowByLane.set(laneIndex, row + 1);
-    return {
+  const nodes: WorkflowGraphNode[] = [];
+  for (const dispatch of task.dispatches) {
+    if (nodes.length >= WORKFLOW_GRAPH_RENDER_LIMITS.nodes) break;
+    const laneIndex = laneIndexById.get(dispatch.phaseVisitId);
+    if (laneIndex === undefined && dispatch.phaseVisitId !== null) continue;
+    const visibleLaneIndex = laneIndex ?? 0;
+    const row = rowByLane.get(visibleLaneIndex) ?? 0;
+    rowByLane.set(visibleLaneIndex, row + 1);
+    nodes.push({
       dispatch,
-      x: laneIndex * LANE_WIDTH + CANVAS_PADDING,
+      x: visibleLaneIndex * LANE_WIDTH + CANVAS_PADDING,
       y: LANE_HEADER_HEIGHT + CANVAS_PADDING + row * (NODE_HEIGHT + NODE_GAP),
-    };
-  });
+    });
+  }
   const nodeById = new Map(nodes.map((node) => [node.dispatch.id, node]));
+  const allDispatchIds = new Set(task.dispatches.map(({ id }) => id));
+  let totalEdgeCount = 0;
+  for (const dispatch of task.dispatches) {
+    for (const dependencyId of dispatch.dependsOn) {
+      if (allDispatchIds.has(dependencyId)) totalEdgeCount += 1;
+    }
+  }
   const edges: WorkflowGraphEdge[] = [];
   for (const target of nodes) {
     for (const dependencyId of target.dispatch.dependsOn) {
-      if (edges.length >= MAX_RENDERED_EDGES) break;
+      if (edges.length >= WORKFLOW_GRAPH_RENDER_LIMITS.edges) break;
       const source = nodeById.get(dependencyId);
       if (!source) continue;
       const startX = source.x + NODE_WIDTH;
@@ -433,6 +466,14 @@ export function buildWorkflowGraphLayout(
     lanes,
     nodes,
     edges,
+    dispatchCountByLaneId,
+    dispatchStatusById,
+    omittedLanes: Math.max(
+      0,
+      task.phaseVisits.length + (hasUnphased ? 1 : 0) - lanes.length,
+    ),
+    omittedNodes: Math.max(0, task.dispatches.length - nodes.length),
+    omittedEdges: Math.max(0, totalEdgeCount - edges.length),
   };
 }
 
@@ -926,8 +967,11 @@ export function WorkflowExecutionView({
                     runId: historicalTask.id,
                   })}
                   onClick={() => {
+                    const isCurrentComparison =
+                      showComparison &&
+                      comparisonTask?.id === historicalTask.id;
                     setComparisonRunId(historicalTask.id);
-                    setShowComparison(true);
+                    setShowComparison(!isCurrentComparison);
                   }}
                 >
                   <span className={styles.historyRunIdentity}>
@@ -1246,6 +1290,21 @@ export function WorkflowExecutionView({
           </span>
         )}
       </div>
+      {(layout.omittedLanes > 0 ||
+        layout.omittedNodes > 0 ||
+        layout.omittedEdges > 0) && (
+        <div
+          className={styles.graphOmission}
+          data-workflow-graph-omission
+          role="status"
+        >
+          {t('workflow.graph.omitted', {
+            lanes: layout.omittedLanes,
+            nodes: layout.omittedNodes,
+            edges: layout.omittedEdges,
+          })}
+        </div>
+      )}
       <div className={styles.workbench}>
         <div className={styles.viewport}>
           <div
@@ -1256,13 +1315,13 @@ export function WorkflowExecutionView({
             }}
           >
             {layout.lanes.map((lane) => {
-              const dispatchCount = layout.nodes.filter(
-                (node) => node.dispatch.phaseVisitId === lane.id,
-              ).length;
+              const dispatchCount =
+                layout.dispatchCountByLaneId.get(lane.id) ?? 0;
               return (
                 <div
                   key={lane.id ?? 'no-phase'}
                   className={styles.lane}
+                  data-workflow-lane={lane.id ?? 'no-phase'}
                   data-active={lane.id === activePhaseVisitId || undefined}
                   data-replay-future={
                     (lane.id !== null &&
@@ -1312,10 +1371,7 @@ export function WorkflowExecutionView({
                 </marker>
               </defs>
               {layout.edges.map((edge) => {
-                const targetStatus = labelById.has(edge.to)
-                  ? displayTask.dispatches.find(({ id }) => id === edge.to)
-                      ?.status
-                  : undefined;
+                const targetStatus = layout.dispatchStatusById.get(edge.to);
                 const isFuture =
                   replayProjection?.futureDispatchIds.has(edge.from) ||
                   replayProjection?.futureDispatchIds.has(edge.to);

@@ -745,13 +745,17 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionStatsImpl?: (sessionId: string) => Promise<ServeSessionStatsStatus>;
-  sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  sessionTasksImpl?: (
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    context?: BridgeClientRequestContext,
   ) => Promise<{ cancelled: boolean }>;
   controlSessionWorkflowTaskImpl?: (
     sessionId: string,
@@ -763,6 +767,7 @@ interface FakeBridgeOpts {
       | 'rerun'
       | 'delete-history'
       | 'run-saved',
+    context?: BridgeClientRequestContext,
   ) => Promise<{ changed: boolean; status?: string; taskId?: string }>;
   clearSessionGoalImpl?: (
     sessionId: string,
@@ -1042,6 +1047,7 @@ interface FakeBridge extends AcpSessionBridge {
   sessionSupportedCommandsCalls: string[];
   sessionStatsCalls: string[];
   sessionTasksCalls: string[];
+  sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined>;
   sessionLspCalls: string[];
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
@@ -1050,6 +1056,7 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     taskId: string;
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
+    context?: BridgeClientRequestContext;
   }>;
   controlSessionWorkflowTaskCalls: Array<{
     sessionId: string;
@@ -1061,6 +1068,7 @@ interface FakeBridge extends AcpSessionBridge {
       | 'rerun'
       | 'delete-history'
       | 'run-saved';
+    context?: BridgeClientRequestContext;
   }>;
   clearSessionGoalCalls: string[];
   continueSessionCalls: string[];
@@ -1220,6 +1228,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionStatsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined> =
+    [];
   const sessionLspCalls: string[] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
@@ -1802,6 +1812,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     sessionStatsCalls,
     sessionTasksCalls,
+    sessionTasksOptions,
     sessionLspCalls,
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
@@ -2072,9 +2083,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionStatsCalls.push(sessionId);
       return sessionStatsImpl(sessionId);
     },
-    async getSessionTasksStatus(sessionId) {
+    async getSessionTasksStatus(sessionId, opts) {
       sessionTasksCalls.push(sessionId);
-      return sessionTasksImpl(sessionId);
+      sessionTasksOptions.push(opts);
+      return sessionTasksImpl(sessionId, opts);
     },
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
@@ -2084,13 +2096,23 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTranscriptCalls.push(req);
       return sessionTranscriptImpl(req);
     },
-    async cancelSessionTask(sessionId, taskId, taskKind) {
-      cancelSessionTaskCalls.push({ sessionId, taskId, taskKind });
-      return cancelSessionTaskImpl(sessionId, taskId, taskKind);
+    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+      cancelSessionTaskCalls.push({
+        sessionId,
+        taskId,
+        taskKind,
+        ...(context ? { context } : {}),
+      });
+      return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
-    async controlSessionWorkflowTask(sessionId, taskId, action) {
-      controlSessionWorkflowTaskCalls.push({ sessionId, taskId, action });
-      return controlSessionWorkflowTaskImpl(sessionId, taskId, action);
+    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+      controlSessionWorkflowTaskCalls.push({
+        sessionId,
+        taskId,
+        action,
+        ...(context ? { context } : {}),
+      });
+      return controlSessionWorkflowTaskImpl(sessionId, taskId, action, context);
     },
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
@@ -8574,6 +8596,9 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/s-1/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const workflowTasksRes = await request(app)
+        .get('/session/s-1/tasks?includeWorkflows=true')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
       const lspRes = await request(app)
         .get('/session/s-1/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -8586,12 +8611,18 @@ describe('createServeApp', () => {
       expect(statsRes.body).toEqual(stats);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
+      expect(workflowTasksRes.status).toBe(200);
+      expect(workflowTasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
       expect(lspRes.body).toEqual(lsp);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionStatsCalls).toEqual(['s-1']);
-      expect(bridge.sessionTasksCalls).toEqual(['s-1']);
+      expect(bridge.sessionTasksCalls).toEqual(['s-1', 's-1']);
+      expect(bridge.sessionTasksOptions).toEqual([
+        { includeWorkflows: false },
+        { includeWorkflows: true },
+      ]);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
     });
 
@@ -8861,12 +8892,18 @@ describe('createServeApp', () => {
         .post('/session/s-1/tasks/task-1/cancel')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
         .send({ kind: 'workflow' });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cancelled: true });
       expect(bridge.cancelSessionTaskCalls).toEqual([
-        { sessionId: 's-1', taskId: 'task-1', taskKind: 'workflow' },
+        {
+          sessionId: 's-1',
+          taskId: 'task-1',
+          taskKind: 'workflow',
+          context: { clientId: 'client-1' },
+        },
       ]);
     });
 
@@ -8888,6 +8925,7 @@ describe('createServeApp', () => {
         .post('/session/s-1/tasks/task-1/workflow-action')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
         .send({ action: 'pause' });
       const resumeRes = await request(app)
         .post('/session/s-1/tasks/task-1/workflow-action')
@@ -8928,7 +8966,12 @@ describe('createServeApp', () => {
       expect(runSavedRes.status).toBe(200);
       expect(runSavedRes.body).toEqual({ changed: true, status: 'running' });
       expect(bridge.controlSessionWorkflowTaskCalls).toEqual([
-        { sessionId: 's-1', taskId: 'task-1', action: 'pause' },
+        {
+          sessionId: 's-1',
+          taskId: 'task-1',
+          action: 'pause',
+          context: { clientId: 'client-1' },
+        },
         { sessionId: 's-1', taskId: 'task-1', action: 'resume' },
         { sessionId: 's-1', taskId: 'task-1', action: 'retry' },
         { sessionId: 's-1', taskId: 'task-1', action: 'rerun' },

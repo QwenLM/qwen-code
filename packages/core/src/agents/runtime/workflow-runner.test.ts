@@ -309,6 +309,27 @@ describe('WorkflowRunner', () => {
     expect(observed.abortCount()).toBe(1);
   });
 
+  it('persists terminal runs without live fire-and-forget dispatches', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("fire and forget"); return "done"',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () => new Promise<string>(() => undefined),
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    const entry = registry.get(handle.runId);
+    expect(entry).toMatchObject({ status: 'completed' });
+    expect(entry?.dispatches).toEqual([
+      expect.objectContaining({ status: 'cancelled' }),
+    ]);
+    expect(writeWorkflowSnapshotMock).toHaveBeenCalledWith(config, entry);
+  });
+
   it('holds an in-flight agent result until a paused run resumes', async () => {
     const { config, registry } = configWithRegistry();
     let resolveDispatch: ((value: string) => void) | undefined;

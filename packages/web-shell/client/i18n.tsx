@@ -2403,6 +2403,8 @@ const EN: Messages = {
   'tasks.kind.workflow': 'Workflow',
   'workflow.graph.waiting': 'Waiting for the first agent dispatch…',
   'workflow.graph.notRecorded': 'No execution graph was saved for this run.',
+  'workflow.graph.omitted': (v) =>
+    `Graph limited for performance: ${v?.lanes ?? 0} phases, ${v?.nodes ?? 0} agents, and ${v?.edges ?? 0} connections omitted.`,
   'workflow.noPhase': 'No phase',
   'workflow.dispatchCount': (v) =>
     `${v?.count ?? 0} dispatch${v?.count === 1 ? '' : 'es'}`,
@@ -5195,6 +5197,8 @@ const ZH: Messages = {
   'tasks.kind.workflow': '工作流',
   'workflow.graph.waiting': '等待第一个 Agent 调度…',
   'workflow.graph.notRecorded': '这次运行没有保存执行图。',
+  'workflow.graph.omitted': (v) =>
+    `为保证性能，执行图已省略 ${v?.lanes ?? 0} 个阶段、${v?.nodes ?? 0} 个 Agent 和 ${v?.edges ?? 0} 条连线。`,
   'workflow.noPhase': '未分阶段',
   'workflow.dispatchCount': (v) => `${v?.count ?? 0} 个调度`,
   'workflow.selectedDispatch': '已选调度',

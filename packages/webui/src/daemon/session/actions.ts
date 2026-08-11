@@ -1481,7 +1481,7 @@ export function createDaemonSessionActions({
         );
       } catch (error) {
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Control workflow failed',
           error,
           'control_workflow',
@@ -1509,7 +1509,7 @@ export function createDaemonSessionActions({
         return { started: changed, ...result };
       } catch (error) {
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Run saved workflow failed',
           error,
           'run_saved_workflow',

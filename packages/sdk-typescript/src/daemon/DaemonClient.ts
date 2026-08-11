@@ -2710,7 +2710,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionTasksStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks?includeWorkflows=true`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {

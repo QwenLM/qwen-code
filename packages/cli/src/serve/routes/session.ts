@@ -3058,10 +3058,12 @@ export function registerSessionRoutes(
     '/session/:id/tasks',
     withOwnerReadSession(
       'GET /session/:id/tasks',
-      async (_req, res, sessionId, runtime) => {
-        res
-          .status(200)
-          .json(await runtime.bridge.getSessionTasksStatus(sessionId));
+      async (req, res, sessionId, runtime) => {
+        res.status(200).json(
+          await runtime.bridge.getSessionTasksStatus(sessionId, {
+            includeWorkflows: req.query['includeWorkflows'] === 'true',
+          }),
+        );
       },
     ),
   );
@@ -3223,10 +3225,17 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         res
           .status(200)
           .json(
-            await runtime.bridge.cancelSessionTask(sessionId, taskId, kind),
+            await runtime.bridge.cancelSessionTask(
+              sessionId,
+              taskId,
+              kind,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
           );
       },
     ),
@@ -3260,6 +3269,8 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         res
           .status(200)
           .json(
@@ -3267,6 +3278,7 @@ export function registerSessionRoutes(
               sessionId,
               taskId,
               action,
+              clientId !== undefined ? { clientId } : undefined,
             ),
           );
       },

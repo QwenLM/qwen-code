@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
@@ -41,33 +41,64 @@ export function WorkflowRunsPage() {
   const [loadError, setLoadError] = useState(false);
   const [startingName, setStartingName] = useState<string | null>(null);
   const [startError, setStartError] = useState(false);
+  const activeSessionIdRef = useRef(connection.sessionId);
+  const reloadGenerationRef = useRef(0);
+  activeSessionIdRef.current = connection.sessionId;
 
   const reload = useCallback(async () => {
-    if (!connection.sessionId) {
+    const sessionId = connection.sessionId;
+    const generation = ++reloadGenerationRef.current;
+    if (!sessionId) {
       setSnapshot(null);
       setLoadError(false);
       setLoading(false);
       return;
     }
+    setSnapshot((current) =>
+      current?.sessionId === sessionId ? current : null,
+    );
     setLoading(true);
     try {
       const [nextSnapshot] = await Promise.all([
         actions.getTasks(),
         actions.refreshCommands(),
       ]);
+      if (
+        reloadGenerationRef.current !== generation ||
+        activeSessionIdRef.current !== sessionId ||
+        nextSnapshot.sessionId !== sessionId
+      ) {
+        return;
+      }
       setSnapshot(nextSnapshot);
       setLoadError(false);
     } catch (error: unknown) {
+      if (
+        reloadGenerationRef.current !== generation ||
+        activeSessionIdRef.current !== sessionId
+      ) {
+        return;
+      }
       console.warn('[web-shell] failed to load workflow runs:', error);
       setLoadError(true);
     } finally {
-      setLoading(false);
+      if (
+        reloadGenerationRef.current === generation &&
+        activeSessionIdRef.current === sessionId
+      ) {
+        setLoading(false);
+      }
     }
   }, [actions, connection.sessionId]);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    setStartingName(null);
+    setStartError(false);
+  }, [connection.sessionId]);
 
   const counts = useMemo(() => {
     let active = 0;
@@ -85,12 +116,22 @@ export function WorkflowRunsPage() {
     [connection.supportedCommands?.savedWorkflows],
   );
 
+  const handleTasksChange = useCallback(
+    (nextSnapshot: DaemonSessionTasksStatus) => {
+      if (nextSnapshot.sessionId !== activeSessionIdRef.current) return;
+      setSnapshot(nextSnapshot);
+    },
+    [],
+  );
+
   const runSavedWorkflow = useCallback(
     async (workflow: SavedWorkflow) => {
+      const sessionId = activeSessionIdRef.current;
       setStartingName(workflow.name);
       setStartError(false);
       try {
         const result = await actions.runSavedWorkflow(workflow.name);
+        if (activeSessionIdRef.current !== sessionId) return;
         if (!result.started) {
           setStartError(true);
           return;
@@ -98,9 +139,9 @@ export function WorkflowRunsPage() {
         setTab('active');
         await reload();
       } catch {
-        setStartError(true);
+        if (activeSessionIdRef.current === sessionId) setStartError(true);
       } finally {
-        setStartingName(null);
+        if (activeSessionIdRef.current === sessionId) setStartingName(null);
       }
     },
     [actions, reload],
@@ -260,7 +301,7 @@ export function WorkflowRunsPage() {
                   syncSnapshot
                   taskView="workflow-active"
                   emptyLabel={t('workflowRuns.emptyActive')}
-                  onTasksChange={setSnapshot}
+                  onTasksChange={handleTasksChange}
                   onWorkflowRunStarted={() => setTab('active')}
                 />
               </TabsContent>
@@ -273,7 +314,7 @@ export function WorkflowRunsPage() {
                   syncSnapshot
                   taskView="workflow-history"
                   emptyLabel={t('workflowRuns.emptyHistory')}
-                  onTasksChange={setSnapshot}
+                  onTasksChange={handleTasksChange}
                   onWorkflowRunStarted={() => setTab('active')}
                 />
               </TabsContent>

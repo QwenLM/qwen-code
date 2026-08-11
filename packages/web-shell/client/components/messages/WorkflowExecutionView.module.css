@@ -649,6 +649,14 @@
   font-weight: 600;
 }
 
+.graphOmission {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--warning-color) 7%, var(--background));
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
 .approvalMetric,
 .approvalMetric strong {
   color: var(--warning-color);

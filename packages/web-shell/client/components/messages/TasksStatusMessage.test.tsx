@@ -47,6 +47,7 @@ afterEach(() => {
   getTasksMock.mockReset();
   cancelTaskMock.mockReset();
   controlWorkflowTaskMock.mockReset();
+  vi.useRealTimers();
 });
 
 function agentTask(
@@ -133,6 +134,11 @@ function renderPanel(
   tasks: DaemonSessionTaskStatus[],
   options: {
     embedded?: boolean;
+    keyboardShortcuts?: boolean;
+    syncSnapshot?: boolean;
+    taskView?: 'all' | 'workflow-active' | 'workflow-history';
+    sessionId?: string;
+    onTasksChange?: (snapshot: DaemonSessionTasksStatus) => void;
     planTodos?: readonly TodoItem[];
     agentTools?: readonly ACPToolCall[];
     onOpenSubagent?: (tool: ACPToolCall) => void;
@@ -141,7 +147,7 @@ function renderPanel(
 ): HTMLElement {
   const snapshot: DaemonSessionTasksStatus = {
     v: 1,
-    sessionId: 'session-1',
+    sessionId: options.sessionId ?? 'session-1',
     now: 10_000,
     tasks,
   };
@@ -155,11 +161,15 @@ function renderPanel(
         <TasksStatusMessage
           message={{ snapshot }}
           embedded={options.embedded}
+          keyboardShortcuts={options.keyboardShortcuts}
+          syncSnapshot={options.syncSnapshot}
+          taskView={options.taskView}
           manageActiveEvent={false}
           planTodos={options.planTodos}
           agentTools={options.agentTools}
           onOpenSubagent={options.onOpenSubagent}
           onOpenMonitor={options.onOpenMonitor}
+          onTasksChange={options.onTasksChange}
         />
       </I18nProvider>,
     );
@@ -204,6 +214,160 @@ describe('TasksStatusMessage monitor details', () => {
 });
 
 describe('TasksStatusMessage workflow details', () => {
+  it('makes embedded workflow rows keyboard-accessible', () => {
+    const container = renderPanel([workflowTask()], {
+      embedded: true,
+      keyboardShortcuts: false,
+      taskView: 'workflow-active',
+    });
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) =>
+      candidate.textContent?.includes('[workflow] review-and-fix'),
+    );
+
+    expect(row).toBeDefined();
+    expect(row?.tabIndex).toBe(0);
+    expect(row?.getAttribute('aria-expanded')).toBe('false');
+    act(() => {
+      row?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    expect(row?.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain('Review behavior regressions');
+  });
+
+  it('closes filtered detail instead of selecting a different workflow', () => {
+    const taskA = workflowTask({
+      id: 'workflow-a',
+      label: 'run-a',
+      startTime: 2_000,
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          id: 'dispatch-a',
+          prompt: 'prompt-for-a',
+        },
+      ],
+    });
+    const taskB = workflowTask({
+      id: 'workflow-b',
+      label: 'run-b',
+      startTime: 1_000,
+      dispatches: [
+        {
+          ...workflowTask().dispatches[0]!,
+          id: 'dispatch-b',
+          prompt: 'prompt-for-b',
+        },
+      ],
+    });
+    const container = renderPanel([taskA, taskB], {
+      embedded: true,
+      keyboardShortcuts: false,
+      syncSnapshot: true,
+      taskView: 'workflow-active',
+    });
+    const rowA = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('[workflow] run-a'));
+    act(() => rowA?.click());
+    expect(container.textContent).toContain('prompt-for-a');
+
+    const nextSnapshot: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-1',
+      now: 11_000,
+      tasks: [{ ...taskA, status: 'completed', endTime: 11_000 }, taskB],
+    };
+    const root = mounted.at(-1)!.root;
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TasksStatusMessage
+            message={{ snapshot: nextSnapshot }}
+            embedded
+            keyboardShortcuts={false}
+            manageActiveEvent={false}
+            syncSnapshot
+            taskView="workflow-active"
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const rowB = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('[workflow] run-b'));
+    expect(rowB?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('prompt-for-a');
+    expect(container.textContent).not.toContain('prompt-for-b');
+  });
+
+  it('ignores a stale polling response from the previous session', async () => {
+    vi.useFakeTimers();
+    const onTasksChange = vi.fn();
+    let resolveSessionA!: (snapshot: DaemonSessionTasksStatus) => void;
+    const pendingSessionA = new Promise<DaemonSessionTasksStatus>((resolve) => {
+      resolveSessionA = resolve;
+    });
+    getTasksMock.mockReturnValueOnce(pendingSessionA);
+    const sessionATask = workflowTask({ id: 'workflow-a', label: 'run-a' });
+    const sessionBTask = workflowTask({ id: 'workflow-b', label: 'run-b' });
+    const container = renderPanel([sessionATask], {
+      embedded: true,
+      keyboardShortcuts: false,
+      syncSnapshot: true,
+      taskView: 'workflow-active',
+      sessionId: 'session-a',
+      onTasksChange,
+    });
+    await act(async () => vi.advanceTimersByTime(3_000));
+
+    const sessionBSnapshot: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-b',
+      now: 11_000,
+      tasks: [sessionBTask],
+    };
+    const root = mounted.at(-1)!.root;
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TasksStatusMessage
+            message={{ snapshot: sessionBSnapshot }}
+            embedded
+            keyboardShortcuts={false}
+            manageActiveEvent={false}
+            syncSnapshot
+            taskView="workflow-active"
+            onTasksChange={onTasksChange}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await act(async () => {
+      resolveSessionA({
+        v: 1,
+        sessionId: 'session-a',
+        now: 12_000,
+        tasks: [sessionATask],
+      });
+      await pendingSessionA;
+    });
+
+    expect(container.textContent).toContain('run-b');
+    expect(container.textContent).not.toContain('run-a');
+    expect(onTasksChange).not.toHaveBeenCalled();
+  });
+
   it('opens the live graph and stops the workflow through the task API', async () => {
     const task = workflowTask();
     cancelTaskMock.mockResolvedValue({ cancelled: true });
@@ -282,6 +446,66 @@ describe('TasksStatusMessage workflow details', () => {
       'workflow-1',
       'resume',
     );
+  });
+
+  it('ignores a workflow action that settles after switching sessions', async () => {
+    let resolveControl!: (value: {
+      changed: boolean;
+      status: 'pausing';
+    }) => void;
+    controlWorkflowTaskMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveControl = resolve;
+      }),
+    );
+    const sessionATask = workflowTask({ id: 'workflow-a', label: 'run-a' });
+    const sessionBTask = workflowTask({ id: 'workflow-b', label: 'run-b' });
+    const container = renderPanel([sessionATask], {
+      embedded: true,
+      keyboardShortcuts: false,
+      syncSnapshot: true,
+      taskView: 'workflow-active',
+      sessionId: 'session-a',
+    });
+    const rowA = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('[workflow] run-a'));
+    act(() => rowA?.click());
+    const pause = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Pause');
+    act(() => pause?.click());
+
+    const sessionBSnapshot: DaemonSessionTasksStatus = {
+      v: 1,
+      sessionId: 'session-b',
+      now: 11_000,
+      tasks: [sessionBTask],
+    };
+    const root = mounted.at(-1)!.root;
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TasksStatusMessage
+            message={{ snapshot: sessionBSnapshot }}
+            embedded
+            keyboardShortcuts={false}
+            manageActiveEvent={false}
+            syncSnapshot
+            taskView="workflow-active"
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await act(async () => {
+      resolveControl({ changed: true, status: 'pausing' });
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('run-b');
+    expect(container.textContent).not.toContain('run-a');
+    expect(getTasksMock).not.toHaveBeenCalled();
   });
 
   it('retries a failed workflow path and refreshes the graph', async () => {

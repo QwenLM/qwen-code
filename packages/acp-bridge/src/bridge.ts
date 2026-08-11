@@ -8237,10 +8237,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
-    async getSessionTasksStatus(sessionId) {
+    async getSessionTasksStatus(sessionId, opts) {
       return requestSessionStatus<ServeSessionTasksStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionTasks,
+        { includeWorkflows: opts?.includeWorkflows === true },
       );
     },
 
@@ -8255,7 +8256,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionTranscriptPage(req);
     },
 
-    async cancelSessionTask(sessionId, taskId, taskKind) {
+    async cancelSessionTask(sessionId, taskId, taskKind, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       return requestSessionStatus<{ cancelled: boolean }>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
@@ -8263,7 +8267,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
-    async controlSessionWorkflowTask(sessionId, taskId, action) {
+    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       return requestSessionStatus<{
         changed: boolean;
         status?: ServeSessionWorkflowTaskStatus['status'];

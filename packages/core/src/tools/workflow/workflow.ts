@@ -75,6 +75,11 @@ export interface WorkflowToolOptions {
   dispatch?: WorkflowAgentDispatch;
 }
 
+export interface WorkflowToolResult extends ToolResult {
+  /** Exact run started by a successfully admitted background invocation. */
+  workflowRunId?: string;
+}
+
 const WORKFLOW_PARAM_SCHEMA = {
   type: 'object',
   properties: {
@@ -165,7 +170,7 @@ const WORKFLOW_PARAM_SCHEMA = {
 
 class WorkflowToolInvocation extends BaseToolInvocation<
   WorkflowParams,
-  ToolResult
+  WorkflowToolResult
 > {
   constructor(
     private readonly config: Config,
@@ -194,7 +199,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
-  ): Promise<ToolResult> {
+  ): Promise<WorkflowToolResult> {
     const runInBackground = this.params.run_in_background === true;
     if (runInBackground && signal.aborted) {
       return backgroundStartCancelledResult();
@@ -229,6 +234,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         handle.budget.total,
       );
       return {
+        workflowRunId: handle.runId,
         llmContent: [
           {
             text: `Workflow started in background.\nRun ID: ${handle.runId}\nStatus: ${status}`,
@@ -341,7 +347,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
   }
 }
 
-function backgroundStartCancelledResult(): ToolResult {
+function backgroundStartCancelledResult(): WorkflowToolResult {
   return {
     llmContent: 'Workflow was cancelled before it could start.',
     returnDisplay: 'Workflow cancelled.',
@@ -571,7 +577,7 @@ These shapes are a starting point, not a menu; compose the harness the task actu
 
 export class WorkflowTool extends BaseDeclarativeTool<
   WorkflowParams,
-  ToolResult
+  WorkflowToolResult
 > {
   constructor(
     private readonly config: Config,
@@ -615,9 +621,6 @@ export class WorkflowTool extends BaseDeclarativeTool<
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
     if (params.run_in_background === true) {
-      if (this.config.getExperimentalZedIntegration?.() === true) {
-        return 'WorkflowTool: `run_in_background` is not available in the Zed integration.';
-      }
       if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
         return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
       }
@@ -627,7 +630,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
 
   protected createInvocation(
     params: WorkflowParams,
-  ): ToolInvocation<WorkflowParams, ToolResult> {
+  ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
     return new WorkflowToolInvocation(this.config, this.toolOptions, params);
   }
 }

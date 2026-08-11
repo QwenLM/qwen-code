@@ -971,7 +971,7 @@ describe('WorkflowRunRegistry', () => {
     ]);
   });
 
-  it('keeps the workflow terminal event last while late dispatches drain', () => {
+  it('cancels unfinished dispatches before the workflow terminal event', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_late_dispatch'));
     r.onDispatchQueued(entry.runId, {
@@ -986,16 +986,44 @@ describe('WorkflowRunRegistry', () => {
     r.onDispatchSettled(entry.runId, 'dispatch-1', undefined, 1_400);
 
     expect(entry.dispatches[0]).toMatchObject({
-      status: 'completed',
-      endedAt: 1_400,
+      status: 'cancelled',
+      endedAt: 1_300,
     });
     expect(entry.events.at(-1)).toMatchObject({
       type: 'workflow-completed',
       at: 1_300,
     });
-    expect(entry.events).not.toContainEqual(
-      expect.objectContaining({ type: 'dispatch-completed', at: 1_400 }),
-    );
+    expect(entry.events.at(-2)).toMatchObject({
+      type: 'dispatch-cancelled',
+      at: 1_300,
+    });
+  });
+
+  it('cancels unfinished dispatches before a failed workflow is persisted', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_failed_dispatch'));
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-1',
+      prompt: 'Fire and forget',
+      dependsOn: [],
+      queuedAt: 1_100,
+    });
+    r.onDispatchStarted(entry.runId, 'dispatch-1', 1_200);
+
+    r.fail(entry.runId, 'workflow failed', 1_300);
+
+    expect(entry.dispatches[0]).toMatchObject({
+      status: 'cancelled',
+      endedAt: 1_300,
+    });
+    expect(entry.events.at(-2)).toMatchObject({
+      type: 'dispatch-cancelled',
+      at: 1_300,
+    });
+    expect(entry.events.at(-1)).toMatchObject({
+      type: 'workflow-failed',
+      at: 1_300,
+    });
   });
 
   it('marks live dispatches cancelled when the workflow is stopped', () => {

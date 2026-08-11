@@ -1445,7 +1445,10 @@ export interface AcpSessionBridge {
   ): Promise<ServeSessionSupportedCommandsStatus>;
 
   /** Read the live background task snapshot for a live session. */
-  getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
+  getSessionTasksStatus(
+    sessionId: string,
+    opts?: { includeWorkflows?: boolean },
+  ): Promise<ServeSessionTasksStatus>;
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
@@ -1464,6 +1467,7 @@ export interface AcpSessionBridge {
     sessionId: string,
     taskId: string,
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 
   /** Control a run, delete history, or start a saved workflow definition. */
@@ -1477,6 +1481,7 @@ export interface AcpSessionBridge {
       | 'rerun'
       | 'delete-history'
       | 'run-saved',
+    context?: BridgeClientRequestContext,
   ): Promise<{
     changed: boolean;
     status?: ServeSessionWorkflowTaskStatus['status'];

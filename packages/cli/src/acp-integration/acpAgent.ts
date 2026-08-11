@@ -120,6 +120,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type WorkflowParams,
+  type WorkflowToolResult,
   listSavedWorkflows,
   listWorkflowSnapshots,
 } from '@qwen-code/qwen-code-core';
@@ -7218,13 +7219,15 @@ class QwenAgent implements Agent {
 
   private async buildSessionTasksStatus(
     sessionId: string,
+    includeWorkflows = false,
   ): Promise<ServeSessionTasksStatus> {
     const session = this.sessionOrThrow(sessionId);
     return buildSessionTasksStatus(
       sessionId,
       session.getConfig(),
       Date.now(),
-      await session.refreshWorkflowHistory(),
+      includeWorkflows ? await session.refreshWorkflowHistory() : [],
+      { includeWorkflows },
     );
   }
 
@@ -8204,6 +8207,7 @@ class QwenAgent implements Agent {
         }
         return (await this.buildSessionTasksStatus(
           sessionId,
+          params['includeWorkflows'] === true,
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
@@ -10533,7 +10537,9 @@ class QwenAgent implements Agent {
               );
               return { cancelled: false, reason, status: task?.status };
             }
+            const handle = registry.getHandle(taskId);
             registry.cancel(taskId, Date.now());
+            if (handle) await handle.completion;
             debugLogger.info(
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
             );
@@ -10601,22 +10607,15 @@ class QwenAgent implements Agent {
               'The workflow tool is unavailable; cannot run this saved workflow.',
             );
           }
-          const existingRunIds = new Set(
-            registry.list().map((entry) => entry.runId),
-          );
-          await workflowTool
+          const result = (await workflowTool
             .build({
               scriptPath: savedWorkflow.scriptPath,
               run_in_background: true,
             } satisfies WorkflowParams)
-            .execute(new AbortController().signal);
-          const startedTask = registry
-            .list()
-            .find(
-              (entry) =>
-                !existingRunIds.has(entry.runId) &&
-                entry.scriptPath === savedWorkflow.scriptPath,
-            );
+            .execute(new AbortController().signal)) as WorkflowToolResult;
+          const startedTask = result.workflowRunId
+            ? registry.get(result.workflowRunId)
+            : undefined;
           return startedTask
             ? {
                 changed: true,
@@ -10652,22 +10651,13 @@ class QwenAgent implements Agent {
             ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
             run_in_background: true,
           };
-          const existingRunIds =
-            action === 'rerun'
-              ? new Set(registry.list().map((entry) => entry.runId))
-              : undefined;
-          await workflowTool
+          const result = (await workflowTool
             .build(startParams)
-            .execute(new AbortController().signal);
+            .execute(new AbortController().signal)) as WorkflowToolResult;
           if (action === 'rerun') {
-            const rerunTask = registry
-              .list()
-              .find(
-                (entry) =>
-                  !existingRunIds?.has(entry.runId) &&
-                  entry.script === task.script &&
-                  entry.args === task.args,
-              );
+            const rerunTask = result.workflowRunId
+              ? registry.get(result.workflowRunId)
+              : undefined;
             if (rerunTask) {
               registry.setLineage(rerunTask.runId, task.runId, 'rerun');
             }

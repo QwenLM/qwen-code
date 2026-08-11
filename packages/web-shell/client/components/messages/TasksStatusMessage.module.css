@@ -48,6 +48,11 @@
   cursor: pointer;
 }
 
+.row:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
 .selected {
   color: var(--agent-blue-500);
 }

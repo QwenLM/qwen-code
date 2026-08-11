@@ -207,7 +207,7 @@ describe('WorkflowTool', () => {
     ).not.toThrow();
   });
 
-  it('rejects background runs without a completion channel or in Zed', () => {
+  it('uses the completion channel as the background-run capability', () => {
     const interactiveRegistry = new WorkflowRunRegistry();
     const interactiveConfig = {
       isInteractive: () => true,
@@ -231,7 +231,7 @@ describe('WorkflowTool', () => {
         script: 'return 1',
         run_in_background: true,
       }),
-    ).toThrow(/Zed integration/i);
+    ).not.toThrow();
   });
 
   it('does not register a background run when the caller is already aborted', async () => {
@@ -322,6 +322,7 @@ describe('WorkflowTool', () => {
     const entry = registry.list()[0]!;
     expect(entry.status).toBe('running');
     expect(entry.isBackgrounded).toBe(true);
+    expect(result.workflowRunId).toBe(entry.runId);
     expect(result.llmContent).toEqual([
       {
         text: `Workflow started in background.\nRun ID: ${entry.runId}\nStatus: running`,
