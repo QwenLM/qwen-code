@@ -1764,6 +1764,32 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // An alias replaces its name with its body and keeps the trailing argv, so
+  // the relocation an invocation appends is part of what runs.
+  it.each([
+    () => `alias gg='git'; gg -C ${plainOutsidePath} reset --hard`,
+    () => `alias gg='git -C'; gg ${plainOutsidePath} reset --hard`,
+  ])('denies a relocation passed to an alias %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('leaves an alias used inside the boundary alone', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      "alias gg='git'; gg status",
+      "alias gg='git commit'; gg -m x",
+      "alias gg='git status'; cd nested; gg",
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

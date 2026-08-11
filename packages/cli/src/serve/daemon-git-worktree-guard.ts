@@ -1916,7 +1916,7 @@ async function evaluateCommandWithCwd(
   const shellLocals = scope.locals ?? new Map<string, GuardToken>();
   // `alias g='git …'` and `f() { git …; }` both make a later bare word run a
   // body defined earlier; without them that word is an opaque `other` run.
-  const definedBodies = new Map<string, string>();
+  const definedBodies = new Map<string, { body: string; alias: boolean }>();
   // Names carrying the export attribute from a name-only `export KEY`; a
   // later assignment to one of them reaches the git subprocess.
   const exportedNames = scope.exportedNames ?? new Set<string>();
@@ -2020,7 +2020,9 @@ async function evaluateCommandWithCwd(
         const body = (
           closeAt >= 0 ? definitionBody.slice(0, closeAt) : definitionBody
         ).trim();
-        if (body.length > 0) definedBodies.set(insideDefinition, body);
+        if (body.length > 0) {
+          definedBodies.set(insideDefinition, { body, alias: false });
+        }
         insideDefinition = undefined;
       }
       continue;
@@ -2303,13 +2305,19 @@ async function evaluateCommandWithCwd(
           const aliasDefinitions = readAliasDefinitions(run);
           if (aliasDefinitions.length > 0) {
             for (const definition of aliasDefinitions) {
-              definedBodies.set(definition.name, definition.body);
+              definedBodies.set(definition.name, {
+                body: definition.body,
+                alias: true,
+              });
             }
             break;
           }
           const definition = readDefinition(run);
           if (definition) {
-            definedBodies.set(definition.name, definition.body);
+            definedBodies.set(definition.name, {
+              body: definition.body,
+              alias: false,
+            });
             break;
           }
           const programToken = readProgramWord(run);
@@ -2334,17 +2342,29 @@ async function evaluateCommandWithCwd(
             if (denial) return { denial, cwdAfter: trackedCwd };
             break;
           }
-          const body =
+          const defined =
             programToken === undefined
               ? undefined
               : definedBodies.get(programToken);
-          if (body !== undefined) {
+          if (defined !== undefined) {
             if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) {
               return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
             }
+            // An alias replaces its name with its body and keeps the trailing
+            // argv, so `gg -C <outside> reset --hard` runs `git -C <outside>
+            // reset --hard`. A function receives those args through `$@`
+            // inside its body, so nothing is appended here.
+            let replay = defined.body;
+            if (defined.alias) {
+              const programIndex = run.findIndex(
+                (token) => token.text === programToken,
+              );
+              const args = joinArgvTexts(run.slice(programIndex + 1));
+              if (args.length > 0) replay = `${replay} ${args}`;
+            }
             // The body runs here, at the cwd this word was reached with.
             const nested = await evaluateCommandWithCwd(
-              body,
+              replay,
               trackedCwd,
               entryCwd,
               activeContext(),
