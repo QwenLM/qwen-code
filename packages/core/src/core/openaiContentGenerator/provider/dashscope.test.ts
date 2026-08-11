@@ -13,7 +13,10 @@ import {
   type MockedFunction,
 } from 'vitest';
 import OpenAI from 'openai';
-import { DashScopeOpenAICompatibleProvider } from './dashscope.js';
+import {
+  DashScopeOpenAICompatibleProvider,
+  selectDashScopeThinkingKnob,
+} from './dashscope.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
@@ -2595,6 +2598,258 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((result as any).preserve_thinking).toBe(false);
+    });
+  });
+});
+
+describe('selectDashScopeThinkingKnob', () => {
+  const model = 'qwen3.8-max';
+
+  it('returns undefined for non-tiered or missing models', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        'qwen3-max',
+        { enable_thinking: false },
+        { thinking_budget: 100 },
+        'high',
+      ),
+    ).toBeUndefined();
+    expect(
+      selectDashScopeThinkingKnob(
+        undefined,
+        { reasoning_effort: 'high' },
+        undefined,
+        undefined,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('matches the tiered family case-insensitively', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        'QWEN3.8-MAX-preview',
+        undefined,
+        undefined,
+        'high',
+      ),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  it('returns undefined when no layer carries a knob', () => {
+    expect(
+      selectDashScopeThinkingKnob(model, undefined, undefined, undefined),
+    ).toBeUndefined();
+  });
+
+  it('falls back to the unified reasoning tier', () => {
+    expect(
+      selectDashScopeThinkingKnob(model, undefined, undefined, 'high'),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  it('lets an extra_body disable win over same-layer values and lower layers', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        { enable_thinking: false, reasoning_effort: 'low' },
+        { thinking_budget: 100 },
+        'high',
+      ),
+    ).toEqual({
+      source: 'extra_body',
+      field: 'enable_thinking',
+      value: false,
+    });
+  });
+
+  it('lets an extra_body budget win over lower-priority layers', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        { thinking_budget: 300 },
+        { reasoning_effort: 'low' },
+        'high',
+      ),
+    ).toEqual({
+      source: 'extra_body',
+      field: 'thinking_budget',
+      value: 300,
+    });
+  });
+
+  it('keeps reasoning_effort over an explicit same-layer thinking_budget', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        { reasoning_effort: 'low', thinking_budget: 300 },
+        undefined,
+        undefined,
+      ),
+    ).toEqual({
+      source: 'extra_body',
+      field: 'reasoning_effort',
+      value: 'low',
+    });
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { reasoning_effort: 'low', thinking_budget: 100 },
+        undefined,
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'reasoning_effort',
+      value: 'low',
+    });
+  });
+
+  it('ignores nullish extra_body knobs', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        {
+          enable_thinking: null,
+          reasoning_effort: null,
+          thinking_budget: undefined,
+        },
+        undefined,
+        'high',
+      ),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  describe('extra_body on-switch', () => {
+    it('lets a samplingParams value decide', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          { thinking_budget: 200 },
+          'high',
+        ),
+      ).toEqual({
+        source: 'samplingParams',
+        field: 'thinking_budget',
+        value: 200,
+      });
+    });
+
+    it('lets the reasoning tier decide when samplingParams has no value', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          undefined,
+          'high',
+        ),
+      ).toEqual({
+        source: 'reasoning',
+        field: 'reasoning_effort',
+        value: 'high',
+      });
+    });
+
+    it('is itself the selection when nothing below carries a value', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          undefined,
+          undefined,
+        ),
+      ).toEqual({
+        source: 'extra_body',
+        field: 'enable_thinking',
+        value: true,
+      });
+    });
+
+    it('blocks a lower-priority samplingParams disable', () => {
+      expect(
+        selectDashScopeThinkingKnob(
+          model,
+          { enable_thinking: true },
+          { enable_thinking: false },
+          'high',
+        ),
+      ).toEqual({
+        source: 'reasoning',
+        field: 'reasoning_effort',
+        value: 'high',
+      });
+    });
+  });
+
+  it('lets a samplingParams disable win over the reasoning tier', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { enable_thinking: false },
+        'high',
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'enable_thinking',
+      value: false,
+    });
+  });
+
+  it('lets a samplingParams budget win over the reasoning tier', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { thinking_budget: 128 },
+        'high',
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'thinking_budget',
+      value: 128,
+    });
+  });
+
+  it('lets the reasoning tier decide under a samplingParams on-switch', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { enable_thinking: true },
+        'high',
+      ),
+    ).toEqual({
+      source: 'reasoning',
+      field: 'reasoning_effort',
+      value: 'high',
+    });
+  });
+
+  it('keeps a lone samplingParams on-switch as the selection', () => {
+    expect(
+      selectDashScopeThinkingKnob(
+        model,
+        undefined,
+        { enable_thinking: true },
+        undefined,
+      ),
+    ).toEqual({
+      source: 'samplingParams',
+      field: 'enable_thinking',
+      value: true,
     });
   });
 });
