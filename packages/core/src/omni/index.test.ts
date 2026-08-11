@@ -1812,7 +1812,17 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(recoveryMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
-      { quarantineRetentionDays: 3, quarantineMaxBytes: 1024 },
+      {
+        quarantineRetentionDays: 3,
+        quarantineMaxBytes: 1024,
+        // Corrupt-object deletion cascades into the degradation cache.
+        // (Structural match: armPipeline's fresh module graph makes the
+        // class identity differ from this file's static import.)
+        degradationCache: expect.objectContaining({
+          removeByOriginalSha256: expect.any(Function),
+          removeByDegradedSha256: expect.any(Function),
+        }),
+      },
     );
   });
 });

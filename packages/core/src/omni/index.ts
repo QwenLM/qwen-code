@@ -36,6 +36,7 @@ import {
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
 } from './upload-cache.js';
 import { runStartupRecoveryOnce } from './recovery.js';
+import { OmniDegradationCache } from './policy/degradation-cache.js';
 import {
   formatDisclosureText,
   formatOmissionText,
@@ -410,6 +411,10 @@ export async function processMediaForOmniDelivery(
   await runStartupRecoveryOnce(store, uploadCache, {
     quarantineRetentionDays: config.getOmniQuarantineRetentionDays?.(),
     quarantineMaxBytes: config.getOmniQuarantineMaxBytes?.(),
+    // Corrupt-object deletion must also invalidate degradation-cache
+    // entries (as source or derivative) — otherwise policy-cache.json
+    // accumulates orphans that can never be served again.
+    degradationCache: new OmniDegradationCache(store.getOmniRootDir()),
   });
 
   // Fixed-policy preprocessing (decision D5: this single site covers

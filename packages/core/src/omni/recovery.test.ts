@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { OmniObjectStore } from './storage.js';
 import { OmniUploadCache } from './upload-cache.js';
+import { OmniDegradationCache } from './policy/degradation-cache.js';
 import {
   runStartupRecoveryOnce,
   resetRecoveryLatchForTests,
@@ -124,6 +125,41 @@ describe('runStartupRecoveryOnce', () => {
 
     await expect(fs.access(objectPath)).rejects.toThrow();
     expect(await cache.get(sha256, 'm')).toBeNull();
+  });
+
+  it('cascades corrupt-object deletion into the degradation cache (source AND derivative sides)', async () => {
+    const { sha256, objectPath } = await putObject('corrupt-policy-source');
+    await fs.writeFile(objectPath, 'tampered-bytes'); // break hash==name
+    const degradationCache = new OmniDegradationCache(store.getOmniRootDir());
+    const otherSha = 'b'.repeat(64);
+    // Entry where the corrupt object is the SOURCE…
+    await degradationCache.put(sha256, 'fp-source', {
+      degradedSha256: otherSha,
+      extension: '.jpg',
+      disclosure: 'd1',
+      mimeType: 'image/jpeg',
+    });
+    // …entry where it is the DERIVATIVE…
+    await degradationCache.put(otherSha, 'fp-derived', {
+      degradedSha256: sha256,
+      extension: '.jpg',
+      disclosure: 'd2',
+      mimeType: 'image/jpeg',
+    });
+    // …and an unrelated entry that must survive the cascade.
+    await degradationCache.put(otherSha, 'fp-unrelated', {
+      degradedSha256: otherSha,
+      extension: '.jpg',
+      disclosure: 'd3',
+      mimeType: 'image/jpeg',
+    });
+
+    await runStartupRecoveryOnce(store, undefined, { degradationCache });
+
+    await expect(fs.access(objectPath)).rejects.toThrow();
+    expect(await degradationCache.get(sha256, 'fp-source')).toBeNull();
+    expect(await degradationCache.get(otherSha, 'fp-derived')).toBeNull();
+    expect(await degradationCache.get(otherSha, 'fp-unrelated')).not.toBeNull();
   });
 
   it('keeps intact objects and runs only once per process', async () => {

@@ -12,6 +12,7 @@ import { pipeline } from 'node:stream/promises';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { OmniObjectStore } from './storage.js';
 import type { OmniUploadCache } from './upload-cache.js';
+import type { OmniDegradationCache } from './policy/degradation-cache.js';
 
 const debugLogger = createDebugLogger('omni:recovery');
 
@@ -55,6 +56,11 @@ export interface StartupRecoveryOptions {
   /** Above this total size, quarantined invocations are removed
    * oldest-first until the area fits. */
   quarantineMaxBytes?: number;
+  /** When set, corrupt-object deletion also cascades into the
+   * degradation cache (both as source and as derivative), keeping
+   * `policy-cache.json` free of entries that can never be served
+   * again. */
+  degradationCache?: OmniDegradationCache;
 }
 
 /** One latch per omni root: distinct stores in one process (multi-project
@@ -273,6 +279,7 @@ async function sweepTmpFiles(objectsDir: string): Promise<void> {
 async function sampleVerifyObjects(
   objectsDir: string,
   uploadCache: OmniUploadCache | undefined,
+  degradationCache: OmniDegradationCache | undefined,
   limit: number,
   maxBytes: number,
 ): Promise<void> {
@@ -329,6 +336,13 @@ async function sampleVerifyObjects(
       if (hash.digest('hex') !== expected) {
         await fs.rm(full, { force: true });
         await uploadCache?.removeBySha256(expected);
+        // The corrupt object may have been a policy SOURCE (its cached
+        // derivatives can never be re-verified against it) or a policy
+        // DERIVATIVE (entries pointing at it can never be served) —
+        // cascade both directions so policy-cache.json does not
+        // accumulate orphans.
+        await degradationCache?.removeByOriginalSha256(expected);
+        await degradationCache?.removeByDegradedSha256(expected);
         debugLogger.debug(
           `recovery: removed corrupt object ${rel} (hash mismatch)`,
         );
@@ -354,7 +368,8 @@ async function sampleVerifyObjects(
  *    (oldest-first once over budget);
  * 4. `objects/…/.tmp-*` promotion orphans are removed (crash leftovers);
  * 5. a small sample of objects is hash-verified; corrupt objects are
- *    deleted with their upload-cache entries cascaded.
+ *    deleted with their upload-cache and degradation-cache entries
+ *    cascaded.
  *
  * Never throws: recovery is hygiene, not a gate. That covers the latch
  * key lookup too — a store whose getOmniRootDir() throws yields a
@@ -398,6 +413,7 @@ export function runStartupRecoveryOnce(
       await sampleVerifyObjects(
         store.getObjectsDir(),
         uploadCache,
+        options?.degradationCache,
         options?.sampleVerifyLimit ?? SAMPLE_VERIFY_LIMIT,
         options?.sampleVerifyMaxBytes ?? SAMPLE_VERIFY_MAX_BYTES,
       );
