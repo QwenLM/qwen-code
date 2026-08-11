@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildProviderTemplate,
   codingPlanProvider,
-  computeProviderTemplateVersion,
+  computeModelListVersion,
   getDefaultModelIds,
   tokenPlanProvider,
 } from '@qwen-code/qwen-code-core';
@@ -50,12 +50,9 @@ describe('subscription plan definitions', () => {
     ] as const) {
       for (const region of [CodingPlanRegion.CHINA, CodingPlanRegion.GLOBAL]) {
         const plan = getSubscriptionPlanConfig(planId, region);
-        expect(plan.version).toBe(
-          computeProviderTemplateVersion(provider, plan.baseUrl),
-        );
-        expect(plan.template).toEqual(
-          buildProviderTemplate(provider, plan.baseUrl),
-        );
+        const template = buildProviderTemplate(provider, plan.baseUrl);
+        expect(plan.version).toBe(computeModelListVersion(template));
+        expect(plan.template).toEqual(template);
       }
     }
   });

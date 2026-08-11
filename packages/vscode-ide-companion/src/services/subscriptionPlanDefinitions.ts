@@ -9,7 +9,7 @@ import {
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
   CODING_PLAN_GLOBAL_BASE_URL,
-  computeProviderTemplateVersion,
+  computeModelListVersion,
   findProviderByCredentials,
   TOKEN_PLAN_CHINA_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
@@ -198,9 +198,10 @@ function resolvePlanTemplate(
         `The IDE and CLI model lists must come from the same preset.`,
     );
   }
+  const template = buildProviderTemplate(provider, endpoint);
   return {
-    template: buildProviderTemplate(provider, endpoint),
-    version: computeProviderTemplateVersion(provider, endpoint),
+    template,
+    version: computeModelListVersion(template),
   };
 }
 

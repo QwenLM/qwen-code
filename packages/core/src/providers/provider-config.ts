@@ -300,16 +300,6 @@ export function computeModelListVersion(models: ProviderModelConfig[]): string {
 }
 
 /**
- * Version of a provider's built-in template (default models only).
- */
-export function computeProviderTemplateVersion(
-  config: ProviderConfig,
-  baseUrl: string,
-): string {
-  return computeModelListVersion(buildProviderTemplate(config, baseUrl));
-}
-
-/**
  * Default base URLs per protocol, used as placeholder/fallback when the user
  * doesn't supply one for a custom provider. Kept in core so the CLI flow
  * (useProviderSetupFlow) and the VS Code flow (AuthMessageHandler) agree on

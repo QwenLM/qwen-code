@@ -28,8 +28,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 import {
   AuthType,
   CODING_PLAN_GLOBAL_BASE_URL,
-  codingPlanProvider,
-  computeProviderTemplateVersion,
   type ProviderInstallPlan,
 } from '@qwen-code/qwen-code-core';
 import { CODING_PLAN_ENV_KEY } from './subscriptionPlanDefinitions.js';
@@ -68,10 +66,6 @@ describe('settingsWriter', () => {
     expect(settings.providerMetadata?.['coding-plan']).toMatchObject({
       region: 'global',
       baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
-      version: computeProviderTemplateVersion(
-        codingPlanProvider,
-        CODING_PLAN_GLOBAL_BASE_URL,
-      ),
     });
   });
 

@@ -684,7 +684,6 @@ import {
 } from '../all-providers.js';
 import {
   buildInstallPlan as buildInstallPlanSrc,
-  computeProviderTemplateVersion as computeProviderTemplateVersionSrc,
   resolveBaseUrl as resolveBaseUrlSrc,
   resolveMetadataKey as resolveMetadataKeySrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
@@ -924,27 +923,5 @@ describe('resolveMetadataKey dotted-id guard', () => {
   it("throws when the id contains '.' (would corrupt dotted setValue writes)", () => {
     const config = makeConfig({ id: 'company.ai', models: [{ id: 'm1' }] });
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
-  });
-});
-
-describe('computeProviderTemplateVersion', () => {
-  it('equals hashing the built-in template by hand', () => {
-    const config = makeConfig();
-    const baseUrl = resolveBaseUrl(config);
-    expect(computeProviderTemplateVersionSrc(config, baseUrl)).toBe(
-      computeModelListVersion(buildProviderTemplate(config, baseUrl)),
-    );
-  });
-
-  it('changes when the built-in template changes', () => {
-    const baseUrl = 'https://api.test.com/v1';
-    const before = computeProviderTemplateVersionSrc(makeConfig(), baseUrl);
-    const after = computeProviderTemplateVersionSrc(
-      makeConfig({
-        models: [{ id: 'model-a-renamed', contextWindowSize: 8192 }],
-      }),
-      baseUrl,
-    );
-    expect(after).not.toBe(before);
   });
 });

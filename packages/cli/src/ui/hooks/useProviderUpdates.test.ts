@@ -16,7 +16,7 @@ import {
   TOKEN_PLAN_ENV_KEY,
   tokenPlanProvider,
   buildProviderTemplate,
-  computeProviderTemplateVersion,
+  computeModelListVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
@@ -36,19 +36,13 @@ const chinaTemplate = buildProviderTemplate(
   codingPlanProvider,
   CODING_PLAN_CHINA_BASE_URL,
 );
-const chinaVersion = computeProviderTemplateVersion(
-  codingPlanProvider,
-  CODING_PLAN_CHINA_BASE_URL,
-);
+const chinaVersion = computeModelListVersion(chinaTemplate);
 
 const tokenTemplate = buildProviderTemplate(
   tokenPlanProvider,
   TOKEN_PLAN_BASE_URL,
 );
-const tokenVersion = computeProviderTemplateVersion(
-  tokenPlanProvider,
-  TOKEN_PLAN_BASE_URL,
-);
+const tokenVersion = computeModelListVersion(tokenTemplate);
 
 const METADATA_KEY = 'coding-plan';
 const TOKEN_METADATA_KEY = 'token-plan';
@@ -142,10 +136,7 @@ describe('useProviderUpdates', () => {
       METADATA_KEY
     ] = {
       baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
-      version: computeProviderTemplateVersion(
-        codingPlanProvider,
-        CODING_PLAN_GLOBAL_BASE_URL,
-      ),
+      version: computeModelListVersion(globalTemplate),
     };
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: globalTemplate,

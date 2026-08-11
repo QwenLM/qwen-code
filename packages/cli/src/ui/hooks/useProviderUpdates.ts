@@ -14,7 +14,8 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
-  computeProviderTemplateVersion,
+  buildProviderTemplate,
+  computeModelListVersion,
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
@@ -204,7 +205,9 @@ function findAllPendingUpdates(
     if (!metadata.version) continue;
 
     const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentVersion = computeProviderTemplateVersion(provider, baseUrl);
+    const currentVersion = computeModelListVersion(
+      buildProviderTemplate(provider, baseUrl),
+    );
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
