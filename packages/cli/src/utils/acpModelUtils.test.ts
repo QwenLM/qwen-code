@@ -276,8 +276,6 @@ describe('acpModelUtils', () => {
       'https://host.example/v1 - contact admin@example.com',
     ],
     ['https://user:p@ss word@host.example/v1', 'https://host.example/v1'],
-    // R1-2: a digit-prefix + space password is stripped (the dotted-host
-    // discriminator in the port-prose veto lets a bare-label username through).
     // R1-2 KNOWN RESIDUAL: digit-prefix + space password is locally
     // indistinguishable from a dotless host + port + prose email; the veto
     // fires and the credential leaks. Same tradeoff class as R5-7, pending

@@ -331,23 +331,12 @@ function findUserInfoStripPoint(
   // userinfo-shaped). #8136 R3-6.
   const atBeforeWs = firstWs === -1 || firstAt < firstWs;
   // A colon before the first '@' marks userinfo only when it is a real
-  // userinfo delimiter, not an IPv6 bracket/port colon. For an IPv6 authority
-  // (`[::1]:8443`), the only colons before the first '@' are inside the brackets
-  // or the port colon after `]` — neither is userinfo. #8136 R1-7.
-  let colonBeforeAt = false;
-  if (baseUrl[authorityStart] === '[') {
-    const close = baseUrl.indexOf(']', authorityStart);
-    if (close === -1 || close >= authorityStart + firstAt) {
-      colonBeforeAt = false;
-    } else {
-      // A userinfo colon would have to be after the host:port AND before '@',
-      // but an IPv6 URL with userinfo is `[::1]`-only authority with no port
-      // prose shape — treat as no userinfo colon for the prose veto.
-      colonBeforeAt = false;
-    }
-  } else {
-    colonBeforeAt = authority.slice(0, firstAt).includes(':');
-  }
+  // userinfo delimiter, not an IPv6 bracket/port colon. An IPv6 authority
+  // (`[::1]:8443`) has no userinfo colon before the first '@' (its colons are
+  // inside the brackets or the port colon after `]`). #8136 R1-7.
+  const colonBeforeAt =
+    baseUrl[authorityStart] !== '[' &&
+    authority.slice(0, firstAt).includes(':');
   if (!atBeforeWs && !colonBeforeAt) {
     return -1;
   }
