@@ -286,11 +286,6 @@ fn handle_connection(
     let Ok(mut client_reader) = client.try_clone() else {
         return;
     };
-    // client_reader is a dup'd fd; client.shutdown(Shutdown::Both) on the
-    // original does not unblock it, so the upload thread can hold the
-    // connection slot open indefinitely after the response is fully sent.
-    // Bound it with a short read timeout so the thread always terminates.
-    let _ = client_reader.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok(mut upstream_writer) = upstream.try_clone() else {
         return;
     };
@@ -571,12 +566,12 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_lan_ipv4, find_header_end, local_control_url, lock, rewrite_request,
-        runtime_socket_addr, select_lan_ipv4, spawn_proxy, Connections,
+        choose_lan_ipv4, find_header_end, local_control_url, rewrite_request, runtime_socket_addr,
+        select_lan_ipv4, spawn_proxy, Connections,
     };
     use std::collections::HashMap;
     use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -701,78 +696,6 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read response");
         assert!(response.ends_with("\r\n\r\nok"), "{response}");
-
-        connections.stopping.store(true, Ordering::SeqCst);
-        proxy_thread.join().expect("stop proxy");
-        upstream_thread.join().expect("stop upstream");
-    }
-
-    #[test]
-    fn upload_timeout_releases_connection_slot() {
-        let upstream = TcpListener::bind(("127.0.0.1", 0)).expect("upstream listener");
-        let upstream_address = upstream.local_addr().expect("upstream address");
-        let upstream_thread = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().expect("upstream connection");
-            let mut request = Vec::new();
-            while find_header_end(&request).is_none() {
-                let mut buffer = [0_u8; 1024];
-                let read = stream.read(&mut buffer).expect("read request");
-                assert_ne!(read, 0);
-                request.extend_from_slice(&buffer[..read]);
-            }
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .expect("write response");
-            stream
-                .shutdown(Shutdown::Write)
-                .expect("shutdown write");
-            // Keep the read side open so the upload half has nowhere to send.
-            thread::sleep(Duration::from_secs(10));
-        });
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("proxy listener");
-        let public_address = listener.local_addr().expect("proxy address");
-        listener
-            .set_nonblocking(true)
-            .expect("nonblocking listener");
-        let connections = Arc::new(Connections {
-            stopping: AtomicBool::new(false),
-            streams: Mutex::new(HashMap::new()),
-        });
-        let proxy_thread = spawn_proxy(
-            listener,
-            upstream_address,
-            format!("http://{public_address}"),
-            "pair-token".to_string(),
-            "runtime-token".to_string(),
-            Arc::clone(&connections),
-        );
-
-        let mut client =
-            TcpStream::connect(public_address).expect("proxy connection");
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("read timeout");
-        write!(
-            client,
-            "GET / HTTP/1.1\r\nHost: {public_address}\r\n\r\n"
-        )
-        .expect("write request");
-        let mut response = String::new();
-        client.read_to_string(&mut response).expect("read response");
-        assert!(response.ends_with("\r\n\r\nok"), "{response}");
-
-        // The upload thread has a 5 s read timeout on the dup'd fd. Wait
-        // long enough for it to expire, then assert the slot was released.
-        thread::sleep(Duration::from_secs(6));
-        {
-            let active = lock(&connections.streams);
-            assert!(
-                active.is_empty(),
-                "connection slot held after upload timeout: {} entries",
-                active.len(),
-            );
-        }
 
         connections.stopping.store(true, Ordering::SeqCst);
         proxy_thread.join().expect("stop proxy");
