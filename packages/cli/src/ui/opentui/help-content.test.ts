@@ -16,7 +16,10 @@ import { CommandKind } from '../commands/types.js';
 import {
   HELP_COMMAND_LIST_VISIBLE_LINES,
   HELP_DOCS_URL,
+  HELP_LAYOUT_FIXED_ROWS,
+  HELP_LAYOUT_RESERVED_ROWS,
   buildHelpCommandsLines,
+  computeHelpBodyRows,
   formatHelpText,
   getHelpShortcuts,
   groupHelpCommands,
@@ -133,6 +136,31 @@ describe('help command lines (signature/meta/description/subcommands)', () => {
 
   it('caps the command listing window at 18 visible lines', () => {
     expect(HELP_COMMAND_LIST_VISIBLE_LINES).toBe(18);
+  });
+});
+
+describe('overlay row budget (80x24 bounded rows, footer kept visible)', () => {
+  it('leaves body rows so header+footer+hints fit at 24 rows', () => {
+    // banner (3) + mount margin (1) + status (1) + composer chrome (5) +
+    // overlay borders/padding/header/footer/hints/margins (10) = 20, so a
+    // 24-row terminal keeps 4 rows for the tab body.
+    expect(computeHelpBodyRows(24)).toBe(4);
+  });
+
+  it('never goes negative on tiny terminals', () => {
+    expect(computeHelpBodyRows(0)).toBe(0);
+    expect(computeHelpBodyRows(12)).toBe(0);
+    expect(computeHelpBodyRows(19)).toBe(0);
+  });
+
+  it('body + fixed overlay rows + reserved chrome never exceeds the screen', () => {
+    for (const height of [24, 25, 30, 40, 60]) {
+      const total =
+        computeHelpBodyRows(height) +
+        HELP_LAYOUT_FIXED_ROWS +
+        HELP_LAYOUT_RESERVED_ROWS;
+      expect(total).toBeLessThanOrEqual(height);
+    }
   });
 });
 

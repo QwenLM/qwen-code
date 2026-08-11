@@ -30,6 +30,26 @@ export const HELP_KEY_COL_WIDTH = 20;
 export const HELP_COMMAND_LIST_VISIBLE_LINES = 18;
 export const HELP_DOCS_URL = 'https://qwenlm.github.io/qwen-code-docs/';
 
+/**
+ * Row budget that keeps the whole overlay on screen at small terminals
+ * (e.g. 80x24). Reserved rows are owned by the surrounding app chrome:
+ * banner (3), dialog-mount top margin (1), status bar (1), composer chrome
+ * (5). Fixed rows are the overlay's own chrome plus the always-rendered
+ * docs footer and key hints: borders (2), vertical padding (2), header (1),
+ * footer (1), hints (1) and the three separator margins (3). The tab body
+ * receives the remainder, so the footer/hints stay visible at 80x24.
+ */
+export const HELP_LAYOUT_RESERVED_ROWS = 10;
+export const HELP_LAYOUT_FIXED_ROWS = 10;
+
+/** Tab-body rows that fit below the header and above the footer/hints. */
+export function computeHelpBodyRows(terminalHeight: number): number {
+  return Math.max(
+    0,
+    terminalHeight - HELP_LAYOUT_RESERVED_ROWS - HELP_LAYOUT_FIXED_ROWS,
+  );
+}
+
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
 
 export const HELP_TABS: ReadonlyArray<{ tab: HelpTab; label: string }> = [

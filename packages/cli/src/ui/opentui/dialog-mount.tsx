@@ -14,8 +14,12 @@
  * the backend through `onClose` / `onNavigate` / `notify`.
  */
 
-import { useMemo, useRef, useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useKeyboard,
+  useRenderer,
+  useTerminalDimensions,
+} from '@opentui/react';
 import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -26,6 +30,7 @@ import { HelpOverlay, helpScrollMax } from './help-overlay.js';
 import {
   buildHelpCommandsLines,
   buildHelpCustomCommandLines,
+  computeHelpBodyRows,
   HELP_TABS,
   type HelpTab,
 } from './help-content.js';
@@ -68,14 +73,26 @@ function HelpDialogHost(props: {
   commands: readonly SlashCommand[];
   onClose: () => void;
 }) {
+  const { commands, onClose } = props;
   const [tab, setTab] = useState<HelpTab>('general');
   const [scroll, setScroll] = useState(0);
+  const renderer = useRenderer();
+  const { height } = useTerminalDimensions();
+  // Plain raw Escape, consumed at the renderer level before parsed-key
+  // dispatch: closes the overlay even though the composer still owns focus
+  // while the dialog is mounted. Ctrl+C (\x03) and every other sequence fall
+  // through untouched.
+  useLayoutEffect(() => {
+    const onRawInput = (sequence: string): boolean => {
+      if (sequence !== '\x1b') return false;
+      onClose();
+      return true;
+    };
+    renderer.addInputHandler(onRawInput);
+    return () => renderer.removeInputHandler(onRawInput);
+  }, [renderer, onClose]);
   useKeyboard((key) => {
     const original = toOriginalKey(key);
-    if (original.name === 'escape') {
-      props.onClose();
-      return;
-    }
     if (original.name === 'tab') {
       const order = HELP_TABS.map(({ tab: helpTab }) => helpTab);
       const index = order.indexOf(tab);
@@ -88,13 +105,20 @@ function HelpDialogHost(props: {
     if (tab === 'general') return;
     const lines =
       tab === 'commands'
-        ? buildHelpCommandsLines(props.commands)
-        : buildHelpCustomCommandLines(props.commands);
+        ? buildHelpCommandsLines(commands)
+        : buildHelpCustomCommandLines(commands);
     const maxScroll = helpScrollMax(lines);
     if (original.name === 'up') setScroll((s) => Math.max(0, s - 1));
     if (original.name === 'down') setScroll((s) => Math.min(maxScroll, s + 1));
   });
-  return <HelpOverlay commands={props.commands} tab={tab} scroll={scroll} />;
+  return (
+    <HelpOverlay
+      commands={commands}
+      tab={tab}
+      scroll={scroll}
+      bodyRows={computeHelpBodyRows(height)}
+    />
+  );
 }
 
 function ThemeDialogHost(props: {

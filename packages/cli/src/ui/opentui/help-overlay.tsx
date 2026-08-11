@@ -13,6 +13,11 @@
  * 18-line scroll window, docs footer. Tab/Shift+Tab/Esc/↑/↓ key handling
  * lives in the backend (the composer owns focus); this component is pure
  * presentation fed by `help-content.ts`.
+ *
+ * Reconciler-safe: `<text>` children are only strings or `<span>` segments
+ * (TextNodeRenderable rejects nested `<text>` renderables). The tab body is
+ * height-capped via `computeHelpBodyRows`, so the docs footer and the key
+ * hints remain visible on an 80x24 terminal.
  */
 
 import { C } from './theme.js';
@@ -83,7 +88,7 @@ function CommandListLine(props: { line: HelpLine }) {
   if (line.type === 'group') {
     return (
       <text fg={C.text} attributes={1}>
-        {line.text} <text fg={C.dim}>{`(${line.count})`}</text>
+        {line.text} <span fg={C.dim}>{`(${line.count})`}</span>
       </text>
     );
   }
@@ -172,8 +177,13 @@ export function HelpOverlay(props: {
   commands: readonly SlashCommand[];
   tab: HelpTab;
   scroll: number;
+  /**
+   * Row budget for the tab body (computeHelpBodyRows). The body is capped to
+   * this height so the footer/hints below it always fit on screen.
+   */
+  bodyRows: number;
 }) {
-  const { commands, tab, scroll } = props;
+  const { commands, tab, scroll, bodyRows } = props;
   return (
     <box flexShrink={1} flexGrow={1} paddingLeft={1} paddingRight={1}>
       <box
@@ -207,7 +217,12 @@ export function HelpOverlay(props: {
               );
             })}
           </box>
-          <box marginTop={1}>
+          <box
+            marginTop={1}
+            flexDirection="column"
+            maxHeight={bodyRows}
+            overflow="hidden"
+          >
             {tab === 'general' && <GeneralHelp />}
             {tab === 'commands' && (
               <CommandsHelp
@@ -226,7 +241,7 @@ export function HelpOverlay(props: {
           </box>
           <box marginTop={1}>
             <text fg={C.dim}>
-              {t('For more help:')} <text fg={C.accent}>{HELP_DOCS_URL}</text>
+              {t('For more help:')} <span fg={C.accent}>{HELP_DOCS_URL}</span>
             </text>
           </box>
           <box marginTop={1}>
