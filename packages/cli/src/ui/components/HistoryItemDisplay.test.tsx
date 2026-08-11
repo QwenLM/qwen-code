@@ -18,7 +18,10 @@ import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import {
+  ThoughtExpandedProvider,
+  PENDING_THOUGHT_HEAD_ID,
+} from '../contexts/ThoughtExpandedContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
@@ -480,6 +483,102 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).not.toContain('Continuing the reasoning');
   });
 
+  it('resolves a thought continuation off the thoughtHeadId prop, not its own id', () => {
+    const item: HistoryItem = {
+      id: 2,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const renderWithHeadIds = (expandedHeadIds: ReadonlySet<number>) =>
+      renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: false,
+            expandedHeadIds,
+            toggle: () => {},
+          }}
+        >
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            thoughtHeadId={42}
+          />
+        </ThoughtExpandedProvider>,
+      );
+
+    // The continuation's own id (2) is in neither set — expansion must
+    // resolve off the head id passed via prop, per `thoughtHeadId ?? item.id`.
+    expect(renderWithHeadIds(new Set([42])).lastFrame()).toContain(
+      'Continuing the reasoning',
+    );
+    expect(renderWithHeadIds(new Set()).lastFrame()).not.toContain(
+      'Continuing the reasoning',
+    );
+  });
+
+  it('renders a pending thought expanded when its expansion key is recorded', () => {
+    const head: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Streaming the reasoning',
+    };
+    const tail: HistoryItem = {
+      id: 2,
+      type: 'gemini_thought_content',
+      text: 'Continuing the reasoning',
+    };
+
+    const renderPendingWithHeadIds = (
+      item: HistoryItem,
+      thoughtHeadId: number,
+      expandedHeadIds: ReadonlySet<number>,
+    ) =>
+      renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: false,
+            expandedHeadIds,
+            toggle: () => {},
+          }}
+        >
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={true}
+            thoughtHeadId={thoughtHeadId}
+          />
+        </ThoughtExpandedProvider>,
+      );
+
+    // Read side of the pending keying: expansion recorded under the sentinel
+    // while streaming must actually render expanded (and collapse again when
+    // the key is absent).
+    const expandedHead = renderPendingWithHeadIds(
+      head,
+      PENDING_THOUGHT_HEAD_ID,
+      new Set([PENDING_THOUGHT_HEAD_ID]),
+    ).lastFrame();
+    expect(expandedHead).toContain('Streaming the reasoning');
+    expect(expandedHead).toContain(`${toggleKeyHint} to collapse`);
+    expect(
+      renderPendingWithHeadIds(
+        head,
+        PENDING_THOUGHT_HEAD_ID,
+        new Set(),
+      ).lastFrame(),
+    ).not.toContain('Streaming the reasoning');
+
+    // A pending tail keyed off its committed head id reads the same way.
+    expect(
+      renderPendingWithHeadIds(tail, 42, new Set([42])).lastFrame(),
+    ).toContain('Continuing the reasoning');
+    expect(
+      renderPendingWithHeadIds(tail, 42, new Set()).lastFrame(),
+    ).not.toContain('Continuing the reasoning');
+  });
+
   it('renders committed thinking expanded when ThoughtExpandedProvider is true', () => {
     const item: HistoryItem = {
       id: 1,
@@ -674,7 +773,11 @@ describe('<HistoryItemDisplay />', () => {
       button: 'left',
     });
 
-    const renderThoughtWithToggle = (toggle: (headId: number) => void) => {
+    const renderThoughtWithToggle = (
+      toggle: (headId: number) => void,
+      isPending = false,
+      thoughtHeadId?: number,
+    ) => {
       vi.mocked(measureElementPosition).mockReturnValue({
         x: 0,
         y: 0,
@@ -693,7 +796,8 @@ describe('<HistoryItemDisplay />', () => {
           <HistoryItemDisplay
             item={thoughtItem}
             terminalWidth={100}
-            isPending={false}
+            isPending={isPending}
+            thoughtHeadId={thoughtHeadId}
           />
         </ThoughtExpandedProvider>,
       );
@@ -703,16 +807,18 @@ describe('<HistoryItemDisplay />', () => {
     it('subscribes the click handler without bypassVpGate (stays VP-gated)', () => {
       vi.mocked(useMouseEvents).mockClear();
       renderWithProviders(
-        <HistoryItemDisplay
-          item={thoughtItem}
-          terminalWidth={100}
-          isPending={false}
-        />,
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
       );
       expect(vi.mocked(useMouseEvents)).toHaveBeenCalled();
       const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
-      // Collapsed thought → the handler is "active", but it must NOT bypass the
-      // VP gate, so useMouseEvents only arms it in VP mode.
+      // Clickable in VP → the handler is active, but it must NOT bypass the VP
+      // gate, so useMouseEvents only arms it in VP mode.
       expect(opts?.isActive).toBe(true);
       expect(opts?.bypassVpGate ?? false).toBe(false);
     });
@@ -724,6 +830,20 @@ describe('<HistoryItemDisplay />', () => {
             item={thoughtItem}
             terminalWidth={100}
             isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
+    it('shows the click hint while the thought is pending (streaming)', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
           />
         </VirtualViewportContext.Provider>,
       );
@@ -754,6 +874,220 @@ describe('<HistoryItemDisplay />', () => {
       expect(toggle).not.toHaveBeenCalled();
       handler?.(mouseEvent('left-release', 5));
       expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+    });
+
+    it('keeps the click handler active while the thought is pending', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+      // A streaming thought must stay clickable — the user expands it to
+      // watch the reasoning live.
+      expect(opts?.isActive).toBe(true);
+      expect(opts?.bypassVpGate ?? false).toBe(false);
+    });
+
+    it('toggles a pending thought on a complete click', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle, true);
+
+      handler?.(mouseEvent('left-press', 5));
+      expect(toggle).not.toHaveBeenCalled();
+      handler?.(mouseEvent('left-release', 5));
+      expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+    });
+
+    it('records a pending thought click under the sentinel, not the shared item id', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(
+        toggle,
+        true,
+        PENDING_THOUGHT_HEAD_ID,
+      );
+
+      handler?.(mouseEvent('left-press', 5));
+      expect(toggle).not.toHaveBeenCalled();
+      handler?.(mouseEvent('left-release', 5));
+      // MainContent renders pending items with the shared item id 0; the
+      // toggle must land on the sentinel so the commit-time migration in
+      // settlePendingThoughtExpansion can find and carry it over.
+      expect(toggle).toHaveBeenCalledWith(PENDING_THOUGHT_HEAD_ID);
+    });
+
+    it('disarms the click handler while fullDetail (Ctrl+O) is active', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+            fullDetail={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // fullDetail already forces the thought open; the handler must not
+      // subscribe, so a click cannot silently record a per-item toggle that
+      // would flip once fullDetail turns off.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the collapse hint while fullDetail is active', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            fullDetail={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      // fullDetail forces the thought open and swallows clicks, so the hint
+      // must stay keyboard-only instead of advertising a dead click target.
+      expect(output).toContain(`${toggleKeyHint} to collapse`);
+      expect(output).not.toContain('click');
+    });
+
+    it('disarms the click handler when allExpanded (Ctrl+O) is active without fullDetail forwarding', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded: true,
+              expandedHeadIds: new Set<number>(),
+              toggle: vi.fn(),
+            }}
+          >
+            <HistoryItemDisplay
+              item={thoughtItem}
+              terminalWidth={100}
+              isPending={true}
+            />
+          </ThoughtExpandedProvider>
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // AgentChatContent never forwards `fullDetail`; Ctrl+O pins the thought
+      // open via `allExpanded` alone, so the handler must not subscribe —
+      // clicks could only record invisible toggles that resurface as flipped
+      // rows once Ctrl+O turns off.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the collapse hint when allExpanded is active without fullDetail forwarding', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <ThoughtExpandedProvider
+            value={{
+              allExpanded: true,
+              expandedHeadIds: new Set<number>(),
+              toggle: vi.fn(),
+            }}
+          >
+            <HistoryItemDisplay
+              item={thoughtItem}
+              terminalWidth={100}
+              isPending={false}
+            />
+          </ThoughtExpandedProvider>
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      // Same contract as fullDetail, exercised through the context flag alone
+      // — the path surfaces that don't forward fullDetail take.
+      expect(output).toContain(`${toggleKeyHint} to collapse`);
+      expect(output).not.toContain('click');
+    });
+
+    it('disarms the click handler when the thoughtExpanded prop forces the thought open', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={true}
+            thoughtExpanded={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // SessionPreview forces thoughts open via the prop; a click could never
+      // collapse one, so the handler must not subscribe — it would only
+      // toggle state the preview never reflects.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the collapse hint when thoughtExpanded forces the thought open', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            thoughtExpanded={true}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      // Same contract as fullDetail: a forced-open thought must not
+      // advertise a click that can never collapse it.
+      expect(output).toContain(`${toggleKeyHint} to collapse`);
+      expect(output).not.toContain('click');
+    });
+
+    it('disarms the click handler when thoughtExpanded={false} pins the thought closed', () => {
+      vi.mocked(useMouseEvents).mockClear();
+      renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            thoughtExpanded={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+      const opts = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[1];
+
+      // `thoughtExpanded === false` pins the thought closed just as `true`
+      // pins it open; a click could only record a toggle the display never
+      // reflects, which would resurface once the prop stops applying.
+      expect(opts?.isActive).toBe(false);
+    });
+
+    it('drops the click wording from the expand hint when thoughtExpanded pins the thought closed', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+            thoughtExpanded={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain(`${toggleKeyHint} to expand`);
+      expect(output).not.toContain('click');
     });
 
     it('does not toggle when selecting text by dragging', () => {

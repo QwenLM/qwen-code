@@ -96,13 +96,79 @@ describe('<ThinkMessage />', () => {
     contentWidth: 80,
   };
 
-  it('should render content when pending (streaming)', () => {
+  it('should advertise expansion while pending (streaming)', () => {
     const { lastFrame } = render(
       <ThinkMessage {...defaultProps} isPending={true} />,
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).not.toContain(`${toggleKeyHint} to expand`);
+    expect(output).toContain(`${toggleKeyHint} to expand`);
+    expect(output).not.toContain('Analyzing the code structure');
+  });
+
+  it('advertises click in the pending hint only when clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={true} />,
+    ).lastFrame();
+    expect(withoutClick).not.toContain('click');
+    expect(withoutClick).toContain(`${toggleKeyHint} to expand`);
+
+    const withClick = render(
+      <ThinkMessage {...defaultProps} isPending={true} clickable={true} />,
+    ).lastFrame();
+    expect(withClick).toContain('click');
+    expect(withClick).toContain(`${toggleKeyHint} to expand`);
+  });
+
+  it('should hint collapse while pending and expanded', () => {
+    const { lastFrame } = render(
+      <ThinkMessage {...defaultProps} isPending={true} expanded={true} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thinking');
+    expect(output).toContain(`${toggleKeyHint} to collapse`);
+    expect(output).toContain('Analyzing the code structure');
+  });
+
+  it('hints click-to-collapse when expanded and clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={true} expanded={true} />,
+    ).lastFrame();
+    // No click target: collapse stays a keyboard-only hint.
+    expect(withoutClick).toContain(`${toggleKeyHint} to collapse`);
+    expect(withoutClick).not.toContain('click');
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={true}
+        expanded={true}
+        clickable={true}
+      />,
+    ).lastFrame();
+    // A click-expanded thought cannot be collapsed by ctrl+o (that is the
+    // app-wide full-detail switch), so the hint advertises clicking only.
+    expect(withClick).toContain('(click to collapse)');
+    expect(withClick).not.toContain(toggleKeyHint);
+  });
+
+  it('hints click-to-collapse when committed, expanded and clickable (VP mode)', () => {
+    const withoutClick = render(
+      <ThinkMessage {...defaultProps} isPending={false} expanded={true} />,
+    ).lastFrame();
+    expect(withoutClick).toContain(`${toggleKeyHint} to collapse`);
+    expect(withoutClick).not.toContain('click');
+
+    const withClick = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={true}
+        clickable={true}
+      />,
+    ).lastFrame();
+    expect(withClick).toContain('(click to collapse)');
+    expect(withClick).not.toContain(toggleKeyHint);
   });
 
   it('should render collapsed line when committed and not expanded', () => {

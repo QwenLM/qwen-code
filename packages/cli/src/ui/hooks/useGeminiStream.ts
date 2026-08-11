@@ -507,6 +507,10 @@ export const useGeminiStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  // Migrate a streamed thought's provisional pending expansion to its real
+  // committed head id when it commits (or drop it when passed `null`). See
+  // settlePendingThoughtExpansion in AppContainer.
+  settlePendingThoughtExpansion?: (committedHeadId: number | null) => void,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1748,6 +1752,20 @@ export const useGeminiStream = (
     [setThought],
   );
 
+  // Commit a streamed thought item and, when it is a `gemini_thought` head,
+  // migrate the provisional expansion to the committed id. Content tails key
+  // off the head id, so they never settle a second entry.
+  const addItemAndSettleThoughtHead = useCallback(
+    (item: HistoryItemWithoutId, userMessageTimestamp: number): number => {
+      const committedId = addItem(item, userMessageTimestamp);
+      if (item.type === 'gemini_thought') {
+        settlePendingThoughtExpansion?.(committedId);
+      }
+      return committedId;
+    },
+    [addItem, settlePendingThoughtExpansion],
+  );
+
   const handleThoughtEvent = useCallback(
     (
       eventValue: ThoughtSummary,
@@ -1777,6 +1795,9 @@ export const useGeminiStream = (
       if (startingNewThought) {
         thoughtStartTimeRef.current = Date.now();
         newThoughtBuffer = description;
+        // A fresh thought begins; drop any stale provisional expansion key
+        // left over from a pending thought that never committed.
+        settlePendingThoughtExpansion?.(null);
       }
 
       // Keep the transient `thought` (subject) in sync for the window title.
@@ -1828,7 +1849,7 @@ export const useGeminiStream = (
           newThoughtBuffer,
           safeSplitPoint,
         );
-        addItem(
+        addItemAndSettleThoughtHead(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
         );
@@ -1846,7 +1867,13 @@ export const useGeminiStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
+    [
+      addItemAndSettleThoughtHead,
+      mergeThought,
+      pendingThoughtItemRef,
+      setPendingThoughtItem,
+      settlePendingThoughtExpansion,
+    ],
   );
 
   // Commit the streamed reasoning to history as a collapsible block (or drop
@@ -1858,12 +1885,12 @@ export const useGeminiStream = (
         if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
           item.durationMs = Date.now() - thoughtStartTimeRef.current;
         }
-        addItem(item, userMessageTimestamp);
+        addItemAndSettleThoughtHead(item, userMessageTimestamp);
       }
       setPendingThoughtItem(null);
       thoughtStartTimeRef.current = null;
     },
-    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
+    [addItemAndSettleThoughtHead, pendingThoughtItemRef, setPendingThoughtItem],
   );
 
   const handleUserCancelledEvent = useCallback(

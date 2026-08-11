@@ -9,6 +9,7 @@ import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
   buildThoughtHeadIdMap,
+  findLastThoughtHeadId,
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
@@ -220,6 +221,35 @@ describe('buildThoughtHeadIdMap', () => {
     expect(map.get(c1)).toBe(1);
     expect(map.get(head2)).toBe(4);
     expect(map.get(c2)).toBe(4);
+  });
+});
+
+describe('findLastThoughtHeadId', () => {
+  it('returns undefined when no thought head exists', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'hi' }, 1),
+      mk({ type: 'gemini_content', text: 'hello' }, 2),
+    ];
+    expect(findLastThoughtHeadId(h)).toBeUndefined();
+  });
+
+  it('returns the id of the most recent thought head', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'gemini_thought', text: 'first' }, 1),
+      mk({ type: 'gemini_content', text: 'answer' }, 2),
+      mk({ type: 'gemini_thought', text: 'second' }, 3),
+      mk({ type: 'gemini_thought_content', text: 'tail' }, 4),
+    ];
+    expect(findLastThoughtHeadId(h)).toBe(3);
+  });
+
+  it('ignores trailing thought continuations', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'gemini_thought', text: 'head' }, 1),
+      mk({ type: 'gemini_thought_content', text: 'c1' }, 2),
+      mk({ type: 'gemini_thought_content', text: 'c2' }, 3),
+    ];
+    expect(findLastThoughtHeadId(h)).toBe(1);
   });
 });
 

@@ -6,6 +6,45 @@
 
 import { createContext, useContext } from 'react';
 
+/**
+ * Head-id key used while a thought is still streaming (pending). A pending
+ * thought has no committed head id yet, so its inline expansion is recorded
+ * under this sentinel and migrated to the real committed head id when the
+ * thought commits (see `settlePendingExpansion` below). Negative so it can
+ * never collide with a real committed head id, which is always a large
+ * positive `baseTimestamp + counter` value, and far enough from zero that it
+ * cannot coincide with the VP path's pending-item ids (`-(i + 1)`), which
+ * are a separate negative namespace.
+ *
+ * Accepted race: a press→release straddling the thought's commit can
+ * dead-click or toggle this stale sentinel, because commit remounts the row
+ * (pending key → committed key, plus the VP live→static wrapper change in
+ * VirtualizedListItem) and the press record dies with the old instance;
+ * pre-allocating the committed id would still remount at the live→static
+ * flip. The window is one click in VP mouse mode; re-click or keyboard
+ * recovers, and settle(null) at the next thought start drops any stray
+ * sentinel.
+ */
+export const PENDING_THOUGHT_HEAD_ID = -1_000_001;
+
+/**
+ * Migrate a pending thought's provisional expansion, keyed by
+ * PENDING_THOUGHT_HEAD_ID, to its committed head id so a thought expanded
+ * while streaming stays expanded. Pass `null` when the pending thought was
+ * dropped without committing — the provisional key is then just removed.
+ * Returns `prev` unchanged when nothing is pending.
+ */
+export function settlePendingExpansion(
+  prev: ReadonlySet<number>,
+  committedHeadId: number | null,
+): ReadonlySet<number> {
+  if (!prev.has(PENDING_THOUGHT_HEAD_ID)) return prev;
+  const next = new Set(prev);
+  next.delete(PENDING_THOUGHT_HEAD_ID);
+  if (committedHeadId != null) next.add(committedHeadId);
+  return next;
+}
+
 export interface ThoughtExpandedValue {
   /**
    * Ctrl+O / Alt+T global toggle. Despite the name this is the app-wide
