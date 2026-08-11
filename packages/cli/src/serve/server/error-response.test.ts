@@ -6,6 +6,7 @@
 
 import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   SessionTranscriptChangedError,
   SessionWriterConflictError,
@@ -29,6 +30,26 @@ function responseMock(): {
 }
 
 describe('sendBridgeError session writer errors', () => {
+  it('serializes the structured session-closing code', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new SessionNotFoundError(
+        'session-1',
+        'The session is closing',
+        'session_closing',
+      ),
+    );
+
+    expect(status).toHaveBeenCalledWith(404);
+    expect(json).toHaveBeenCalledWith({
+      error: 'No session with id "session-1". The session is closing',
+      code: 'session_closing',
+      sessionId: 'session-1',
+    });
+  });
+
   it('maps sealed session maintenance to daemon_draining', () => {
     const { response, status, json } = responseMock();
 

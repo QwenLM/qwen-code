@@ -209,6 +209,23 @@ describe('removeInjectedFromQueue', () => {
       ).toBeNull();
     });
 
+    it('matches a stable id even when another client receives the echo', () => {
+      const prompt = q('adopted');
+      const next = removeInjectedFromQueue(
+        [prompt],
+        [
+          {
+            ...batchFrom('s', 'original-client', 'adopted'),
+            messageIds: [prompt.midTurnMessageId!],
+          },
+        ],
+        's',
+        'new-client',
+        true,
+      );
+      expect(next).toEqual([]);
+    });
+
     it('dedupes an anonymous batch (no originator) regardless of our client id', () => {
       const prompts = [q('anon'), q('keep')];
       const next = removeInjectedFromQueue(
