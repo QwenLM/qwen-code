@@ -920,10 +920,20 @@ export async function listLiveSessions(
   try {
     entries = await fs.readdir(dir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      debugLogger.debug(`listLiveSessions readdir failed: ${describe(error)}`);
-    }
-    return [];
+    // ENOENT is an answer: no session has ever registered on this machine,
+    // so the empty list is the truth. Nothing else is. An EACCES — the
+    // directory re-created by another uid, a restrictive NFS export, a
+    // sandbox uid mapping — means this process could not look, and
+    // returning `[]` for it reports "no sessions are running" with exactly
+    // the same confidence. For a diagnostic command that is the answer
+    // most likely to be believed and least likely to be true.
+    //
+    // The caller is what knows how to say "I could not look": `qwen
+    // sessions ps` already catches, prints the reason and exits non-zero.
+    // Swallowing here is what made that branch unreachable, so its test
+    // could only pass by mocking a rejection this function never produced.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
+    throw error;
   }
 
   // Read once per enumeration, not once per record: a process cannot
