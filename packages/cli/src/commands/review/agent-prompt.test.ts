@@ -58,6 +58,7 @@ import {
   agentPromptCommand,
 } from './agent-prompt.js';
 import { BRIEFS } from './lib/agent-briefs.js';
+import { SHELL_MODEL_LAYERS } from './lib/audit-layers.js';
 import {
   readRecordedPrompts,
   briefPath,
@@ -2077,6 +2078,22 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toContain('terminate the argv with');
   });
 
+  it('hunts model-of-execution STATE divergence in Agent 2, and says to run the real system', () => {
+    // The class #8687 shipped past every static reviewer: a guard that models how
+    // a shell EXECUTES (cwd/exports/options/functions across function, eval,
+    // subshell, `$(…)`, pipeline boundaries) and diverges from real bash in what
+    // it propagates — not in how it tokenizes. It is invisible to a reading-only
+    // pass because the model looks internally consistent; the finder must run the
+    // real system as an oracle to discover the divergence.
+    const p = buildRoleBrief(PLAN, '2');
+    expect(p).toContain("A model of another system's EXECUTION");
+    expect(p).toContain('do not argue it — run it');
+    expect(p).toContain('run_shell_command');
+    // Oracle-at-discovery is a finder capability here, but it must not smuggle in
+    // the verifier's probe machinery verbatim — that stays verifier-only (2065).
+    expect(p).not.toContain('write a **probe**');
+  });
+
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
     // It runs the build. Requiring it to open the diff would be requiring a thing
     // its job does not involve, and reporting it "blind" for not doing so would
@@ -2264,6 +2281,46 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(b).toContain('Retry counters');
     expect(c).toContain('Early returns');
     for (const p of [a, b, c]) expect(p).toContain('do not attempt the others');
+  });
+
+  it('gives invariant-c the recursive-evaluator state-return contract', () => {
+    // The cross-chunk half of the #8687 class: a hand-grown interpreter whose
+    // state-propagation bug sits between recursive call sites two thousand lines
+    // apart. A chunk agent sees the discarded return in isolation; only a
+    // whole-file reader owns the contract that every recursive body's cwd/exports/
+    // definitions are merged back the way the real shell threads them.
+    const plan = {
+      ...PLAN,
+      files: [
+        {
+          path: 'f.ts',
+          heavy: true,
+          addedRanges: [],
+          diffRange: { startLine: 1, endLine: 2 },
+        },
+      ],
+    };
+    const c = buildRoleBrief(plan, 'invariant-c', { file: 'f.ts' });
+    expect(c).toContain('state-return contract');
+    expect(c).toContain('MERGES back');
+    expect(c).toContain('command substitutions');
+  });
+
+  it('makes the reverse audit cover a modeled system by defect LAYER, receipting each', () => {
+    // "Two dry rounds" is silent about a layer nobody walked; on a modeled
+    // executable system the surface-layer bypasses fill a round while a deep
+    // layer goes untouched. The auditor must walk each layer and RECEIPT it in
+    // the structured `Layer walked: <id>` form audit-layers.ts parses.
+    const brief = BRIEFS['reverse-audit'].brief;
+    expect(brief).toContain('MODELS an executable system');
+    expect(brief).toContain('Layer walked: <id>');
+    expect(brief).toContain('owed scope');
+    // Drift guard: every taxonomy id the tooling counts coverage against must be
+    // named in the brief the auditor is told to receipt against — otherwise the
+    // parser looks for a layer the auditor was never asked to walk.
+    for (const layer of SHELL_MODEL_LAYERS) {
+      expect(brief).toContain(`\`${layer.id}\``);
+    }
   });
 
   it('carries the project rules into every reviewing role — and NOT into Agent 7', () => {

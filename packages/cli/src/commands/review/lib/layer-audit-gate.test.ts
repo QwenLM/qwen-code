@@ -1,0 +1,120 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { layerAuditGate } from './layer-audit-gate.js';
+import { MODELED_SYSTEM_DOMAIN } from './audit-layers.js';
+
+/** A valid RepositoryContext (strict schema) with the given domains. */
+function context(domains: string[]) {
+  return {
+    version: 1,
+    provider: 'test',
+    label: 'guard',
+    domains,
+    relatedPaths: [],
+    recommendedTests: [],
+    requiredConfigurations: [],
+    requiredAgents: [],
+    unverifiedDimensions: [],
+    verificationNotes: [],
+  };
+}
+
+describe('layerAuditGate', () => {
+  let dir: string;
+  const planPath = () => join(dir, 'plan.json');
+  const writePlan = (plan: unknown) =>
+    writeFileSync(planPath(), JSON.stringify(plan));
+  const env = {} as NodeJS.ProcessEnv;
+
+  // A reader that returns receipts covering exactly the named layers.
+  const returns = (...covered: string[]) =>
+    covered.map((id) => `Layer walked: ${id} — examined.`);
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'layer-gate-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('is inert with no plan path', () => {
+    expect(layerAuditGate(undefined, env, () => returns()).unreviewed).toEqual(
+      [],
+    );
+  });
+
+  it('is inert on a plan with no repository context', () => {
+    writePlan({ srcDiffLines: 10 });
+    expect(
+      layerAuditGate(planPath(), env, () => returns('lexing')).unreviewed,
+    ).toEqual([]);
+  });
+
+  it('is inert when the manifest does not mark the diff a modeled system', () => {
+    writePlan({ repositoryContext: context(['some-other-domain']) });
+    // Even with token-only coverage, no sentinel domain → no cap at all.
+    expect(
+      layerAuditGate(planPath(), env, () => returns('lexing')).unreviewed,
+    ).toEqual([]);
+  });
+
+  it('owes an entry per unwalked layer once the diff is marked a modeled system', () => {
+    writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
+    // Token layers walked; the state layers were not — the #8687 shape.
+    const out = layerAuditGate(planPath(), env, () =>
+      returns('lexing', 'expansion'),
+    ).unreviewed;
+    expect(out.some((e) => e.includes('scope-propagation'))).toBe(true);
+    expect(out.some((e) => e.includes('resolution-order'))).toBe(true);
+    expect(out.some((e) => e.includes('inheritance'))).toBe(true);
+    expect(out.some((e) => e.includes('toctou'))).toBe(true);
+    // Walked layers are not owed.
+    expect(out.some((e) => e.includes('lexing'))).toBe(false);
+    // Every entry is a self-explained reverse-audit cap line.
+    for (const e of out)
+      expect(e).toMatch(/^reverse audit — the .+ was never walked$/);
+  });
+
+  it('owes nothing when every layer was walked', () => {
+    writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
+    const out = layerAuditGate(planPath(), env, () =>
+      returns(
+        'lexing',
+        'expansion',
+        'scope-propagation',
+        'resolution-order',
+        'inheritance',
+        'toctou',
+      ),
+    ).unreviewed;
+    expect(out).toEqual([]);
+  });
+
+  it('does NOT cap when no auditor return exists — the reverse-audit-ran floor owns that', () => {
+    writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
+    expect(layerAuditGate(planPath(), env, () => []).unreviewed).toEqual([]);
+  });
+
+  it('fails open on an invalid repository context', () => {
+    // version 2 makes validateRepositoryContext throw; the gate must not.
+    writePlan({
+      repositoryContext: { ...context([MODELED_SYSTEM_DOMAIN]), version: 2 },
+    });
+    expect(
+      layerAuditGate(planPath(), env, () => returns('lexing')).unreviewed,
+    ).toEqual([]);
+  });
+
+  it('fails open on an unreadable plan', () => {
+    expect(
+      layerAuditGate(join(dir, 'nope.json'), env, () => returns('lexing'))
+        .unreviewed,
+    ).toEqual([]);
+  });
+});
