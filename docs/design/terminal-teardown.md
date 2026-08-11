@@ -18,7 +18,9 @@ The interactive signal handler owns graceful handling for `SIGHUP`, `SIGINT`,
 and `SIGTERM`. It invokes the current terminal teardown synchronously before
 starting asynchronous resource cleanup. Once shutdown starts, it keeps no-op
 listeners installed for all three signals until the process exits so a repeated
-signal cannot interrupt cleanup.
+signal cannot interrupt cleanup. Its disposer runs in the priority cleanup
+phase, so non-signal shutdown paths install those guards before asynchronous
+resource cleanup begins.
 
 The cleanup registry supports an explicit priority queue. Existing cleanup
 continues to run FIFO. The TUI registers one synchronous priority cleanup that
@@ -30,9 +32,11 @@ path.
 
 Kitty pushes are tracked per screen. Teardown pops the alternate-screen flags,
 unmounts Ink to return to the main screen, and then pops the main-screen flags.
-The same path restores stdin raw mode. If Ink enters the alternate screen but
-throws before returning an unmount handle, startup defers the main-screen pop
-to the `alwaysLast` phase of the same signal-exit dispatcher Ink uses.
+Before unmounting, it performs the existing best-effort memory-pressure check
+so React teardown cannot exhaust a near-limit heap. The same path restores stdin
+raw mode. If Ink enters the alternate screen but throws before returning an
+unmount handle, startup defers the main-screen pop to the `alwaysLast` phase of
+the same signal-exit dispatcher Ink uses.
 
 ## Alternatives
 
@@ -46,6 +50,7 @@ to the `alwaysLast` phase of the same signal-exit dispatcher Ink uses.
 ## Verification
 
 Unit tests cover priority ordering, signal exit codes and duplicate-signal
-handling, startup failure restoration, and Kitty listener ownership. Real PTY
-checks cover direct `process.exit()`, `SIGTERM`, and `SIGHUP`, with and without
-the virtualized terminal buffer and with Kitty protocol detection enabled.
+handling, startup failure restoration, and Kitty listener ownership. Manual
+real PTY checks cover direct `process.exit()`, `SIGTERM`, and `SIGHUP`, with and
+without the virtualized terminal buffer and with Kitty protocol detection
+enabled.

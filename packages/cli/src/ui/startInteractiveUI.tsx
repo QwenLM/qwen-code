@@ -143,7 +143,12 @@ export async function startInteractiveUI(
   const restoreTerminal = () => {
     if (terminalRestored) return;
     terminalRestored = true;
+    // Reclaim before unmounting so React teardown cannot exhaust a near-limit
+    // heap before the terminal has been restored.
     const restoreOperations = [
+      () => {
+        if (unmount) pressureMonitor?.performCheck();
+      },
       popKittyProtocolFlags,
       () => unmount?.(),
       () => {
@@ -178,11 +183,6 @@ export async function startInteractiveUI(
   });
   registerCleanup(
     () => {
-      try {
-        pressureMonitor?.performCheck();
-      } catch {
-        // Best-effort: ignore.
-      }
       restoreTerminal();
       clearTerminalTeardown();
     },

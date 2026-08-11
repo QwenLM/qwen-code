@@ -297,6 +297,8 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   let lastSigintAt = 0;
   let swallowSignalHandlersInstalled = false;
 
+  // Named handlers are removed during non-signal cleanup. Install stand-ins
+  // first so a late signal cannot trigger Node's default exit mid-teardown.
   const swallowSignalDuringCleanup = () => {};
   const installSwallowSignalHandlers = () => {
     if (swallowSignalHandlersInstalled) {
@@ -999,7 +1001,9 @@ export async function main() {
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     let themeAutoDetectionComplete: Promise<void> | undefined;
     if (config.isInteractive()) {
-      registerCleanup(installInteractiveSignalHandlers(wasRaw));
+      registerCleanup(installInteractiveSignalHandlers(wasRaw), {
+        priority: true,
+      });
     }
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       const { startEarlyInputCapture, stopAndGetCapturedInput } = await import(

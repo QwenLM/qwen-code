@@ -2431,6 +2431,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     const installedSignals = new Set<string>();
     const signals = new Set(['SIGHUP', 'SIGINT', 'SIGTERM']);
     let signalCleanup: (() => void) | undefined;
+    let signalCleanupOptions: { priority?: boolean } | undefined;
     let signalHandlersInstalled = false;
 
     const realProcessOn = process.on.bind(process);
@@ -2473,9 +2474,10 @@ describe('gemini.tsx main function kitty protocol', () => {
       );
     const registerCleanupMock = vi.mocked(cleanupModule.registerCleanup);
     registerCleanupMock.mockReset();
-    registerCleanupMock.mockImplementation((cleanup) => {
+    registerCleanupMock.mockImplementation((cleanup, options) => {
       if (signalHandlersInstalled && !signalCleanup) {
         signalCleanup = cleanup;
+        signalCleanupOptions = options;
       }
       return vi.fn();
     });
@@ -2488,6 +2490,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     try {
       await main();
       expect(signalCleanup).toBeTypeOf('function');
+      expect(signalCleanupOptions).toEqual({ priority: true });
 
       actions.length = 0;
       signalCleanup?.();
@@ -3036,7 +3039,10 @@ describe('startInteractiveUI', () => {
     );
   });
 
-  it('restores Kitty flags on both sides of Ink unmount', async () => {
+  it('restores Kitty flags when the pre-unmount pressure check fails', async () => {
+    const performCheck = vi.fn(() => {
+      throw new Error('pressure check failed');
+    });
     const unmount = vi.fn();
     const { render } = await import('ink');
     vi.mocked(render).mockReturnValue({ unmount } as never);
@@ -3045,7 +3051,10 @@ describe('startInteractiveUI', () => {
     );
 
     await startInteractiveUI(
-      mockConfig,
+      {
+        ...mockConfig,
+        getMemoryPressureMonitor: () => ({ performCheck }),
+      } as unknown as Config,
       mockSettings,
       mockStartupWarnings,
       mockWorkspaceRoot,
@@ -3061,12 +3070,16 @@ describe('startInteractiveUI', () => {
     expect(terminalTeardown).toBeTypeOf('function');
     terminalTeardown?.();
 
+    expect(performCheck).toHaveBeenCalledTimes(1);
     expect(unmount).toHaveBeenCalledTimes(1);
     expect(popKittyProtocolFlags).toHaveBeenCalledTimes(1);
     expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(popKittyProtocolFlags).mock.invocationCallOrder[0],
     ).toBeLessThan(unmount.mock.invocationCallOrder[0]);
+    expect(performCheck.mock.invocationCallOrder[0]).toBeLessThan(
+      unmount.mock.invocationCallOrder[0],
+    );
     expect(
       vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
     ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
