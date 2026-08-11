@@ -13,7 +13,8 @@ import {
   statSync,
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
+import type { ArgumentsCamelCase, Argv } from 'yargs';
+import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
@@ -56,77 +57,6 @@ export const MCP_COMMANDS = [
   ['reject [name]', 'Reject a pending MCP server'],
 ] as const;
 
-const TOP_LEVEL_HELP_OPTIONS = [
-  ['model', { alias: 'm', type: 'string', description: 'Model' }],
-  [
-    'fallback-model',
-    {
-      type: 'array',
-      description:
-        'Fallback model(s) for capacity errors, repeatable or comma-separated (max 3)',
-    },
-  ],
-  [
-    'prompt',
-    {
-      alias: 'p',
-      type: 'string',
-      description: 'Prompt. Appended to input on stdin (if any).',
-    },
-  ],
-  [
-    'prompt-interactive',
-    {
-      alias: 'i',
-      type: 'string',
-      description:
-        'Execute the provided prompt and continue in interactive mode',
-    },
-  ],
-  [
-    'safe-mode',
-    {
-      type: 'boolean',
-      description:
-        'Disable all customizations (context files, hooks, extensions, skills, MCP servers) for troubleshooting.',
-    },
-  ],
-  [
-    'sandbox',
-    {
-      alias: 's',
-      type: 'boolean',
-      description: 'Run in sandbox?',
-    },
-  ],
-  [
-    'output-format',
-    {
-      alias: 'o',
-      type: 'string',
-      choices: ['text', 'json', 'stream-json'],
-      description: 'The format of the CLI output.',
-    },
-  ],
-  [
-    'continue',
-    {
-      alias: 'c',
-      type: 'boolean',
-      description: 'Resume the most recent session for the current project.',
-    },
-  ],
-  [
-    'resume',
-    {
-      alias: 'r',
-      type: 'string',
-      description:
-        'Resume a specific session by its ID. Use without an ID to show session picker.',
-    },
-  ],
-] as const satisfies ReadonlyArray<readonly [string, Options]>;
-
 const VALUE_FLAGS = new Set([
   '--model',
   '-m',
@@ -139,6 +69,36 @@ const VALUE_FLAGS = new Set([
   '-o',
   '--resume',
   '-r',
+  '--extensions',
+  '-e',
+  '--include-directories',
+  '--add-dir',
+  '--approval-mode',
+  '--auth-type',
+  '--proxy',
+  '--system-prompt',
+  '--sandbox-image',
+  '--channel',
+  '--allowed-mcp-server-names',
+  '--mcp-config',
+  '--allowed-tools',
+  '--openai-logging-dir',
+  '--openai-api-key',
+  '--openai-base-url',
+  '--input-format',
+  '--json-fd',
+  '--json-file',
+  '--json-schema',
+  '--input-file',
+  '--session-id',
+  '--worktree',
+  '--max-session-turns',
+  '--max-wall-time',
+  '--max-tool-calls',
+  '--max-subagent-depth',
+  '--core-tools',
+  '--exclude-tools',
+  '--disabled-slash-commands',
 ]);
 
 function writeStdoutLine(line: string): void {

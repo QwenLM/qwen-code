@@ -246,6 +246,10 @@ describe('runCliEntry', () => {
     expect(helpText).toContain('-s, --sandbox');
     expect(helpText).toContain('-o, --output-format');
     expect(helpText).toContain('-r, --resume');
+    // Verify flags that were historically missing from the bootstrap help
+    // (issue #8897).
+    expect(helpText).toContain('--approval-mode');
+    expect(helpText).toContain('--auth-type');
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
