@@ -90,6 +90,13 @@ const GIT_COMMAND_CONFIG_KEY_PATTERNS = [
   /^ssh\.variant$/,
   /^tar\..+\.command$/,
   /^web\.browser$/,
+  // Pulls in a config file the guard cannot read: it can carry a
+  // `core.worktree` redirect or any command-executing key, so it is
+  // undecidable and fails closed.
+  /^include\.path$/,
+  /^includeif\..+\.path$/,
+  /^imap\.tunnel$/,
+  /^instaweb\.httpd$/,
 ];
 
 // Environment assignments that redirect git's repository selection (mirrors
@@ -110,6 +117,7 @@ const GIT_UNRESOLVABLE_ENV_KEYS = new Set([
   'GIT_CONFIG_PARAMETERS',
   'GIT_CONFIG_SYSTEM',
   'GIT_EDITOR',
+  'GIT_DIFFTOOL_EXTCMD',
   'GIT_EXTERNAL_DIFF',
   'GIT_OBJECT_DIRECTORY',
   'GIT_PAGER',
@@ -880,8 +888,8 @@ type RunAnalysis =
     }
   | { kind: 'dynamic-program'; rest: GuardToken[]; state: PrefixState }
   | { kind: 'export'; state: PrefixState; operands: GuardToken[] }
-  | { kind: 'all-export' }
-  | { kind: 'all-export-off' }
+  | { kind: 'all-export'; state: PrefixState }
+  | { kind: 'all-export-off'; state: PrefixState }
   | { kind: 'undecidable' }
   | { kind: 'other'; state: PrefixState; assignmentsOnly: boolean };
 
@@ -996,40 +1004,70 @@ function readProgramWord(run: GuardToken[]): string | undefined {
   return undefined;
 }
 
+// The tokens from the program word onward — past leading keywords,
+// assignments and redirect/fd operands — so a definition or a call is
+// recognised even behind `if …; then`, `X=1`, or `2>/dev/null`.
+function runFromProgramWord(run: GuardToken[]): GuardToken[] {
+  let index = 0;
+  while (index < run.length) {
+    const token = run[index]!;
+    if (
+      token.redirect ||
+      token.ambiguousFd ||
+      leadingEnvAssignmentKey(token.text) !== null ||
+      LEADING_SHELL_KEYWORDS.has(token.text)
+    ) {
+      index++;
+      continue;
+    }
+    break;
+  }
+  return run.slice(index);
+}
+
 /** `f()` / `f ()` — the header of a function definition, if this is one. */
 function readFunctionName(run: GuardToken[]): string | undefined {
-  if (run.length === 0) return undefined;
-  const first = run[0]!.text;
+  const body = runFromProgramWord(run);
+  if (body.length === 0) return undefined;
+  const first = body[0]!.text;
   if (first.endsWith('()') && first.length > 2) return first.slice(0, -2);
-  if (run[1]?.text === '()') return first;
+  if (body[1]?.text === '()') return first;
   return undefined;
+}
+
+// R6-5: a single `alias a=1 b=2` statement defines every pair, not just the
+// first. Returns all of them.
+function readAliasDefinitions(
+  run: GuardToken[],
+): Array<{ name: string; body: string }> {
+  const body = runFromProgramWord(run);
+  if (body.length === 0 || executableBaseName(body[0]!) !== 'alias') return [];
+  const definitions: Array<{ name: string; body: string }> = [];
+  for (const token of body.slice(1)) {
+    const separator = token.text.indexOf('=');
+    if (separator <= 0) continue;
+    definitions.push({
+      name: token.text.slice(0, separator),
+      body: token.text.slice(separator + 1),
+    });
+  }
+  return definitions;
 }
 
 function readDefinition(
   run: GuardToken[],
 ): { name: string; body: string } | undefined {
-  if (run.length === 0) return undefined;
-  const program = executableBaseName(run[0]!);
-  if (program === 'alias') {
-    for (const token of run.slice(1)) {
-      const separator = token.text.indexOf('=');
-      if (separator <= 0) continue;
-      return {
-        name: token.text.slice(0, separator),
-        body: token.text.slice(separator + 1),
-      };
-    }
-    return undefined;
-  }
+  const body = runFromProgramWord(run);
+  if (body.length === 0) return undefined;
   // shell-quote yields `f()` (or `f` `()`), then the braced body tokens.
-  const first = run[0]!.text;
+  const first = body[0]!.text;
   const name = first.endsWith('()')
     ? first.slice(0, -2)
-    : run[1]?.text === '()'
+    : body[1]?.text === '()'
       ? first
       : undefined;
   if (!name) return undefined;
-  const bodyTokens = run
+  const bodyTokens = body
     .slice(first.endsWith('()') ? 1 : 2)
     .filter((token) => token.text !== '{' && token.text !== '}');
   if (bodyTokens.length === 0) return undefined;
@@ -1068,8 +1106,12 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
       return { kind: 'export', state, operands };
     }
     if (program === 'set') {
-      if (requestsAllExport(run, index + 1)) return { kind: 'all-export' };
-      if (disablesAllExport(run, index + 1)) return { kind: 'all-export-off' };
+      if (requestsAllExport(run, index + 1)) {
+        return { kind: 'all-export', state };
+      }
+      if (disablesAllExport(run, index + 1)) {
+        return { kind: 'all-export-off', state };
+      }
     }
     if (program === 'env') {
       const scan = consumeEnvWrapper(run, index, state);
@@ -1745,6 +1787,35 @@ interface EvaluationScope {
  * quote and substitution rules. `separators[i]` follows segment `i`. Both
  * sides of a `|` run in subshells, so a `cd` there must not move the shell.
  */
+/**
+ * A heredoc body is stdin data delivered to the command, not shell commands,
+ * yet `splitCommands` has no heredoc state and would parse each body line as
+ * its own segment — letting a body `cd` launder the tracked directory. Strip
+ * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
+ * best-effort: only the first heredoc on a line is handled, which is the
+ * shape a model emits, and anything unrecognised is left untouched.
+ */
+function stripHeredocBodies(command: string): string {
+  const lines = command.split('\n');
+  const out: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    out.push(line);
+    const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
+    if (!match) continue;
+    const delimiter = match[2]!;
+    const stripTabs = line.includes('<<-');
+    // Consume the body up to the delimiter line, dropping it from the output.
+    while (index + 1 < lines.length) {
+      index++;
+      const body = lines[index]!;
+      const trimmed = stripTabs ? body.replace(/^\t+/, '') : body;
+      if (trimmed === delimiter) break;
+    }
+  }
+  return out.join('\n');
+}
+
 function readTopLevelSeparators(command: string): string[] {
   const separators: string[] = [];
   let single = false;
@@ -1796,6 +1867,9 @@ function readTopLevelSeparators(command: string): string[] {
     if (character === '&' && next === '&') {
       separators.push('&&');
       index++;
+    } else if (character === '&' && next === '>') {
+      // `&>` / `&>>` redirects stdout+stderr; the `&` is not a separator.
+      index += command[index + 2] === '>' ? 2 : 1;
     } else if (character === '&') {
       // A lone `&` backgrounds the command in its own subshell.
       separators.push('&');
@@ -1850,7 +1924,8 @@ async function evaluateCommandWithCwd(
   // replayed verbatim, so the name is recorded as Git-shaped instead and the
   // later bare word answers to the unrecognized-program containment rule.
   const gitShapedNames = new Set<string>();
-  let insideDefinition = false;
+  let insideDefinition: string | undefined;
+  let definitionBody = '';
   // Paths a run in this command may have re-pointed. Any containment the
   // guard proves for one of them afterwards is proved against the old target.
   // Shared with every nested evaluation, in both directions.
@@ -1896,8 +1971,8 @@ async function evaluateCommandWithCwd(
     for (const [key, token] of snapshot.locals) shellLocals.set(key, token);
   };
   const subshellCwds: ShellStateSnapshot[] = [];
-  const segments = splitCommands(command);
-  const separators = readTopLevelSeparators(command);
+  const segments = splitCommands(stripHeredocBodies(command));
+  const separators = readTopLevelSeparators(stripHeredocBodies(command));
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;
@@ -1925,18 +2000,29 @@ async function evaluateCommandWithCwd(
     // `name() { … }` — shell-quote reports the parentheses as operators, so
     // the header is recognised on the raw segment. The body runs wherever the
     // name is later used, which is what the recorded shape stands in for.
-    const functionHeader = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)/.exec(
-      segment,
-    );
+    const functionHeader =
+      /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)/.exec(segment) ??
+      // The `function NAME` keyword form, with the `()` optional.
+      /^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/.exec(segment);
     if (functionHeader) {
-      if (GIT_WORD_PATTERN.test(segment)) {
-        gitShapedNames.add(functionHeader[1]!);
-      }
-      insideDefinition = true;
+      insideDefinition = functionHeader[1]!;
+      // Start the body at the first `{`; the header before it is not code.
+      const braceAt = segment.indexOf('{');
+      definitionBody = braceAt >= 0 ? segment.slice(braceAt + 1) : '';
+    } else if (insideDefinition !== undefined) {
+      definitionBody += `\n${segment}`;
     }
-    if (insideDefinition) {
-      // The remaining body segments are definition text, not execution.
-      if (segment.includes('}')) insideDefinition = false;
+    if (insideDefinition !== undefined) {
+      if (segment.includes('}')) {
+        // Record the whole body so a later call replays it — a `-C <outside>`
+        // or a `cd` inside it is then seen, not just the name.
+        const closeAt = definitionBody.lastIndexOf('}');
+        const body = (
+          closeAt >= 0 ? definitionBody.slice(0, closeAt) : definitionBody
+        ).trim();
+        if (body.length > 0) definedBodies.set(insideDefinition, body);
+        insideDefinition = undefined;
+      }
       continue;
     }
 
@@ -2204,12 +2290,23 @@ async function evaluateCommandWithCwd(
         }
         case 'all-export':
           allExport = true;
+          // A leading `GIT_DIR=… set -a` still made that assignment; it is
+          // shell-local for now, promoted the moment allexport is on.
+          exported.relocations.push(...analysis.state.relocations);
+          if (analysis.state.unresolved) exported.unresolved = true;
           break;
         case 'all-export-off':
           allExport = false;
           break;
         case 'other': {
-          // `alias name=body` / `name() { body }` — record, don't execute.
+          // `alias name=body …` / `name() { body }` — record, don't execute.
+          const aliasDefinitions = readAliasDefinitions(run);
+          if (aliasDefinitions.length > 0) {
+            for (const definition of aliasDefinitions) {
+              definedBodies.set(definition.name, definition.body);
+            }
+            break;
+          }
           const definition = readDefinition(run);
           if (definition) {
             definedBodies.set(definition.name, definition.body);
@@ -2263,9 +2360,12 @@ async function evaluateCommandWithCwd(
             run.some((t) => PATH_EXTRACTING_PROGRAMS.has(executableBaseName(t)))
           ) {
             // An archive can place a symlink anywhere below the extraction
-            // directory, so the directory itself is what became suspect.
-            if (trackedCwd === undefined) scope.relink.gitDir = true;
-            else relinkedTargets.push(trackedCwd);
+            // directory, so a later relocation resolving into it is suspect.
+            // A path-less run that merely discovers a repository from an
+            // extracted `.git` is a TOCTOU (the archive is unpacked after
+            // this decision) and is left to the same limitation as the
+            // symlink race rather than denying every `tar && git commit`.
+            if (trackedCwd !== undefined) relinkedTargets.push(trackedCwd);
           }
           if (
             run.some((t) => PATH_RELINKING_PROGRAMS.has(executableBaseName(t)))

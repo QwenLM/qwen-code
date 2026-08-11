@@ -1682,6 +1682,88 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // Common shell forms an agent may emit — not adversarial exotica. Fixed
+  // even under the guard's "reliable against literal forms" promise.
+  it.each([
+    // `&>` / `&>>` is a redirect operator, not a background separator.
+    () => `cd ${plainOutsidePath} &> /dev/null; git reset --hard`,
+    () => `cd ${plainOutsidePath} &>> /dev/null; git reset --hard`,
+    // The `function NAME { … }` keyword form, `()` optional.
+    () => `function g { git reset --hard; }; cd ${plainOutsidePath}; g`,
+    () => `function g() { git reset --hard; }; cd ${plainOutsidePath}; g`,
+    // `include.path`/`includeIf.*.path` pull in a config file the guard
+    // cannot read; it can carry a worktree redirect or executable config.
+    () => `git -c include.path=/tmp/evil reset --hard`,
+    () => `git -c includeIf.gitdir:/x.path=/tmp/evil commit -m x`,
+  ])(
+    'denies a common-form relocation the parser used to miss %#',
+    async (b) => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(b()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('leaves the in-boundary equivalents of those forms alone', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'git status &> /dev/null',
+      'git commit -m x &>> log.txt',
+      'function g { git status; }; cd nested; g',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
+  // Round-9 Criticals reproduced before fixing (Git-word-free path).
+  it.each([
+    // Config/env channels git executes as programs.
+    () => `git -c imap.tunnel='touch /tmp/x' -C ${plainOutsidePath} fetch`,
+    () =>
+      `git -c instaweb.httpd='touch /tmp/x' -C ${plainOutsidePath} rev-parse`,
+    () =>
+      `GIT_DIFFTOOL_EXTCMD='touch /tmp/x' git -C ${plainOutsidePath} difftool`,
+    // `GIT_DIR=… set -a` persists (special builtin) and exports.
+    () => `GIT_DIR=${plainOutsidePath}/.git set -a; git reset --hard`,
+    // Definition recognition behind a redirect / keyword prefix.
+    () => `2>/dev/null alias g='git reset --hard'; cd ${plainOutsidePath}; g`,
+    () =>
+      `if true; then alias g='git reset --hard'; fi; cd ${plainOutsidePath}; g`,
+    // Every pair of a multi-alias statement is a definition.
+    () => `alias a=x g='git reset --hard'; cd ${plainOutsidePath}; g`,
+    // A heredoc body must not launder a tracked cwd.
+    () =>
+      `cd ${plainOutsidePath}; cat <<EOF\ncd ${effectiveCwd}\nEOF\ngit reset --hard`,
+    // A `-C` inside a function body is seen when the body spans segments.
+    () => `f() { true; git -C ${plainOutsidePath} reset --hard; }; f`,
+  ])('denies the round-9 critical form %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('keeps the round-9 in-boundary equivalents alone', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      // A backgrounded `cd` does not move the shell that runs git.
+      'cd nested & git commit -m x',
+      // Extract-then-commit is ordinary work, not a relocation.
+      'tar -xf a.tar && git commit -m x',
+      'cat <<EOF\nhello\nEOF',
+      'f() { true; git status; }; f',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
