@@ -1949,6 +1949,32 @@ it -C ${outsideRepo} reset --hard`,
     ).resolves.toEqual({ allowed: true });
   });
 
+  // Reachable escapes via a redirection on a `cd` or inside a git run.
+  it.each([
+    () => `cd ${plainOutsidePath} >&2; git reset --hard`,
+    () => `git 2>/dev/null -C ${plainOutsidePath} reset --hard`,
+    () => `git -C ${plainOutsidePath} 2>/dev/null reset --hard`,
+  ])('denies a relocation around a redirection %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('leaves an ordinary redirection alone', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'cd nested >&2; git status',
+      'git status 2>/dev/null',
+      'git -C nested reset --hard 2>&1',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

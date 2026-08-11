@@ -1248,6 +1248,12 @@ function readGitInvocation(tokens: GuardToken[]): GitInvocation {
   let index = 1;
   while (index < tokens.length) {
     const token = tokens[index]!;
+    if (token.redirect || token.ambiguousFd) {
+      // A redirection operand among the args (`git 2>/dev/null -C <p> …`) is
+      // not part of argv and must not terminate option parsing.
+      index++;
+      continue;
+    }
     if (token.dynamic || BRACE_EXPANSION_PATTERN.test(token.text)) {
       unresolved = true;
       index++;
@@ -1880,6 +1886,11 @@ function readTopLevelSeparators(command: string): string[] {
     } else if (character === '&' && next === '>') {
       // `&>` / `&>>` redirects stdout+stderr; the `&` is not a separator.
       index += command[index + 2] === '>' ? 2 : 1;
+    } else if (
+      character === '&' &&
+      (command[index - 1] === '>' || command[index - 1] === '<')
+    ) {
+      // `>&2` / `<&fd` — the `&` is part of a file-descriptor redirect.
     } else if (character === '&') {
       // A lone `&` backgrounds the command in its own subshell.
       separators.push('&');
