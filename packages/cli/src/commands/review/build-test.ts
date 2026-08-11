@@ -43,6 +43,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  ANSI_SGR_RE,
   isDependencyFailureLine,
   isDiskFailureLine,
   isGoalFailureLine,
@@ -97,10 +98,17 @@ export interface CommandResult {
   infrastructure?: boolean;
   /**
    * The command exited 0 but its output records failures Maven did not fail
-   * on (a fail-never setting swallowed them): `test-plan` must not rule a
-   * Test Plan claim reproduced against this run.
+   * on (a fail-never or skip-tests setting swallowed them): `test-plan`
+   * must not rule a Test Plan claim reproduced against this run.
    */
   swallowedFailure?: boolean;
+  /**
+   * The command exited 0 but part of its fresh test-report evidence was
+   * never read (past the parse cap, rejected by the parser, or unseen past
+   * a truncated sweep), so the adapter refused to certify the run:
+   * `test-plan` must not settle a Test Plan claim against it.
+   */
+  evidenceCapped?: boolean;
   /**
    * Present on a Maven LIFECYCLE command (not the dependency warm-up): what
    * it scopes, as the adapter knew it when it built the command line.
@@ -194,13 +202,11 @@ const MODULE_ERROR_RE = /Cannot find module '[^']+'|Could not resolve "[^"]+"/;
  */
 const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s+\d/;
 
-/** SGR color sequences — stripped per line before the summary test, because a
- *  real runner interleaves them BETWEEN tokens (`Tests\x1b[2m  \x1b[22m3 failed`),
- *  where no anchored pattern can step over them. The rescued line itself keeps
- *  its original bytes. */
-// eslint-disable-next-line no-control-regex -- ESC is the character under test
-const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
-
+/** SGR color sequences come from the Maven adapter's `ANSI_SGR_RE` export,
+ *  shared so the rescue below and the adapter's own classification strip the
+ *  same bytes: a real runner interleaves them BETWEEN tokens
+ *  (`Tests\x1b[2m  \x1b[22m3 failed`), where no anchored pattern can step
+ *  over them. The rescued line itself keeps its original bytes. */
 export function trimOutput(s: string): string {
   if (s.length <= KEEP_HEAD + KEEP_TAIL) return s;
   const middle = s.slice(KEEP_HEAD, s.length - KEEP_TAIL);

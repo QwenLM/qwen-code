@@ -2087,9 +2087,12 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('Do not run `test-delta` for Maven in this release');
     expect(p).toContain('Source: [build]');
     // The only steering against hand-run full builds — the pattern the same
-    // paragraph records as timing out 71 times and verifying nothing.
+    // paragraph records as timing out 71 times and verifying nothing. The
+    // prohibition is scoped to what build-test runs: the unsupported
+    // fallback below it is the sanctioned hand-run path, and the wording
+    // must not forbid it.
     expect(p).toContain(
-      'Do **not** substitute hand-written npm or Maven commands',
+      'Do **not** substitute hand-written npm or Maven commands for what `build-test` runs',
     );
   });
 

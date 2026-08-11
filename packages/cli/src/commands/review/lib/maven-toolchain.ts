@@ -8,7 +8,8 @@ import {
   accessSync,
   constants,
   existsSync,
-  readdirSync,
+  lstatSync,
+  opendirSync,
   readFileSync,
   statSync,
 } from 'node:fs';
@@ -32,6 +33,17 @@ export interface MavenOwnership {
   reactorWide: boolean;
   modules: string[];
 }
+
+/**
+ * SGR color sequences. Every classification regex in this file anchors on
+ * Maven's `[INFO]`/`[ERROR]` framing, and a `-Dstyle.color=always` config
+ * interleaves these codes BEFORE and BETWEEN tokens, defeating every
+ * anchored predicate — so the executed output is stripped ONCE at
+ * ingestion, before any classification or marker mining reads it.
+ * `build-test`'s trim rescue shares this constant: same bytes, same answer.
+ */
+// eslint-disable-next-line no-control-regex -- ESC is the character under test
+export const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
 
 const REACTOR_WIDE_FILES = new Set(['pom.xml', 'mvnw', 'mvnw.cmd']);
 /**
@@ -87,10 +99,20 @@ const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 /**
  * Cap the report sweep: it walks the worktree for `target/<report-dir>`
  * directories, and a PR controls how many directories exist. Past the cap the
- * sweep stops — a missed report costs evidence, never a wrong verdict, since
- * absent evidence can never certify a pass.
+ * sweep stops and reports the truncation — a truncated sweep can miss failure
+ * evidence, so the run refuses to certify a pass (see `evidenceCapped`).
  */
 const MAX_SCANNED_DIRS = 20_000;
+
+/**
+ * Bound the enumeration of ONE directory as well as the sweep's scan count:
+ * `readdirSync` materializes the full Dirent array at once, and a PR-
+ * controlled wide fan-out (a single directory holding hundreds of thousands
+ * of children) made that array the sweep's dominant memory cost. Entries are
+ * streamed through `opendirSync` and reading stops past this bound; the
+ * directory then counts as truncation, failing closed like the scan cap.
+ */
+const MAX_DIR_ENTRIES = 10_000;
 
 /**
  * Cap how many fresh reports one run parses: the parse is synchronous,
@@ -186,6 +208,13 @@ function isRepoMetadataPath(path: string): boolean {
  * `src/test/resources/projects/*` — never a reactor member, so the file stays
  * owned by the enclosing real project.
  *
+ * The skip fails closed at the ROOT: when every POM beneath the path's `src/`
+ * chain was skipped and the walk would collapse to the root project, the
+ * nested POM may instead be a REAL module (a reactor can aggregate
+ * `<module>src/core</module>`), and `-pl .` compiles only the root — the
+ * changed module would go untested under a green verdict. Returning null
+ * escalates the path to a reactor-wide run instead.
+ *
  * Whether the project this returns is ACTIVE under the current profiles, JDK,
  * and `<modules>` inheritance is deliberately NOT decided here: Maven decides
  * it, by accepting or rejecting the `-pl` selector this ownership produces
@@ -195,11 +224,15 @@ function isRepoMetadataPath(path: string): boolean {
  */
 function owningProject(root: string, path: string): string | null {
   let dir = dirname(join(root, path));
+  let skippedPomBeneathSrc = false;
   while (isInside(root, dir)) {
     const rel = toPosix(relative(root, dir)) || '.';
     // Strictly BENEATH `src/`: a real project located exactly AT a `src` path
     // is not test data.
-    if (!/(?:^|\/)src\//.test(rel) && existsSync(join(dir, 'pom.xml'))) {
+    if (/(?:^|\/)src\//.test(rel)) {
+      if (existsSync(join(dir, 'pom.xml'))) skippedPomBeneathSrc = true;
+    } else if (existsSync(join(dir, 'pom.xml'))) {
+      if (rel === '.' && skippedPomBeneathSrc) return null;
       return rel;
     }
     if (dir === root) break;
@@ -273,6 +306,8 @@ export function detectMavenOwnership(
 
 interface ReportSnapshot {
   mtimes: Map<string, number>;
+  /** The pre-run sweep stopped early: the freshness baseline is incomplete. */
+  truncated: boolean;
 }
 
 interface MavenTestSummary {
@@ -287,31 +322,76 @@ interface MavenTestSummary {
 }
 
 /**
+ * A directory's entries, streamed one at a time so a PR-controlled wide
+ * fan-out cannot materialize an unbounded Dirent array. Reading stops past
+ * MAX_DIR_ENTRIES and reports the truncation; an unreadable directory
+ * returns null.
+ */
+function readDirBounded(
+  dir: string,
+): { entries: Dirent[]; truncated: boolean } | null {
+  let handle;
+  try {
+    handle = opendirSync(dir);
+  } catch {
+    return null;
+  }
+  const entries: Dirent[] = [];
+  let truncated = false;
+  try {
+    for (;;) {
+      if (entries.length >= MAX_DIR_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      const entry = handle.readSync();
+      if (entry === null) break;
+      entries.push(entry);
+    }
+  } finally {
+    handle.closeSync();
+  }
+  return { entries, truncated };
+}
+
+/**
  * Every `<projectDir>/target/<report-dir>/*.xml` in the worktree.
  *
  * The sweep walks the tree rather than a list of reactor projects: which
  * projects are active is Maven's answer, not this adapter's, and a report
- * directory only exists where Maven actually ran. `isDirectory()` is false for
- * symlinks, so the walk never follows one out of the worktree or into a cycle.
+ * directory only exists where Maven actually ran. Symlinks are never
+ * followed: a Dirent's `isDirectory()` is false for one, and the report-dir
+ * read itself is gated on `lstatSync` (which does not resolve the link), so
+ * neither the descent nor the direct listing can escape the worktree.
+ *
+ * `truncated` reports that the sweep stopped early — the scanned-directory
+ * cap, the per-directory fan-out bound, or a queue that outgrew the scan
+ * budget. A truncated sweep can miss failure evidence, so the caller fails
+ * closed on it exactly like the fresh-report cap.
  */
-function reportPaths(root: string): string[] {
+function reportPaths(root: string): { paths: string[]; truncated: boolean } {
   const paths: string[] = [];
   const queue: string[] = [root];
   let scanned = 0;
+  let truncated = false;
   while (queue.length > 0 && scanned < MAX_SCANNED_DIRS) {
     const dir = queue.pop() as string;
     scanned += 1;
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
+    const listing = readDirBounded(dir);
+    if (listing === null) continue;
+    if (listing.truncated) truncated = true;
+    for (const entry of listing.entries) {
       if (!entry.isDirectory()) continue;
       if (entry.name === '.git' || entry.name === 'node_modules') continue;
       const child = join(dir, entry.name);
       if (entry.name !== 'target') {
+        // A wide fan-out can enqueue far more directories than the scan
+        // budget will ever pop; the backlog itself is the memory cost, so
+        // stop enqueuing and count it as truncation.
+        if (queue.length >= MAX_SCANNED_DIRS) {
+          truncated = true;
+          continue;
+        }
         queue.push(child);
         continue;
       }
@@ -319,13 +399,18 @@ function reportPaths(root: string): string[] {
       // generated sources, and the only paths of interest sit one level down.
       for (const reportDir of REPORT_DIRS) {
         const reports = join(child, reportDir);
-        let files: Dirent[];
+        // lstat does NOT follow a symlink: a symlinked report dir would
+        // resolve outside the worktree and inject its stale reports as
+        // fresh evidence.
         try {
-          files = readdirSync(reports, { withFileTypes: true });
+          if (!lstatSync(reports).isDirectory()) continue;
         } catch {
           continue;
         }
-        for (const file of files) {
+        const files = readDirBounded(reports);
+        if (files === null) continue;
+        if (files.truncated) truncated = true;
+        for (const file of files.entries) {
           if (file.isFile() && file.name.endsWith('.xml')) {
             paths.push(join(reports, file.name));
           }
@@ -333,7 +418,8 @@ function reportPaths(root: string): string[] {
       }
     }
   }
-  return paths;
+  if (queue.length > 0) truncated = true;
+  return { paths, truncated };
 }
 
 function snapshotReports(root: string): ReportSnapshot {
@@ -341,15 +427,16 @@ function snapshotReports(root: string): ReportSnapshot {
   // 1s granularity: a report rewritten inside the same tick reads as stale and
   // is dropped. That degrades in the safe direction — absent test-count
   // evidence, never a wrong verdict — so no sub-second workaround is worth it.
+  const { paths, truncated } = reportPaths(root);
   const mtimes = new Map<string, number>();
-  for (const path of reportPaths(root)) {
+  for (const path of paths) {
     try {
       mtimes.set(path, statSync(path).mtimeMs);
     } catch {
       // The report disappeared while the snapshot was being taken.
     }
   }
-  return { mtimes };
+  return { mtimes, truncated };
 }
 
 function xmlAttributes(source: string): Map<string, string> {
@@ -588,9 +675,15 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
 function freshTestSummaries(
   root: string,
   before: ReportSnapshot,
-): { summaries: MavenTestSummary[]; unparsed: number } {
+): {
+  summaries: MavenTestSummary[];
+  unparsed: number;
+  rejected: number;
+  truncated: boolean;
+} {
   const fresh: string[] = [];
-  for (const path of reportPaths(root)) {
+  const { paths, truncated } = reportPaths(root);
+  for (const path of paths) {
     let mtime: number;
     try {
       mtime = statSync(path).mtimeMs;
@@ -607,16 +700,38 @@ function freshTestSummaries(
   // the same root prefix, so absolute and relative order agree.
   fresh.sort();
   const summaries: MavenTestSummary[] = [];
+  // Fresh reports the parser REFUSED (oversized, unreadable, zero suites)
+  // are unknown evidence too: the count cap fails closed by design, and a
+  // parse rejection must not fail open where the cap fails closed — a
+  // masked exit 0 over one oversized failing report would otherwise read
+  // green.
+  let rejected = 0;
   for (const path of fresh.slice(0, MAX_FRESH_REPORTS)) {
     const summary = parseTestReport(root, path);
     if (summary) summaries.push(summary);
+    else rejected += 1;
   }
-  return { summaries, unparsed: Math.max(0, fresh.length - MAX_FRESH_REPORTS) };
+  return {
+    summaries,
+    unparsed: Math.max(0, fresh.length - MAX_FRESH_REPORTS),
+    rejected,
+    // A truncated PRE-run sweep makes the freshness baseline incomplete (a
+    // committed stale report the pre-walk missed reads as fresh), so both
+    // truncations fail closed.
+    truncated: truncated || before.truncated,
+  };
 }
 
 /** Report paths are always `<projectDir>/target/<report-dir>/<file>` (see reportPaths). */
 function projectDirOf(report: string): string {
   return dirname(dirname(dirname(report)));
+}
+
+/** Evidence the run could not read: unparsed past the count cap, rejected by the parser, or unseen past a truncated sweep. */
+interface FreshEvidenceGaps {
+  unparsed: number;
+  rejected: number;
+  truncated: boolean;
 }
 
 /**
@@ -629,9 +744,16 @@ function projectDirOf(report: string): string {
 function appendTestSummaries(
   result: CommandResult,
   summaries: MavenTestSummary[],
-  unparsedReports: number,
+  gaps: FreshEvidenceGaps,
 ): CommandResult {
-  if (summaries.length === 0 && unparsedReports === 0) return result;
+  if (
+    summaries.length === 0 &&
+    gaps.unparsed === 0 &&
+    gaps.rejected === 0 &&
+    !gaps.truncated
+  ) {
+    return result;
+  }
 
   const clean = new Map<string, MavenTestSummary[]>();
   const failing: MavenTestSummary[] = [];
@@ -648,23 +770,22 @@ function appendTestSummaries(
 
   const lines: string[] = [];
   const cleanGroups = [...clean.entries()].map(([project, group]) => {
-    const totals = group.reduce(
-      (sum, item) => ({
-        tests: sum.tests + item.tests,
-        skipped: sum.skipped + item.skipped,
-      }),
-      { tests: 0, skipped: 0 },
+    // The printed totals are the per-report CLAMPED passed sum, not raw
+    // Σtests/Σskipped: test-plan parses counts per LINE with its own clamp,
+    // and Surefire does not guarantee tests >= skipped within one report
+    // (class-level @Disabled), so raw pre-aggregated totals would parse to
+    // a different passed count than the clamped per-report truth — and
+    // which path a group takes (printed rollup vs omission marker) would
+    // change the observed count.
+    const clampedPassed = group.reduce(
+      (sum, item) => sum + Math.max(0, item.tests - item.skipped),
+      0,
     );
     return {
       line:
         `[maven-test-report] ${project} (${group.length} report(s)): ` +
-        `tests=${totals.tests}, failures=0, errors=0, skipped=${totals.skipped}`,
-      // The group's per-report clamped passed total — what the omission
-      // marker aggregates (see below).
-      clampedPassed: group.reduce(
-        (sum, item) => sum + Math.max(0, item.tests - item.skipped),
-        0,
-      ),
+        `tests=${clampedPassed}, failures=0, errors=0, skipped=0`,
+      clampedPassed,
     };
   });
   const cleanLines = cleanGroups.map((group) => group.line);
@@ -715,11 +836,23 @@ function appendTestSummaries(
   }
   lines.push(...reportLines);
 
-  const caseLines = failing.flatMap((summary) =>
-    summary.failedCases.map(
+  const caseLines = failing.flatMap((summary) => {
+    const cases = summary.failedCases.map(
       (testcase) => `[maven-test-failure] ${summary.report}: ${testcase}`,
-    ),
-  );
+    );
+    // The invariant test-plan's guards key on: failures>0 ⇒ at least one
+    // [maven-test-failure] line. A report whose <testsuite> header records
+    // failures with no failing <testcase> body emits none — hold the
+    // invariant with a fallback line rather than letting the failure
+    // vanish from the mined text.
+    if (cases.length === 0 && summary.droppedCases === 0) {
+      cases.push(
+        `[maven-test-failure] ${summary.report}: ${summary.failures} ` +
+          `failure(s), ${summary.errors} error(s) recorded without case detail`,
+      );
+    }
+    return cases;
+  });
   // The per-report parse cap dropped cases BEFORE this point; their count
   // joins the omission marker so count adjudication sees the truncation.
   const droppedCases = failing.reduce(
@@ -736,10 +869,24 @@ function appendTestSummaries(
   }
   lines.push(...caseLines);
 
-  if (unparsedReports > 0) {
+  if (gaps.unparsed > 0) {
     lines.push(
-      `[maven-test-report] ${unparsedReports} more fresh report(s) not parsed: ` +
+      `[maven-test-report] ${gaps.unparsed} more fresh report(s) not parsed: ` +
         `the ${MAX_FRESH_REPORTS}-report evidence cap was reached`,
+    );
+  }
+  if (gaps.rejected > 0) {
+    lines.push(
+      `[maven-test-report] ${gaps.rejected} fresh report(s) could not be parsed ` +
+        '(oversized, unreadable, or carrying no test suites): their failure ' +
+        'status is unknown',
+    );
+  }
+  if (gaps.truncated) {
+    lines.push(
+      '[maven-test-report] the report sweep was truncated (the ' +
+        `${MAX_SCANNED_DIRS}-directory cap or the ${MAX_DIR_ENTRIES}-entry ` +
+        'fan-out bound was reached): some fresh reports may be unseen',
     );
   }
 
@@ -831,7 +978,14 @@ function isLaunchFailure(output: string): boolean {
         /JAVA_HOME.*(?:not defined|incorrectly|invalid directory)/i.test(
           line,
         ) ||
-        /Unable to locate a Java Runtime/i.test(line),
+        /Unable to locate a Java Runtime/i.test(line) ||
+        // Wrapper bootstrap failures: the distribution download dies before
+        // Maven's JVM starts, so these wordings can only appear in the
+        // unframed prelude — the canonical cold-worktree acquisition
+        // failure, and every review worktree is cold.
+        /Failed to download Maven distribution/i.test(line) ||
+        /Maven distribution.*(?:checksum|corrupt|invalid)/i.test(line) ||
+        /^(?:curl|wget): \(\d+\)/.test(line),
     ) || lines.some(isDiskFailureLine)
   );
 }
@@ -900,11 +1054,29 @@ function isGoalFailure(output: string): boolean {
   return output.split('\n').some(isGoalFailureLine);
 }
 
+/**
+ * Surefire's marker that a skip setting suppressed the entire test phase.
+ * Printed for `-DskipTests`, `-Dmaven.test.skip=true`, and POM-configured
+ * `<skipTests>` alike — the one line that distinguishes "tested, zero
+ * reports" from "never tested at all".
+ */
+const TESTS_SKIPPED_LINE_RE = /^\[INFO\] Tests are skipped\./;
+
 function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
   return summaries.some(
     (summary) => summary.failures > 0 || summary.errors > 0,
   );
 }
+
+/**
+ * Maven's rejection of a `-pl` selector naming a project it does not have in
+ * the active reactor. This is the ONE piece of Maven's model this adapter
+ * reads back, and it reads it from Maven rather than recomputing it: profile
+ * activation, `<modules>` inheritance, and JDK-conditional membership all land
+ * here already evaluated.
+ */
+const SELECTOR_REJECTED_RE =
+  /Could not find the selected project in the reactor:\s*([^\n]*)/;
 
 /**
  * Shell diagnostics for a wrapper that cannot start. `Permission denied` is
@@ -916,16 +1088,6 @@ function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
  * Win32 is known-uncovered: a broken `mvnw.cmd` (missing, CRLF, ACL) matches
  * none of these POSIX shapes and stays attributed to the diff.
  */
-/**
- * Maven's rejection of a `-pl` selector naming a project it does not have in
- * the active reactor. This is the ONE piece of Maven's model this adapter
- * reads back, and it reads it from Maven rather than recomputing it: profile
- * activation, `<modules>` inheritance, and JDK-conditional membership all land
- * here already evaluated.
- */
-const SELECTOR_REJECTED_RE =
-  /Could not find the selected project in the reactor:\s*([^\n]*)/;
-
 const WRAPPER_LAUNCH_FAILURE_RE =
   /(?:^|\n)(?:.*\.\/mvnw[^\n]*(?:Permission denied|bad interpreter|No such file or directory|cannot execute: required file not found|not found)|\/usr\/bin\/env:[^\n]*No such file or directory)(?:\n|$)/i;
 
@@ -949,14 +1111,27 @@ function summaryTotals(summaries: MavenTestSummary[]) {
  * nothing upstream filters them any more. `,` separates `-pl` arguments and
  * `:` makes Maven read a selector as `[groupId]:artifactId` coordinates
  * instead of a path, so both change the MEANING of the selector; `%` is
- * cmd.exe variable expansion, which a `"…"` wrap does not stop.
+ * cmd.exe variable expansion, which a `"…"` wrap does not stop. A LEADING
+ * `-` makes Maven's commons-cli re-read the value as an option (`-pl -rf`
+ * dies with 'Missing argument for option: pl'), and a leading `!` is
+ * Maven's exclusion operator — quoting preserves the value but not the
+ * semantics, so both widen to the full reactor like the rest.
  */
 export function shellSelector(
   modules: string[],
   platform: string = process.platform,
 ): string | null {
   if (modules.length === 0) return null;
-  if (modules.some((module) => /[,:%]/.test(module))) return null;
+  if (
+    modules.some(
+      (module) =>
+        /[,:%]/.test(module) ||
+        module.startsWith('-') ||
+        module.startsWith('!'),
+    )
+  ) {
+    return null;
+  }
   const selector = modules.join(',');
   if (/^[A-Za-z0-9_./,-]+$/.test(selector)) return selector;
   // The command runs through cmd.exe on Windows, where POSIX quoting is
@@ -1315,11 +1490,20 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // reports dir for nothing.
   const before = args.buildOnly ? null : snapshotReports(args.root);
   ranACommand = true;
-  const executed = args.exec(
+  const executedRaw = args.exec(
     command,
     args.root,
     Math.max(0, Math.min(perCommandMs, remainingMs())),
   );
+  // Strip SGR once, before ANY classification reads the output: every
+  // predicate below anchors on Maven's `[INFO]`/`[ERROR]` framing, and a
+  // `-Dstyle.color=always` in `.mvn/maven.config` interleaves color codes
+  // that defeat all of them — colored bytes would launder a failed compile
+  // into a green verdict.
+  const executed = {
+    ...executedRaw,
+    output: executedRaw.output.replace(ANSI_SGR_RE, ''),
+  };
   // Maven's own answer to "is this project in the active reactor". It is the
   // authority on profile activation, `<modules>` inheritance, and JDK-
   // conditional membership, and it rejects an unknown selector before
@@ -1335,10 +1519,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   }
   const fresh = before
     ? freshTestSummaries(args.root, before)
-    : { summaries: [], unparsed: 0 };
+    : { summaries: [], unparsed: 0, rejected: 0, truncated: false };
   const summaries = fresh.summaries;
   const result = {
-    ...appendTestSummaries(executed, summaries, fresh.unparsed),
+    ...appendTestSummaries(executed, summaries, {
+      unparsed: fresh.unparsed,
+      rejected: fresh.rejected,
+      truncated: fresh.truncated,
+    }),
     maven: mavenFacts,
   };
   const timedOut = result.timedOut ? [result.command] : [];
@@ -1346,10 +1534,22 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`
   // exit 0 over failing tests, and the verdict must read the evidence.
   const freshFailures = hasFreshTestFailure(summaries);
-  // Reports past the evidence cap were never parsed, so their failure
-  // status is UNKNOWN: certifying a clean pass over them reads a failed
-  // run green exactly as dropping them did. Fail closed instead.
-  const evidenceCapped = fresh.unparsed > 0;
+  // Reports past the evidence cap were never parsed, reports the parser
+  // rejected were never read, and a truncated sweep never saw some reports
+  // at all: the failure status of all three is UNKNOWN, and certifying a
+  // clean pass over unknown evidence reads a failed run green exactly as
+  // dropping it did. Fail closed instead.
+  const evidenceCapped =
+    fresh.unparsed > 0 || fresh.rejected > 0 || fresh.truncated;
+  // A skip setting (`-DskipTests`/`-Dmaven.test.skip=true` in
+  // `.mvn/maven.config`, or a POM `<skipTests>`) lets `mvn test` exit 0
+  // having executed ZERO tests, and Surefire's skip path emits none of the
+  // framed errors the predicates below scan for — without this check a run
+  // that tested nothing is certified green, and Test Plan count claims
+  // become uncontradictable. The marker covers all three spellings.
+  const testsSuppressed =
+    summaries.length === 0 &&
+    result.output.split('\n').some((line) => TESTS_SKIPPED_LINE_RE.test(line));
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -1360,7 +1560,8 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     result.exitCode === 0 &&
     !result.timedOut &&
     !freshFailures &&
-    (isSourceFailure(result.output) ||
+    (testsSuppressed ||
+      isSourceFailure(result.output) ||
       isDependencyFailure(result.output) ||
       isLaunchFailure(result.output) ||
       isGoalFailure(result.output));
@@ -1390,11 +1591,16 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         !executedWrapperChanged &&
         (result.exitCode === 126 || result.exitCode === 127) &&
         WRAPPER_LAUNCH_FAILURE_RE.test(result.output)));
-  const recorded = acquisitionFailure
-    ? { ...result, infrastructure: true }
-    : swallowedFailure
-      ? { ...result, swallowedFailure: true }
-      : result;
+  const recorded = {
+    ...result,
+    // These flags are how test-plan sees the adapter's exit-0 ok:false
+    // outcomes: a run carrying ANY of them must not settle a Test Plan
+    // claim. They are set independently — an acquisition failure under a
+    // fail-never setting can coincide with capped evidence.
+    ...(acquisitionFailure ? { infrastructure: true } : {}),
+    ...(swallowedFailure ? { swallowedFailure: true } : {}),
+    ...(evidenceCapped ? { evidenceCapped: true } : {}),
+  };
   const report = mavenReport({
     affected,
     buildSet,
@@ -1455,10 +1661,33 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       `\`${result.command}\` exited 0 but fresh Surefire/Failsafe reports record ` +
       `${totals.failures} failure(s) and ${totals.errors} error(s) — a testFailureIgnore-style ` +
       'setting is swallowing them. Treat these as test failures, not a pass.';
-  } else if (!ok && result.exitCode === 0 && evidenceCapped) {
+  } else if (!ok && result.exitCode === 0 && testsSuppressed) {
     report.note =
-      `\`${result.command}\` exited 0, but ${fresh.unparsed} fresh Surefire/Failsafe report(s) ` +
-      `exceeded the ${MAX_FRESH_REPORTS}-report evidence cap and were not parsed — their ` +
+      `\`${result.command}\` exited 0, but Maven reported \`Tests are skipped.\` — ` +
+      'a skip setting (`-DskipTests`/`-Dmaven.test.skip` in `.mvn/maven.config` or a POM ' +
+      '`<skipTests>`) suppressed the entire test phase, so nothing was tested. ' +
+      'Treat this as an unverified run, not a pass.';
+  } else if (!ok && result.exitCode === 0 && evidenceCapped) {
+    const gapReasons: string[] = [];
+    if (fresh.unparsed > 0) {
+      gapReasons.push(
+        `${fresh.unparsed} fresh Surefire/Failsafe report(s) exceeded the ` +
+          `${MAX_FRESH_REPORTS}-report evidence cap and were not parsed`,
+      );
+    }
+    if (fresh.rejected > 0) {
+      gapReasons.push(
+        `${fresh.rejected} fresh report(s) could not be parsed (oversized, ` +
+          'unreadable, or carrying no test suites)',
+      );
+    }
+    if (fresh.truncated) {
+      gapReasons.push(
+        'the report sweep was truncated, so some fresh reports may be unseen',
+      );
+    }
+    report.note =
+      `\`${result.command}\` exited 0, but ${gapReasons.join('; ')} — their ` +
       'failure status is unknown, so the run is not certified as a pass.' +
       (swallowedFailure
         ? ' The output also records failures Maven did not fail on.'
@@ -1500,8 +1729,9 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   } else if (selectorUnsafe) {
     report.note +=
       ' Scope: a changed module directory carries a character a `-pl` selector cannot express ' +
-      '(`,` and `:` change what the selector means to Maven; `%` expands in cmd.exe), so this ' +
-      'run covered the full reactor instead of the changed modules and their upstream dependencies.';
+      '(`,` and `:` change what the selector means to Maven; `%` expands in cmd.exe; a leading ' +
+      '`-` or `!` reads as an option or an exclusion), so this run covered the full reactor ' +
+      'instead of the changed modules and their upstream dependencies.';
   }
   if (install && (install.timedOut || install.exitCode !== 0)) {
     report.note +=

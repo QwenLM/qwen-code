@@ -9,7 +9,7 @@
 // pre-existing flake into a public Critical (or the reverse). The base rerun
 // itself is a seam — one command in one cwd — so the exec is injected.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +22,21 @@ import {
   type TestDeltaReport,
 } from './test-delta.js';
 import type { BuildTestReport, CommandResult } from './build-test.js';
+
+// A passthrough spy on the real spawn: the fractional-timeout pin below must
+// observe the OPTIONS handed to spawnSync — the ERR_OUT_OF_RANGE a reverted
+// coercion throws lands in the same report shape as a real run, so outcome-
+// level assertions cannot see it.
+const spawnSpy = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual =
+    (await importOriginal()) as typeof import('node:child_process');
+  spawnSpy.mockImplementation((...args: unknown[]) =>
+    (actual.spawnSync as (...a: unknown[]) => unknown)(...args),
+  );
+  const mod = { ...actual, spawnSync: spawnSpy };
+  return { ...mod, default: mod };
+});
 
 const cmd = (over: Partial<CommandResult>): CommandResult => ({
   command: 'npm test --workspace="packages/core"',
@@ -495,6 +510,23 @@ describe('runTestDelta', () => {
     // of throwing out of the whole call.
     expect(r.entries).toHaveLength(1);
     expect(r.entries[0].base.timedOut).toBe(false);
+  });
+
+  it('hands spawnSync an integral, positive timeout for a fractional budget', () => {
+    // The outcome-level probe above cannot see a reverted coercion — the
+    // ERR_OUT_OF_RANGE throw lands in the same report shape as a real run —
+    // so pin the spawn OPTIONS directly.
+    spawnSpy.mockClear();
+    runTestDelta({
+      report: writeReport([
+        cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
+      ]),
+      baseline,
+      timeout: 60.123,
+    });
+    const opts = spawnSpy.mock.calls[0]?.[1] as { timeout?: number };
+    expect(Number.isInteger(opts.timeout)).toBe(true);
+    expect(opts.timeout).toBeGreaterThanOrEqual(1);
   });
 
   it('refuses an unreadable report and a missing base tree without throwing', () => {

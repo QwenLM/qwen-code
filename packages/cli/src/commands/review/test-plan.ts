@@ -452,12 +452,15 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // an interrupted or infrastructure-classified run is not a completed
     // suite, and its partial counts must not adjudicate a count claim. A
     // fail-never run that swallowed failures is the same — the field's
-    // contract forbids ruling any claim reproduced against it.
+    // contract forbids ruling any claim reproduced against it — and so is a
+    // run whose evidence the adapter refused to certify: its parsed subset
+    // is partial by definition.
     if (
       cmd.timedOut ||
       cmd.exitCode === null ||
       cmd.infrastructure ||
-      cmd.swallowedFailure
+      cmd.swallowedFailure ||
+      cmd.evidenceCapped
     )
       continue;
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
@@ -633,6 +636,16 @@ const MAVEN_PHASE_RE =
   /^(?:clean|validate|compile|test-compile|test|package|verify|install)$/;
 
 /**
+ * Work this review never runs, for reduction DISCLOSURE only — deliberately
+ * wider than the settlement vocabulary above: a claim carrying `deploy`,
+ * `site`, or a plugin goal (a positional carrying `:`) in non-trailing
+ * position settles via its trailing in-vocabulary phase, and the reduction
+ * must be disclosed rather than read as if the whole claim ran. Trailing
+ * out-of-vocabulary work is refused separately by claimFinalWork.
+ */
+const MAVEN_UNRUN_WORK_RE = /^(?:deploy|site|pre-site|post-site)$/;
+
+/**
  * Flags whose space-separated form consumes the NEXT token as their value
  * (the attached `=` forms carry it in-token and consume nothing). A module
  * dir named `test` handed to one is a flag VALUE, not a lifecycle phase.
@@ -683,6 +696,18 @@ function mavenPositionalTokens(command: string): string[] {
       }
       continue;
     }
+    // The attached `-pl='foo bar'` form carries the same quoted value
+    // in-token: the split broke it at the space, so consume through the
+    // closing quote here too, or a phase-looking word inside the selector
+    // (`-pl='foo test'`) would be read as a claimed phase.
+    if (token.startsWith('-pl=') || token.startsWith('--projects=')) {
+      const raw = token.slice(token.indexOf('=') + 1);
+      const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
+      if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
+        while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
+      }
+      continue;
+    }
     positional.push(token);
   }
   return positional;
@@ -716,10 +741,23 @@ function mavenHasAlsoMake(command: string): boolean {
     const token = tokens[i];
     // A quoted `-pl` selector can carry `-am` inside a module dir name
     // (`-pl 'foo -am bar'` — spaces pass the POM entry gate); consume the
-    // whole selector so the split inside it is not read as the flag.
-    if ((token === '-pl' || token === '--projects') && i + 1 < tokens.length) {
-      i += 1;
-      const raw = tokens[i];
+    // whole selector so the split inside it is not read as the flag. The
+    // attached `-pl='foo -am bar'` form breaks the same way at the space,
+    // so it gets the same consumption.
+    if (
+      token === '-pl' ||
+      token === '--projects' ||
+      token.startsWith('-pl=') ||
+      token.startsWith('--projects=')
+    ) {
+      let raw: string | undefined;
+      if (token === '-pl' || token === '--projects') {
+        i += 1;
+        raw = tokens[i];
+      } else {
+        raw = token.slice(token.indexOf('=') + 1);
+      }
+      if (raw === undefined) break;
       const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
       if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
         while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
@@ -782,14 +820,22 @@ function mavenPlModules(command: string): string[] | null {
           // Quoted and unquoted spellings compare equal.
           const quoted = /^(['"])(.*)\1$/.exec(trimmed);
           const unquoted = quoted ? quoted[2] : trimmed;
-          // Maven also accepts `[groupId]:artifactId` coordinate selectors;
-          // the review's own runs use directory selectors, so compare the
-          // artifactId — the coordinate's last `:` segment — or such
-          // claims could never settle or be contradicted. A reactor module
-          // dir can never carry `:` (the POM entry gate rejects it), so
-          // recorded selectors are untouched by this branch.
-          const colon = unquoted.lastIndexOf(':');
-          return colon === -1 ? unquoted : unquoted.slice(colon + 1);
+          // A `[groupId]:artifactId` coordinate selector names a different
+          // NAMESPACE than the recorded module directories: artifactId and
+          // dir name can disagree, and two dirs can share one artifactId,
+          // so reducing the coordinate and string-matching it against a dir
+          // could settle — or contradict — the claim with a DIFFERENT
+          // module's run. Kept raw instead: a coordinate never matches a
+          // recorded dir (dirs can't carry `:`), so such claims stay
+          // unsettleable (unchecked) rather than risk a wrong-module
+          // verdict.
+          if (unquoted.includes(':')) return unquoted;
+          // Maven treats `-pl ./core` identically to `-pl core`, and the
+          // recorded modules come from repo-relative paths that never carry
+          // the prefix — normalize the claim spelling away, or the claim
+          // could never settle or be contradicted. A bare `.` (the root
+          // project) survives the strip as `''` and is restored.
+          return unquoted.replace(/^\.\/+/, '') || '.';
         })
         .filter((module) => module.length > 0),
     ),
@@ -880,9 +926,15 @@ function ruleCommand(
   // Lifecycle phases the claim names, in order: a multi-phase claim
   // (`clean test`) runs phases the recorded single-phase run never did.
   // Flag values are excluded: a module dir named `test` handed to `-pl` is
-  // a selector, not a claimed phase.
-  const claimPhases = mavenPositionalTokens(claimed).filter((token) =>
-    MAVEN_PHASE_RE.test(token),
+  // a selector, not a claimed phase. Out-of-vocabulary WORK counts too
+  // (`mvn deploy test`, a leading plugin goal): it never ran here, and
+  // settling the trailing phase without disclosing the reduction would
+  // overstate the evidence.
+  const claimPhases = mavenPositionalTokens(claimed).filter(
+    (token) =>
+      MAVEN_PHASE_RE.test(token) ||
+      MAVEN_UNRUN_WORK_RE.test(token) ||
+      (!token.startsWith('-') && token.includes(':')),
   );
   const claimScopesItself = claimTokens.some(
     (token) =>
@@ -933,8 +985,13 @@ function ruleCommand(
   // A run this review itself classified as infrastructure (a timeout, a
   // spawn-level death, a Maven acquisition failure) is the same evidence the
   // build-test note disavowed as environmental — it must not settle a claim.
+  // Neither may a run whose fresh-report evidence the adapter refused to
+  // certify: its parsed subset is partial by definition.
   const finished = (c: CommandResult): boolean =>
-    !c.timedOut && c.exitCode !== null && !c.infrastructure;
+    !c.timedOut &&
+    c.exitCode !== null &&
+    !c.infrastructure &&
+    !c.evidenceCapped;
   // The marker is mined from the command's own output — PR test stdout can
   // print it too, so it is not tamper-proof (same property as the npm
   // console-summary parsing). Runner-gated like the `[maven-test-report]`
@@ -946,22 +1003,38 @@ function ruleCommand(
   // A zero exit over fresh failing reports (surefire `testFailureIgnore`),
   // or over framed errors a fail-never setting swallowed, is a FAILED run
   // for ruling purposes: the Maven adapter marks both ok:false, so the
-  // claim must not read as reproduced.
+  // claim must not read as reproduced. A run whose evidence was capped is
+  // ok:false for the opposite reason — it certified NOTHING — so it counts
+  // as failed here too, never as reproduced.
   const ranFailed = (c: CommandResult): boolean =>
-    c.exitCode !== 0 || freshTestFailures(c) || c.swallowedFailure === true;
+    c.exitCode !== 0 ||
+    freshTestFailures(c) ||
+    c.swallowedFailure === true ||
+    c.evidenceCapped === true;
   // A run's `[maven-test-failure]` markers attribute each failure to its
   // report path `<module>/target/...`: when one resolves inside the claimed
   // `-pl` set the failure is provably inside the claim's scope, and the
   // `-am` carve-outs must not discard it. Mined from the command's own
   // output, so it carries the same tamper surface as freshTestFailures.
+  // The 200-line case cap can drop EVERY `[maven-test-failure]` line of the
+  // claimed module when an upstream module fails first in path order, so a
+  // surviving `[maven-test-report]` line with non-zero failures/errors for
+  // a report INSIDE the claim is in-scope failure evidence too.
   const failureInsideClaim = (c: CommandResult): boolean => {
     if (claimPlModules === null) return false;
     const output = c.output ?? '';
-    return claimPlModules.some((module) =>
-      output.includes(
-        `[maven-test-failure] ${module === '.' ? '' : `${module}/`}target/`,
-      ),
-    );
+    const lines = output.split('\n');
+    return claimPlModules.some((module) => {
+      const prefix = module === '.' ? '' : `${module}/`;
+      if (output.includes(`[maven-test-failure] ${prefix}target/`)) {
+        return true;
+      }
+      return lines.some(
+        (line) =>
+          line.startsWith(`[maven-test-report] ${prefix}target/`) &&
+          (/ failures=[1-9]/.test(line) || / errors=[1-9]/.test(line)),
+      );
+    });
   };
   // How a matched run relates to the claim — module-scoped and/or
   // phase-reduced — in the wording the notes use. Shared by the
@@ -1150,6 +1223,20 @@ function ruleCommand(
         text,
         verdict: 'unchecked',
         note: `${runForm(environmental).howItRan}; it failed for environmental reasons`,
+      };
+    }
+    // A run the adapter refused to certify settles nothing either way:
+    // name the cap rather than letting the claim fall through to the
+    // "not run" wording, which would misstate what happened.
+    const capped = matches.find((c) => c.evidenceCapped);
+    if (capped) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'unchecked',
+        note:
+          `${runForm(capped).howItRan}; part of its fresh report evidence ` +
+          'was never read (cap, parse rejection, or a truncated sweep), so the run was not certified',
       };
     }
 

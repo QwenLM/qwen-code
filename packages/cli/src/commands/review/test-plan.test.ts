@@ -839,12 +839,15 @@ describe('runTestPlan', () => {
      * One recorded Maven lifecycle run, in the shape the adapter emits: the
      * command line AND the `maven` facts it rendered that line from.
      *
-     * Both come from ONE input here, exactly as they do in the adapter, so a
-     * fixture cannot describe a run the adapter could not have produced —
+     * Both come from ONE input here, exactly as they do in the adapter —
      * which is the whole reason `test-plan` reads the facts instead of
-     * parsing the string back. Pass `command` to render a line the adapter
-     * would not (a claim-side spelling under test); pass `maven: undefined`
-     * for a non-Maven run.
+     * parsing the string back. The fixture is deliberately BROADER than the
+     * adapter, though: the `alsoMake` override can render a narrowed `-pl`
+     * run WITHOUT `-am`, a shape the adapter never emits (its rendering
+     * always pairs the two) — that impossible shape exists to pin the
+     * claim-side `-am` carve-outs against adversarial inputs. Pass
+     * `command` to render a line the adapter would not (a claim-side
+     * spelling under test); pass `maven: undefined` for a non-Maven run.
      */
     const mavenCmd = (
       opts: {
@@ -1516,18 +1519,135 @@ describe('runTestPlan', () => {
       expect(verdictOf(clean.claims, 'mvn clean test')).toBe('reproduces');
     });
 
-    it('settles a coordinate -pl claim on a directory-form run of the same artifact', () => {
-      // `-pl :core` selects by artifactId; the review's own runs select by
-      // directory, so the comparison normalizes the coordinate form — or
-      // such claims could never settle or be contradicted.
+    it('leaves a coordinate -pl claim unsettleable rather than matching it against a directory run', () => {
+      // `-pl :core` selects by artifactId — a different NAMESPACE than the
+      // recorded module directories. artifactId and dir name can disagree,
+      // and two dirs can share one artifactId, so string-matching the
+      // reduced coordinate against a dir could settle — or contradict — the
+      // claim with a DIFFERENT module's run. Unchecked beats wrong.
       const green = {
         build: [],
         test: [mavenCmd()],
       } as unknown as BuildTestReport;
       const r = run('## Test Plan\n\nRan `./mvnw -pl :core test`', [], green);
       const claim = r.claims.find((c) => c.text === './mvnw -pl :core test');
+      expect(claim?.verdict).toBe('unchecked');
+    });
+
+    it('settles a ./-prefixed -pl claim exactly like the bare spelling', () => {
+      // Maven treats `-pl ./core` identically to `-pl core`, and the
+      // recorded modules never carry the prefix — without the
+      // normalization the natural spelling could never settle or be
+      // contradicted.
+      const green = {
+        build: [],
+        test: [mavenCmd()],
+      } as unknown as BuildTestReport;
+      const r = run(
+        '## Test Plan\n\nRan `./mvnw -pl ./core -am test`',
+        [],
+        green,
+      );
+      const claim = r.claims.find(
+        (c) => c.text === './mvnw -pl ./core -am test',
+      );
       expect(claim?.verdict).toBe('reproduces');
-      expect(claim?.note).toContain('module-scoped');
+    });
+
+    it('does not read an -am inside a quoted attached -pl= selector as the flag', () => {
+      // The space-form twin already consumes the quoted selector; the
+      // attached form broke at the space and the bare `-am` token inside it
+      // disabled the upstream-failure carve-out, contradicting a correct
+      // claim.
+      const output =
+        '[maven-test-report] aaa/target/surefire-reports/TEST-A.xml: tests=2, failures=1, errors=0, skipped=0\n' +
+        '[maven-test-failure] aaa/target/surefire-reports/TEST-A.xml: example.ATest#fails';
+      const bt = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['foo -am bar'],
+            exitCode: 1,
+            output,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run(
+        "## Test Plan\n\nRan `./mvnw -pl='foo -am bar' test`",
+        [],
+        bt,
+      );
+      const claim = r.claims.find(
+        (c) => c.text === "./mvnw -pl='foo -am bar' test",
+      );
+      // The failure lives in upstream `aaa`, which the claim (no `-am`)
+      // never tests — the carve-out applies and the claim stays unchecked.
+      expect(claim?.verdict).toBe('unchecked');
+    });
+
+    it('discloses the phase reduction when a claim carries unrun work in non-trailing position', () => {
+      // `mvn deploy test` never ran `deploy` here: settling through the
+      // trailing in-vocabulary phase must disclose the reduction rather
+      // than read as if the whole claim ran.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `mvn deploy test`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'mvn deploy test');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('final phase');
+      expect(claim?.note).toContain('deploy test');
+    });
+
+    it('contradicts an -am-excluded claim when the failure survives as a report line inside the claim', () => {
+      // The 200-line case cap can drop every [maven-test-failure] line of
+      // the claimed module while its [maven-test-report] line survives with
+      // failures>0 — that surviving line is in-scope failure evidence, or
+      // truncation alone would flip the verdict.
+      const output =
+        '[maven-test-report] aaa/target/surefire-reports/TEST-A.xml: tests=300, failures=250, errors=0, skipped=0\n' +
+        Array.from(
+          { length: 200 },
+          (_, i) =>
+            `[maven-test-failure] aaa/target/surefire-reports/TEST-A.xml: example.ATest#f${i}`,
+        ).join('\n') +
+        '\n[maven-test-failure] 51 more failing case(s) omitted\n' +
+        '[maven-test-report] zzz/target/surefire-reports/TEST-Z.xml: tests=5, failures=1, errors=0, skipped=0';
+      const bt = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['zzz'],
+            exitCode: 0,
+            output,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw -pl zzz test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw -pl zzz test');
+      expect(claim?.verdict).toBe('contradicted');
+    });
+
+    it('settles nothing against a run whose evidence the adapter refused to certify', () => {
+      // An evidenceCapped run is ok:false because its parsed subset is
+      // partial BY DEFINITION — it must not rule a claim reproduced, and
+      // its counts must not adjudicate a count claim.
+      const bt = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: null,
+            evidenceCapped: true,
+            output:
+              '[maven-test-report] core (3 report(s)): tests=1000, failures=0, errors=0, skipped=0',
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('not certified');
     });
 
     it('discloses the reduced form of an interrupted matching run too', () => {

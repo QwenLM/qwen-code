@@ -270,8 +270,12 @@ Fastjson2 and Druid establish these requirements:
   deadline timing out proves nothing, so downstream coverage stays with the
   project's CI matrix. P1 does not claim this is a recursively computed
   dependency-graph closure.
-- Root `pom.xml`, `.mvn/**`, `mvnw`, and `mvnw.cmd` affect the whole reactor and
-  disable module narrowing.
+- Root `pom.xml` and `.mvn/**` affect the whole reactor and disable module
+  narrowing. Of the two wrapper scripts, only the one this platform executes
+  does: every wrapper repo ships both `mvnw` and `mvnw.cmd`, and a change
+  confined to the other platform's wrapper cannot affect this run, so it is
+  inert for narrowing (the report discloses when it was changed but not
+  exercised).
 - Profile modules must not be treated as unconditionally active. P1 discovers
   module ownership from POM aggregation paths, but Maven is the authority on
   whether a selected project belongs to the active reactor under the current
@@ -299,16 +303,24 @@ P1 does not model the Maven reactor. Maven is the authority on which projects
 it contains, and this adapter reads that answer back rather than recomputing
 it:
 
-1. Assign each changed path to the nearest ancestor directory holding a
+1. Exempt documentation (doc extensions in doc-shaped locations only) and
+   repository metadata; such paths select nothing. The exemption runs BEFORE
+   ownership: a README-only or `.github/`-only diff maps to no project.
+2. Assign each changed path to the nearest ancestor directory holding a
    `pom.xml`, skipping directories strictly beneath a `src/` tree (a POM there
-   is maven-invoker or archetype test data, never a reactor member).
-2. Use repository-relative project paths as the `-pl` selectors, and fail
+   is maven-invoker or archetype test data, never a reactor member). If the
+   walk skipped a POM-bearing directory and would collapse to the ROOT
+   project, fail closed to reactor-wide instead: the nested POM may be a real
+   module (a reactor can aggregate `<module>src/core</module>`), and `-pl .`
+   compiles only the root.
+3. Use repository-relative project paths as the `-pl` selectors, and fail
    closed to the full reactor when a directory name cannot be expressed in one
-   (`,` and `:` change what a selector means to Maven; `%` expands in cmd.exe).
-3. Treat any changed POM as reactor-wide. A POM is parent config for
+   (`,` and `:` change what a selector means to Maven; `%` expands in cmd.exe;
+   a leading `-` or `!` reads as an option or an exclusion).
+4. Treat any changed POM as reactor-wide. A POM is parent config for
    everything that aggregates or inherits it, and `-pl <owner> -am` would
    compile the aggregator and test nothing that changed.
-4. Let Maven reject the selector. `Could not find the selected project in the
+5. Let Maven reject the selector. `Could not find the selected project in the
 reactor` is the authoritative answer for a standalone or profile-inactive
    project — evaluated against the real effective model, the active profiles,
    and the current JDK, and returned before anything is compiled. That
@@ -370,15 +382,20 @@ Existing fields are generalized without changing their JSON shape:
 - `test`: contains the Maven `test` command in normal mode.
 - `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
 
-Command results carry two optional classification flags consumed by
+Command results carry three optional classification flags consumed by
 `test-plan`:
 
 - `CommandResult.infrastructure`: the adapter classified the failure as
   environmental (Maven/Java or dependency acquisition, an unlaunchable
   wrapper), so a Test Plan claim must not be settled against it.
 - `CommandResult.swallowedFailure`: the command exited 0 but its output
-  records failures Maven did not fail on (a fail-never setting), so a Test
-  Plan claim must not be ruled reproduced against it.
+  records failures Maven did not fail on (a fail-never setting, or a
+  skip-tests setting that suppressed the whole test phase), so a Test Plan
+  claim must not be ruled reproduced against it.
+- `CommandResult.evidenceCapped`: the command exited 0 but part of its fresh
+  report evidence was never read (past the parse cap, rejected by the parser,
+  or unseen past a truncated sweep), so the adapter refused to certify the
+  run and a Test Plan claim must not be settled against it.
 
 Dependency/plugin resolution failures and unavailable wrapper/runtime are
 infrastructure outcomes, except when the diff changed the inputs that could
@@ -477,6 +494,12 @@ specifying this before two real adapters demonstrate the common boundary.
 
 ## Risks
 
+- **Win32 wrapper-launch deaths are not yet infrastructure:** a broken but
+  present `mvnw.cmd` produces cmd.exe diagnostics that match none of the
+  POSIX launch-failure shapes, so on Windows such an environment outage stays
+  attributed to the diff. The infrastructure guarantee for an unlaunchable
+  wrapper holds on POSIX only; close the predicate gap before relying on it
+  on win32.
 - **Accidental report drift:** protected by the existing `build-test` suite and
   explicit report-shape assertions.
 - **Adapter abstraction without behavior:** P0 is justified only if npm
@@ -498,5 +521,6 @@ specifying this before two real adapters demonstrate the common boundary.
 
 None. P1 settled the report-schema widening it introduced (`toolchain`
 discriminant, `CommandResult.infrastructure`,
-`CommandResult.swallowedFailure`); multi-toolchain aggregation remains a
-decision for the phase that introduces that behavior.
+`CommandResult.swallowedFailure`, `CommandResult.evidenceCapped`);
+multi-toolchain aggregation remains a decision for the phase that introduces
+that behavior.

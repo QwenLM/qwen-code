@@ -351,6 +351,41 @@ describe('runBuildTest', () => {
     });
   });
 
+  it('carries the Maven classification flags and command facts into the recorded CommandResult', () => {
+    // The adapter's own unit tests cover the classification, but nothing
+    // pinned that the fields survive into the report shape test-plan
+    // consumes — vitest transpiles without type-checking, so a renamed or
+    // dropped field anywhere in between reads as undefined downstream.
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/Main.java']);
+    const report = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+      exec: (command: string) => ({
+        command,
+        exitCode: 0,
+        seconds: 1,
+        timedOut: false,
+        output:
+          '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check on project fixture',
+      }),
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(false);
+    const recorded = report.test[0];
+    expect(recorded?.swallowedFailure).toBe(true);
+    expect(recorded?.maven).toEqual({
+      lifecycle: 'test',
+      modules: ['.'],
+      alsoMake: true,
+    });
+    expect(recorded?.infrastructure).toBeUndefined();
+    expect(recorded?.evidenceCapped).toBeUndefined();
+  });
+
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {
     // `packages/**` matches real paths that the walker cannot resolve, so a diff
     // inside it would otherwise yield an empty affected set and a confident green.
