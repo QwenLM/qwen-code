@@ -372,7 +372,10 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
         if (!Array.isArray(chunked)) {
           return chunked;
         }
-        const withHours = durationSeconds >= 3600;
+        // Match formatClock's Math.round: a 3599.6s duration rounds to
+        // 3600 inside the clock label, which without the hours field
+        // would render as "00:00" instead of "1:00:00".
+        const withHours = Math.round(durationSeconds) >= 3600;
         const lines: string[] = [];
         const segmentLength = durationSeconds / segmentCount;
         for (const [index, outcome] of chunked.entries()) {
