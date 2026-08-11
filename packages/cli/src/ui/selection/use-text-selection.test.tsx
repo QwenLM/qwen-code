@@ -121,6 +121,8 @@ const makeEvent = (
   button: 'left',
 });
 
+const flushMicrotasks = (): Promise<void> => Promise.resolve();
+
 describe('TextSelectionController', () => {
   let frame: ReadonlyFrame;
   let setSelection: ReturnType<typeof vi.fn>;
@@ -299,23 +301,25 @@ describe('TextSelectionController', () => {
     );
   });
 
-  it('clears a completed selection when scrollTop changes', () => {
+  it('clears a completed selection when scrollTop changes', async () => {
     const handler = mount();
     selectHello(handler);
     setSelection.mockClear();
 
     scrollState = { ...scrollState, scrollTop: 1 };
     listener!(frame);
+    await flushMicrotasks();
 
     expect(setSelection).toHaveBeenCalledWith(null);
   });
 
-  it('clears a completed selection when same-size frame content changes', () => {
+  it('clears a completed selection when same-size frame content changes', async () => {
     const handler = mount();
     selectHello(handler);
     setSelection.mockClear();
 
     listener!(makeFrame('hullo'));
+    await flushMicrotasks();
 
     expect(setSelection).toHaveBeenCalledWith(null);
   });
@@ -342,7 +346,7 @@ describe('TextSelectionController', () => {
     expect(setSelection).not.toHaveBeenCalled();
   });
 
-  it('clears a footer selection when footer content changes', () => {
+  it('clears a footer selection when footer content changes', async () => {
     frame = makeTwoLineFrame('hello', 'status');
     viewportRect = { x: 0, y: 0, width: 5, height: 1 };
     additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
@@ -355,7 +359,84 @@ describe('TextSelectionController', () => {
     expect(setSelection).not.toHaveBeenCalled();
 
     listener!(makeTwoLineFrame('hello', 'footer'));
+    await flushMicrotasks();
 
     expect(setSelection).toHaveBeenCalledWith(null);
+  });
+
+  it('clears a footer selection when its layout changes', async () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('left-release', 6, 2));
+    setSelection.mockClear();
+
+    additionalSelectableRects = [{ x: 0, y: 2, width: 6, height: 1 }];
+    listener!(frame);
+    await flushMicrotasks();
+
+    expect(setSelection).toHaveBeenCalledWith(null);
+  });
+
+  it('keeps a footer selection while history scrolls', async () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    handler(makeEvent('left-release', 6, 2));
+    setSelection.mockClear();
+
+    scrollState = { ...scrollState, scrollTop: 1, scrollHeight: 2 };
+    listener!(frame);
+    await flushMicrotasks();
+
+    expect(setSelection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a footer drag active while history scrolls', () => {
+    frame = makeTwoLineFrame('hello', 'status');
+    viewportRect = { x: 0, y: 0, width: 5, height: 1 };
+    additionalSelectableRects = [{ x: 0, y: 1, width: 6, height: 1 }];
+    const handler = mount();
+    handler(makeEvent('left-press', 1, 2));
+    setSelection.mockClear();
+
+    scrollState = { ...scrollState, scrollTop: 1 };
+    handler(makeEvent('move', 5, 2));
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 1,
+      ex: 4,
+      ey: 1,
+    });
+  });
+
+  it('does not let stale invalidation clear a newer selection', () => {
+    const handler = mount();
+    selectHello(handler);
+    setSelection.mockClear();
+
+    const queued: Array<() => void> = [];
+    const queueSpy = vi
+      .spyOn(globalThis, 'queueMicrotask')
+      .mockImplementation((callback) => queued.push(callback));
+    frame = makeFrame('hullo');
+    listener!(frame);
+
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 5));
+    queued[0]();
+    queueSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 0,
+    });
   });
 });

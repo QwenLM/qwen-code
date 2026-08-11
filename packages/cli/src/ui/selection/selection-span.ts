@@ -12,9 +12,13 @@ function isWordCell(value: string): boolean {
   return value !== '' && value !== ' ' && !/^\s$/u.test(value);
 }
 
-/** Trailing column of the last non-space cell on a row, or -1 if blank. */
-function lastContentColumn(row: ReadonlyFrame['cells'][number]): number {
-  for (let x = row.length - 1; x >= 0; x--) {
+/** Trailing column of the last non-space cell in a row range, or -1 if blank. */
+function lastContentColumn(
+  row: ReadonlyFrame['cells'][number],
+  start: number,
+  end: number,
+): number {
+  for (let x = end; x >= start; x--) {
     if (row[x].value !== '' && row[x].value !== ' ') {
       return x;
     }
@@ -57,18 +61,27 @@ export function wordSpanAt(
   return { sx, sy: y, ex, ey: y };
 }
 
-/** Whole visual line span (first column to last non-space), or null if blank. */
+/** Contiguous selectable line span around a click, or null if blank. */
 export function lineSpanAt(
   frame: ReadonlyFrame | null,
+  x: number,
   y: number,
 ): NormalizedSelection | null {
   const row = frame?.cells[y];
-  if (!row) {
+  if (!row?.[x]?.selectable) {
     return null;
   }
-  const end = lastContentColumn(row);
-  if (end < 0) {
+  let start = x;
+  while (start > 0 && row[start - 1].selectable) {
+    start--;
+  }
+  let runEnd = x;
+  while (runEnd < row.length - 1 && row[runEnd + 1].selectable) {
+    runEnd++;
+  }
+  const contentEnd = lastContentColumn(row, start, runEnd);
+  if (contentEnd < start) {
     return null;
   }
-  return { sx: 0, sy: y, ex: end, ey: y };
+  return { sx: start, sy: y, ex: contentEnd, ey: y };
 }

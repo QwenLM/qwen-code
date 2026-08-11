@@ -88,8 +88,9 @@ interface ClickRecord {
  * regions into a text selection: it maps terminal coordinates to the
  * composited frame, drives the {@link SelectionState}, highlights the range
  * through the frame controller, and copies on release. Double/triple click
- * select a word/line. B1 scope: visible-region only, cleared on any scroll,
- * resize, or streaming content change.
+ * select a word/line. B1 scope: visible-region only; history selections clear
+ * on scroll, while every selection clears when its owning content or layout
+ * changes.
  */
 export function TextSelectionController(
   props: TextSelectionControllerProps,
@@ -102,6 +103,7 @@ export function TextSelectionController(
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
   const baselineRectRef = useRef<ViewportRect | null>(null);
   const activeRectIndexRef = useRef<number | null>(null);
+  const selectionGenerationRef = useRef(0);
   const lastClickRef = useRef<ClickRecord | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
@@ -115,6 +117,7 @@ export function TextSelectionController(
   }, [stdout]);
 
   const clearSelection = useCallback(() => {
+    selectionGenerationRef.current += 1;
     activeRectIndexRef.current = null;
     const selection = selectionRef.current;
     if (selection.isEmpty) {
@@ -203,13 +206,17 @@ export function TextSelectionController(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
 
-      // Any scroll drops the selection (B1: visible-region only).
+      // History scrolls invalidate history-owned selection coordinates. Footer
+      // selections live outside the scrollable viewport and remain valid.
       if (event.name.startsWith('scroll-')) {
-        clearSelection();
+        if (activeRectIndexRef.current === 0) {
+          clearSelection();
+        }
         return;
       }
 
       if (event.name === 'left-press') {
+        selectionGenerationRef.current += 1;
         if (
           propsRef.current.hitTestScrollbar({ col: event.col, row: event.row })
         ) {
@@ -244,7 +251,7 @@ export function TextSelectionController(
           const span =
             count === 2
               ? wordSpanAt(frame, point.x, point.y)
-              : lineSpanAt(frame, point.y);
+              : lineSpanAt(frame, point.x, point.y);
           if (span) {
             selection.selectSpan(span, count === 2 ? 'word' : 'line');
             recordBaseline(rect);
@@ -266,10 +273,11 @@ export function TextSelectionController(
           return;
         }
         lastClickRef.current = null;
-        // A scroll under the drag invalidates coordinates in B1.
+        // A scroll under a history drag invalidates its viewport coordinates.
         if (
+          activeRectIndexRef.current === 0 &&
           propsRef.current.getScrollState().scrollTop !==
-          dragScrollTopRef.current
+            dragScrollTopRef.current
         ) {
           clearSelection();
           return;
@@ -340,13 +348,20 @@ export function TextSelectionController(
       }
       const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
       const activeRect = getActiveRect();
+      const isViewportSelection = activeRectIndexRef.current === 0;
       if (
-        scrollTop !== baselineScrollTopRef.current ||
-        scrollHeight !== baselineScrollHeightRef.current ||
+        (isViewportSelection &&
+          (scrollTop !== baselineScrollTopRef.current ||
+            scrollHeight !== baselineScrollHeightRef.current)) ||
         !sameViewportRect(baselineRectRef.current, activeRect) ||
         !sameViewportContent(baselineFrameRef.current, frame, activeRect)
       ) {
-        clearSelection();
+        const invalidatedGeneration = selectionGenerationRef.current;
+        queueMicrotask(() => {
+          if (selectionGenerationRef.current === invalidatedGeneration) {
+            clearSelection();
+          }
+        });
       }
     });
   }, [getBuffer, getActiveRect, clearSelection]);

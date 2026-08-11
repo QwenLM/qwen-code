@@ -67,11 +67,26 @@ describe('wordSpanAt', () => {
 describe('lineSpanAt', () => {
   it('spans from column 0 to the last non-space cell', () => {
     const frame = frameFromLines(['  hi there   ']);
-    expect(lineSpanAt(frame, 0)).toEqual({ sx: 0, sy: 0, ex: 9, ey: 0 });
+    expect(lineSpanAt(frame, 4, 0)).toEqual({ sx: 0, sy: 0, ex: 9, ey: 0 });
   });
 
   it('returns null for a blank line', () => {
     const frame = frameFromLines(['     ']);
-    expect(lineSpanAt(frame, 0)).toBeNull();
+    expect(lineSpanAt(frame, 2, 0)).toBeNull();
+  });
+
+  it('stops at a non-selectable layout gap', () => {
+    const frame = frameFromLines(['status    42%']);
+    for (let x = 6; x < 10; x++) {
+      (frame.cells[0][x] as FrameCell).selectable = false;
+    }
+
+    expect(lineSpanAt(frame, 2, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 5,
+      ey: 0,
+    });
+    expect(lineSpanAt(frame, 7, 0)).toBeNull();
   });
 });
