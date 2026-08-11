@@ -17,6 +17,7 @@ import {
   getPersistScopeForModelSelection,
 } from '../../config/modelProvidersScope.js';
 import {
+  applyReasoningEffort,
   getModelReasoningControls,
   normalizeModelReasoningEffort,
   normalizeReasoningEffort,
@@ -111,7 +112,7 @@ export const effortCommand: SlashCommand = {
     const effectiveTier = registration?.effort
       ? normalizeModelReasoningEffort(registration, tier)!
       : tier;
-    config.setReasoningEffort(effectiveTier);
+    const applied = applyReasoningEffort(config, effectiveTier);
     // `model.reasoningPreferences` is scoped independently from
     // `modelProviders`; persist to the scope that owns the `model` key so the
     // write cannot be shadowed by a higher-precedence scope's entry.
@@ -136,7 +137,7 @@ export const effortCommand: SlashCommand = {
     // (`reasoning: false`), so effort cannot silently re-enable it. The tier is
     // still persisted for future sessions, but report that it won't take effect
     // yet instead of a misleading success message.
-    if (config.getReasoningEffort() !== effectiveTier) {
+    if (!applied) {
       return {
         type: 'message',
         messageType: 'info',

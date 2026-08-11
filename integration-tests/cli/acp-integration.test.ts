@@ -487,7 +487,7 @@ function setupAcpTest(
     }
   });
 
-  it('supports session/set_config_option for mode and model', async () => {
+  it('supports session/set_config_option for mode, model, and reasoning effort', async () => {
     const rig = new TestRig();
     // Inject a deterministic openai provider model so `availableModels` always
     // contains a settable openai entry. The previous version relied on the
@@ -534,8 +534,25 @@ function setupAcpTest(
         models: {
           availableModels: Array<{ modelId: string }>;
         };
+        configOptions: Array<{
+          id: string;
+          category?: string;
+          currentValue: string;
+          options: Array<{ value: string; name: string }>;
+        }>;
       };
       expect(newSession.sessionId).toBeTruthy();
+
+      const initialReasoningOption = newSession.configOptions.find(
+        (opt) => opt.id === 'reasoning_effort',
+      );
+      expect(initialReasoningOption).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+      });
+      expect(
+        initialReasoningOption?.options.map((option) => option.value),
+      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -599,6 +616,57 @@ function setupAcpTest(
       );
       expect(updatedModelOption).toBeDefined();
       expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
+      expect(
+        setModelResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('default');
+
+      const setReasoningResult = (await sendRequest(
+        'session/set_config_option',
+        {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'xhigh',
+        },
+      )) as {
+        configOptions: Array<{ id: string; currentValue: string }>;
+      };
+      expect(
+        setReasoningResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('xhigh');
+
+      const resetReasoningResult = (await sendRequest(
+        'session/set_config_option',
+        {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+        },
+      )) as {
+        configOptions: Array<{ id: string; currentValue: string }>;
+      };
+      expect(
+        resetReasoningResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('default');
+
+      await expect(
+        sendRequest('session/set_config_option', {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          code: -32602,
+          message:
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+        },
+      });
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
@@ -723,20 +791,26 @@ function setupAcpTest(
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
 
-    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests, agent } =
-      setupAcpTest(rig, {
-        permissionHandler: (request) => {
-          // Track all permission requests for later verification
-          // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
-          if (request.toolCall?.kind === 'switch_mode') {
-            planModeRequests.push(request);
-            // Return proceed_always to switch to auto-edit mode
-            return { optionId: 'proceed_always' };
-          }
-          // Auto-approve all other requests
-          return { optionId: 'proceed_once' };
-        },
-      });
+    const {
+      sendRequest,
+      cleanup,
+      stderr,
+      sessionUpdates,
+      permissionRequests,
+      agent,
+    } = setupAcpTest(rig, {
+      permissionHandler: (request) => {
+        // Track all permission requests for later verification
+        // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
+        if (request.toolCall?.kind === 'switch_mode') {
+          planModeRequests.push(request);
+          // Return proceed_always to switch to auto-edit mode
+          return { optionId: 'proceed_always' };
+        }
+        // Auto-approve all other requests
+        return { optionId: 'proceed_once' };
+      },
+    });
 
     try {
       // Initialize

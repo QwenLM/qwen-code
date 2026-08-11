@@ -6,6 +6,7 @@
 
 import { useState, useCallback } from 'react';
 import {
+  applyReasoningEffort,
   getModelReasoningControls,
   normalizeModelReasoningEffort,
   type Config,
@@ -54,7 +55,7 @@ export const useEffortCommand = (
         const effectiveEffort = registration?.effort
           ? normalizeModelReasoningEffort(registration, effort)!
           : effort;
-        config.setReasoningEffort(effectiveEffort);
+        const applied = applyReasoningEffort(config, effectiveEffort);
         // Mirror the slash-command path: `model.reasoningPreferences` is
         // scoped independently from `modelProviders`, so persist to the scope
         // owning the `model` key to avoid shadowed writes.
@@ -74,14 +75,13 @@ export const useEffortCommand = (
         } else {
           loadedSettings.setValue(scope, 'model.reasoningEffort', effort);
         }
-        // Mirror the slash-command path's read-back so the dialog reports the
-        // outcome in-chat instead of silently closing (the status line is the
-        // only other signal). `setReasoningEffort` is a no-op when thinking is
-        // explicitly disabled (`reasoning: false`): the tier is still persisted
-        // for future sessions, but say it won't take effect until thinking is
-        // re-enabled; otherwise confirm the requested tier.
+        // Report the outcome in-chat instead of silently closing (the status
+        // line is the only other signal). `setReasoningEffort` is a no-op when
+        // thinking is explicitly disabled (`reasoning: false`): the tier is
+        // still persisted for future sessions, but say it won't take effect
+        // until thinking is re-enabled.
         if (addItem) {
-          if (config.getReasoningEffort() !== effectiveEffort) {
+          if (!applied) {
             addItem(
               {
                 type: MessageType.INFO,

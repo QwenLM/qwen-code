@@ -414,6 +414,14 @@ const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;
 
+/**
+ * Config-option ids this HTTP transport's `session/set_config_option` can
+ * route. Shared by `configOptionsFor`'s advertisement filter and the
+ * setter's rejection message so the advertised set and the set reported as
+ * supported cannot drift apart.
+ */
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
+
 class AcpParamError extends Error {}
 
 class InvalidRequestedSessionIdError extends Error {}
@@ -1162,9 +1170,14 @@ export class AcpDispatcher {
   }
 
   /**
-   * The session's ACP-shaped config options (model/mode/…), read from the
-   * child's own session state. Returned in `session/new` and as the result
-   * of `session/set_config_option`. Best-effort — `undefined` on error.
+   * The session's ACP-shaped config options supported by this HTTP transport
+   * (currently model and mode), read from the child's own session state.
+   * Every response built from this helper (`session/new`,
+   * `session/load`/`session/resume`, `session/fork`, and the
+   * `session/set_config_option` result) is gated to the ids the transport
+   * can route. Raw-state surfaces (context status, REST load/resume state)
+   * intentionally carry the child's full unfiltered set — they report session
+   * state. Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
@@ -1175,7 +1188,13 @@ export class AcpDispatcher {
         state?: { configOptions?: unknown };
       };
       const co = ctx?.state?.configOptions;
-      return Array.isArray(co) ? co : undefined;
+      return Array.isArray(co)
+        ? co.filter(
+            (option) =>
+              isObject(option) &&
+              HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string),
+          )
+        : undefined;
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp configOptionsFor(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
@@ -2545,6 +2564,8 @@ export class AcpDispatcher {
                 ctx,
               );
             } else {
+              // Ids advertised by raw-state surfaces but unroutable here
+              // (e.g. reasoning_effort) must fail loud, not fall into mode.
               if (id !== undefined) {
                 this.replySession(
                   conn,
@@ -2554,7 +2575,7 @@ export class AcpDispatcher {
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    `Unknown configId: ${configId}`,
+                    `ConfigId not supported by this transport: ${configId} (supported: ${HTTP_ACP_CONFIG_OPTION_IDS.join(', ')})`,
                   ),
                 );
               }
