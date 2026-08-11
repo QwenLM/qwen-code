@@ -19,7 +19,7 @@ const MAX_CONNECTIONS: usize = 64;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalNetwork {
     address: Ipv4Addr,
     netmask: Ipv4Addr,
@@ -170,11 +170,11 @@ fn spawn_proxy(
                         let _ = client.shutdown(Shutdown::Both);
                         break;
                     }
-                    if !network.contains(peer.ip()) {
-                        let _ = write_rejection(&mut client, 403, "Forbidden (off-network)");
+                    if client.set_nonblocking(false).is_err() {
                         continue;
                     }
-                    if client.set_nonblocking(false).is_err() {
+                    if !network.contains(peer.ip()) {
+                        let _ = write_rejection(&mut client, 403, "Forbidden (off-network)");
                         continue;
                     }
                     let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
