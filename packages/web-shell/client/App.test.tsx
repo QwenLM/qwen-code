@@ -15158,6 +15158,40 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('reconciles a confirmed rename after its source attachment is replaced', async () => {
+    const rename = deferred<void>();
+    mockSessionActions.renameSession.mockReturnValueOnce(rename.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/rename Delayed title';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+        'Delayed title',
+      );
+    });
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/other';
+      rerender();
+    });
+    sessionCatalogController.renamed.mockClear();
+
+    await act(async () => {
+      rename.resolve();
+      await rename.promise;
+    });
+
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+      'Delayed title',
+    );
+  });
+
   it('reconciles a name reused after the session loaded a different title', async () => {
     const { container, rerender } = renderApp();
     await flush();

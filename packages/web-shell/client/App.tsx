@@ -8493,7 +8493,6 @@ export function App({
             sessionActions
               .renameSession(displayName)
               .then(() => {
-                if (!owner.isCurrent()) return;
                 if (renamedSessionId) {
                   reconcileCatalogRename(
                     renamedWorkspaceCwd,
@@ -8501,6 +8500,7 @@ export function App({
                     displayName,
                   );
                 }
+                if (!owner.isCurrent()) return;
                 store.dispatch([
                   {
                     type: 'status',
@@ -8509,12 +8509,12 @@ export function App({
                 ]);
               })
               .catch((error: unknown) => {
-                if (!owner.isCurrent()) return;
                 if (renamedWorkspaceCwd) {
                   sessionCatalogController.invalidateWorkspace(
                     renamedWorkspaceCwd,
                   );
                 }
+                if (!owner.isCurrent()) return;
                 reportError(error, 'Failed to rename session');
               });
             return true;
