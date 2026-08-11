@@ -833,6 +833,8 @@ export interface MidTurnQueueEntry {
   messageId: string;
   text: string;
   originatorClientId?: string;
+  queueOnly?: boolean;
+  onSettledWithoutDrain?: () => void;
 }
 
 /**
@@ -1651,15 +1653,19 @@ export interface AcpSessionBridge {
    * authorized against the session like `/prompt` and `/btw` — throws
    * `InvalidClientIdError` when the id is not bound to the session, and
    * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
-   * With `options.queueOnly` an idle session rejects instead of promoting —
-   * for callers that must drive the next turn themselves (live steering).
+   * With `options.queueOnly` an idle session rejects instead of promoting. If
+   * a busy session settles before draining the message,
+   * `onSettledWithoutDrain` lets the caller drive the next turn itself.
    */
   enqueueMidTurnMessage(
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
     messageId?: string,
-    options?: { queueOnly?: boolean },
+    options?: {
+      queueOnly?: boolean;
+      onSettledWithoutDrain?: () => void;
+    },
   ): { accepted: boolean; messageId?: string };
 
   /** Remove a queued or promoted mid-turn message. */

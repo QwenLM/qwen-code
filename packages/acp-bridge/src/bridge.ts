@@ -7045,13 +7045,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               }
             }
           }
-          // When the last active prompt settles, atomically move every
-          // daemon-owned undrained message into the normal FIFO before
-          // releasing this prompt's slot. That makes each promoted prompt a
-          // queued successor (with the normal added/started events) and keeps
-          // the session alive after its originating client detaches.
-          if (entry.pendingPromptCount === 1 && !entry.closing) {
+          // When the last active prompt settles, atomically move ordinary
+          // daemon-owned messages into the normal FIFO before releasing this
+          // prompt's slot. Queue-only callers take back messages that missed
+          // the final drain so they can preserve their own turn semantics.
+          if (
+            entry.pendingPromptCount === 1 &&
+            !entry.closing &&
+            byId.get(entry.sessionId) === entry
+          ) {
             for (const message of entry.midTurnMessageQueue.splice(0)) {
+              if (message.queueOnly) {
+                try {
+                  message.onSettledWithoutDrain?.();
+                } catch (error) {
+                  writeStderrLine(
+                    `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to hand undrained queue-only message ${JSON.stringify(message.messageId)} back to its caller: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+                  );
+                }
+                continue;
+              }
               promoteMidTurnMessage(
                 entry,
                 message.messageId,
@@ -8887,16 +8900,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
-      // `isClosingOrAuthorizingClose`, not bare `closing`: same admission
-      // invariant as `sendPrompt` — a conditional close still being confirmed
-      // must refuse new work too, or a message promoted in that window races
-      // the teardown and is dropped after an `accepted: true` ack.
-      if (isClosingOrAuthorizingClose(entry)) {
-        writeStderrLine(
-          `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected: session closing`,
-        );
-        return { accepted: false };
-      }
       const trimmed = message.trim();
       if (trimmed.length === 0) {
         writeStderrLine(
@@ -8936,6 +8939,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return { accepted: true, messageId: requestedMessageId };
         }
       }
+      // Answer retries for daemon-owned ids before rejecting genuinely new
+      // work during conditional close. Existing ownership remains idempotent;
+      // only fresh admission can race the teardown.
+      if (isClosingOrAuthorizingClose(entry)) {
+        writeStderrLine(
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected: session closing`,
+        );
+        return { accepted: false };
+      }
       const messageId = requestedMessageId ?? randomUUID();
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.
@@ -8963,6 +8975,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         messageId,
         text: trimmed,
         originatorClientId,
+        ...(options?.queueOnly
+          ? {
+              queueOnly: true,
+              onSettledWithoutDrain: options.onSettledWithoutDrain,
+            }
+          : {}),
       };
       entry.midTurnMessageQueue.push(queuedMessage);
       // UI enqueues only: an anonymous enqueue (live steering) is an internal

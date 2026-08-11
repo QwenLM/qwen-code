@@ -1255,6 +1255,31 @@ export class LiveSessionCoordinator {
       event.request,
       event.activeTranscript,
     );
+    const runAsNextTurn = async (notifyAdmission: boolean) => {
+      if (
+        !this.isCurrentSocket(context, generation) ||
+        context.realtime !== source
+      ) {
+        return false;
+      }
+      let admitted = false;
+      await this.runCoordinatorTurn(
+        context,
+        locator,
+        event.request,
+        modelPrompt,
+        () => {
+          admitted = true;
+          if (notifyAdmission) onPromptAdmitted();
+        },
+        (message) => {
+          if (this.isCurrentSocket(context, generation)) {
+            source.sendBackendContext(message);
+          }
+        },
+      );
+      return admitted;
+    };
     // `queueOnly`: if the turn already settled, promotion would run this
     // steering as a bare prompt no coordinator collector subscribes to — the
     // response would never reach the Realtime source, and no turn deadline
@@ -1265,7 +1290,21 @@ export class LiveSessionCoordinator {
       modelPrompt,
       undefined,
       undefined,
-      { queueOnly: true },
+      {
+        queueOnly: true,
+        onSettledWithoutDrain: () => {
+          void runAsNextTurn(false).catch((error: unknown) => {
+            if (
+              this.isCurrentSocket(context, generation) &&
+              context.realtime === source
+            ) {
+              source.sendBackendContext(
+                `The Qwen Code agent could not complete the request: ${errorMessage(error)}`,
+              );
+            }
+          });
+        },
+      },
     );
     if (routed.accepted) {
       onPromptAdmitted();
@@ -1273,29 +1312,7 @@ export class LiveSessionCoordinator {
     }
 
     await activeHandoff.turnComplete;
-    if (
-      !this.isCurrentSocket(context, generation) ||
-      context.realtime !== source
-    ) {
-      return false;
-    }
-    let admitted = false;
-    await this.runCoordinatorTurn(
-      context,
-      locator,
-      event.request,
-      modelPrompt,
-      () => {
-        admitted = true;
-        onPromptAdmitted();
-      },
-      (message) => {
-        if (this.isCurrentSocket(context, generation)) {
-          source.sendBackendContext(message);
-        }
-      },
-    );
-    return admitted;
+    return runAsNextTurn(true);
   }
 
   private async handleDelegate(

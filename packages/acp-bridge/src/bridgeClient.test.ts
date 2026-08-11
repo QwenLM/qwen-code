@@ -3035,8 +3035,25 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:drain',
       activePromptId: 'prompt-drain',
       midTurnMessageQueue: [
-        { messageId: 'mid-1', text: 'first' },
-        { messageId: 'mid-2', text: 'second' },
+        {
+          messageId: 'mid-1',
+          text: 'first',
+          originatorClientId: 'client-1',
+        },
+        {
+          messageId: 'internal',
+          text: '<realtime_delegation />',
+          queueOnly: true,
+        },
+        {
+          messageId: 'anonymous-ui',
+          text: 'anonymous ordinary',
+        },
+        {
+          messageId: 'mid-2',
+          text: 'second',
+          originatorClientId: 'client-2',
+        },
       ],
       settledMidTurnMessageIds: [],
       events: { publish },
@@ -3048,14 +3065,24 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
 
     expect(result).toEqual({
-      messages: ['first', 'second'],
+      messages: [
+        'first',
+        '<realtime_delegation />',
+        'anonymous ordinary',
+        'second',
+      ],
       hasQueuedPrompt: false,
     });
     // Queue emptied so the same messages can't be re-injected on the next batch.
     expect(entry.midTurnMessageQueue).toEqual([]);
     // Stable ids land in the reconciliation ring so a client that missed the
     // echo frame (or refreshed) can tell "already injected" from "dropped".
-    expect(entry.settledMidTurnMessageIds).toEqual(['mid-1', 'mid-2']);
+    expect(entry.settledMidTurnMessageIds).toEqual([
+      'mid-1',
+      'internal',
+      'anonymous-ui',
+      'mid-2',
+    ]);
     // Exactly one SSE frame carrying the drained text for the browser to dedupe.
     expect(publish).toHaveBeenCalledTimes(1);
     expect(publish.mock.calls[0][0]).toMatchObject({
@@ -3063,13 +3090,41 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       promptId: 'prompt-drain',
       data: {
         sessionId: 'sess:drain',
-        messages: ['first', 'second'],
-        messageIds: ['mid-1', 'mid-2'],
+        messages: ['first', 'anonymous ordinary', 'second'],
+        messageIds: ['mid-1', 'anonymous-ui', 'mid-2'],
       },
     });
-    // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
-    // frame, so every consumer reconciles it.
+    // The session-wide frame omits internal anonymous steering while the child
+    // still receives it in queue order.
     expect(publish.mock.calls[0][0].originatorClientId).toBeUndefined();
+  });
+
+  it('does not publish an injected frame for anonymous steering', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'sess:anonymous',
+      midTurnMessageQueue: [
+        {
+          messageId: 'internal',
+          text: '<realtime_delegation />',
+          queueOnly: true,
+        },
+      ],
+      settledMidTurnMessageIds: [],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:anonymous', entry);
+
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:anonymous',
+      }),
+    ).resolves.toEqual({
+      messages: ['<realtime_delegation />'],
+      hasQueuedPrompt: false,
+    });
+    expect(entry.settledMidTurnMessageIds).toEqual(['internal']);
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('publishes one session-wide frame for messages from every client', async () => {
@@ -3138,6 +3193,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           {
             messageId: 'mid-delivered',
             text: 'still-delivered',
+            originatorClientId: 'client-1',
           },
         ],
         settledMidTurnMessageIds: [],

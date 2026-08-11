@@ -1250,12 +1250,14 @@ export class BridgeClient implements Client {
         );
       }
     }
+    // Queue-only entries are private coordinator steering, not UI transcript.
+    const echoed = drained.filter((item) => !item.queueOnly);
     const messages = drained.map((item) => item.text);
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
     );
-    if (drained.length > 0) {
+    if (echoed.length > 0) {
       // `publish()` never throws — it returns `undefined` on a closed bus (see
       // EventBus.publish's never-throws contract: "Don't add try/catch wrappers
       // around publish()"). Capture the result instead. A dropped frame is
@@ -1266,14 +1268,14 @@ export class BridgeClient implements Client {
         ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
         data: {
           sessionId: entry.sessionId,
-          messages,
-          messageIds: drained.map((item) => item.messageId),
+          messages: echoed.map((item) => item.text),
+          messageIds: echoed.map((item) => item.messageId),
         },
       });
       writeStderrLine(
         published
-          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} injected into running turn`
-          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echo frame dropped (bus closed); reconciliation required`,
+          ? `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} injected into running turn`
+          : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
       );
     }
     return { messages, hasQueuedPrompt };
