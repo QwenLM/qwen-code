@@ -38,7 +38,7 @@
         "packages/web-shell/client/e2e/*",
         "packages/web-shell/client/e2e/utils/*",
         "packages/web-shell/client/e2e/visuals/*",
-        "packages/web-shell/client/hooks/**"
+        "packages/web-shell/client/hooks/*.ts"
       ]
     },
     {
