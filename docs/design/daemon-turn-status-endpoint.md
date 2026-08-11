@@ -49,6 +49,13 @@ particular `promptTextTruncated` / `resultTruncated` are only present when
 also carries `resultCode: "RESULT_TEXT_TRUNCATED"` so consumers can reject an
 incomplete answer without interpreting free text.
 
+`originatorClientId`, when present, identifies the trusted client that admitted
+the prompt. An `error` payload may accompany `state: 'error'` and contains a
+required `message` plus an optional `code`; `prompt_deadline_exceeded` identifies
+the bridge deadline terminal. Error messages are capped at 4,096 UTF-16 code
+units and codes at 256, with `messageTruncated` / `codeTruncated` set only when
+the corresponding value was truncated.
+
 - `queued` / `running` mirror the bridge's live `pendingPromptList`
   (`queuedAt` at admission, `startedAt` at FIFO dispatch).
 - `completed` / `cancelled` / `error` come from the bridge's exactly-once
@@ -91,11 +98,13 @@ Settled outcomes survive daemon restarts by appending one
   `recordFileHistorySnapshot`: a recording failure must never break turn
   settlement.
 - `Session` accumulates the turn in flight (`#turnRecording`): the record
-  is created at admission after `assertCanStartTurn()` for prompts carrying
-  an invocation context (daemon-admitted prompts only — internal
-  cron/notification turns are not pollable), accumulates canonical visible
-  answer segments in `sendUpdate`, and settles on every exit path (early
-  admission-cancel, pendingSend-cancel, normal completion, thrown error).
+  is created after invocation-context validation but before admission checks,
+  including `assertCanStartTurn()`, for prompts carrying an invocation context
+  (daemon-admitted prompts only — internal cron/notification turns are not
+  pollable). This keeps admission failures queryable by promptId. The record
+  accumulates canonical visible answer segments in `sendUpdate` and settles on
+  every exit path (early admission-cancel, pendingSend-cancel, normal
+  completion, thrown error).
   Each `prompt()` call captures its own record reference and settles that
   exact reference; the shared slot is only published once the predecessor
   turn has settled and the turn's model loop starts. This keeps DAEMON-003
@@ -120,9 +129,9 @@ they are not converted into a successful `turnResult: null` response.
 Transcript persistence is asynchronous relative to the bridge's formal
 terminal event. To prevent a completed prompt from briefly regressing to
 `prompt_not_found`, each live `SessionEntry` retains recent formal terminal
-statuses in insertion order. The map is capped by the configured
-`eventRingSize`; eviction only removes the transient overlay, so persisted
-records remain queryable.
+statuses in insertion order. The map has a fixed limit of 64 entries,
+independently of `eventRingSize`; eviction only removes the transient overlay,
+so persisted records remain queryable.
 
 ## Bridge resolution order
 
