@@ -68,6 +68,7 @@ interface CatalogState {
   refresh?: Promise<void>;
   refreshTimer?: ReturnType<typeof setTimeout>;
   options?: LoadModelMetadataCatalogOptions;
+  lastSuccessfulRefreshAt?: number;
 }
 
 const builtInCatalog = builtInModelModalities as ModelMetadataCatalog;
@@ -277,6 +278,7 @@ function refreshCatalog(
   state.refresh = fetchAndCache(cachePath, refreshOptions)
     .then((catalog) => {
       state.current = catalog;
+      state.lastSuccessfulRefreshAt = Date.now();
     })
     .catch((error) => {
       debugLogger.debug(
@@ -312,6 +314,7 @@ async function loadInitialCatalog(
     const catalog = parseCatalog(text);
     if (catalog && Object.keys(catalog).length > 0) {
       state.current = catalog;
+      state.lastSuccessfulRefreshAt = stat.mtimeMs;
       const ageMs = Date.now() - stat.mtimeMs;
       if (ageMs >= CACHE_TTL_MS) {
         refreshCatalog(state, cachePath, keepFresh);
@@ -346,7 +349,10 @@ export function loadModelMetadataCatalog(
   if (optionsChanged) state.options = options;
 
   if (state.current) {
-    if (optionsChanged && options.cachePath === undefined) {
+    const catalogIsFresh =
+      state.lastSuccessfulRefreshAt !== undefined &&
+      Date.now() - state.lastSuccessfulRefreshAt < CACHE_TTL_MS;
+    if (optionsChanged && options.cachePath === undefined && !catalogIsFresh) {
       refreshCatalog(state, cachePath, true);
     }
     return Promise.resolve(state.current);

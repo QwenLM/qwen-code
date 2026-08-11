@@ -1301,6 +1301,31 @@ describe('loadModelMetadataCatalog', () => {
     });
   });
 
+  it('does not refetch a fresh shared catalog when workspace proxies alternate', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(
+      async () => new Response(JSON.stringify(catalog)),
+    );
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+
+    expect(undiciFetch).toHaveBeenCalledOnce();
+    expect(EnvHttpProxyAgent).toHaveBeenCalledOnce();
+  });
+
   it('closes the proxy dispatcher and keeps the snapshot on rejection', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
