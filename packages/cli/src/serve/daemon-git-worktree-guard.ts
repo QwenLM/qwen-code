@@ -1993,18 +1993,36 @@ async function evaluateCommandWithCwd(
     const defined = definedBodies.get(programToken)!;
     if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) return denyDynamicRelocation();
     let replay = defined.body;
+    const programIndex = run.findIndex((token) => token.text === programToken);
     if (defined.alias) {
-      const programIndex = run.findIndex(
-        (token) => token.text === programToken,
-      );
       const args = joinArgvTexts(run.slice(programIndex + 1));
       if (args.length > 0) replay = `${replay} ${args}`;
     }
+    // `VAR=val name` puts the assignment in the call's environment, so the
+    // body's git sees it — record the leading assignments as ambient.
+    const prefix: PrefixState = { relocations: [], unresolved: false };
+    for (const token of run.slice(0, programIndex)) {
+      if (leadingEnvAssignmentKey(token.text) !== null) {
+        recordEnvAssignment(token, prefix);
+      }
+    }
+    const base = activeContext();
+    const bodyContext: GuardEvaluationContext =
+      prefix.relocations.length > 0 || prefix.unresolved
+        ? {
+            canonicalEffectiveCwd: base.canonicalEffectiveCwd,
+            ambientRelocations: [
+              ...base.ambientRelocations,
+              ...prefix.relocations,
+            ],
+            ambientUnresolved: base.ambientUnresolved || prefix.unresolved,
+          }
+        : base;
     const nested = await evaluateCommandWithCwd(
       replay,
       trackedCwd,
       entryCwd,
-      activeContext(),
+      bodyContext,
       depth + 1,
       {
         relink: scope.relink,
@@ -2013,6 +2031,7 @@ async function evaluateCommandWithCwd(
         allExport,
         definedBodies,
         gitShapedNames,
+        exportedFunctions,
       },
     );
     if (nested.denial) return nested.denial;
@@ -2049,6 +2068,19 @@ async function evaluateCommandWithCwd(
       : undefined;
     const gitShapedNamesBefore = pipeComponent
       ? new Set(gitShapedNames)
+      : undefined;
+    const exportedNamesBefore = pipeComponent
+      ? new Set(exportedNames)
+      : undefined;
+    const exportedFunctionsBefore = pipeComponent
+      ? new Set(exportedFunctions)
+      : undefined;
+    const shellLocalsBefore = pipeComponent ? new Map(shellLocals) : undefined;
+    const exportedBefore = pipeComponent
+      ? {
+          relocations: [...exported.relocations],
+          unresolved: exported.unresolved,
+        }
       : undefined;
     const allExportBefore = allExport;
     const substitutions = extractCommandSubstitutions(segment);
@@ -2546,13 +2578,23 @@ async function evaluateCommandWithCwd(
     // Both sides of a pipe run in their own subshell, so whatever this
     // segment did to the shell's directory dies with it.
     if (pipeComponent) {
-      // A subshell's cwd, option state and definitions die with it.
+      // A subshell keeps nothing: its cwd, option state, definitions,
+      // exports and variables all die with it.
       trackedCwd = cwdBeforeSegment;
       allExport = allExportBefore;
       definedBodies.clear();
       for (const [k, v] of definedBodiesBefore!) definedBodies.set(k, v);
       gitShapedNames.clear();
       for (const k of gitShapedNamesBefore!) gitShapedNames.add(k);
+      exportedNames.clear();
+      for (const k of exportedNamesBefore!) exportedNames.add(k);
+      exportedFunctions.clear();
+      for (const k of exportedFunctionsBefore!) exportedFunctions.add(k);
+      shellLocals.clear();
+      for (const [k, v] of shellLocalsBefore!) shellLocals.set(k, v);
+      exported.relocations.length = 0;
+      exported.relocations.push(...exportedBefore!.relocations);
+      exported.unresolved = exportedBefore!.unresolved;
     }
   }
   return {

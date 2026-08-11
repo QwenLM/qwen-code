@@ -1918,6 +1918,37 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
+  // Gaps in the function-model work of the preceding commits.
+  it.each([
+    // `export -f` state must reach a nested same-shell body too.
+    () =>
+      `f() { cd ${plainOutsidePath}; }; export -f f; g() { bash -c "f; git reset --hard"; }; g`,
+    // A prefix assignment on a function/alias invocation reaches its git.
+    () => `gg() { git status; }; GIT_WORK_TREE=${plainOutsidePath} gg`,
+    () => `alias gg='git status'; GIT_WORK_TREE=${plainOutsidePath} gg`,
+  ])('propagates invocation state into a recorded body %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('rolls back a pipe subshell fully', async () => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    // The pipe-side export/assignment dies with the subshell.
+    await expect(
+      guard(
+        request(
+          `export GIT_WORK_TREE; GIT_WORK_TREE=${plainOutsidePath} | cat; git status`,
+        ),
+      ),
+    ).resolves.toEqual({ allowed: true });
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
