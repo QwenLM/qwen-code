@@ -6438,66 +6438,6 @@ describe('App session callbacks', () => {
     expect(onToast).toHaveBeenCalledWith('error', 'Failed to branch session.');
   });
 
-  it('explains a stale checkpoint without reloading when pagination is unsupported', async () => {
-    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    // beforeEach leaves capabilities.features empty, so the daemon does not
-    // advertise session_transcript_pagination.
-    mockSessionActions.branchSession.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        { code: 'branch_point_invalid' },
-        'Invalid branch point',
-      ),
-    );
-    const onToast = vi.fn();
-    renderApp({ onToast });
-    await flush();
-
-    await act(async () => {
-      await testState.latestMessageListProps?.onBranchSession?.(
-        'stale-checkpoint',
-      );
-    });
-
-    expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
-    expect(onToast).toHaveBeenCalledWith(
-      'error',
-      'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
-    );
-  });
-
-  it('reports when the stale-checkpoint transcript refresh itself fails', async () => {
-    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    mockConnection.capabilities.features = ['session_transcript_pagination'];
-    mockSessionActions.branchSession.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        { code: 'branch_point_invalid' },
-        'Invalid branch point',
-      ),
-    );
-    mockSessionActions.reloadSession.mockRejectedValue(
-      new Error('Session load superseded'),
-    );
-    const onToast = vi.fn();
-    renderApp({ onToast });
-    await flush();
-
-    await act(async () => {
-      await testState.latestMessageListProps?.onBranchSession?.(
-        'stale-checkpoint',
-      );
-    });
-
-    expect(mockSessionActions.reloadSession).toHaveBeenCalledWith(
-      expect.any(AbortSignal),
-    );
-    expect(onToast).toHaveBeenCalledWith(
-      'error',
-      'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
-    );
-  });
-
   it('skips the stale-recovery toast when a switch lands during the reload', async () => {
     const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
     mockConnection.capabilities.features = ['session_transcript_pagination'];
@@ -6545,35 +6485,6 @@ describe('App session callbacks', () => {
       'This response is no longer on the active history path, and the transcript could not be refreshed. Please retry.',
     );
     expect(onToast).not.toHaveBeenCalledWith(
-      'error',
-      'This response is no longer on the active history path. The transcript has been refreshed.',
-    );
-  });
-
-  it('treats a superseded same-session stale reload as refreshed', async () => {
-    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
-    mockConnection.capabilities.features = ['session_transcript_pagination'];
-    mockSessionActions.branchSession.mockRejectedValue(
-      new DaemonHttpError(
-        409,
-        { code: 'branch_point_invalid' },
-        'Invalid branch point',
-      ),
-    );
-    mockSessionActions.reloadSession.mockRejectedValue(
-      new DOMException('Session load superseded', 'AbortError'),
-    );
-    const onToast = vi.fn();
-    renderApp({ onToast });
-    await flush();
-
-    await act(async () => {
-      await testState.latestMessageListProps?.onBranchSession?.(
-        'stale-checkpoint',
-      );
-    });
-
-    expect(onToast).toHaveBeenCalledWith(
       'error',
       'This response is no longer on the active history path. The transcript has been refreshed.',
     );

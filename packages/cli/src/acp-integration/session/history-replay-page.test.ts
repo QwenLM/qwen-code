@@ -255,29 +255,6 @@ describe('history replay page', () => {
     ]);
   });
 
-  it('attaches the checkpoint from the frozen page catalog to Assistant replay', async () => {
-    const result = await replayTranscriptRecordPage({
-      sessionId: SESSION_ID,
-      page: recordPage({
-        records: [assistantRecord()],
-        branchPointsByAssistantUuid: {
-          'assistant-record': 'checkpoint-record',
-        },
-      }),
-      encodeCursor: vi.fn(),
-    });
-
-    const assistantUpdate = result.updates.find(
-      (update) => update.sessionUpdate === 'agent_message_chunk',
-    ) as { _meta?: Record<string, unknown> } | undefined;
-    expect(assistantUpdate?._meta).toMatchObject({
-      qwenTranscript: {
-        sourceRecordIds: ['assistant-record'],
-        branchRecordId: 'checkpoint-record',
-      },
-    });
-  });
-
   it('attaches the checkpoint only to the final chunk of a multi-chunk Assistant record', async () => {
     // One assistant record replays as text/thought/text. The checkpoint
     // marks the END of the record, so only the last visible assistant

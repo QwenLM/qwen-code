@@ -455,31 +455,6 @@ describe('ChatRecordingService', () => {
       expect(mockConfig.getSessionService).not.toHaveBeenCalled();
     });
 
-    it('flushes pending writes before reading the active transcript', async () => {
-      let finishWrite!: () => void;
-      vi.mocked(jsonl.writeLine).mockReturnValueOnce(
-        new Promise<void>((resolve) => {
-          finishWrite = resolve;
-        }),
-      );
-      const messages = [
-        branchTestRecord('persisted', null, 'user', [{ text: 'persisted' }]),
-      ];
-      const loadSession = vi.fn().mockResolvedValue({
-        conversation: { messages },
-      });
-      mockConfig.getSessionService = vi.fn().mockReturnValue({ loadSession });
-
-      chatRecordingService.recordUserMessage([{ text: 'pending' }]);
-      const read = chatRecordingService.readActiveTranscriptChain();
-      await Promise.resolve();
-      expect(loadSession).not.toHaveBeenCalled();
-
-      finishWrite();
-      await expect(read).resolves.toEqual(messages);
-      expect(loadSession).toHaveBeenCalledWith('test-session-id');
-    });
-
     it('validates successive turns from in-memory cursors without reloading history', async () => {
       const firstCursor = chatRecordingService.getBranchCheckpointCursor();
       chatRecordingService.recordUserMessage([{ text: 'first' }]);

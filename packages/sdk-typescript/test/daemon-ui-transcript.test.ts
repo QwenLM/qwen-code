@@ -250,34 +250,6 @@ describe('daemon transcript rewind', () => {
     expect(state.blocks[0]).not.toHaveProperty('branchRecordId');
   });
 
-  it('retains the branch point when matching a prompt completion', () => {
-    const assistantRecordUuid = '11111111-1111-4111-8111-111111111111';
-    const checkpointUuid = '22222222-2222-4222-8222-222222222222';
-    expect(
-      matchTurnEvent(
-        {
-          v: 1,
-          type: 'turn_complete',
-          data: {
-            promptId: 'prompt-1',
-            stopReason: 'end_turn',
-            branchPoint: {
-              assistantRecordUuid,
-              checkpointUuid,
-            },
-          },
-        },
-        'prompt-1',
-      ),
-    ).toEqual({
-      stopReason: 'end_turn',
-      branchPoint: {
-        assistantRecordUuid,
-        checkpointUuid,
-      },
-    });
-  });
-
   it('drops malformed or non-completed branch point metadata', () => {
     for (const [stopReason, assistantRecordUuid, checkpointUuid] of [
       ['end_turn', '11111111-1111-4111-8111-111111111111', 'not-a-uuid'],

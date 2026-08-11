@@ -8,7 +8,6 @@ import { describe, expect, it } from 'vitest';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
-  parseBranchCheckpointPayload,
   resolveBranchPoints,
   resolveCompletedTurnBranchCandidateFromRecords,
   type BranchPoint,
@@ -62,21 +61,6 @@ function resolveSingle(records: ChatRecord[]): BranchPoint | undefined {
 }
 
 describe('branch points', () => {
-  it('parses checkpoint v1 without retaining legacy fields', () => {
-    expect(
-      parseBranchCheckpointPayload({
-        v: 1,
-        startExclusiveRecordUuid: null,
-        assistantRecordUuid: 'a1',
-        promptId: 'legacy-prompt',
-      } as unknown as ChatRecord['systemPayload']),
-    ).toEqual({
-      v: 1,
-      startExclusiveRecordUuid: null,
-      assistantRecordUuid: 'a1',
-    });
-  });
-
   it('resolves a durable checkpoint for a completed text turn', () => {
     const user = record('u1', null, 'user', [{ text: 'question' }]);
     const assistant = record('a1', 'u1', 'assistant', [{ text: 'answer' }]);

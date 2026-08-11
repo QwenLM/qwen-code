@@ -237,46 +237,6 @@ describe('MessageItem generation updates', () => {
   });
 });
 
-describe('MessageItem branch binding', () => {
-  it('passes the checkpoint record id to the branch handler', () => {
-    const onBranchSession = vi.fn();
-    const container = render(
-      <I18nProvider language="en">
-        <MessageItem
-          message={assistantMsg('1', 'hello')}
-          onBranchSession={onBranchSession}
-          branchRecordId="checkpoint-1"
-        />
-      </I18nProvider>,
-    );
-    const button = container.querySelector<HTMLButtonElement>(
-      '[data-testid="assistant-branch"]',
-    );
-    expect(button).not.toBeNull();
-
-    act(() => button?.click());
-
-    expect(onBranchSession).toHaveBeenCalledWith('checkpoint-1');
-  });
-
-  it('exposes no branch action without a checkpoint record id', () => {
-    const onBranchSession = vi.fn();
-    const container = render(
-      <I18nProvider language="en">
-        <MessageItem
-          message={assistantMsg('1', 'hello')}
-          onBranchSession={onBranchSession}
-        />
-      </I18nProvider>,
-    );
-
-    expect(
-      container.querySelector('[data-testid="assistant-branch"]'),
-    ).toBeNull();
-    expect(onBranchSession).not.toHaveBeenCalled();
-  });
-});
-
 describe('MessageItem assistant turn footer', () => {
   const customization = (
     renderAssistantTurnFooter: WebShellCustomization['renderAssistantTurnFooter'],

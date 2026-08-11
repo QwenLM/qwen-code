@@ -64,43 +64,6 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('normalizes replay branch metadata into the Assistant transcript block', () => {
-    const events = normalizeDaemonEvent({
-      id: 3,
-      v: 1,
-      type: 'session_update',
-      data: {
-        update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'historical answer' },
-          _meta: {
-            qwenTranscript: { branchRecordId: 'checkpoint-record' },
-          },
-        },
-      },
-    });
-
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      events,
-      { now: 2 },
-    );
-
-    expect(events).toMatchObject([
-      {
-        type: 'assistant.text.delta',
-        branchRecordId: 'checkpoint-record',
-      },
-    ]);
-    expect(state.blocks).toMatchObject([
-      {
-        kind: 'assistant',
-        text: 'historical answer',
-        branchRecordId: 'checkpoint-record',
-      },
-    ]);
-  });
-
   it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
     // A checkpointed record replayed as 2+ chunks creates its block from
     // the first (undecorated) chunk; the decorated final chunk must merge

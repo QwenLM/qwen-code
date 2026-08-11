@@ -14068,83 +14068,55 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
-  it('strips an existing branch suffix from the source title when branching', async () => {
-    const recording = makeRecordingService();
-    recording.getCurrentCustomTitle.mockReturnValue(
-      'Source session (Branch 2)',
-    );
-    const sessionService = {
-      forkSession: vi.fn().mockResolvedValue(undefined),
-      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
-      renameSession: vi.fn().mockResolvedValue(true),
-      removeSession: vi.fn().mockResolvedValue(undefined),
-    };
-    const innerConfig = makeLiveSessionInnerConfig(recording);
-    innerConfig.getSessionService.mockReturnValue(
-      sessionService as unknown as SessionService,
-    );
-    const { agent, agentPromise } = await bootAgent(innerConfig);
+  it.each([
+    {
+      sourceTitle: 'Source session (Branch 2)',
+      expectedTitle: 'Source session (Branch)',
+    },
+    {
+      sourceTitle: undefined,
+      expectedTitle: '550e8400 (Branch)',
+    },
+  ])(
+    'derives the branch title from $sourceTitle',
+    async ({ sourceTitle, expectedTitle }) => {
+      const recording = makeRecordingService();
+      recording.getCurrentCustomTitle.mockReturnValue(sourceTitle);
+      const sessionService = {
+        forkSession: vi.fn().mockResolvedValue(undefined),
+        findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+        renameSession: vi.fn().mockResolvedValue(true),
+        removeSession: vi.fn().mockResolvedValue(undefined),
+      };
+      const innerConfig = makeLiveSessionInnerConfig(recording);
+      innerConfig.getSessionService.mockReturnValue(
+        sessionService as unknown as SessionService,
+      );
+      const { agent, agentPromise } = await bootAgent(innerConfig);
 
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    const result = await agent.extMethod(
-      SERVE_CONTROL_EXT_METHODS.sessionBranch,
-      {
-        cwd: '/tmp',
-        sessionId: liveSessionId,
-      },
-    );
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const result = await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        {
+          cwd: '/tmp',
+          sessionId: liveSessionId,
+        },
+      );
 
-    expect(sessionService.forkSession).toHaveBeenCalledWith(
-      liveSessionId,
-      expect.any(String),
-      { title: 'Source session (Branch)' },
-    );
-    expect(result).toMatchObject({
-      title: 'Source session (Branch)',
-      displayName: 'Source session (Branch)',
-    });
+      expect(sessionService.forkSession).toHaveBeenCalledWith(
+        liveSessionId,
+        expect.any(String),
+        { title: expectedTitle },
+      );
+      expect(result).toMatchObject({
+        title: expectedTitle,
+        displayName: expectedTitle,
+      });
 
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('falls back to the session id prefix when branching an untitled session', async () => {
-    const recording = makeRecordingService();
-    recording.getCurrentCustomTitle.mockReturnValue(undefined);
-    const sessionService = {
-      forkSession: vi.fn().mockResolvedValue(undefined),
-      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
-      renameSession: vi.fn().mockResolvedValue(true),
-      removeSession: vi.fn().mockResolvedValue(undefined),
-    };
-    const innerConfig = makeLiveSessionInnerConfig(recording);
-    innerConfig.getSessionService.mockReturnValue(
-      sessionService as unknown as SessionService,
-    );
-    const { agent, agentPromise } = await bootAgent(innerConfig);
-
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    const result = await agent.extMethod(
-      SERVE_CONTROL_EXT_METHODS.sessionBranch,
-      {
-        cwd: '/tmp',
-        sessionId: liveSessionId,
-      },
-    );
-
-    expect(sessionService.forkSession).toHaveBeenCalledWith(
-      liveSessionId,
-      expect.any(String),
-      { title: '550e8400 (Branch)' },
-    );
-    expect(result).toMatchObject({
-      title: '550e8400 (Branch)',
-      displayName: '550e8400 (Branch)',
-    });
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('creates a side task with source metadata and no branch suffix', async () => {
     const recording = makeRecordingService();

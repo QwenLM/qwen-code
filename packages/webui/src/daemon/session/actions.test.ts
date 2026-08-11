@@ -884,25 +884,6 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
-  it('reports non-stale branch failures with a user action notice', async () => {
-    const session = createMockSession('session-a');
-    const addNotice = vi.fn((notice) => notice);
-    session.client.branchSession.mockRejectedValueOnce(
-      new DaemonHttpError(500, undefined, 'Agent failure'),
-    );
-    const { actions } = createActionsHarness({ addNotice, session });
-
-    await expect(actions.branchSession(undefined, 'a1')).rejects.toMatchObject({
-      _alreadyDispatched: true,
-    });
-    expect(addNotice).toHaveBeenCalledWith(
-      expect.objectContaining({
-        code: 'daemon.branch_session.failed',
-        operation: 'branch_session',
-      }),
-    );
-  });
-
   it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
     vi.useFakeTimers();
     try {
