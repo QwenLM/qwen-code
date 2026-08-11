@@ -577,6 +577,139 @@ function normalizeLimits(raw: unknown): NormalizedOmniProcessingLimits {
   return limits;
 }
 
+/** A numeric bound with its exclusivity, for the §11.2 range checks. */
+interface NumericBound {
+  value: number;
+  exclusive: boolean;
+}
+
+/** Effective lower bound of a property schema: the tighter of `minimum`
+ * and (numeric draft-2020) `exclusiveMinimum` — higher value wins, an
+ * exclusive bound beats an inclusive one at the same value. */
+function lowerBoundOf(s: Record<string, unknown>): NumericBound | undefined {
+  let bound: NumericBound | undefined;
+  if (typeof s['minimum'] === 'number') {
+    bound = { value: s['minimum'], exclusive: false };
+  }
+  if (typeof s['exclusiveMinimum'] === 'number') {
+    const b = { value: s['exclusiveMinimum'], exclusive: true };
+    if (!bound || b.value >= bound.value) bound = b;
+  }
+  return bound;
+}
+
+/** Effective upper bound: the tighter of `maximum` and
+ * `exclusiveMaximum` — lower value wins, exclusive beats inclusive. */
+function upperBoundOf(s: Record<string, unknown>): NumericBound | undefined {
+  let bound: NumericBound | undefined;
+  if (typeof s['maximum'] === 'number') {
+    bound = { value: s['maximum'], exclusive: false };
+  }
+  if (typeof s['exclusiveMaximum'] === 'number') {
+    const b = { value: s['exclusiveMaximum'], exclusive: true };
+    if (!bound || b.value <= bound.value) bound = b;
+  }
+  return bound;
+}
+
+/**
+ * §11.2 constraint-VALUE narrowing: given one native property schema and
+ * the projection override that will be merged over it
+ * (`{...native, ...override}` in model-access.ts), return a description
+ * of the first constraint the merge would LOOSEN, or undefined when the
+ * merged schema is at least as tight as the native one. Covers the
+ * design's "类型、枚举、范围" beyond the property-set check: `type`,
+ * `enum` subsets, numeric ranges (minimum/maximum and their exclusive
+ * forms considered together), and the minLength/maxLength/
+ * minItems/maxItems scalar families.
+ */
+function findProjectionLoosening(
+  native: Record<string, unknown>,
+  override: Record<string, unknown>,
+): string | undefined {
+  const merged: Record<string, unknown> = { ...native, ...override };
+
+  // Type may not change — a different type is a different surface, not a
+  // narrowing. The one true narrowing is integer over number.
+  if (typeof native['type'] === 'string' && merged['type'] !== native['type']) {
+    if (!(native['type'] === 'number' && merged['type'] === 'integer')) {
+      return (
+        `"type" changes the native type ` +
+        `(${JSON.stringify(merged['type'])} vs native "${native['type']}")`
+      );
+    }
+  }
+
+  // enum: the projected value set must be a subset of the native one.
+  if (Array.isArray(native['enum'])) {
+    if (!Array.isArray(merged['enum'])) {
+      return '"enum" replaces the native enum with a non-array';
+    }
+    const allowed = new Set(native['enum'].map((v) => JSON.stringify(v)));
+    const added = merged['enum'].filter((v) => !allowed.has(JSON.stringify(v)));
+    if (added.length > 0) {
+      return (
+        `"enum" adds values the native enum does not allow ` +
+        `(${added.map((v) => JSON.stringify(v)).join(', ')})`
+      );
+    }
+  }
+
+  // Numeric range: the merged effective bounds may not extend past the
+  // native effective bounds.
+  const nativeLower = lowerBoundOf(native);
+  if (nativeLower) {
+    const mergedLower = lowerBoundOf(merged);
+    if (
+      !mergedLower ||
+      mergedLower.value < nativeLower.value ||
+      (mergedLower.value === nativeLower.value &&
+        nativeLower.exclusive &&
+        !mergedLower.exclusive)
+    ) {
+      return (
+        `the lower bound loosens the native one ` +
+        `(${mergedLower?.value ?? 'none'} vs native ${nativeLower.value})`
+      );
+    }
+  }
+  const nativeUpper = upperBoundOf(native);
+  if (nativeUpper) {
+    const mergedUpper = upperBoundOf(merged);
+    if (
+      !mergedUpper ||
+      mergedUpper.value > nativeUpper.value ||
+      (mergedUpper.value === nativeUpper.value &&
+        nativeUpper.exclusive &&
+        !mergedUpper.exclusive)
+    ) {
+      return (
+        `the upper bound loosens the native one ` +
+        `(${mergedUpper?.value ?? 'none'} vs native ${nativeUpper.value})`
+      );
+    }
+  }
+
+  // Scalar tightness families: min* may not shrink, max* may not grow.
+  for (const key of ['minLength', 'minItems'] as const) {
+    const n = native[key];
+    if (typeof n !== 'number') continue;
+    const m = merged[key];
+    if (typeof m !== 'number' || m < n) {
+      return `"${key}" loosens the native constraint (${JSON.stringify(m)} vs native ${n})`;
+    }
+  }
+  for (const key of ['maxLength', 'maxItems'] as const) {
+    const n = native[key];
+    if (typeof n !== 'number') continue;
+    const m = merged[key];
+    if (typeof m !== 'number' || m > n) {
+      return `"${key}" loosens the native constraint (${JSON.stringify(m)} vs native ${n})`;
+    }
+  }
+  return undefined;
+}
+
 function validatePolicyTools(
   policyTools: OmniPolicyToolsSettings | undefined,
   tools: OmniPolicyToolLookup,
@@ -729,6 +862,30 @@ function validatePolicyTools(
             .join(', ')} not present in the tool's native schema ` +
             `(projection may only narrow)`,
         );
+      }
+      // §11.2 in full: narrowing covers constraint VALUES, not just the
+      // property set. The declaration merges each projected property's
+      // keys over the native ones (model-access.ts), so an override
+      // carrying a looser bound would promise the model a range the
+      // native per-call validation then rejects — the exact per-call
+      // misconfiguration this startup check exists to prevent.
+      if (
+        isPlainRecord(projection['properties']) &&
+        nativeProperties !== undefined
+      ) {
+        for (const [prop, override] of Object.entries(
+          projection['properties'],
+        )) {
+          const native = nativeProperties[prop];
+          if (!isPlainRecord(override) || !isPlainRecord(native)) continue;
+          const loosening = findProjectionLoosening(native, override);
+          if (loosening !== undefined) {
+            fail(
+              `${where}.modelAccess.parameterSchema.properties.${prop}: ` +
+                `${loosening} (projection may only narrow)`,
+            );
+          }
+        }
       }
     }
   }

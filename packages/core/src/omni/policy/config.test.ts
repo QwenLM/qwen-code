@@ -1186,5 +1186,102 @@ describe('normalizeOmniProcessingConfig', () => {
         }),
       ).not.toThrow();
     });
+
+    describe('constraint-value narrowing (§11.2: 不能扩大类型、枚举、范围)', () => {
+      /** Tool whose native schema carries real constraints to loosen. */
+      const constrainedTools = (): Record<string, ToolStub> => {
+        const tools = defaultTools();
+        tools['omni_downsample_image'] = {
+          ...makeTool(['image']),
+          parameterSchema: {
+            type: 'object',
+            properties: {
+              inputPath: { type: 'string' },
+              outputDir: { type: 'string' },
+              quality: { type: 'number', minimum: 1, maximum: 100 },
+              format: { type: 'string', enum: ['jpeg', 'webp'] },
+              tags: { type: 'array', minItems: 1, maxItems: 4 },
+            },
+          },
+        };
+        return tools;
+      };
+      const withProjection = (
+        prop: string,
+        override: Record<string, unknown>,
+      ) =>
+        normalize(
+          {
+            policyTools: {
+              omni_downsample_image: {
+                modelAccess: {
+                  parameterSchema: { properties: { [prop]: override } },
+                },
+              },
+            },
+          },
+          constrainedTools(),
+        );
+      const at =
+        'omni.processing.policyTools.omni_downsample_image.modelAccess.' +
+        'parameterSchema.properties.';
+
+      it('rejects an override raising the native maximum (probe case)', () => {
+        expect(() => withProjection('quality', { maximum: 200 })).toThrow(
+          `${at}quality: the upper bound loosens the native one ` +
+            '(200 vs native 100) (projection may only narrow)',
+        );
+      });
+
+      it('rejects an override lowering the native minimum', () => {
+        expect(() => withProjection('quality', { minimum: 0 })).toThrow(
+          `${at}quality: the lower bound loosens the native one ` +
+            '(0 vs native 1) (projection may only narrow)',
+        );
+      });
+
+      it('rejects an enum override adding values outside the native enum', () => {
+        expect(() =>
+          withProjection('format', { enum: ['jpeg', 'png'] }),
+        ).toThrow(
+          `${at}format: "enum" adds values the native enum does not allow ` +
+            '("png") (projection may only narrow)',
+        );
+      });
+
+      it('rejects an override changing the native type', () => {
+        expect(() => withProjection('quality', { type: 'string' })).toThrow(
+          `${at}quality: "type" changes the native type ` +
+            '("string" vs native "number") (projection may only narrow)',
+        );
+      });
+
+      it('rejects maxItems above the native cap', () => {
+        expect(() => withProjection('tags', { maxItems: 10 })).toThrow(
+          `${at}tags: "maxItems" loosens the native constraint ` +
+            '(10 vs native 4) (projection may only narrow)',
+        );
+      });
+
+      it('accepts genuinely narrowing overrides', () => {
+        expect(() =>
+          withProjection('quality', {
+            type: 'integer', // integer narrows number
+            minimum: 10,
+            maximum: 80,
+          }),
+        ).not.toThrow();
+        expect(() =>
+          withProjection('format', { enum: ['jpeg'] }),
+        ).not.toThrow();
+        expect(() =>
+          withProjection('tags', { minItems: 2, maxItems: 3 }),
+        ).not.toThrow();
+        // Adding a bound where the native schema has none narrows too.
+        expect(() =>
+          withProjection('inputPath', { minLength: 1 }),
+        ).not.toThrow();
+      });
+    });
   });
 });
