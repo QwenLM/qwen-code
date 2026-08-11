@@ -74,3 +74,16 @@ export function isLocalIpcPath(candidate: string): boolean {
   if (candidate.startsWith('//')) return false;
   return path.isAbsolute(candidate);
 }
+
+export function isPeerSocketPath(candidate: string): boolean {
+  if (!isLocalIpcPath(candidate)) return false;
+  if (process.platform === 'win32') {
+    return /^\\\\[.?]\\pipe\\qwen-socks-\d+$/i.test(
+      candidate.replace(/\//g, '\\'),
+    );
+  }
+  const match = /^(\d+)\.sock$/.exec(path.basename(candidate));
+  if (!match) return false;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && candidate === resolvePeerSocketPath(pid);
+}

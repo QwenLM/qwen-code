@@ -25,6 +25,7 @@ import {
   formatPeerDisplay,
   formatPeerEnvelope,
   InboundGate,
+  isPeerSocketPath,
   type HeldMessage,
   type InboundPolicy,
   type PeerFrame,
@@ -75,14 +76,7 @@ export class PeerMessaging {
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
       deliver: (frame) => messaging.deliver(frame),
-      reportStatus: (frame, status) => {
-        if (!frame.from) return;
-        void sendDeliveryStatus(frame.from, {
-          status,
-          origMsgId: frame.msgId,
-          from: messaging.inbox?.socketPath,
-        });
-      },
+      reportStatus: (frame, status) => messaging.reportStatus(frame, status),
       onHeldChange: (held) => messaging.emitHeldChange(held),
     });
 
@@ -114,12 +108,7 @@ export class PeerMessaging {
         0,
         messaging.buffered.length,
       )) {
-        if (buffered.from) {
-          void sendDeliveryStatus(buffered.from, {
-            status: 'expired',
-            origMsgId: buffered.msgId,
-          });
-        }
+        messaging.reportStatus(buffered, 'expired');
       }
       return null;
     }
@@ -201,6 +190,24 @@ export class PeerMessaging {
       return;
     }
     this.submit(frame);
+  }
+
+  private reportStatus(
+    frame: PeerUserFrame,
+    status: 'delivered' | 'held' | 'denied' | 'expired',
+  ): void {
+    if (
+      this.options.getPolicySetting() === 'refuse' ||
+      !frame.from ||
+      !isPeerSocketPath(frame.from)
+    ) {
+      return;
+    }
+    void sendDeliveryStatus(frame.from, {
+      status,
+      origMsgId: frame.msgId,
+      from: this.inbox?.socketPath,
+    });
   }
 
   private submit(frame: PeerUserFrame): void {

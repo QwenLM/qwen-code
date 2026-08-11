@@ -3249,6 +3249,40 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('allowPrivateNetworkHooks scope handling', () => {
+    it('does not let workspace settings weaken the inbound peer gate', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              agents: {
+                crossSessionMessaging: false,
+                crossSessionInbound: 'refuse',
+                builtin: { exploreModel: 'fast' },
+              },
+            });
+          }
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              agents: {
+                crossSessionMessaging: true,
+                crossSessionInbound: 'accept',
+                builtin: { exploreModel: 'inherit' },
+              },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents).toMatchObject({
+        crossSessionMessaging: false,
+        crossSessionInbound: 'refuse',
+        builtin: { exploreModel: 'inherit' },
+      });
+    });
+
     it('should honor security.allowPrivateNetworkHooks from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(

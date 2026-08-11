@@ -414,9 +414,13 @@ function tagMcpServerScope(
  * Returns a shallow copy — never mutates input.
  */
 function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
+  const stripsPeerGate =
+    settings.agents?.crossSessionMessaging !== undefined ||
+    settings.agents?.crossSessionInbound !== undefined;
   if (
     settings.security?.allowPrivateNetworkHooks === undefined &&
-    settings.security?.allowedInsecureVoiceBaseUrls === undefined
+    settings.security?.allowedInsecureVoiceBaseUrls === undefined &&
+    !stripsPeerGate
   ) {
     return settings;
   }
@@ -424,8 +428,17 @@ function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
     allowPrivateNetworkHooks: _privateHooks,
     allowedInsecureVoiceBaseUrls: _insecureVoice,
     ...restSecurity
-  } = settings.security;
-  return { ...settings, security: restSecurity };
+  } = settings.security ?? {};
+  const {
+    crossSessionMessaging: _crossSessionMessaging,
+    crossSessionInbound: _crossSessionInbound,
+    ...restAgents
+  } = settings.agents ?? {};
+  return {
+    ...settings,
+    ...(settings.security ? { security: restSecurity } : {}),
+    ...(stripsPeerGate ? { agents: restAgents } : {}),
+  };
 }
 
 function mergeSettings(

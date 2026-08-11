@@ -17,6 +17,7 @@ import {
   ApprovalMode,
   buildUserFrame,
   MAX_SOCKET_PATH_BYTES,
+  resolvePeerSocketPath,
   sendPeerFrame,
   startPeerInbox,
   type PeerFrame,
@@ -36,12 +37,12 @@ const isWindows = process.platform === 'win32';
  * test with `peer messaging failed to start`. Apply the same fallback.
  */
 function socketTmpRoot(): string {
-  // Longest path the suite builds: <root>/qwen-peer-msg-XXXXXX/socks/sender.sock.
+  // Longest path the suite builds: <root>/qwen-peer-msg-XXXXXX/socks/self.sock.
   const longest = path.join(
     os.tmpdir(),
     'qwen-peer-msg-XXXXXX',
     'socks',
-    'sender.sock',
+    'self.sock',
   );
   return Buffer.byteLength(longest) <= MAX_SOCKET_PATH_BYTES
     ? os.tmpdir()
@@ -73,7 +74,7 @@ async function settle(): Promise<void> {
 
 async function startSenderInbox(): Promise<PeerInbox> {
   const inbox = await startPeerInbox({
-    socketPath: path.join(tmpDir, 'socks', 'sender.sock'),
+    socketPath: resolvePeerSocketPath(process.pid + 10_000_000),
     onFrame: (frame) => receipts.push(frame),
   });
   if (!inbox) throw new Error('sender inbox failed to start');

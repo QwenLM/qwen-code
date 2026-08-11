@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import {
   isLocalIpcPath,
+  isPeerSocketPath,
   MAX_SOCKET_PATH_BYTES,
   resolvePeerSocketPath,
 } from './socket-path.js';
@@ -114,5 +115,14 @@ describe('isLocalIpcPath', () => {
     expect(isLocalIpcPath('')).toBe(false);
     expect(isLocalIpcPath(undefined as unknown as string)).toBe(false);
     expect(isLocalIpcPath(42 as unknown as string)).toBe(false);
+  });
+});
+
+describe.skipIf(isWindows)('isPeerSocketPath', () => {
+  it('accepts only numeric peer sockets at their managed path', () => {
+    expect(isPeerSocketPath(resolvePeerSocketPath(42))).toBe(true);
+    expect(isPeerSocketPath('/tmp/qwen-socks/not-a-pid.sock')).toBe(false);
+    expect(isPeerSocketPath('/tmp/unrelated/42.sock')).toBe(false);
+    expect(isPeerSocketPath('/tmp/unrelated/qwen-socks/42.sock')).toBe(false);
   });
 });

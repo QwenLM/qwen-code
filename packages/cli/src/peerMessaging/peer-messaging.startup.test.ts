@@ -37,13 +37,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-const { ApprovalMode, buildUserFrame } = await import(
+const { ApprovalMode, buildUserFrame, resolvePeerSocketPath } = await import(
   '@qwen-code/qwen-code-core'
 );
 const { PeerMessaging } = await import('./peer-messaging.js');
 
-const SELF_SOCKET = '/tmp/qwen-socks-test/self.sock';
-const PEER_SOCKET = '/tmp/qwen-socks-test/peer.sock';
+const SELF_SOCKET = resolvePeerSocketPath(456);
+const PEER_SOCKET = resolvePeerSocketPath(123);
 
 /** A frame that arrives during the bind window, before `start` resolves. */
 function arriveDuringStartup(frame: PeerUserFrame): void {
@@ -105,6 +105,32 @@ describe('PeerMessaging.start startup window', () => {
       PEER_SOCKET,
       expect.objectContaining({ status: 'delivered', origMsgId: sent.msgId }),
     );
+  });
+
+  it('does not send a receipt to an arbitrary local socket path', async () => {
+    const sent = { ...frame(), from: '/tmp/unrelated.sock' };
+    arriveDuringStartup(sent);
+
+    await PeerMessaging.start({
+      socketPath: SELF_SOCKET,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+    });
+
+    expect(sendDeliveryStatusMock).not.toHaveBeenCalled();
+  });
+
+  it('does not send receipts when inbound messaging is refused', async () => {
+    const sent = frame();
+    arriveDuringStartup(sent);
+
+    await PeerMessaging.start({
+      socketPath: SELF_SOCKET,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'refuse',
+    });
+
+    expect(sendDeliveryStatusMock).not.toHaveBeenCalled();
   });
 
   it('holds a startup-window frame when the gate would hold it', async () => {
