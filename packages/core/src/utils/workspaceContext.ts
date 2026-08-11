@@ -274,6 +274,8 @@ export class WorkspaceContext {
       return cached;
     }
     const resolved = resolveWorkspacePath(pathToCheck);
+    if (
+      this.resolvedPathCache.size >= WorkspaceContext.RESOLVED_PATH_CACHE_MAX
     ) {
       // FIFO eviction: drop the oldest insertion (Map preserves insert order).
       const oldest = this.resolvedPathCache.keys().next().value;
