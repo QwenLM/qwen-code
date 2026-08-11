@@ -6207,6 +6207,62 @@ describe('runNonInteractive', () => {
     expect(markProxySchemaPresented).not.toHaveBeenCalled();
   });
 
+  it('does not commit deferred presentations after reactive compression mutates the carrying send', async () => {
+    setupMetricsMock();
+    const markProxySchemaPresented = vi.fn().mockReturnValue(true);
+    Object.assign(mockToolRegistry, { markProxySchemaPresented });
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'search-call',
+            name: ToolNames.TOOL_SEARCH,
+            response: { output: '<functions>...</functions>' },
+          },
+        },
+      ],
+      deferredToolPresentations: [
+        { name: ToolNames.CRON_CREATE, schemaFingerprint: 'schema' },
+      ],
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'search-call',
+              name: ToolNames.TOOL_SEARCH,
+              args: { query: 'cron' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-compressed-send',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          },
+          { type: GeminiEventType.Retry },
+          { type: GeminiEventType.Content, value: 'compressed retry response' },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Create a cron job',
+      'prompt-compressed-send',
+    );
+
+    expect(markProxySchemaPresented).not.toHaveBeenCalled();
+  });
+
   it('records deferred calls with the normalized target identity', async () => {
     setupMetricsMock();
     const emitToolResult = vi.fn();

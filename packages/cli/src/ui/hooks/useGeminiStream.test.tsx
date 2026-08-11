@@ -506,6 +506,39 @@ describe('useGeminiStream', () => {
       expect(onDeliveryFailed).toHaveBeenCalledOnce();
     });
 
+    it('does not accept context after reactive compression mutates the carrying send', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          };
+          yield { type: ServerGeminiEventType.Retry };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'compressed retry response',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'schema-bearing tool result',
+          SendMessageType.ToolResult,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+
     it.each([
       {
         caseName: 'an error event',

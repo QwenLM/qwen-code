@@ -3550,7 +3550,15 @@ export const useGeminiStream = (
           );
           const acknowledgedStream = (async function* () {
             let accepted = false;
+            let mutatedBeforeAcceptance = false;
             for await (const event of stream) {
+              if (
+                !accepted &&
+                event.type === ServerGeminiEventType.ChatCompressed
+              ) {
+                mutatedBeforeAcceptance = true;
+                reportDeliveryFailure();
+              }
               const terminalRejection =
                 event.type === ServerGeminiEventType.Error ||
                 event.type === ServerGeminiEventType.UserCancelled;
@@ -3568,7 +3576,9 @@ export const useGeminiStream = (
                 reportDeliveryFailure();
               } else if (provesAcceptance && !accepted) {
                 accepted = true;
-                metadata?.onContextAccepted?.();
+                if (!mutatedBeforeAcceptance) {
+                  metadata?.onContextAccepted?.();
+                }
               }
               yield event;
             }

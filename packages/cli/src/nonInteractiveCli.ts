@@ -2278,6 +2278,7 @@ export async function runNonInteractive(
         const carriedPresentations = pendingDeferredToolPresentations;
         pendingDeferredToolPresentations = [];
         let carriedPresentationsCommitted = false;
+        let carryingContextMutatedBeforeAcceptance = false;
         const apiStartTime = Date.now();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
@@ -2309,6 +2310,13 @@ export async function runNonInteractive(
         for await (const event of responseStream) {
           if (
             !carriedPresentationsCommitted &&
+            event.type === GeminiEventType.ChatCompressed
+          ) {
+            carryingContextMutatedBeforeAcceptance = true;
+          }
+          if (
+            !carriedPresentationsCommitted &&
+            !carryingContextMutatedBeforeAcceptance &&
             provesContextAcceptance(event.type)
           ) {
             commitDeferredToolPresentations(carriedPresentations);
@@ -2610,6 +2618,7 @@ export async function runNonInteractive(
               const itemCarriedPresentations = itemPendingPresentations;
               itemPendingPresentations = [];
               let itemCarriedPresentationsCommitted = false;
+              let itemCarryingContextMutatedBeforeAcceptance = false;
               const itemApiStartTime = Date.now();
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
@@ -2633,6 +2642,13 @@ export async function runNonInteractive(
               for await (const event of itemStream) {
                 if (
                   !itemCarriedPresentationsCommitted &&
+                  event.type === GeminiEventType.ChatCompressed
+                ) {
+                  itemCarryingContextMutatedBeforeAcceptance = true;
+                }
+                if (
+                  !itemCarriedPresentationsCommitted &&
+                  !itemCarryingContextMutatedBeforeAcceptance &&
                   provesContextAcceptance(event.type)
                 ) {
                   commitDeferredToolPresentations(itemCarriedPresentations);
