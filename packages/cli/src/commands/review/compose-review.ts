@@ -801,10 +801,11 @@ function composeReviewBody(
           subjectZh: publicLabelsZh[label],
         };
         coverageEntries.push(entry);
-        // A chunk agent's idle label is `chunk N` and keeps the prefix
-        // dedup; a rostered agent's is a role publicLabel — the caller's
-        // own relay register — and joins the exemption (see above).
-        if (!CHUNK_SUBJECT_RE.test(label)) roleLabelEntries.add(entry);
+        // A chunk agent's idle label is `chunk N` and a non-rostered
+        // launch keeps its fallback label — both are internal register and
+        // keep the #7188 prefix dedup; only ROSTERED labels (the caller's
+        // own relay register) join the exemption (see above).
+        if (publicLabelsZh[label] !== undefined) roleLabelEntries.add(entry);
       }
       if (cov.idleAgents.length > 0) {
         remediation.push(
@@ -835,7 +836,7 @@ function composeReviewBody(
         // phrase that matched a readsDiff-false role), and a caller relay
         // spelled in that register must not be swallowed by the prefix
         // match (see `roleLabelEntries`).
-        if (!CHUNK_SUBJECT_RE.test(label)) roleLabelEntries.add(entry);
+        if (publicLabelsZh[label] !== undefined) roleLabelEntries.add(entry);
       }
       if (cov.blindAgents.length > 0) {
         remediation.push(
@@ -860,7 +861,7 @@ function composeReviewBody(
           subjectZh: publicLabelsZh[label],
         };
         coverageEntries.push(entry);
-        if (!CHUNK_SUBJECT_RE.test(label)) roleLabelEntries.add(entry);
+        if (publicLabelsZh[label] !== undefined) roleLabelEntries.add(entry);
       }
       if (cov.unopenedAgents.length > 0) {
         remediation.push(
@@ -880,7 +881,16 @@ function composeReviewBody(
       // rewritten, missing-role and unread-brief entries arrive structurally
       // (`cov.disclosures`, push order preserved) — their labels can carry
       // em-dashes of their own, which is why they are never reparsed here.
-      coverageEntries.push(...cov.disclosures);
+      for (const e of cov.disclosures) {
+        coverageEntries.push(e);
+        // The rename lets a rewritten-launch disclosure carry a role
+        // publicLabel as its subject; a caller relay spelled in that
+        // register must not be swallowed by the prefix match, so it joins
+        // the exemption exactly the way the idle/blind/unopened entries do.
+        // missingRoles/unreadBriefs entries keep internal subjects that
+        // never key into `publicLabelsZh` and keep the prefix dedup.
+        if (publicLabelsZh[e.subject] !== undefined) roleLabelEntries.add(e);
+      }
       if (cov.rewrittenPrompts.length > 0) {
         remediation.push(
           'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
@@ -1299,10 +1309,14 @@ function composeReviewBody(
     // a relay that begins with one and brings its own reason after the
     // em-dash is a SCOPE those entries do not explain, and the skill
     // promises such prose renders verbatim. A bare subject echo still
-    // dedups.
+    // dedups, and so does a verbatim re-relay of an entry's own sentence —
+    // it carries no new scope, and a #7188-style paste of a prior body's
+    // line is exactly that shape.
     const echoesCoverage = covEntries.some(
       (e) =>
         d === e.subject ||
+        d ===
+          `${e.publicSubject ?? e.subject} — ${e.publicReason ?? e.reason}` ||
         (!roleLabelEntries.has(e) && d.startsWith(`${e.subject} — `)),
     );
     if (!echoesCoverage) callerLeft.push(d);
@@ -1344,8 +1358,16 @@ function composeReviewBody(
     agentZh?: string;
     gap: string;
   }> = [];
+  // The publicLabel register folds every round of a role onto one agent
+  // name, so two rounds disclosing the identical gap arrive as two items
+  // that would render two textually identical clauses — fold them the way
+  // the parser folds a within-return restatement.
+  const seenBudgetGapItems = new Set<string>();
   for (const g of budgetGapNotes) {
     for (const gap of g.gaps) {
+      const dedupKey = `${g.agent}\u0000${gap}`;
+      if (seenBudgetGapItems.has(dedupKey)) continue;
+      seenBudgetGapItems.add(dedupKey);
       budgetGapItems.push({
         agent: g.agent,
         agentZh: publicLabelsZh[g.agent],

@@ -354,6 +354,20 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: （none）',
       'Budget gap: 【N/A】',
       'Budget gap: 「none」',
+      'Budget gap: 『none』',
+      'Budget gap: 《none》',
+      // Fullwidth terminal punctuation rides OUTSIDE the wrappers the same
+      // way a halfwidth period does — `（none）。` must lose the period
+      // before the wrapper strip can see the pair, or the phantom leaks
+      // through into the posted body's budget-gap sentence.
+      'Budget gap: （none）。',
+      'Budget gap: 「none」。',
+      'Budget gap: 【N/A】。',
+      'Budget gap: "none"。',
+      'Budget gap: none。',
+      'Budget gap: none．',
+      // The marker itself is bilingual: the line starts at the CJK marker.
+      '预算缺口：（none）。',
       // List markers from the brief's bullet format wrap placeholders the
       // same way brackets do.
       'Budget gap: - none',
@@ -383,6 +397,13 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     expect(
       budgetGapDisclosures('Budget gap: (retry path) the remaining callers'),
     ).toEqual(['(retry path) the remaining callers']);
+    // … and the same holds marker-wrapped: the brief hands agents a bullet
+    // format, so `- <check>` is plausible input. A drop-if-marker-leading
+    // mutant passes every negative above yet silently discards this — the
+    // loss of a real disclosure shipping green.
+    expect(
+      budgetGapDisclosures('Budget gap: - the auth flow is untested'),
+    ).toEqual(['- the auth flow is untested']);
   });
 
   it('keeps a REAL gap in parentheses — the paren strip fires only for placeholders', () => {

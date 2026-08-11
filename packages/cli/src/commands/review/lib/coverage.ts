@@ -661,6 +661,10 @@ export function coverageFromTranscripts(
               'ran on a prompt the run wrote itself (none was built for this ' +
                 'chunk), so the brief with its method and rules never reached it',
               {
+                // The rename can make `name` a rostered publicLabel; the
+                // bilingual body needs its twin, the way every other
+                // rostered entry this report plumbs carries one.
+                subjectZh: rostered?.labelZh,
                 reasonZh:
                   '运行在这次 run 自行编写的 prompt 上（该 chunk 从未构建过 ' +
                   'prompt），承载方法与规则的 brief 从未到达该 agent',
@@ -688,7 +692,10 @@ export function coverageFromTranscripts(
               disclose(
                 name,
                 'launched with a prompt that is not the one the CLI built',
-                { reasonZh: '启动时使用的 prompt 不是 CLI 构建的那一份' },
+                {
+                  subjectZh: rostered?.labelZh,
+                  reasonZh: '启动时使用的 prompt 不是 CLI 构建的那一份',
+                },
               ),
             );
           }

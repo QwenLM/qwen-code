@@ -1098,6 +1098,321 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
   });
 
+  it('a fallback-label entry keeps the prefix dedup for a caller relay', () => {
+    // The exemption register is ROSTERED publicLabels only: a non-rostered
+    // launch keeps its fallback label (the truncated `You are review agent
+    // …` first line), and that is internal register — a caller spelling
+    // a relay in it is pasting the gate's own line (#7188), so the prefix
+    // match keeps it. When the guard approximated "rostered" as "not a
+    // `chunk N` label", fallback-label entries joined the exemption and a
+    // relayed gate line double-rendered end-to-end (probe-reproduced): a
+    // free-lance agent goes idle, coverage names it by the fallback, the
+    // orchestrator relays in the same register.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const strayPrompt =
+      'You are review agent `free-lance`, an extra pass this run wrote for itself.\n' +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    transcript('stray', strayPrompt, { toolCalls: 0 });
+    const fallbackLabel =
+      'You are review agent `free-lance`, an extra pass this run...';
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would relaunch a WORKING agent over this idle one.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        `${fallbackLabel} — made zero tool calls on the payment-flow walk`,
+      ],
+    });
+    const sentence = `Not reviewed: ${fallbackLabel} — the agent made no tool call: it read nothing.`;
+    expect(r.body).toContain(sentence);
+    // The relay rides the internal subject register and loses the
+    // collision to the coverage-derived line — rendered once, not twice.
+    expect(r.body.split(sentence).length - 1).toBe(1);
+    expect(r.body).not.toContain(
+      'made zero tool calls on the payment-flow walk',
+    );
+  });
+
+  it('a blind chunk entry still dedups a caller relay of the same chunk', () => {
+    // The blind-loop sibling of the unopened-chunk guard: a blind agent's
+    // label is `chunk N` — internal register — and keeps the prefix dedup
+    // the exemption exists to waive for role publicLabels ONLY. Without the
+    // guard here, a nothing-built run's blind chunk-1 entry joined the
+    // exemption and a relayed `chunk 1 — …` line double-rendered; the
+    // mutant survives every other test, so this one is its oracle.
+    transcript('a1', blindPrompt(1), { toolCalls: 0 });
+    const p = plan({ step45: false });
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would relaunch a WORKING chunk-1 agent over this one.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['chunk 1 — the agent was launched blind'],
+    });
+    expect(r.body).toContain('never named the diff file');
+    expect(r.body).not.toContain('the agent was launched blind');
+  });
+
+  it("a rewritten-launch disclosure in the role register does not shadow the caller's relay", () => {
+    // The rename gives a rewritten-launch disclosure a role publicLabel
+    // subject: a chunk agent launched wearing a built role prompt matches
+    // it (`wasDeliveredVerbatim` is line containment), so `disclose` names
+    // it `reverse audit`. A caller relay spelled in that register must not
+    // be swallowed by the prefix match — the exemption the idle/blind/
+    // unopened loops earn applies at the `cov.disclosures` spread too.
+    // Pre-fix the relay below was silently lost end-to-end
+    // (probe-reproduced); the structural line and the scoped relay must
+    // both render.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const rolePrompt =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'reverse-audit.txt'), rolePrompt);
+    transcript('v-ra-rewritten', `${rolePrompt}\nYou own chunk 1 of 2.`, {
+      toolCalls: 2,
+      range: [0, 100],
+      opens: [brief],
+    });
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would re-record the very step this case means to lack.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        "reverse audit — chunk 1's auditor returned nothing substantive twice",
+      ],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — ran on a prompt the run wrote itself ' +
+        '(none was built for this chunk), so the brief with its method and ' +
+        'rules never reached it.',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 1's auditor returned nothing substantive twice.",
+    );
+  });
+
+  it('a rewritten-launch disclosure keeps its Chinese twin in a bilingual body', () => {
+    // The rename lets the rewritten-launch disclosures carry a role
+    // publicLabel subject; the bilingual body's Chinese half must say it
+    // in Chinese (subjectZh), the way every other rostered entry this
+    // report plumbs does — pre-fix the zh sentence embedded the English
+    // label beside proper Chinese siblings (probe-reproduced).
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const rolePrompt =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'reverse-audit.txt'), rolePrompt);
+    transcript('v-ra-rewritten', `${rolePrompt}\nYou own chunk 1 of 2.`, {
+      toolCalls: 2,
+      range: [0, 100],
+      opens: [brief],
+    });
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would re-record the very step this case means to lack.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '未审查：反向审计——运行在这次 run 自行编写的 prompt 上（该 chunk 从未构建过 prompt），承载方法与规则的 brief 从未到达该 agent。',
+    );
+  });
+
+  it('a bare caller echo of an idle rostered subject dedups against the idle entry', () => {
+    // The bare-echo arm (`d === e.subject`) earns its keep on the exempt
+    // register: an idle rostered auditor plus a bare relay of its subject
+    // (no reason after the em-dash) must not render the whiff sentence
+    // beside the true idle disclosure — a factually wrong claim about the
+    // run PLUS a double disclosure. Drop the arm and the mutant survives
+    // every other test; the flip renders the whiff.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), launch);
+    transcript('v-reverse_audit', launch, { toolCalls: 0 });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — the agent made no tool call: it read nothing.',
+    );
+    expect(r.body).not.toContain(
+      'the agent returned no evidence of its walk twice',
+    );
+  });
+
+  it('a verbatim re-relay of a coverage sentence dedups in the exempt register too', () => {
+    // The exemption waives the PREFIX match for role publicLabels — never
+    // the echo check itself. A relay restating an entry's exact sentence
+    // carries no new scope (a #7188-style paste of a prior body's "Not
+    // reviewed" line is exactly this shape); without the exact-sentence
+    // arm the idle sentence below rendered twice (probe-reproduced).
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), launch);
+    transcript('v-reverse_audit', launch, { toolCalls: 0 });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'reverse audit — the agent made no tool call: it read nothing',
+      ],
+    });
+    const sentence =
+      'Not reviewed: reverse audit — the agent made no tool call: it read nothing.';
+    expect(r.body.split(sentence).length - 1).toBe(1);
+  });
+
+  it('folds two rounds of one role disclosing the identical budget gap', () => {
+    // The publicLabel register folds every round of a role onto one agent
+    // name, so a same-round relaunch that hits the same ceiling and
+    // re-discloses the identical line arrives as two items that render two
+    // textually identical clauses — and a duplicate inside the
+    // MAX_BUDGET_GAP_LINES budget can push a distinct third gap into the
+    // truncation. (agent, gap) dedup folds them the way the parser folds a
+    // within-return restatement.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const launch =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'reverse-audit.txt'), launch);
+    transcript('v-ra-gap-1', launch, {
+      toolCalls: 2,
+      range: [0, 100],
+      text: 'Walked the diff.\nBudget gap: the retry-path walk',
+    });
+    transcript('v-ra-gap-2', launch, {
+      toolCalls: 2,
+      range: [0, 100],
+      text: 'Walked the diff again.\nBudget gap: the retry-path walk',
+    });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not explored to full depth (tool budget reached): ' +
+        'reverse audit: `the retry-path walk`.',
+    );
+    expect(
+      r.body.split('reverse audit: `the retry-path walk`').length - 1,
+    ).toBe(1);
+  });
+
+  it('a chunk-agent budget-gap discloser keeps the English name in the zh half', () => {
+    // The zh sentence's agent name rides `it.agentZh ?? it.agent`: every
+    // bilingual budget-gap test above uses a rostered discloser carrying a
+    // zh twin, so the fallback side never executes — a mutant dropping it
+    // survives them all and prints literal `undefined：` for a
+    // non-rostered discloser. A chunk agent is exactly that.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 2,
+      range: [0, 100],
+      text: 'No issues found.\nBudget gap: the negative-path walk',
+    });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '未探索到全部深度（达到工具调用预算）：chunk 1：`the negative-path walk`。',
+    );
+    expect(r.body).not.toContain('undefined：');
+  });
+
   it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
     // The gate refused round 1, so no reverse-audit record exists. Without
     // the marker the floor would report the absence as a rogue/unlaunched
