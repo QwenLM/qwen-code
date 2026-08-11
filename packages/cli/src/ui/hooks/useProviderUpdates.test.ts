@@ -687,7 +687,10 @@ describe('useProviderUpdates', () => {
     // Active session on Token Plan with a model the updated Coding Plan
     // template does not contain: previousModelStillAvailable is false, yet the
     // update targets an inactive provider and must not switch the session.
-    mockConfig.getModel.mockReturnValue('qwen3.7-max');
+    mockConfig.getModel
+      .mockReturnValueOnce('qwen3.7-max')
+      .mockReturnValueOnce('qwen3.7-max')
+      .mockReturnValue('qwen3.5-plus');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       authType: AuthType.USE_OPENAI,
       baseUrl: TOKEN_PLAN_BASE_URL,
@@ -725,6 +728,17 @@ describe('useProviderUpdates', () => {
         call[1] === 'model.name' || call[1] === 'model.baseUrl',
     );
     expect(selectionWrites).toHaveLength(0);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'Coding Plan configuration updated successfully.',
+      },
+      expect.any(Number),
+    );
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('switched') }),
+      expect.any(Number),
+    );
   });
 
   it.each([

@@ -308,7 +308,7 @@ export function useProviderSetupFlow(
               ...getDefaultModelIds(provider, selectedUrl).filter(
                 (id) => !trimmedNextDefaults.has(id),
               ),
-              ...customIds,
+              ...customIds.filter((id) => !trimmedNextDefaults.has(id)),
             ]),
           ].join(', '),
         );

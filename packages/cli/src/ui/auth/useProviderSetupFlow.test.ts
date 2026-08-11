@@ -214,6 +214,11 @@ describe('useProviderSetupFlow', () => {
       result.current.selectBaseUrl(firstUrl);
     });
     expect(result.current.state.modelIds).toBe('first-default, shared-id');
+
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+    expect(result.current.state.modelIds).toBe('second-default');
   });
 
   it('rebuilds endpoint defaults after a net-zero model edit', () => {

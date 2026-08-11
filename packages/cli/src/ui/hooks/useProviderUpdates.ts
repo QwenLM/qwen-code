@@ -435,6 +435,7 @@ export function useProviderUpdates(
           // the session is actually using and its model disappeared.
           delete installPlan.modelSelection;
         }
+        const writesModelSelection = installPlan.modelSelection !== undefined;
         const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
@@ -460,7 +461,7 @@ export function useProviderUpdates(
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
 
-        if (activeModel === previousModel) {
+        if (!writesModelSelection) {
           addItem(
             {
               type: 'info',

@@ -2085,6 +2085,7 @@ function readExistingProviderConfig(
   if (!hasExistingConfig) return undefined;
 
   const advancedConfig = readExistingAdvancedConfig(firstModel);
+  const restoredEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const modelIdsByBaseUrl =
     existing && Array.isArray(config.baseUrl)
       ? Object.fromEntries(
@@ -2093,7 +2094,10 @@ function readExistingProviderConfig(
               .filter(
                 (model) =>
                   normalizeBaseUrlForMatching(model.baseUrl) ===
-                  normalizeBaseUrlForMatching(option.url),
+                    normalizeBaseUrlForMatching(option.url) ||
+                  (model.baseUrl === undefined &&
+                    normalizeBaseUrlForMatching(option.url) ===
+                      restoredEndpoint),
               )
               .map((model) => model.id);
             return ids.length > 0 ? [[option.url, [...new Set(ids)]]] : [];
@@ -2115,8 +2119,10 @@ function readExistingProviderConfig(
           modelIds: existing.models
             .filter(
               (model) =>
+                model.baseUrl === undefined ||
+                firstModel?.baseUrl === undefined ||
                 normalizeBaseUrlForMatching(model.baseUrl) ===
-                normalizeBaseUrlForMatching(firstModel?.baseUrl),
+                  normalizeBaseUrlForMatching(firstModel?.baseUrl),
             )
             .map((model) => model.id),
           ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0

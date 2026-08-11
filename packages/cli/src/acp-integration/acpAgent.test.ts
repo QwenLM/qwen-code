@@ -11389,6 +11389,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
               envKey: 'FIRST_API_KEY',
             },
             {
+              id: 'legacy-without-base-url',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
               id: 'custom-second',
               baseUrl: 'https://second.example/v1',
               envKey: 'SECOND_API_KEY',
@@ -11454,9 +11458,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
                 protocol: 'openai',
                 baseUrl: 'https://first.example/v1',
                 hasApiKey: true,
-                modelIds: ['first-model', 'custom-first'],
+                modelIds: [
+                  'first-model',
+                  'custom-first',
+                  'legacy-without-base-url',
+                ],
                 modelIdsByBaseUrl: {
-                  'https://first.example/v1': ['first-model', 'custom-first'],
+                  'https://first.example/v1': [
+                    'first-model',
+                    'custom-first',
+                    'legacy-without-base-url',
+                  ],
                   'https://second.example/v1': [
                     'custom-second',
                     'wrong-url-shared-env',
