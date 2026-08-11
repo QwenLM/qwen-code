@@ -14449,6 +14449,57 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       });
 
+      it('cleans up prompt admission when claiming a Goal permit fails', async () => {
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation(() => {
+          throw new Error('goal runtime disposed');
+        });
+        mockGoalRuntime.releaseTurn.mockRejectedValueOnce(
+          new Error('goal runtime disposed'),
+        );
+        const admission = new AbortController();
+        const removeEventListener = vi.spyOn(
+          admission.signal,
+          'removeEventListener',
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'user input' }],
+            },
+            undefined,
+            admission.signal,
+          ),
+        ).rejects.toThrow('goal runtime disposed');
+
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(removeEventListener).toHaveBeenCalledWith(
+          'abort',
+          expect.any(Function),
+        );
+        await expect(session.cancelPendingPrompt()).rejects.toThrow(
+          'Not currently generating',
+        );
+      });
+
       it('settles a completed Goal turn even when the transcript flush fails', async () => {
         // `ChatRecordingService` latches a write failure permanently — a
         // taken-over transcript lease, for one — so every later `flush()`

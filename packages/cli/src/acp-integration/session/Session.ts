@@ -3509,26 +3509,44 @@ export class Session implements SessionContext {
     }
 
     if (reservedGoalRuntime && reservedGoalTurnKey) {
-      const permit = await claimGoalTurn(
-        reservedGoalRuntime,
-        reservedGoalTurnKey,
-        pendingSend.signal,
-      );
-      if (permit) {
-        const goal = reservedGoalRuntime.getSnapshot().goal;
-        if (goal) {
-          const verifierFeedback =
-            reservedGoalRuntime.getVerifierFeedback(permit);
-          goalTurn = {
-            permit,
-            turnKey: reservedGoalTurnKey,
-            controller: pendingSend,
-            origin: 'user',
-            continuationContext: goal.objective,
-            ...(verifierFeedback ? { verifierFeedback } : {}),
-            modelStarted: false,
-          };
+      try {
+        const permit = await claimGoalTurn(
+          reservedGoalRuntime,
+          reservedGoalTurnKey,
+          pendingSend.signal,
+        );
+        if (permit) {
+          const goal = reservedGoalRuntime.getSnapshot().goal;
+          if (goal) {
+            const verifierFeedback =
+              reservedGoalRuntime.getVerifierFeedback(permit);
+            goalTurn = {
+              permit,
+              turnKey: reservedGoalTurnKey,
+              controller: pendingSend,
+              origin: 'user',
+              continuationContext: goal.objective,
+              ...(verifierFeedback ? { verifierFeedback } : {}),
+              modelStarted: false,
+            };
+          }
         }
+      } catch (error) {
+        try {
+          await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
+        } catch (releaseError) {
+          debugLogger.warn(
+            `Failed to release Goal reservation after admission failure: ${
+              releaseError instanceof Error
+                ? releaseError.message
+                : String(releaseError)
+            }`,
+          );
+        } finally {
+          releasePendingSend();
+          this.todoStopGuard.suspend();
+        }
+        throw error;
       }
     }
 
