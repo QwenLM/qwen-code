@@ -10,6 +10,7 @@
  */
 import { MouseButton } from '@opentui/core';
 import { C, SYNTAX, applyThemeMode } from './theme.js';
+import { OpenTuiInputPrompt } from './input-prompt.js';
 import {
   useKeyboard,
   useRenderer,
@@ -17,7 +18,6 @@ import {
   useTerminalDimensions,
 } from '@opentui/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { EditBufferRenderable } from '@opentui/core';
 import { copyText } from './clipboard.js';
 import { buildScenario, TOKEN_INTERVAL_MS } from './stream-script.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -298,7 +298,6 @@ function App({
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const queueRef = useRef<OpenTuiStreamEvent[]>([]);
   const liveAbortRef = useRef<AbortController | null>(null);
-  const promptRef = useRef<EditBufferRenderable | null>(null);
 
   // Streaming phase for the status bar / spinner / border (F1.1).
   const phase = livePhase(items, streaming);
@@ -406,66 +405,71 @@ function App({
     }
   });
 
-  const onSubmit = useCallback(() => {
-    const el = promptRef.current;
-    const text = (el?.plainText ?? '').trim();
-    el?.clear();
-    el?.requestRender();
-    if (!text) return;
-    applyEvent({ type: 'user', text });
-    // Slash-command routing (parity with the 67-command registry).
-    if (isSlashCommandInput(text)) {
-      const name = text.replace(/^[/?]/, '').split(/\s/)[0] ?? '';
-      const route = commandRouteFor(name);
-      if (name === 'clear') {
-        setItems([]);
+  const userPrompts = items
+    .filter((i) => i.kind === 'user')
+    .map((i) => (i.kind === 'user' ? i.text : ''));
+
+  const submitText = useCallback(
+    (raw: string) => {
+      const text = raw.trim();
+      if (!text) return;
+      applyEvent({ type: 'user', text });
+      // Slash-command routing (parity with the 67-command registry).
+      if (isSlashCommandInput(text)) {
+        const name = text.replace(/^[/?]/, '').split(/\s/)[0] ?? '';
+        const route = commandRouteFor(name);
+        if (name === 'clear') {
+          setItems([]);
+          return;
+        }
+        applyEvent({
+          type: 'text',
+          delta: route
+            ? `/${name} → routed (results: ${route.results.join(',')})`
+            : `unknown command: /${name}`,
+        });
         return;
       }
-      applyEvent({
-        type: 'text',
-        delta: route
-          ? `/${name} → routed (results: ${route.results.join(',')})`
-          : `unknown command: /${name}`,
-      });
-      return;
-    }
-    if (config) {
-      // Live client wiring: submit to the real agent loop; Esc aborts via the
-      // AbortController whose signal reaches client.sendMessageStream.
-      liveAbortRef.current?.abort();
-      const controller = new AbortController();
-      liveAbortRef.current = controller;
-      setStreaming(true);
-      (async () => {
-        try {
-          for await (const ev of livePromptEvents(
-            config,
-            text,
-            controller.signal,
-          ))
-            applyEvent(ev);
-        } catch (err) {
-          if (!controller.signal.aborted) {
-            applyEvent({
-              type: 'text',
-              delta: `\n[live error] ${String(err)}`,
-            });
+      if (config) {
+        // Live client wiring: submit to the real agent loop; Esc aborts via the
+        // AbortController whose signal reaches client.sendMessageStream.
+        liveAbortRef.current?.abort();
+        const controller = new AbortController();
+        liveAbortRef.current = controller;
+        setStreaming(true);
+        (async () => {
+          try {
+            for await (const ev of livePromptEvents(
+              config,
+              text,
+              controller.signal,
+            ))
+              applyEvent(ev);
+          } catch (err) {
+            if (!controller.signal.aborted) {
+              applyEvent({
+                type: 'text',
+                delta: `\n[live error] ${String(err)}`,
+              });
+            }
+            setItems((prev) =>
+              settleOpenTools(
+                prev,
+                controller.signal.aborted ? 'interrupted' : 'error',
+              ),
+            );
+          } finally {
+            if (liveAbortRef.current === controller)
+              liveAbortRef.current = null;
+            setStreaming(false);
           }
-          setItems((prev) =>
-            settleOpenTools(
-              prev,
-              controller.signal.aborted ? 'interrupted' : 'error',
-            ),
-          );
-        } finally {
-          if (liveAbortRef.current === controller) liveAbortRef.current = null;
-          setStreaming(false);
-        }
-      })();
-      return;
-    }
-    startStream(); // scripted: every submission replays the scenario
-  }, [startStream, config, applyEvent]);
+        })();
+        return;
+      }
+      startStream(); // scripted: every submission replays the scenario
+    },
+    [startStream, config, applyEvent],
+  );
 
   return (
     <box flexDirection="column" width={width} height="100%">
@@ -548,16 +552,17 @@ function App({
         marginLeft={1}
         marginRight={1}
       >
-        <textarea
-          ref={(el: EditBufferRenderable | null) => {
-            promptRef.current = el;
+        <OpenTuiInputPrompt
+          onSubmit={submitText}
+          userMessages={userPrompts}
+          streaming={streaming}
+          onInterrupt={() => {
+            liveAbortRef.current?.abort();
+            liveAbortRef.current = null;
+            setStreaming(false);
           }}
-          focused
-          onSubmit={onSubmit}
-          placeholder="Ask anything… (Enter submits — replays the scripted scenario)"
-          placeholderColor={C.dim}
-          flexGrow={1}
-          height={3}
+          placeholder="Ask anything… (Enter submits, Shift+Enter for newline)"
+          focus
         />
       </box>
     </box>
