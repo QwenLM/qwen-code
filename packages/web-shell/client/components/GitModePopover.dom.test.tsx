@@ -8,6 +8,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { SessionGitIntent } from './GitModePopover';
 
 const popoverHarness = vi.hoisted(() => ({
@@ -285,6 +286,33 @@ describe('GitModePopover existing branches', () => {
     await flush();
 
     expect(document.body.textContent).toContain('Commit or stash first');
+    expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(3);
+  });
+
+  it('shows the sanitized daemon detail, not the machine code, on checkout failure', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'dirty_working_tree',
+          message: 'Your local changes \u202ewould be overwritten',
+        },
+        'POST /workspaces/:workspace/git/checkout: dirty_working_tree',
+      ),
+    );
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+    clickButton('topic');
+    await flush();
+
+    // The daemon's human-facing detail wins over the SDK-composed machine
+    // message, and the bidi override inside it is neutralized.
+    expect(document.body.textContent).toContain('Your local changes');
+    expect(document.body.textContent).not.toContain('dirty_working_tree');
+    expect(document.body.textContent).not.toContain('\u202e');
+    expect(document.body.textContent).toContain('\\u202e');
     expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(3);
   });
 

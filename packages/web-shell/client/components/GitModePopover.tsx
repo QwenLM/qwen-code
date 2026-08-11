@@ -6,7 +6,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonGitBranchesResult } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonGitBranchesResult,
+} from '@qwen-code/sdk/daemon';
 import {
   ChevronDownIcon,
   CircleDotIcon,
@@ -58,6 +61,26 @@ export function validateBranchName(name: string): boolean {
         (c) => branchNameEncoder.encode(c).length > MAX_BRANCH_COMPONENT_BYTES,
       )
   );
+}
+
+// Daemon git failures carry the human-facing, path-redacted git detail in
+// `body.message`; the SDK-composed `error.message` is only the machine error
+// code (`<route label>: <body.error>`). Sanitize whichever is shown: the
+// detail is repo-controlled git output and can carry bidi overrides.
+function describeGitDaemonError(error: unknown): string {
+  const body =
+    error instanceof DaemonHttpError &&
+    typeof error.body === 'object' &&
+    error.body !== null
+      ? (error.body as { message?: unknown })
+      : undefined;
+  const detail =
+    typeof body?.message === 'string' && body.message !== ''
+      ? body.message
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  return sanitizeControlChars(detail);
 }
 
 interface GitModePopoverProps {
@@ -152,9 +175,7 @@ export function GitModePopover({
       })
       .catch((error: unknown) => {
         if (!cancelled) {
-          setExistingError(
-            error instanceof Error ? error.message : String(error),
-          );
+          setExistingError(describeGitDaemonError(error));
         }
       })
       .finally(() => {
@@ -214,9 +235,7 @@ export function GitModePopover({
         onBranchChanged?.();
         setOpen(false);
       } catch (error) {
-        setExistingError(
-          error instanceof Error ? error.message : String(error),
-        );
+        setExistingError(describeGitDaemonError(error));
       } finally {
         setCheckoutRef(null);
       }

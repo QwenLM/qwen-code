@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchGitBranches,
   gitCheckout,
@@ -153,6 +153,19 @@ describe('fetchGitBranches recent branches', () => {
     expect(result.recent).toContain('feature-b');
     expect(result.recent).toContain('feature-a');
     expect(result.recent).not.toContain('master');
+  });
+});
+
+describe('fetchGitBranches HEAD under colliding refs', () => {
+  it('reports head without the heads/ prefix under a colliding tag', async () => {
+    // `symbolic-ref --short` shortens to the shortest unambiguous name and
+    // would report `heads/release`; the full-form read must win.
+    const dir = makeRepo();
+    git(dir, 'branch', 'release');
+    git(dir, 'tag', 'release');
+    git(dir, 'checkout', '-q', 'release');
+
+    expect((await fetchGitBranches(dir)).head).toBe('release');
   });
 });
 
@@ -312,6 +325,52 @@ describe('gitCheckout', () => {
     }
     expect(currentBranch(dir)).toBe('master');
   });
+
+  it('rejects a refused checkout when detached HEAD already sits on the target commit', async () => {
+    // With the index locked the checkout is refused before moving HEAD. The
+    // commit-equality fallback must not absorb that: HEAD was ALREADY
+    // detached at the target commit, so the equality holds without a switch.
+    const dir = makeRepo();
+    git(dir, 'branch', 'target');
+    git(dir, 'checkout', '-q', '--detach', 'HEAD');
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+    try {
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+    } finally {
+      fs.rmSync(path.join(dir, '.git', 'index.lock'));
+    }
+    // HEAD stays detached; the refusal was not absorbed as a landing.
+    expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+  });
+
+  it('logs a refused rollback restore instead of swallowing it', async () => {
+    // The failing hook dirties a file that diverges between the half-moved
+    // HEAD and the original branch, so the restore checkout is refused; the
+    // refusal must surface instead of vanishing silently.
+    const dir = makeRepo();
+    git(dir, 'checkout', '-q', '-b', 'target');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'target version\n');
+    git(dir, 'commit', '-q', '-am', 'target change');
+    git(dir, 'checkout', '-q', '-b', 'elsewhere', 'master');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'elsewhere version\n');
+    git(dir, 'commit', '-q', '-am', 'elsewhere change');
+    git(dir, 'checkout', '-q', 'master');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\necho dirty > a.txt\ngit symbolic-ref HEAD refs/heads/elsewhere\nexit 1\n',
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+      expect(errorSpy).toHaveBeenCalledWith(
+        'git checkout rollback failed:',
+        expect.anything(),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 describe('gitCreateBranch', () => {
@@ -388,6 +447,22 @@ describe('gitPush', () => {
 
     await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
       /detached HEAD/,
+    );
+  });
+
+  it('fails loud on a setUpstream push under a colliding tag', async () => {
+    // The branch name is read from the full symbolic ref: a regression to
+    // `symbolic-ref --short HEAD` would resolve `heads/feature` here and
+    // fail with a different error (no matching refspec) instead.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'branch', 'feature');
+    git(dir, 'tag', 'feature');
+    git(dir, 'checkout', '-q', 'feature');
+
+    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
+      /matches more than one/,
     );
   });
 
@@ -789,6 +864,28 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
     expect(result).toEqual({ branch, detached: false });
     expect(headSha(dir)).toBe(localHead);
   });
+
+  it('reports a detached landing when a hook detaches HEAD after a tracking checkout', async () => {
+    // The hook detaches HEAD onto the target commit after `--track` created
+    // the branch and exits non-zero: the absorbed failure must report the
+    // real detached state, not `{ branch: '', detached: false }`.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git(dir, 'fetch', '-q', 'origin');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nrm -f "$0"\ngit checkout -q --detach HEAD\nexit 1\n',
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+    const result = await gitCheckout(dir, 'origin/feature');
+
+    expect(result.detached).toBe(true);
+    expect(result.branch).not.toBe('');
+    expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+  });
 });
 
 describe('gitCheckout fully qualified refs (R6-19)', () => {
@@ -834,6 +931,24 @@ describe('gitCheckout fully qualified refs (R6-19)', () => {
       'feature@{u}',
     ).trim();
     expect(tracking).toBe('origin/feature');
+  });
+
+  it('lands on a slashed local branch whose name mirrors a remote-tracking ref', async () => {
+    // A local branch literally named origin/develop is a legal ref, and the
+    // pickers submit it as refs/heads/origin/develop. The remote-tracking
+    // mirror must not reroute the checkout to the unrelated local `develop`.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/develop');
+    git(dir, 'fetch', '-q', 'origin');
+    git(dir, 'branch', 'origin/develop');
+    git(dir, 'branch', 'develop');
+
+    const result = await gitCheckout(dir, 'refs/heads/origin/develop');
+
+    expect(result).toEqual({ branch: 'origin/develop', detached: false });
+    expect(currentBranch(dir)).toBe('origin/develop');
   });
 });
 

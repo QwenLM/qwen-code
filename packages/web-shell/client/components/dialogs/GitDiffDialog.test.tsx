@@ -743,6 +743,89 @@ describe('GitDiffDialog', () => {
     });
   });
 
+  it('drops the selected branch source when a refresh reports it as HEAD', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitBranches.mockResolvedValue({
+      head: 'main',
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'feature', isHead: false },
+      ],
+      remote: [],
+      tags: [],
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={0} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    const branchTrigger = document.body.querySelector(
+      'button[aria-label="Select branch"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      branchTrigger.click();
+    });
+    await flush();
+    const featureOption = Array.from(
+      document.body.querySelectorAll('[role="option"]'),
+    ).find((option) =>
+      option.textContent?.includes('feature'),
+    ) as HTMLButtonElement;
+    expect(featureOption).toBeTruthy();
+    await act(async () => {
+      featureOption.click();
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'refs/heads/feature',
+    });
+
+    // The user checks `feature` out elsewhere; the refetched list now
+    // reports it as HEAD, which the selectable set excludes. The survival
+    // set must agree and fall back instead of keeping a value no option
+    // can render.
+    workspaceGitBranches.mockResolvedValue({
+      head: 'feature',
+      local: [
+        { name: 'main', isHead: false },
+        { name: 'feature', isHead: true },
+      ],
+      remote: [],
+      tags: [],
+    });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={1} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'refs/heads/main',
+    });
+  });
+
   it('resets the selected source when the workspace changes', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     container = document.createElement('div');

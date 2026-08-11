@@ -332,7 +332,7 @@ async function runCheckoutStep(
     await runGit(cwd, args, env);
     return;
   } catch (err) {
-    if (await checkoutLanded(cwd, landing, env)) return;
+    if (await checkoutLanded(cwd, landing, original, env)) return;
     // Roll back only when HEAD's reflog records this step's checkout as the
     // most recent checkout move — the evidence that the step moved HEAD
     // before failing (a failing post-checkout hook can move it away again).
@@ -342,14 +342,22 @@ async function runCheckoutStep(
     if (await checkoutMovedHead(cwd, landing, env)) {
       if (original.ref) {
         await runGit(cwd, ['checkout', original.ref, '--'], env).catch(
-          () => {},
+          (rollbackErr) => {
+            // A refused restore leaves the workspace half-moved against the
+            // captured original; surface it instead of failing silently.
+            // eslint-disable-next-line no-console
+            console.error('git checkout rollback failed:', rollbackErr);
+          },
         );
       } else if (original.commit) {
         await runGit(
           cwd,
           ['checkout', '--detach', original.commit, '--'],
           env,
-        ).catch(() => {});
+        ).catch((rollbackErr) => {
+          // eslint-disable-next-line no-console
+          console.error('git checkout rollback failed:', rollbackErr);
+        });
       }
     }
     throw err;
@@ -388,6 +396,7 @@ async function checkoutMovedHead(
 async function checkoutLanded(
   cwd: string,
   landing: CheckoutLanding,
+  original: { ref: string; commit: string },
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
   const [nowBranchRaw, nowCommitRaw, targetCommitRaw] = await Promise.all([
@@ -411,11 +420,15 @@ async function checkoutLanded(
   // requested switch happened. That is sufficient for detached landings
   // (tag/SHA targets expect no branch); while HEAD is still attached to a
   // branch the same equality held before the step ran, so absorbing it would
-  // report a refused switch as a success.
+  // report a refused switch as a success. The same holds when HEAD was
+  // ALREADY detached at the target commit before the step: a refused
+  // checkout leaves that exact state behind, so the pre-step snapshot must
+  // not match the target either.
   if (nowBranchRaw.trim() !== '') return false;
   const nowCommit = nowCommitRaw.trim();
   const targetCommit = targetCommitRaw.trim();
-  return targetCommit !== '' && nowCommit === targetCommit;
+  if (targetCommit === '' || nowCommit !== targetCommit) return false;
+  return original.commit === '' || original.commit !== targetCommit;
 }
 
 /**
@@ -436,8 +449,10 @@ export async function gitCheckout(
   // Normalize each namespace to the form the disambiguation below handles
   // explicitly. `refs/tags/` stays qualified: git resolves it unambiguously
   // and detaches, which is the tag semantic.
+  let headsQualified = false;
   if (ref.startsWith('refs/heads/')) {
     ref = ref.slice('refs/heads/'.length);
+    headsQualified = true;
   } else if (ref.startsWith('refs/remotes/')) {
     ref = ref.slice('refs/remotes/'.length);
   }
@@ -459,13 +474,19 @@ export async function gitCheckout(
   // and checking out the remote ref directly detaches HEAD. When no local
   // branch of that name exists yet, create one tracking the exact remote ref
   // so a fork layout (origin + upstream) lands on the clicked commit.
-  const isRemoteTracking = await runGit(
-    cwd,
-    ['show-ref', '--verify', '--quiet', `refs/remotes/${ref}`],
-    env,
-  )
-    .then(() => true)
-    .catch(() => false);
+  // Skip the probe when the input named refs/heads/ explicitly: a local
+  // branch whose slashed name mirrors a remote-tracking ref (a legal ref,
+  // listable in the pickers) must resolve as that local branch, not be
+  // rerouted down the tracking-checkout path of the mirror name.
+  const isRemoteTracking =
+    !headsQualified &&
+    (await runGit(
+      cwd,
+      ['show-ref', '--verify', '--quiet', `refs/remotes/${ref}`],
+      env,
+    )
+      .then(() => true)
+      .catch(() => false));
   if (isRemoteTracking) {
     const localName = ref.slice(ref.indexOf('/') + 1);
     if (!isValidCheckoutRef(localName)) {
@@ -500,7 +521,14 @@ export async function gitCheckout(
       );
     }
     const head = await readHeadBranchName(cwd, env);
-    return { branch: head, detached: false };
+    if (head) {
+      return { branch: head, detached: false };
+    }
+    // An absorbed hook failure can leave HEAD detached on the target commit
+    // (the bare path's fall-through covers the same state); report the real
+    // landing instead of a malformed `{ branch: '', detached: false }`.
+    const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env);
+    return { branch: sha.trim(), detached: true };
   }
   // `--` terminates options/pathspecs so a validated ref can never be
   // reinterpreted as a path (e.g. `.` wiping the working tree).

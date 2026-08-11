@@ -592,7 +592,9 @@ export function GitDiffContent({
           // Fully qualified values name the exact ref of the selected row,
           // so a colliding short name resolves to the chosen target.
           const qualified = [
-            ...result.local.map((branch) => `refs/heads/${branch.name}`),
+            ...result.local
+              .filter((branch) => !branch.isHead)
+              .map((branch) => `refs/heads/${branch.name}`),
             ...result.remote.map((branch) => `refs/remotes/${branch.name}`),
           ];
           if (current && qualified.includes(current)) return current;

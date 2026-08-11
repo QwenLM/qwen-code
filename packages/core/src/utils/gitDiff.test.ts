@@ -641,90 +641,99 @@ describe('fetchGitDiff', () => {
     expect(hunks?.truncated).toBe(true);
   });
 
-  it('keeps a mode-only collision row when the executable bit changed', async () => {
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'base');
-    await git(repo, 'switch', '-q', '-c', 'baseline');
-    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
-    await fs.chmod(path.join(repo, 'run.sh'), 0o755);
-    await git(repo, 'add', 'run.sh');
-    await git(repo, 'commit', '-q', '-m', 'baseline file');
-    await git(repo, 'switch', '-q', 'main');
-    // Recreated untracked, identical content but without the executable bit.
-    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
-    await fs.chmod(path.join(repo, 'run.sh'), 0o644);
+  it.skipIf(process.platform === 'win32')(
+    'keeps a mode-only collision row when the executable bit changed',
+    async () => {
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', 'base');
+      await git(repo, 'switch', '-q', '-c', 'baseline');
+      await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+      await fs.chmod(path.join(repo, 'run.sh'), 0o755);
+      await git(repo, 'add', 'run.sh');
+      await git(repo, 'commit', '-q', '-m', 'baseline file');
+      await git(repo, 'switch', '-q', 'main');
+      // Recreated untracked, identical content but without the executable bit.
+      await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+      await fs.chmod(path.join(repo, 'run.sh'), 0o644);
 
-    const result = await fetchGitDiff(repo, {
-      mode: 'branch',
-      ref: 'baseline',
-    });
-    // The phantom deletion is replaced by a 0/0 row, not dropped: the
-    // executable bit flip is a real metadata change against the baseline.
-    expect(result?.perFileStats.get('run.sh')).toEqual({
-      added: 0,
-      removed: 0,
-      isBinary: false,
-      truncated: false,
-    });
-    expect(result?.stats).toEqual({
-      filesCount: 1,
-      linesAdded: 0,
-      linesRemoved: 0,
-    });
-  });
+      const result = await fetchGitDiff(repo, {
+        mode: 'branch',
+        ref: 'baseline',
+      });
+      // The phantom deletion is replaced by a 0/0 row, not dropped: the
+      // executable bit flip is a real metadata change against the baseline.
+      expect(result?.perFileStats.get('run.sh')).toEqual({
+        added: 0,
+        removed: 0,
+        isBinary: false,
+        truncated: false,
+      });
+      expect(result?.stats).toEqual({
+        filesCount: 1,
+        linesAdded: 0,
+        linesRemoved: 0,
+      });
+    },
+  );
 
-  it('drops a collision whose mode matches under owner-exec canonicalization', async () => {
-    // Git canonicalizes modes from the owner-exec bit alone (0o100): a file
-    // chmod 0o654 (group-exec without owner-exec) is tracked as 100644 and
-    // is unchanged here. Any wider exec-bit mask would keep a phantom row.
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'base');
-    await git(repo, 'switch', '-q', '-c', 'baseline');
-    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
-    await git(repo, 'add', 'run.sh');
-    await git(repo, 'commit', '-q', '-m', 'baseline file');
-    await git(repo, 'switch', '-q', 'main');
-    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
-    await fs.chmod(path.join(repo, 'run.sh'), 0o654);
+  it.skipIf(process.platform === 'win32')(
+    'drops a collision whose mode matches under owner-exec canonicalization',
+    async () => {
+      // Git canonicalizes modes from the owner-exec bit alone (0o100): a file
+      // chmod 0o654 (group-exec without owner-exec) is tracked as 100644 and
+      // is unchanged here. Any wider exec-bit mask would keep a phantom row.
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', 'base');
+      await git(repo, 'switch', '-q', '-c', 'baseline');
+      await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+      await git(repo, 'add', 'run.sh');
+      await git(repo, 'commit', '-q', '-m', 'baseline file');
+      await git(repo, 'switch', '-q', 'main');
+      await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+      await fs.chmod(path.join(repo, 'run.sh'), 0o654);
 
-    const result = await fetchGitDiff(repo, {
-      mode: 'branch',
-      ref: 'baseline',
-    });
-    expect(result?.stats.filesCount).toBe(0);
-    expect(result?.perFileStats.has('run.sh')).toBe(false);
-  });
+      const result = await fetchGitDiff(repo, {
+        mode: 'branch',
+        ref: 'baseline',
+      });
+      expect(result?.stats.filesCount).toBe(0);
+      expect(result?.perFileStats.has('run.sh')).toBe(false);
+    },
+  );
 
-  it('keeps a mode-collision row when the owner-exec bit flipped', async () => {
-    // Baseline tracks 100755; the identical worktree copy at 0o654 lost the
-    // owner-exec bit, which git reports as a pure mode change. An any-exec
-    // mask would compute 100755, match the base mode, and drop the row.
-    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
-    await git(repo, 'add', '.');
-    await git(repo, 'commit', '-q', '-m', 'base');
-    await git(repo, 'switch', '-q', '-c', 'baseline');
-    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
-    await fs.chmod(path.join(repo, 'run.sh'), 0o755);
-    await git(repo, 'add', 'run.sh');
-    await git(repo, 'commit', '-q', '-m', 'baseline file');
-    await git(repo, 'switch', '-q', 'main');
-    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
-    await fs.chmod(path.join(repo, 'run.sh'), 0o654);
+  it.skipIf(process.platform === 'win32')(
+    'keeps a mode-collision row when the owner-exec bit flipped',
+    async () => {
+      // Baseline tracks 100755; the identical worktree copy at 0o654 lost the
+      // owner-exec bit, which git reports as a pure mode change. An any-exec
+      // mask would compute 100755, match the base mode, and drop the row.
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', 'base');
+      await git(repo, 'switch', '-q', '-c', 'baseline');
+      await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+      await fs.chmod(path.join(repo, 'run.sh'), 0o755);
+      await git(repo, 'add', 'run.sh');
+      await git(repo, 'commit', '-q', '-m', 'baseline file');
+      await git(repo, 'switch', '-q', 'main');
+      await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+      await fs.chmod(path.join(repo, 'run.sh'), 0o654);
 
-    const result = await fetchGitDiff(repo, {
-      mode: 'branch',
-      ref: 'baseline',
-    });
-    expect(result?.perFileStats.get('run.sh')).toEqual({
-      added: 0,
-      removed: 0,
-      isBinary: false,
-      truncated: false,
-    });
-    expect(result?.stats.filesCount).toBe(1);
-  });
+      const result = await fetchGitDiff(repo, {
+        mode: 'branch',
+        ref: 'baseline',
+      });
+      expect(result?.perFileStats.get('run.sh')).toEqual({
+        added: 0,
+        removed: 0,
+        isBinary: false,
+        truncated: false,
+      });
+      expect(result?.stats.filesCount).toBe(1);
+    },
+  );
 
   it('re-accounts a tracked-then-ignored collision instead of a phantom deletion', async () => {
     // The baseline tracks artifact.txt; the current branch untracked it
@@ -907,6 +916,99 @@ describe('fetchGitDiff', () => {
       isBinary: true,
     });
   });
+
+  it('classifies a CJK collision file past the cap as truncated text, not binary', async () => {
+    // The 1 MB read cap lands inside a 3-byte CJK sequence: validating the
+    // raw capped prefix would reject a fully valid file as binary. Both
+    // sides of the comparison must trim the trailing partial sequence.
+    const cjk = Buffer.from('文'.repeat(350_000), 'utf8'); // 1,050,000 bytes
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'cjk.txt'), cjk);
+    await git(repo, 'add', 'cjk.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'cjk.txt'), cjk);
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats.filesCount).toBe(1);
+    expect(result?.perFileStats.get('cjk.txt')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: false,
+      truncated: true,
+    });
+  });
+
+  it('keeps a truncated text row when the baseline blob is invalid only past the cap', async () => {
+    // The baseline blob carries an invalid byte BEYOND MAX_DIFF_SIZE_BYTES:
+    // only the capped prefix is ever decoded, so validation must stop at the
+    // cap like the worktree side's does, instead of rejecting the blob.
+    const bigContent = Buffer.concat([
+      Buffer.from('a'.repeat(MAX_DIFF_SIZE_BYTES + 1), 'utf8'),
+      Buffer.from([0xff]),
+    ]);
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'big.txt'), bigContent);
+    await git(repo, 'add', 'big.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'big.txt'), bigContent);
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats.filesCount).toBe(1);
+    expect(result?.perFileStats.get('big.txt')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: false,
+      truncated: true,
+    });
+  });
+
+  it('still re-accounts collisions when ignored files push the inclusive count past the threshold', async () => {
+    // 506 ignored junk files push the ignore-INCLUSIVE untracked count past
+    // MAX_FILES_FOR_DETAILS while the exclude-standard count stays tiny:
+    // classification must gate on the latter, or the colliding path survives
+    // as a phantom deletion while the detail path still runs.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await fs.writeFile(path.join(repo, 'artifact.txt'), 'same\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'branch', 'baseline');
+    await git(repo, 'rm', '-q', '--cached', 'artifact.txt');
+    await fs.writeFile(path.join(repo, '.gitignore'), 'artifact.txt\njunk/\n');
+    await fs.mkdir(path.join(repo, 'junk'));
+    await Promise.all(
+      Array.from({ length: 506 }, (_, i) =>
+        fs.writeFile(path.join(repo, 'junk', `f${i}.txt`), 'x\n'),
+      ),
+    );
+    await fs.writeFile(path.join(repo, 'artifact.txt'), 'same\n');
+    await git(repo, 'add', '.gitignore');
+    await git(repo, 'commit', '-q', '-m', 'untrack and ignore');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 2,
+      linesRemoved: 0,
+    });
+    expect(result?.perFileStats.has('artifact.txt')).toBe(false);
+  }, 30_000);
 
   it('shows an empty-baseline-blob collision as an all-added row with hunks', async () => {
     await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');

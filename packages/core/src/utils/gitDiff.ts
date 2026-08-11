@@ -241,7 +241,11 @@ export async function fetchGitDiff(
   // git timeout before the diff even starts) so colliding paths can be diffed
   // as base-blob-vs-worktree below while everything else stays all-added.
   // Past the fast-path threshold the classification is skipped — the
-  // aggregate totals are shortstat-driven there anyway.
+  // aggregate totals are shortstat-driven there anyway. The gate keys on the
+  // SAME exclude-standard count the fast-path gate below uses: the
+  // ignore-inclusive list can exceed the threshold (one ignored build
+  // directory suffices) while the detail path still runs, and skipping
+  // classification there would defeat the collision re-accounting.
   const quickStats =
     (shortstatOut != null && parseShortstat(shortstatOut)) || EMPTY_STATS;
   let filteredUntrackedPaths: string[] | null = null;
@@ -250,7 +254,7 @@ export async function fetchGitDiff(
   if (
     comparison.untrackedBaseRef &&
     classifiablePaths.length > 0 &&
-    quickStats.filesCount + classifiablePaths.length <= MAX_FILES_FOR_DETAILS
+    quickStats.filesCount + rawUntrackedPaths.length <= MAX_FILES_FOR_DETAILS
   ) {
     trackedAtBase = await classifyPathsTrackedAtBase(
       gitRoot,
@@ -494,15 +498,19 @@ export async function fetchGitDiffHunksForFile(
     // baseline tracks that the worktree holds untracked arrives here as a
     // phantom deletion. The real worktree-vs-baseline comparison is the base
     // blob against the on-disk content.
-    if (
-      comparison.untrackedBaseRef &&
-      (await isUntrackedWorktreePath(gitRoot, relPath, true))
-    ) {
-      return await branchModeUntrackedHunks(
-        gitRoot,
-        comparison.untrackedBaseRef,
-        relPath,
-      );
+    if (comparison.untrackedBaseRef) {
+      // A git failure (`null`) must not fold into "not untracked": falling
+      // through would return the phantom full-deletion hunks for a file that
+      // exists on disk. Fail closed instead.
+      const isUntracked = await isUntrackedWorktreePath(gitRoot, relPath, true);
+      if (isUntracked === null) return null;
+      if (isUntracked) {
+        return await branchModeUntrackedHunks(
+          gitRoot,
+          comparison.untrackedBaseRef,
+          relPath,
+        );
+      }
     }
     const [key, hunks] = parsed.entries().next().value as [string, Hunk[]];
     return { hunks: hunks ?? [], truncated: truncatedPaths.has(key) };
@@ -638,6 +646,30 @@ function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
   return rel;
 }
 
+/** Drop a trailing incomplete UTF-8 sequence (at most 3 bytes) left when a
+ *  byte-capped read cuts a multi-byte character, returning the last offset
+ *  that ends on a character boundary. Content ending on a complete sequence
+ *  is returned unchanged; an invalid lead byte is left for the validator. */
+function trimPartialUtf8Sequence(buf: Buffer, end: number): number {
+  for (let back = 1; back <= 3 && back <= end; back++) {
+    const byte = buf[end - back] ?? 0;
+    if ((byte & 0xc0) === 0x80) continue;
+    const leadLength =
+      byte < 0x80
+        ? 1
+        : byte >= 0xc0 && byte < 0xe0
+          ? 2
+          : byte >= 0xe0 && byte < 0xf0
+            ? 3
+            : byte >= 0xf0 && byte < 0xf8
+              ? 4
+              : 0;
+    if (leadLength === 0) return end;
+    return back >= leadLength ? end : end - back;
+  }
+  return end;
+}
+
 /**
  * Read an untracked worktree file as text under the line-counting safeguards:
  * regular files only (`ls-files --others` can list FIFOs whose open() blocks
@@ -681,9 +713,16 @@ async function readWorktreeTextFile(
     for (let i = 0; i < sniffEnd; i++) {
       if (buf[i] === 0) return null;
     }
-    if (strict && !isUtf8(buf.subarray(0, offset))) return null;
+    // A byte-capped read can cut a multi-byte UTF-8 sequence in half; the
+    // trailing partial bytes would fail strict validation (and decode to a
+    // stray U+FFFD otherwise), so drop them before validating and decoding.
+    const end =
+      st.size > MAX_DIFF_SIZE_BYTES
+        ? trimPartialUtf8Sequence(buf, offset)
+        : offset;
+    if (strict && !isUtf8(buf.subarray(0, end))) return null;
     return {
-      text: buf.toString('utf8', 0, offset),
+      text: buf.toString('utf8', 0, end),
       truncated: st.size > MAX_DIFF_SIZE_BYTES,
     };
   } catch {
@@ -758,9 +797,22 @@ async function classifyPathsTrackedAtBase(
   paths: string[],
 ): Promise<Map<string, string> | null> {
   const tracked = new Map<string, string>();
-  const CHUNK_SIZE = 100;
-  for (let i = 0; i < paths.length; i += CHUNK_SIZE) {
-    const chunk = paths.slice(i, i + CHUNK_SIZE);
+  // Chunk by argv byte volume, not path count alone: with long paths
+  // enabled, Windows' CreateProcessW caps the command line at 32,767
+  // characters, and one over-size chunk would fail the whole branch-mode
+  // classification (and with it the diff) closed.
+  const CHUNK_ARGV_BYTES = 30_000;
+  for (let i = 0; i < paths.length; ) {
+    const chunk: string[] = [];
+    let argvBytes = 0;
+    while (i < paths.length) {
+      // The `:(literal)` magic prefix plus the path bytes.
+      const argBytes = Buffer.byteLength(paths[i] ?? '', 'utf8') + 10;
+      if (chunk.length > 0 && argvBytes + argBytes > CHUNK_ARGV_BYTES) break;
+      chunk.push(paths[i] ?? '');
+      argvBytes += argBytes;
+      i++;
+    }
     const out = await runGit(
       [
         '--no-optional-locks',
@@ -804,12 +856,13 @@ async function isBlobTrackedAtBase(
 /** Whether git lists the path as an untracked worktree file. Ignored paths
  *  are excluded unless `includeIgnored` is set: branch-mode reroutes pass it
  *  because a baseline-tracked path can be untracked AND ignored (the
- *  `git rm --cached` + .gitignore recipe) and still collide. */
+ *  `git rm --cached` + .gitignore recipe) and still collide. Returns `null`
+ *  when git itself fails — callers must not fold that into `false`. */
 async function isUntrackedWorktreePath(
   gitRoot: string,
   relPath: string,
   includeIgnored = false,
-): Promise<boolean> {
+): Promise<boolean | null> {
   const out = await runGit(
     [
       '--no-optional-locks',
@@ -822,12 +875,13 @@ async function isUntrackedWorktreePath(
     ],
     gitRoot,
   );
+  if (out == null) return null;
   // An exact-entry match, not "any match under the pathspec": a pathspec also
   // matches every descendant path (an untracked `a/x` would otherwise make
   // `a` test true and reroute a real deletion of the file `a`), and the
   // `:(literal)` magic keeps glob metacharacters in the name from matching
   // sibling files.
-  return out != null && splitNulDelimited(out).includes(relPath);
+  return splitNulDelimited(out).includes(relPath);
 }
 
 /** Cut patch hunks at `MAX_LINES_PER_FILE` content lines, mirroring
@@ -886,20 +940,26 @@ async function diffBaseBlobAgainstWorktree(
   // in UTF-16 code units would scan strictly more than 8 KB of bytes for
   // multi-byte content and mislabel real text blobs as binary.
   if (baseRaw.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return null;
+  // Cap the baseline side in BYTES, mirroring `readWorktreeTextFile` on the
+  // worktree side, BEFORE validating: bytes past the cap are never decoded,
+  // and validating them would classify a valid capped prefix with an invalid
+  // trailer as binary while the worktree side only validates its capped
+  // prefix. Slicing a decoded string would count UTF-16 code units (up to
+  // ~3x the byte budget for CJK content) and truncate the two sides of the
+  // same diff asymmetrically — identical large files could then compare as
+  // changed because their prefixes differ. The cap can split a multi-byte
+  // sequence, so drop the trailing partial bytes first (the worktree side
+  // trims the same way).
+  const baseTruncated = baseRaw.length > MAX_DIFF_SIZE_BYTES;
+  const baseBytes = baseTruncated
+    ? baseRaw.subarray(0, trimPartialUtf8Sequence(baseRaw, MAX_DIFF_SIZE_BYTES))
+    : baseRaw;
   // Strict UTF-8 validation — invalid text is treated as binary instead of
   // being lossily decoded (see the baseRaw read above).
-  if (!isUtf8(baseRaw)) return null;
+  if (!isUtf8(baseBytes)) return null;
   const worktree = await readWorktreeTextFile(gitRoot, relPath, true);
   if (worktree === null) return null;
-  // Cap the baseline side in BYTES, mirroring `readWorktreeTextFile` on the
-  // worktree side. Slicing a decoded string would count UTF-16 code units
-  // (up to ~3x the byte budget for CJK content) and truncate the two sides
-  // of the same diff asymmetrically — identical large files could then
-  // compare as changed because their prefixes differ.
-  const baseTruncated = baseRaw.length > MAX_DIFF_SIZE_BYTES;
-  const baseText = (
-    baseTruncated ? baseRaw.subarray(0, MAX_DIFF_SIZE_BYTES) : baseRaw
-  ).toString('utf8');
+  const baseText = baseBytes.toString('utf8');
   // @types/diff does not declare the runtime-supported `timeout` option yet.
   const patchOptions: PatchOptions & { timeout: number } = {
     context: 3,

@@ -201,7 +201,7 @@ test('git mode chip checks out an existing branch', async ({
           /^\/workspaces\/[^/]+\/git\/checkout\/?$/.test(request.path),
       ),
     )
-    .toMatchObject({ body: { ref: 'origin/develop' } });
+    .toMatchObject({ body: { ref: 'refs/remotes/origin/develop' } });
   // Quiescence: the checkout success path bumps the git-status revision,
   // which fires follow-up status fetches; wait for them to land before
   // asserting no session was created, so a late session-create riding the
