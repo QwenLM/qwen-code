@@ -89,7 +89,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
-import { createHealthDemoRoutes } from './routes/health-demo.js';
+import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
@@ -293,6 +293,7 @@ export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
   listWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 export type {
@@ -1604,15 +1605,14 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
-  const healthDemoRoutes = createHealthDemoRoutes({
+  const healthRoutes = createHealthRoutes({
     opts,
-    getPort,
     workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
-  if (healthDemoRoutes.exposeHealthPreAuth) {
-    healthDemoRoutes.register(app);
+  if (healthRoutes.exposeHealthPreAuth) {
+    healthRoutes.register(app);
   }
 
   installAccessLogMiddleware(app, daemonLog);
@@ -1701,13 +1701,12 @@ export function createServeApp(
     app.use(rateLimiter.middleware);
   }
 
-  if (!healthDemoRoutes.exposeHealthPreAuth) {
+  if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
-    // the token. Otherwise unauthenticated callers can ping any
-    // reachable address:port to confirm a daemon exists (and `/demo`
-    // leaks the full API surface).
-    healthDemoRoutes.register(app);
+    // `/health` AFTER `bearerAuth` so probes must carry the token.
+    // Otherwise unauthenticated callers can ping any reachable
+    // address:port to confirm a daemon exists.
+    healthRoutes.register(app);
   }
 
   installJsonBodyParser(app);

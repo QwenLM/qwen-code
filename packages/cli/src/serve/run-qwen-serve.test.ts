@@ -10913,6 +10913,55 @@ describe('runQwenServe channel worker supervisor', () => {
 });
 
 describe('runQwenServe startup observability', () => {
+  it("names every pre-auth surface in the --allow-origin '*' warning", async () => {
+    // This warning is the operator's only notice of what a wildcard origin
+    // exposes without a token, so it must enumerate the actual pre-auth
+    // surface: the Web Shell static assets (mounted before bearerAuth in
+    // every mode) and, on loopback without --require-auth, /health. If the
+    // pre-auth set drifts again, this assertion is what catches the stale
+    // message.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-allow-origin-')),
+    );
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret',
+        allowOrigins: ['*'],
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      const warning = stderrWrites
+        .join('')
+        .split('\n')
+        .find((line) => line.includes('--allow-origin:'));
+      expect(warning).toBeDefined();
+      expect(warning).toContain('Web Shell static assets');
+      expect(warning).toContain('--no-web');
+      expect(warning).toContain('/health');
+      expect(warning).toContain('--require-auth');
+      // The retired debug page must not resurface in the enumeration.
+      expect(warning).not.toContain('/demo');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
+
   let tmpDir: string;
 
   afterEach(() => {
