@@ -310,9 +310,27 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: none',
       'Budget gap: None.',
       'Budget gap: None (all checks completed)',
+      'Budget gap: (none — all planned checks completed)',
+      'Budget gap: (None.)',
       'Budget gap: N/A - stayed under budget',
+      'Budget gap: (N/A - stayed under budget)',
+      'Budget gap: none — all planned checks completed',
       'Budget gap: nothing skipped',
       'Budget gap: no gaps',
+      // The rest of the drop vocabulary, pinned — this regex is a live
+      // edit site, and a narrowing that turns `no checks` into a phantom
+      // gap must not ship green.
+      'Budget gap: no checks',
+      'Budget gap: nothing',
+      'Budget gap: n/a',
+      'Budget gap: none — planned checks completed',
+      'Budget gap: none — every check covered',
+      'Budget gap: none — everything completed',
+      // The found / to-report non-answers, and inner paren padding.
+      'Budget gap: none found',
+      'Budget gap: nothing to report',
+      'Budget gap: no gaps found',
+      'Budget gap: none ( all checks completed)',
       // Bracket-wrapped non-answers reached a real posted body: the
       // wrapping parenthesis defeated the leading-token match.
       'Budget gap: (none)',
@@ -345,6 +363,87 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     ).toEqual(['(retry path) the remaining callers']);
   });
 
+  it('keeps a REAL gap in parentheses — the paren strip fires only for placeholders', () => {
+    // The strip exists for `(none — all planned checks completed)`; a
+    // genuine parenthesized disclosure must survive it …
+    expect(budgetGapDisclosures('Budget gap: (chunk 2 unfetchable)')).toEqual([
+      '(chunk 2 unfetchable)',
+    ]);
+    // … including the ones that merely START with a placeholder token: the
+    // greedy leading-token class swallows them otherwise, certifying work
+    // that never happened.
+    for (const gap of [
+      '(none of the chunk-2 checks ran — the runner died)',
+      '(N/A — the Windows runner was unavailable)',
+      '(no checks ran on Windows — runner unavailable)',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+    // A completion HEAD is not a completion: these merely continue with
+    // an "all done" word. Dropping them certifies work that never
+    // happened — the exact failure the paren strip exists to kill.
+    for (const gap of [
+      '(no checks — all deferred to follow-up)',
+      '(nothing — every check crashed)',
+      '(none — all 5 Windows checks failed to start)',
+      '(none — all planned checks completed except the Windows matrix)',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+    // … and inner text merely STARTING with the template/dash shapes is
+    // not a template or a dash run — the classifier is anchored, never
+    // prefix-matching.
+    for (const gap of [
+      '(<integration tests on Windows> runner unavailable)',
+      '(- second-order callers untested)',
+      '(* flaky reruns pending)',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+  });
+
+  it('keeps a REAL gap bare too — one strict judgment for both forms', () => {
+    // The identical gaps without parentheses are the brief's canonical
+    // form; they must survive the same strict shapes, not fall to a
+    // greedier bare-path class.
+    for (const gap of [
+      'none of the chunk-2 checks ran — the runner died',
+      'N/A — the Windows runner was unavailable',
+      'no checks ran on Windows — runner unavailable',
+      'no checks — all deferred to follow-up',
+      'nothing — every check crashed',
+      'none — all 5 Windows checks failed to start',
+      'none — all planned checks completed except the Windows matrix',
+      '<integration tests on Windows> runner unavailable',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+    }
+  });
+
+  it('keeps the stayed / negated-completion / exception shapes — real gaps that brush the idioms', () => {
+    for (const gap of [
+      // The stayed idiom is end-anchored: text continuing past `budget`
+      // discloses skipped work, and `stayed` heading somewhere else
+      // entirely is no completion at all.
+      'N/A - stayed under budget, but the Windows matrix never ran',
+      'no checks — stayed queued behind the runner outage',
+      'none — stayed under budget but skipped the Windows matrix',
+      // A completion word that is NEGATED is a failure report ending in
+      // "completed", not completion.
+      'none — all checks crashed, none completed',
+      'no checks — all deferred, nothing finished',
+      // An exception quantifier between head and completion word restricts
+      // the claim — `all but X completed` names the X that was not.
+      'none — all but the Windows checks completed',
+      'none — all but one check completed',
+    ]) {
+      expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
+      expect(budgetGapDisclosures(`Budget gap: (${gap})`)).toEqual([
+        `(${gap})`,
+      ]);
+    }
+  });
+
   it('folds duplicate disclosures into one gap', () => {
     // An agent commonly states its gap mid-return and restates it in the
     // closing summary — one gap, not two, and duplicates must not consume
@@ -356,6 +455,20 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
           'Budget gap: Second-order callers',
       ),
     ).toEqual(['second-order callers']);
+    // … whether or not the restatement wraps the gap in parentheses …
+    expect(
+      budgetGapDisclosures(
+        'Budget gap: auth flow untested\n' + 'Budget gap: (auth flow untested)',
+      ),
+    ).toEqual(['auth flow untested']);
+    // … and the fold survives sentence punctuation INSIDE the parens —
+    // a parenthesized sentence naturally ends in a period.
+    expect(
+      budgetGapDisclosures(
+        'Budget gap: (auth flow untested.)\n' +
+          'Budget gap: auth flow untested',
+      ),
+    ).toEqual(['(auth flow untested.)']);
   });
 
   it('sanitizes and caps what will reach a terminal and the posted body', () => {
@@ -389,10 +502,32 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     // The previous single multiline regex was measured at 5.8 s on 98 KB
     // of newlines — quadratic backtracking from every line start. The
     // line-based scan has no cross-line class to backtrack over.
-    const pathological = '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000);
+    const pathological =
+      '-\n'.repeat(49_000) + ' \n> - '.repeat(20_000) + ' '.repeat(40_000);
     const t0 = performance.now();
     expect(budgetGapDisclosures(pathological)).toEqual([]);
     expect(performance.now() - t0).toBeLessThan(1000);
+    // The placeholder classifier's own hazard shape — a token followed by
+    // a long whitespace run — must stay linear too; it was measured
+    // quadratic (seconds at 40k spaces) when its quantifiers overlapped.
+    const spaced = `Budget gap: (none${' '.repeat(160_000)}x)`;
+    const t1 = performance.now();
+    expect(budgetGapDisclosures(spaced)).toHaveLength(1);
+    expect(performance.now() - t1).toBeLessThan(1000);
+    // The line matcher's own hazard shape — a long indentation run on a
+    // line that is NOT a disclosure. The pre-rewrite matcher's overlapping
+    // `[ \t]*` pair backtracked quadratically here (seconds at 40k tabs);
+    // the disclosure on the line above pins that a real gap still parses
+    // out of the same text.
+    const indented = `Budget gap: ok\n${'\t'.repeat(40_000)}not a gap line`;
+    const t2 = performance.now();
+    expect(budgetGapDisclosures(indented)).toEqual(['ok']);
+    expect(performance.now() - t2).toBeLessThan(1000);
+    // And a deep-indented bullet disclosure still matches — the leading
+    // whitespace lives inside the optional bullet group, not beside it.
+    expect(
+      budgetGapDisclosures(`${'\t'.repeat(4000)}- Budget gap: the check`),
+    ).toEqual(['the check']);
   });
 });
 

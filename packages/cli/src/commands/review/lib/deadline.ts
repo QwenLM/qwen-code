@@ -39,7 +39,13 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { promptRecordDir } from './prompt-record.js';
 
@@ -504,7 +510,8 @@ export function roundCapStopEntryZh(cap: number): string {
  * without converging — without depending on the orchestrator to relay the
  * entry. Same marker file and same swallow-on-write-error discipline as
  * `writeBudgetStop`; only one stop fires per run, whichever refusal comes
- * first.
+ * first — the same-run guard below enforces it, so a retry-past-cap after a
+ * time-budget stop cannot flip the recorded cause.
  */
 export function writeRoundCapStop(
   planPath: string,
@@ -513,6 +520,11 @@ export function writeRoundCapStop(
   nowMs: number = Date.now(),
 ): void {
   try {
+    // First refusal wins: a same-run marker already on disk (its run-epoch
+    // fence in `readBudgetStop` excludes previous runs') is left untouched,
+    // so a time-budget stop followed by a retry that the cap then refuses
+    // does not post two contradictory stop disclosures.
+    if (readBudgetStop(planPath) !== null) return;
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
     const stop: BudgetStop = {
@@ -536,7 +548,8 @@ export function writeRoundCapStop(
  * reads it back and synthesizes the verdict-capping disclosure without
  * depending on the orchestrator to relay a sentence. Write errors are
  * swallowed: the stderr instruction still carries the entry, and a gate
- * that cannot write must still refuse.
+ * that cannot write must still refuse. First refusal wins here too — a
+ * same-run marker already on disk is left untouched.
  */
 export function writeBudgetStop(
   planPath: string,
@@ -545,6 +558,7 @@ export function writeBudgetStop(
   nowMs: number = Date.now(),
 ): void {
   try {
+    if (readBudgetStop(planPath) !== null) return;
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
     const stop: BudgetStop = {
@@ -592,6 +606,23 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
 }
 
 /**
+ * Remove any stop marker beside the prompt records. Called when the loop
+ * reaches a clean end that outranks an earlier same-run refusal — a
+ * CONVERGED exit after an over-cap round was refused: the marker would
+ * otherwise survive (nothing else unlinks it) and cap a verdict the audit
+ * legitimately converged. Missing file and unlink errors are swallowed —
+ * the file was the thing to be rid of.
+ */
+export function clearBudgetStop(planPath: string): void {
+  try {
+    rmSync(join(promptRecordDir(planPath), STOP_FILE), { force: true });
+  } catch {
+    // Best-effort: a marker we could not remove still only caps a verdict,
+    // never corrupts one, and the converged stderr is the load-bearing half.
+  }
+}
+
+/**
  * The refusal, spelled as the termination rule it is. Printed to stderr by
  * `agent-prompt` alongside exit code 4; the disclosure sentence matches the
  * `budget-stop.json` marker byte for byte, so both channels cap the verdict
@@ -620,9 +651,11 @@ export function reverseAuditBudgetMessage(
     `\`agent-prompt --role verify\` (never a hand-rolled agent) — it is gated ` +
     `on the compose floor and will refuse once too little time remains, ` +
     `leaving any still-\`[unverified]\` findings tagged for compose-review to ` +
-    `cap — then compose and submit. Do NOT re-verify findings already ` +
-    `confirmed in earlier rounds. A review that stops here still reports ` +
-    `everything it proved; a review that runs past its deadline is killed ` +
-    `holding all of it.`
+    `cap; when the deadline is within that floor, stop waiting on any ` +
+    `verifier batch still out and compose with the tags in hand. Do NOT ` +
+    `re-verify findings already confirmed in earlier rounds, and do NOT ` +
+    `invent a fresh re-verification pass. Then compose and submit — a ` +
+    `review that stops here still reports everything it proved; a review ` +
+    `that runs past its deadline is killed holding all of it.`
   );
 }

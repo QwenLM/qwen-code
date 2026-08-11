@@ -1462,7 +1462,7 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
-  // A budget-stop marker means the round builder itself refused the reverse
+  // A TIME-budget stop marker means the round builder refused the reverse
   // audit on the run's time budget. Exactly ONE gap shape is then by design:
   // `not-built` — the refusal writes no record, so an audit with no records
   // is the audit the gate stopped, and the gap's FIX (rebuild the round)
@@ -1475,7 +1475,15 @@ export function verificationGaps(
   // hand-written round-1 launch is exactly as undelivered when round 3 later
   // hits the budget, and suppressing it would let "stopped before round 3"
   // imply the rounds that did run were faithful.
-  const budgetStopped = readBudgetStop(planPath) !== null;
+  //
+  // Only the time-budget cause earns this exemption. A ROUND-CAP stop does
+  // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
+  // (rebuild `--round 1`) is admitted, and a local run has no deadline to
+  // refuse it at all — the monotone-refusal premise fails twice. So a
+  // round-cap marker leaves the not-built gap and its rebuild remediation
+  // owed, exactly as if no marker were present.
+  const stop = readBudgetStop(planPath);
+  const budgetStopped = stop !== null && stop.cause !== 'round-cap';
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
   const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';

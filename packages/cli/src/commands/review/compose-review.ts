@@ -39,7 +39,14 @@ import {
 } from './lib/deadline.js';
 import { MAX_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
-import { gh, setGhHost } from './lib/gh.js';
+import {
+  HOSTNAME_RE,
+  gh,
+  getGhHost,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
@@ -64,6 +71,7 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
+  FOOTER_MARKER,
   REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
@@ -242,6 +250,182 @@ function withMarker(line: string): string {
   return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
 
+/** The plan's PR identity, when it names one — the base for comment anchors. */
+interface PrIdentity {
+  ownerRepo: string;
+  prNumber: string;
+  /** The host fetch-pr recorded for a non-default instance, else null. */
+  host: string | null;
+}
+
+/**
+ * The one rule for "this parsed plan names a PR" — the bilingual recovery
+ * and the comment anchors both read it, so a hardening of plan-identity
+ * validation lands once, not twice in this file.
+ */
+function planPrIdentity(plan: unknown): PrIdentity | null {
+  if (typeof plan !== 'object' || plan === null) return null;
+  const p = plan as {
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+    host?: unknown;
+  };
+  const ownerRepo =
+    typeof p.ownerRepo === 'string' && isOwnerRepo(p.ownerRepo)
+      ? p.ownerRepo
+      : null;
+  const prNumber = isPositivePrNumber(p.prNumber) ? String(p.prNumber) : null;
+  // The plan is a file on disk; hold a recorded host to the same standard
+  // the rest of this surface applies (HOSTNAME_RE in setGhHost) before it
+  // rides into a posted anchor URL.
+  const host =
+    typeof p.host === 'string' && HOSTNAME_RE.test(p.host) ? p.host : null;
+  return ownerRepo && prNumber ? { ownerRepo, prNumber, host } : null;
+}
+
+function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
+  if (!planPath) return null;
+  try {
+    return planPrIdentity(JSON.parse(readFileSync(planPath, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `comment 3733696855` in a model-written unresolved entry is a bare number
+ * the PR page cannot navigate; with the plan's PR identity it becomes the
+ * anchor GitHub already serves — review-thread comments under
+ * `#discussion_r`, issue-level ones under `#issuecomment`. An entry that
+ * already carries a markdown link is left alone: the model linked it itself,
+ * and rewriting inside its link text would corrupt it.
+ */
+function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
+  if (!pr || text.includes('](')) return text;
+  // The anchor must point at the instance the PR lives on: the host the
+  // plan recorded, else this run's routed host, else an operator-exported
+  // GH_HOST — the same effective-host resolution `submit` posts through.
+  // Defaulting to github.com 404s a GHE review's anchors, or lands them on
+  // a same-named public repo's different PR.
+  // Normalized before the github.com comparison below: hostnames are
+  // case-insensitive, :443 is the implicit port (leading zeros included),
+  // a trailing dot is the same DNS name, and www. fronts the same default
+  // instance — every one of these variants must land on the floor, or a
+  // `GH_HOST=www.github.com` run links an ordinal `comment 5` into a dead
+  // anchor.
+  const host = (resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com')
+    .toLowerCase()
+    .replace(/:0*443$/, '')
+    .replace(/\.$/, '')
+    .replace(/^www\.github\.com$/, 'github.com');
+  const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
+  // github.com's comment ids run long, so a short number after "comment"
+  // reads likelier as an ordinal; a GHE instance's id space is its own and
+  // often short, and the floor would leave the feature inert there.
+  // Case-insensitive: the pipeline's own label is capitalized
+  // (`**Issue-level comment**` in pr-context), and an entry echoing that
+  // casing must still anchor under #issuecomment, not #discussion_r.
+  const commentRef =
+    host === 'github.com'
+      ? /\b(issue-level )?comment (\d{6,})\b/gi
+      : /\b(issue-level )?comment (\d+)\b/gi;
+  // The anchor family is decided per ENTRY, not per match: issue-comment
+  // ids and review-comment ids are separate id spaces, and an issue-level
+  // entry that echoes pr-context's own header shape (`**Issue-level
+  // comment** — … (comment 5199834809)`) carries its id apart from the
+  // phrase — routed by adjacency alone, that id anchors under
+  // #discussion_r, a link that can never resolve.
+  const issueLevelEntry = /\bissue(?:-level)?\s+comment\b/i.test(text);
+  return text.replace(
+    commentRef,
+    (_m, issueLevel: string | undefined, id: string) =>
+      issueLevel || issueLevelEntry
+        ? `[${issueLevel ?? ''}comment ${id}](${base}#issuecomment-${id})`
+        : `[comment ${id}](${base}#discussion_r${id})`,
+  );
+}
+
+/**
+ * The unresolved-existing-Critical block, as a Markdown list instead of a
+ * space-joined paragraph: #8388's posted body ran 31 of these together in
+ * one unreadable wall. Entries sharing the exact reason after their first
+ * ` — ` collapse into one marked group that states the reason once and
+ * lists the subjects — the same repetition-killing move the not-reviewed
+ * sentences already make. Nothing is dropped: every subject and every
+ * distinct reason still renders, because erasing one is how a review
+ * approves the very thing it is asking about. The Chinese half carries a
+ * count and a pointer instead of duplicating the untranslatable English
+ * list — on #8388 that duplication alone doubled the body.
+ */
+function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+  const parsed = cannotTell.map((raw) => {
+    // Entries render as one-line list items: an unindented newline ends a
+    // list item (CommonMark), so a model-written entry spanning lines would
+    // leak its continuation out of the list. Collapsed by split/join, not
+    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
+    // a long whitespace run with no newline in it, and these entries are
+    // model-written with no length cap — one such entry stalled a measured
+    // probe for seconds at 80k characters.
+    const unmarked = raw.startsWith(CRITICAL_PREFIX)
+      ? raw.slice(CRITICAL_PREFIX.length).trim()
+      : raw;
+    const line = linkifyCommentRefs(
+      unmarked.includes('\n')
+        ? unmarked
+            .split('\n')
+            .map((seg) => seg.trim())
+            .filter((seg) => seg !== '')
+            .join(' ')
+        : unmarked,
+      pr,
+    );
+    const idx = line.indexOf(' — ');
+    // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
+    // empty-string reason would become a group key and render `2 entries — :`.
+    return idx === -1
+      ? { head: line, reason: null }
+      : {
+          head: line.slice(0, idx),
+          reason: line.slice(idx + 3).trim() || null,
+        };
+  });
+  // Grouped on the exact reason text, in first-appearance order. A reasonless
+  // entry stays its own item — there is nothing to share.
+  interface Group {
+    reason: string | null;
+    heads: string[];
+  }
+  const groups: Group[] = [];
+  const byReason = new Map<string, Group>();
+  for (const p of parsed) {
+    const existing = p.reason === null ? undefined : byReason.get(p.reason);
+    if (existing) {
+      existing.heads.push(p.head);
+      continue;
+    }
+    const group: Group = { reason: p.reason, heads: [p.head] };
+    groups.push(group);
+    if (p.reason !== null) byReason.set(p.reason, group);
+  }
+  const lines: string[] = [];
+  for (const { reason, heads } of groups) {
+    if (heads.length === 1) {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+      );
+    } else {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
+        ...heads.map((head) => `  - ${head}`),
+      );
+    }
+  }
+  return {
+    en: `Unresolved, please confirm:\n\n${lines.join('\n')}`,
+    zh: `未决，请确认：共 ${cannotTell.length} 条（原文未翻译，列表见上方英文部分）。`,
+  };
+}
+
 // The input arrives as JSON a model wrote, and the skill tells it to omit
 // fields that do not apply — so absence is normal and means zero/empty. What
 // must never pass is a PRESENT field of the wrong shape: `undefined + 1` is
@@ -271,7 +455,14 @@ function toStringList(value: unknown, field: string): string[] {
 }
 
 function stripReviewFooter(entry: string): string {
-  return entry.replace(REVIEW_FOOTER_RE, '');
+  // Guarded on the marker: the strip regex opens `\s*` under an unanchored
+  // search, which scans quadratically on a long whitespace run in an entry
+  // that carries no footer at all — and these entries are model-written
+  // with no length cap (measured ~20 s at 80k characters). An entry
+  // without the marker has nothing to strip.
+  return entry.includes(FOOTER_MARKER)
+    ? entry.replace(REVIEW_FOOTER_RE, '')
+    : entry;
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
@@ -1226,14 +1417,7 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [
-          {
-            en: `Unresolved, please confirm: ${cannotTell
-              .map((l) => withMarker(l))
-              .join(' ')}`,
-            zh: `未决，请确认：${cannotTell.map((l) => withMarker(l)).join(' ')}`,
-          },
-        ];
+      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
@@ -1459,6 +1643,13 @@ function composeReviewBody(
     });
   }
 
+  // Clauses 1–4 are the verdict: short sentences that read as one opener
+  // paragraph. Everything after — unresolved Criticals, disclosures, body
+  // blockers — gets a paragraph of its own: #8388's posted body joined all
+  // of it with spaces, 31 unresolved entries and seven disclosures in a
+  // single unreadable wall.
+  const openerCount = clauses.length;
+
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
 
@@ -1489,9 +1680,21 @@ function composeReviewBody(
     clauses.push(...bodyCriticalBlock);
   }
 
+  const openerParts = clauses.slice(0, openerCount);
+  const paragraphs: Bi[] = [
+    ...(openerParts.length > 0
+      ? [
+          {
+            en: openerParts.map((c) => c.en).join(' '),
+            zh: openerParts.map((c) => c.zh).join(' '),
+          },
+        ]
+      : []),
+    ...clauses.slice(openerCount),
+  ];
   return {
     event,
-    body: render(clauses, ' '),
+    body: render(paragraphs, '\n\n'),
     baseEvent,
     cappedBy,
     downgraded,
@@ -1879,29 +2082,23 @@ function bilingualFromPlan(
   fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
 ): boolean {
   if (!planPath) return false;
-  let plan: {
-    prDescriptionHasHan?: unknown;
-    ownerRepo?: unknown;
-    prNumber?: unknown;
-  };
+  let plan: unknown;
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
     return false;
   }
-  if (typeof plan?.prDescriptionHasHan === 'boolean') {
-    return plan.prDescriptionHasHan;
+  const han = (plan as { prDescriptionHasHan?: unknown })?.prDescriptionHasHan;
+  if (typeof han === 'boolean') {
+    return han;
   }
-  const ownerRepo =
-    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
-      ? plan.ownerRepo
-      : undefined;
-  const prNumber = isPositivePrNumber(plan?.prNumber)
-    ? String(plan.prNumber)
-    : undefined;
-  if (!ownerRepo || !prNumber) return false;
+  // The identity rule is shared with the comment anchors (planPrIdentity).
+  // The stricter ownerRepo shape changes no outcome: a misshapen one failed
+  // the gh fetch and fell back to English anyway.
+  const pr = planPrIdentity(plan);
+  if (!pr) return false;
   try {
-    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
+    return /\p{Script=Han}/u.test(fetchPrBody(pr.ownerRepo, pr.prNumber));
   } catch {
     return false;
   }
