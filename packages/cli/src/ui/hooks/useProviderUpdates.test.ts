@@ -10,6 +10,7 @@ import {
   AuthType,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
+  CODING_PLAN_GLOBAL_BASE_URL,
   codingPlanProvider,
   TOKEN_PLAN_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
@@ -119,6 +120,35 @@ describe('useProviderUpdates', () => {
     };
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
+  it('uses the stored non-default base URL when versions match', () => {
+    const globalTemplate = buildProviderTemplate(
+      codingPlanProvider,
+      CODING_PLAN_GLOBAL_BASE_URL,
+    );
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+      version: computeProviderTemplateVersion(
+        codingPlanProvider,
+        CODING_PLAN_GLOBAL_BASE_URL,
+      ),
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: globalTemplate,
     };
 
     const { result } = renderHook(() =>

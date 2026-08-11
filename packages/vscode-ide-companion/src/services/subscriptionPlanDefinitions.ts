@@ -6,9 +6,17 @@
 
 import {
   buildProviderTemplate,
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_ENV_KEY,
+  CODING_PLAN_GLOBAL_BASE_URL,
   computeProviderTemplateVersion,
   findProviderByCredentials,
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
 } from '@qwen-code/qwen-code-core';
+
+export { CODING_PLAN_ENV_KEY, TOKEN_PLAN_ENV_KEY };
 
 export enum CodingPlanRegion {
   CHINA = 'china',
@@ -28,12 +36,6 @@ export interface SubscriptionPlanModelConfig {
 
 export type CodingPlanTemplate = SubscriptionPlanModelConfig[];
 
-export const CODING_PLAN_ENV_KEY = 'BAILIAN_CODING_PLAN_API_KEY';
-export const TOKEN_PLAN_ENV_KEY = 'BAILIAN_TOKEN_PLAN_API_KEY';
-const TOKEN_PLAN_CHINA_ENDPOINT =
-  'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
-const TOKEN_PLAN_GLOBAL_ENDPOINT =
-  'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
 const TOKEN_PLAN_CHINA_DOC_URL =
   'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856';
 const TOKEN_PLAN_GLOBAL_DOC_URL =
@@ -47,7 +49,6 @@ interface SubscriptionPlanRegionConfig<
   endpoint: string;
   documentationUrl?: string;
   apiKeyUrl?: string;
-  modelNamePrefix?: string;
 }
 
 export interface SubscriptionPlanDefinition<
@@ -59,7 +60,6 @@ export interface SubscriptionPlanDefinition<
   title: string;
   description: string;
   envKey: string;
-  modelNamePrefix: string;
   authEventType: 'coding-plan';
   metadataKey: string;
   endpoint?: string;
@@ -94,7 +94,6 @@ const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
   title: 'Coding Plan',
   description: 'For individual developers · Weekly quota included',
   envKey: CODING_PLAN_ENV_KEY,
-  modelNamePrefix: 'ModelStudio Coding Plan',
   authEventType: 'coding-plan',
   metadataKey: 'codingPlan',
   defaultRegion: CodingPlanRegion.CHINA,
@@ -102,16 +101,15 @@ const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
     {
       id: CodingPlanRegion.CHINA,
       title: 'China (Beijing)',
-      endpoint: 'https://coding.dashscope.aliyuncs.com/v1',
+      endpoint: CODING_PLAN_CHINA_BASE_URL,
       documentationUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan',
     },
     {
       id: CodingPlanRegion.GLOBAL,
       title: 'Singapore (International)',
-      endpoint: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      endpoint: CODING_PLAN_GLOBAL_BASE_URL,
       documentationUrl:
         'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
-      modelNamePrefix: 'ModelStudio Coding Plan for Global/Intl',
     },
   ],
 };
@@ -123,7 +121,6 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
   description:
     'For teams and companies · Usage-based billing with dedicated endpoint',
   envKey: TOKEN_PLAN_ENV_KEY,
-  modelNamePrefix: 'ModelStudio Token Plan',
   authEventType: 'coding-plan',
   metadataKey: 'tokenPlan',
   defaultRegion: CodingPlanRegion.CHINA,
@@ -131,17 +128,16 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
     {
       id: CodingPlanRegion.CHINA,
       title: 'China (Beijing)',
-      endpoint: TOKEN_PLAN_CHINA_ENDPOINT,
+      endpoint: TOKEN_PLAN_CHINA_BASE_URL,
       documentationUrl: TOKEN_PLAN_CHINA_DOC_URL,
       apiKeyUrl: TOKEN_PLAN_CHINA_DOC_URL,
     },
     {
       id: CodingPlanRegion.GLOBAL,
       title: 'Singapore (International)',
-      endpoint: TOKEN_PLAN_GLOBAL_ENDPOINT,
+      endpoint: TOKEN_PLAN_GLOBAL_BASE_URL,
       documentationUrl: TOKEN_PLAN_GLOBAL_DOC_URL,
       apiKeyUrl: TOKEN_PLAN_GLOBAL_DOC_URL,
-      modelNamePrefix: 'ModelStudio Token Plan for Global/Intl',
     },
   ],
   usageDocumentationUrl: TOKEN_PLAN_CHINA_DOC_URL,

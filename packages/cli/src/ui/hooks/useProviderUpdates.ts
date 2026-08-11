@@ -269,6 +269,9 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
+        installPlan.providerState![
+          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+        ]!['version'] = pending.currentVersion;
         delete installPlan.env;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
