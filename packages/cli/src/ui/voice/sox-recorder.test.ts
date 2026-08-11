@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   mkdtemp: vi.fn(),
   readFile: vi.fn(),
   rm: vi.fn(),
+  decodeCalls: [] as Buffer[],
 }));
 
 vi.mock('node:child_process', async () => {
@@ -47,6 +48,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   decodeProcessOutput: (buffer: Buffer | string) => {
     if (!Buffer.isBuffer(buffer)) return String(buffer);
     if (buffer.length === 0) return '';
+    mocks.decodeCalls.push(buffer);
     const strict = new TextDecoder('utf-8', { fatal: true });
     const isUtf8 = (() => {
       try {
@@ -79,6 +81,7 @@ async function startRecorder(recorder: ReturnType<typeof createSoxRecorder>) {
 describe('createSoxRecorder', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.decodeCalls.length = 0;
   });
 
   it('records mono 16k wav audio with sox and returns the file bytes', async () => {
@@ -209,6 +212,32 @@ describe('createSoxRecorder', () => {
     child.stderr.emit('data', Buffer.from('x'.repeat(5000)));
     child.emit('close', 2);
 
+    await expect(recorder.stop()).rejects.toThrow(
+      `Voice recorder failed with exit code 2: ${'x'.repeat(4096)}.`,
+    );
+  });
+
+  it('bounds raw stderr accumulation while sox writes continuously', async () => {
+    const child = new FakeChildProcess();
+    mocks.spawn.mockReturnValue(child);
+    mocks.mkdtemp.mockResolvedValue('/tmp/qwen-voice-abc');
+
+    const recorder = createSoxRecorder();
+    await startRecorder(recorder);
+    // A chatty sox session (repeated ALSA xrun/device warnings) far exceeds
+    // the decode cap. The raw buffer handed to decodeProcessOutput on close
+    // must be bounded — reverting to an unconditional push retains every byte.
+    for (let i = 0; i < 100; i++) {
+      child.stderr.emit('data', Buffer.from('x'.repeat(1024)));
+    }
+    child.emit('close', 2);
+
+    const decoded = mocks.decodeCalls.at(-1);
+    expect(decoded).toBeDefined();
+    // 100 KiB emitted, but the retained raw buffer is capped (4x the 4 KiB
+    // decoded cap, headroom for a multi-byte char split at the cap) — not the
+    // full stream.
+    expect(decoded!.length).toBeLessThan(100 * 1024);
     await expect(recorder.stop()).rejects.toThrow(
       `Voice recorder failed with exit code 2: ${'x'.repeat(4096)}.`,
     );

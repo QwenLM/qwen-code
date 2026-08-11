@@ -89,10 +89,16 @@ class SoxRecorder implements VoiceRecorder {
     const child = this.child;
     // Accumulate raw stderr chunks and decode once on close, so a chunk that
     // splits a multi-byte sequence doesn't mojibake: decodeProcessOutput's
-    // full-buffer detection is per-buffer, not per-chunk.
+    // full-buffer detection is per-buffer, not per-chunk. Bound the raw
+    // accumulation (not just the decoded string on close) so a minutes-long,
+    // chatty sox session can't retain every stderr byte in memory.
     const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderrChunks.push(chunk);
+      if (stderrBytes < MAX_STDERR_LENGTH * 4) {
+        stderrChunks.push(chunk);
+        stderrBytes += chunk.length;
+      }
     });
     this.closePromise = new Promise((resolve) => {
       child.once('close', (code, signal) => {
