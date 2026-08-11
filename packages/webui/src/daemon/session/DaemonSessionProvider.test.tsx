@@ -7409,8 +7409,8 @@ describe('DaemonSessionProvider', () => {
     const closingError = new DaemonHttpError(
       404,
       {
-        error:
-          'No session with id "session-b". The session is closing; retry after close completes',
+        code: 'session_closing',
+        error: 'No session with id "session-b". The session is closing',
         sessionId: 'session-b',
       },
       'POST /session/:id/load: No session with id "session-b". The session is closing; retry after close completes',
@@ -7570,11 +7570,47 @@ describe('DaemonSessionProvider', () => {
       new DaemonHttpError(
         404,
         {
+          code: 'session_closing',
           error:
             'No session with id "session-b". The session is closing; retry after close completes',
           sessionId: 'session-b',
         },
         'POST /session/:id/load: No session with id "session-b". The session is closing; retry after close completes',
+      ),
+    );
+
+    await expect(
+      requireActions(actions).loadSession('session-b'),
+    ).rejects.toThrow();
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a missing session', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      new DaemonHttpError(
+        404,
+        {
+          code: 'session_not_found',
+          error: 'No session with id "session-b"',
+          sessionId: 'session-b',
+        },
+        'POST /session/:id/load: No session with id "session-b"',
       ),
     );
 
@@ -7611,6 +7647,7 @@ describe('DaemonSessionProvider', () => {
       new DaemonHttpError(
         404,
         {
+          code: 'session_closing',
           error:
             'No session with id "session-b". The session is closing; retry after close completes',
           sessionId: 'session-b',

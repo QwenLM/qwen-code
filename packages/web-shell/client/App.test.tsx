@@ -423,7 +423,14 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
   };
   return {
     DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-    DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
+    // This harness only models the parent session connection.
+    DaemonSessionProvider: ({
+      children,
+      clientId,
+    }: {
+      children: ReactNode;
+      clientId?: string;
+    }) => (clientId?.startsWith('side-task:') ? null : children),
     useActions: () => mockSessionActions,
     useConnection: () => mockConnection,
     useDaemonSessionOwnerGuard: () => ownerGuard,

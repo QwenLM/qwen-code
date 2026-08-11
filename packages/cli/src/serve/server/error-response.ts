@@ -390,7 +390,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionNotFoundError) {
-    res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    res
+      .status(404)
+      .json({ error: err.message, code: err.code, sessionId: err.sessionId });
     return;
   }
   if (err instanceof SessionArchivedError) {
