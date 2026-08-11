@@ -25,6 +25,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -608,15 +609,16 @@ export class DaemonSessionClient {
   /**
    * Queue a user message typed while this session's turn is still running so
    * the ACP child can drain it mid-turn. Forwards the client id bound at
-   * create/attach. Resolves `{ accepted: false }` when the session is idle —
-   * the caller should then send the message as a normal next-turn prompt.
+   * create/attach. Accepted requests become daemon-owned even when the active
+   * turn settles while the request is in flight.
    */
   async enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; messageId?: string },
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -625,6 +627,22 @@ export class DaemonSessionClient {
     messageId: string,
   ): Promise<DaemonRemoveMidTurnMessageResult> {
     return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot (queue + delivery-state rings) for
+   * this session. Forwards the bound client id. See
+   * `DaemonClient.getMidTurnMessages` — requires the daemon to advertise
+   * `session_mid_turn_message_query`; older daemons reject with 404 and
+   * callers preserve their current state.
+   */
+  async getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult> {
+    return await this.client.getMidTurnMessages(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

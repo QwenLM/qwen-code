@@ -73,6 +73,7 @@ import {
 import { BRIEFS } from './agent-briefs.js';
 import { chunkIdsProblem } from './diff-plan.js';
 import { readBudgetStop } from './deadline.js';
+import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
 
 export interface CoverageFromTranscripts {
@@ -154,6 +155,17 @@ export interface CoverageFromTranscripts {
   missingChunks: number[];
   /** Chunk ids an agent declared unreachable. */
   uncoverableChunks: number[];
+  /**
+   * `Budget gap: <the check>` lines parsed from agent returns — the fixed
+   * disclosure format the tool-budget brief mandates when an agent's soft
+   * ceiling stopped a check it wanted. Detection is deterministic (this
+   * parse); the RULING stays with the orchestrator, exactly as it does for
+   * whiffs: a gap naming an incomplete required trace joins
+   * `unreviewedDimensions` and caps Approve, a gap naming optional depth is
+   * disclosed in the report. An empty list on a budgeted run means no agent
+   * hit its ceiling mid-check.
+   */
+  budgetGaps: Array<{ agent: string; gaps: string[] }>;
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
   /**
@@ -478,6 +490,67 @@ export function coverageFromTranscripts(
   const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
     chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
 
+  // Parsed once per record: the gap scan also feeds the supersession check
+  // below, and the parse is not free on a long return.
+  const gapsMemo = new Map<AgentRecord, string[]>();
+  const gapsOf = (rec: AgentRecord): string[] => {
+    let g = gapsMemo.get(rec);
+    if (g === undefined) {
+      g = budgetGapDisclosures(rec.finalText);
+      gapsMemo.set(rec, g);
+    }
+    return g;
+  };
+  // A record's gaps are silenced only by a GAP-FREE superseding record — a
+  // genuine repair. Two relaunches that both hit the ceiling and both
+  // disclose would otherwise supersede each other and drop every gap.
+  const gapsSuperseded = (rec: AgentRecord, chunk: number | null): boolean => {
+    if (chunk !== null) {
+      const b = builtOf(`chunk-${chunk}`);
+      if (b === undefined) return false;
+      return records.some(
+        (r) =>
+          r !== rec &&
+          assignedChunk(r) === chunk &&
+          wasDeliveredVerbatim(r.launchPrompt, b) &&
+          r.diffToolCalls > 0 &&
+          gapsOf(r).length === 0,
+      );
+    }
+    // A whole-diff record: same shape as `keySatisfied`, plus the gap-free
+    // requirement on the record that would do the superseding.
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined) continue;
+      if (!wasDeliveredVerbatim(rec.launchPrompt, b)) continue;
+      const needle = JSON.stringify(briefPath(planPath, key));
+      if (
+        records.some(
+          (r) =>
+            r !== rec &&
+            wasDeliveredVerbatim(r.launchPrompt, b) &&
+            r.successfulCallArgs.some((a) => a.includes(needle)) &&
+            gapsOf(r).length === 0,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Budget-gap disclosures (`Budget gap: <the check>` lines, the format the
+  // tool-budget brief mandates and `budgetGapDisclosures` parses). Collected
+  // inside the walk below so every guard the `Uncoverable:` claim earns
+  // applies here for the same reason: the brief hands each agent the literal
+  // template, so a zero-tool-call or blind agent that copied it back must
+  // not be credited with a disclosed gap — that is the whiff wearing a
+  // costume. Detection is deterministic here; the RULING (which gaps cap
+  // Approve) stays with the orchestrator, like whiffs. Not part of `ok`: a
+  // disclosed gap is the budget working, and failing the gate on it would
+  // teach agents not to disclose.
+  const budgetGaps: Array<{ agent: string; gaps: string[] }> = [];
+
   for (const rec of records) {
     const chunk = assignedChunk(rec);
     const name = label(rec, chunk);
@@ -579,10 +652,34 @@ export function coverageFromTranscripts(
       continue;
     }
 
-    // What it was told to read, plus what it demonstrably read. The second term is
-    // what lets an agent handed the bare diff path with no territory — a
-    // reverse-audit pass, a verifier — be credited for exactly the lines it opened
-    // and for no others.
+    // This record has passed every credit guard: it was given the diff, it
+    // worked, and if it was pointed at lines it opened the file they live
+    // in. Only now do its budget-gap lines count as disclosures.
+    //
+    // Disclosing costs NO coverage credit, on purpose — an earlier draft
+    // narrowed a disclosing agent's credit to its ranged reads, and that
+    // punished exactly the honest agent: `rangeOf` records only reads that
+    // carry a positive `limit`, so a compliant offset-paged or whole-file
+    // read left a discloser with zero credit and a hard gate failure,
+    // while an agent that stopped WITHOUT disclosing kept its full `told`
+    // credit. An asymmetry that only ever bites the discloser teaches
+    // agents not to disclose. The `told` presumption is the same for every
+    // agent; what a disclosed gap changes is the RULING (Step 3D), not the
+    // arithmetic.
+    //
+    // Suppression is gap-aware: a superseding record silences this one's
+    // gaps only if it has none itself — a relaunch that hits the same
+    // ceiling and discloses again must not let two compliant records
+    // mutually supersede every disclosure into silence.
+    const gaps = gapsOf(rec);
+    if (gaps.length > 0 && !gapsSuperseded(rec, chunk)) {
+      budgetGaps.push({ agent: name, gaps });
+    }
+
+    // What it was told to read, plus what it demonstrably read. The second
+    // term is what lets an agent handed the bare diff path with no
+    // territory — a reverse-audit pass, a verifier — be credited for
+    // exactly the lines it opened and for no others.
     const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
 
@@ -876,6 +973,7 @@ export function coverageFromTranscripts(
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
+    budgetGaps,
     coveredChunks: [...covered].sort((a, b) => a - b),
     plannedChunks: plan.chunks.map((c) => ({
       id: c.id,
@@ -1330,7 +1428,7 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
-  // A budget-stop marker means the round builder itself refused the reverse
+  // A TIME-budget stop marker means the round builder refused the reverse
   // audit on the run's time budget. Exactly ONE gap shape is then by design:
   // `not-built` — the refusal writes no record, so an audit with no records
   // is the audit the gate stopped, and the gap's FIX (rebuild the round)
@@ -1343,7 +1441,15 @@ export function verificationGaps(
   // hand-written round-1 launch is exactly as undelivered when round 3 later
   // hits the budget, and suppressing it would let "stopped before round 3"
   // imply the rounds that did run were faithful.
-  const budgetStopped = readBudgetStop(planPath) !== null;
+  //
+  // Only the time-budget cause earns this exemption. A ROUND-CAP stop does
+  // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
+  // (rebuild `--round 1`) is admitted, and a local run has no deadline to
+  // refuse it at all — the monotone-refusal premise fails twice. So a
+  // round-cap marker leaves the not-built gap and its rebuild remediation
+  // owed, exactly as if no marker were present.
+  const stop = readBudgetStop(planPath);
+  const budgetStopped = stop !== null && stop.cause !== 'round-cap';
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
   const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';

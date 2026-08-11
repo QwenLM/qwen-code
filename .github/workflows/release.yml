@@ -398,7 +398,7 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/external-context/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else

@@ -39,20 +39,22 @@ export interface MidTurnInjectedBatch {
  * the next turn. An entry that already fell back to the ordinary path
  * (`midTurnState === undefined`) is never matched.
  *
- * Skips a batch whose `originatorClientId` is some OTHER client: the daemon
- * broadcasts the injection frame to every client on the session, but only the
- * client that queued the message should drop it — a peer with a coincidentally
- * equal text must keep its own entry. Batches with no originator (anonymous
- * push) are reconciled regardless.
+ * Text fallback skips batches from another originator so coincidentally equal
+ * messages are not removed. In strict-id mode, an exact id still wins because
+ * a refreshed client can adopt a session-wide daemon-owned row.
  *
  * Returns a NEW array when something was removed, or `null` when nothing matched
- * (so the caller can skip a redundant state update).
+ * (so the caller can skip a redundant state update). `strictMessageIds`
+ * disables the submitting-row text fallback for daemons that accept the
+ * client-generated ids used by reconciliation; older daemons still need the
+ * fallback because they mint their id after the request arrives.
  */
 export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
   prompts: readonly T[],
   batches: readonly MidTurnInjectedBatch[],
   sessionId: string,
   clientId?: string,
+  strictMessageIds = false,
 ): T[] | null {
   const remaining = [...prompts];
   const isTextOnly = (prompt: T) =>
@@ -60,12 +62,10 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
   let changed = false;
   for (const batch of batches) {
     if (batch.sessionId !== sessionId) continue;
-    if (
-      batch.originatorClientId !== undefined &&
-      batch.originatorClientId !== clientId
-    ) {
-      continue;
-    }
+    const originatorMatches =
+      batch.originatorClientId === undefined ||
+      batch.originatorClientId === clientId;
+    if (!originatorMatches && !strictMessageIds) continue;
     for (const [messageIndex, message] of batch.messages.entries()) {
       const messageId = batch.messageIds?.[messageIndex];
       // A strict id match wins regardless of position; the text fallback below
@@ -80,13 +80,14 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
                 isTextOnly(prompt),
             )
           : -1;
-      if (index < 0) {
+      if (index < 0 && originatorMatches) {
         index = remaining.findIndex(
           (prompt) =>
             prompt.midTurnState !== undefined &&
             (messageId === undefined ||
               (prompt.midTurnState === 'submitting' &&
-                prompt.midTurnMessageId === undefined)) &&
+                (!strictMessageIds ||
+                  prompt.midTurnMessageId === undefined))) &&
             prompt.text === message &&
             isTextOnly(prompt),
         );
