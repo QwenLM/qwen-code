@@ -143,11 +143,27 @@ interface OssMediaRef {
   displayName: string;
 }
 
+/** Omni media can sit at the top level of a content's parts OR nested
+ * inside a tool result's `functionResponse.parts` (the tool-result
+ * funnel converts media in place there — see processToolResultOmniMedia).
+ * Every helper below must see both levels, or nested deliveries would be
+ * invisible to the reactive fallback and the retry loop would stall on
+ * an unchanged request. */
+function* iterateParts(content: Content): Generator<Part> {
+  for (const part of content.parts ?? []) {
+    yield part;
+    const nested = part.functionResponse?.parts;
+    if (Array.isArray(nested)) {
+      yield* nested as Part[];
+    }
+  }
+}
+
 /** Collect the distinct oss:// media deliveries present in `contents`. */
 export function collectOssMediaRefs(contents: Content[]): OssMediaRef[] {
   const byUri = new Map<string, OssMediaRef>();
   for (const content of contents) {
-    for (const part of content.parts ?? []) {
+    for (const part of iterateParts(content)) {
       const fileData = part.fileData;
       if (!fileData?.fileUri?.startsWith(OSS_URL_PREFIX)) continue;
       if (byUri.has(fileData.fileUri)) continue;
@@ -163,11 +179,12 @@ export function collectOssMediaRefs(contents: Content[]): OssMediaRef[] {
 
 /** Whether a retry-with-degradation is even applicable to this request. */
 export function contentsHaveOssMedia(contents: Content[]): boolean {
-  return contents.some((content) =>
-    content.parts?.some((part) =>
-      part.fileData?.fileUri?.startsWith(OSS_URL_PREFIX),
-    ),
-  );
+  return contents.some((content) => {
+    for (const part of iterateParts(content)) {
+      if (part.fileData?.fileUri?.startsWith(OSS_URL_PREFIX)) return true;
+    }
+    return false;
+  });
 }
 
 /** Locate the content-addressed object file for a hash (extension is not
@@ -238,29 +255,54 @@ export function applyOssMediaReplacements(
   replacements: Map<string, OssMediaReplacement>,
 ): number {
   let replacedParts = 0;
-  for (const content of contents) {
-    if (!content.parts?.length) continue;
+  /** Swap matching fileData parts in one part list, returning the rebuilt
+   * list or null when nothing matched. */
+  const swapInParts = (parts: Part[]): Part[] | null => {
     const nextParts: Part[] = [];
     let changed = false;
-    for (const part of content.parts) {
+    for (const part of parts) {
       const uri = part.fileData?.fileUri;
       const replacement = uri ? replacements.get(uri) : undefined;
-      if (!replacement || !part.fileData) {
-        nextParts.push(part);
+      if (replacement && part.fileData) {
+        nextParts.push({ text: replacement.disclosureText });
+        nextParts.push({
+          fileData: {
+            ...part.fileData,
+            fileUri: replacement.fileUri,
+            mimeType: replacement.mimeType,
+          },
+        });
+        replacedParts++;
+        changed = true;
         continue;
       }
-      nextParts.push({ text: replacement.disclosureText });
-      nextParts.push({
-        fileData: {
-          ...part.fileData,
-          fileUri: replacement.fileUri,
-          mimeType: replacement.mimeType,
-        },
-      });
-      replacedParts++;
-      changed = true;
+      // Media nested in a tool result's functionResponse.parts (see
+      // iterateParts) is swapped inside the SAME nested array — the
+      // disclosure must land immediately before its media part (D8),
+      // which hoisting to the top level would break.
+      const nested = part.functionResponse?.parts;
+      if (Array.isArray(nested)) {
+        const swappedNested = swapInParts(nested as Part[]);
+        if (swappedNested) {
+          nextParts.push({
+            ...part,
+            functionResponse: {
+              ...part.functionResponse,
+              parts: swappedNested,
+            },
+          } as Part);
+          changed = true;
+          continue;
+        }
+      }
+      nextParts.push(part);
     }
-    if (changed) content.parts = nextParts;
+    return changed ? nextParts : null;
+  };
+  for (const content of contents) {
+    if (!content.parts?.length) continue;
+    const swapped = swapInParts(content.parts);
+    if (swapped) content.parts = swapped;
   }
   return replacedParts;
 }

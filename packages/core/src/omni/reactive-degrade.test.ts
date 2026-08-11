@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
 import type { NormalizedFixedPolicy } from './policy/types.js';
 import {
@@ -76,6 +76,29 @@ function ossContents(): Content[] {
   ];
 }
 
+/** A tool result carrying media (and a text sibling) on
+ * `functionResponse.parts` — qwen-code's extension to the \@google/genai
+ * schema (see `coreToolScheduler.createFunctionResponsePart`), which is
+ * why the nested array is typed as `Part[]` and cast on assembly. */
+function nestedToolResultPart(): Part {
+  const nestedParts: Part[] = [
+    { text: 'tool output' },
+    {
+      fileData: {
+        fileUri: 'oss://bucket/nested',
+        mimeType: 'video/mp4',
+        displayName: 'nested.mp4',
+      },
+    },
+  ];
+  const functionResponse = {
+    name: 'some_tool',
+    response: {},
+    parts: nestedParts,
+  };
+  return { functionResponse } as Part;
+}
+
 describe('collectOssMediaRefs', () => {
   it('collects distinct oss:// media parts with display names', () => {
     const refs = collectOssMediaRefs(ossContents());
@@ -121,6 +144,20 @@ describe('collectOssMediaRefs', () => {
     expect(
       contentsHaveOssMedia([{ role: 'user', parts: [{ text: 'hi' }] }]),
     ).toBe(false);
+  });
+
+  it('sees media nested in functionResponse.parts (tool-result deliveries)', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: [nestedToolResultPart()] },
+    ];
+    expect(contentsHaveOssMedia(contents)).toBe(true);
+    expect(collectOssMediaRefs(contents)).toEqual([
+      {
+        fileUri: 'oss://bucket/nested',
+        mimeType: 'video/mp4',
+        displayName: 'nested.mp4',
+      },
+    ]);
   });
 });
 
@@ -218,6 +255,35 @@ describe('applyOssMediaReplacements', () => {
     const before = JSON.parse(JSON.stringify(contents));
     expect(applyOssMediaReplacements(contents, new Map())).toBe(0);
     expect(contents).toEqual(before);
+  });
+
+  it('swaps nested tool-result media inside the SAME functionResponse.parts array (D8)', () => {
+    const contents: Content[] = [
+      { role: 'user', parts: [nestedToolResultPart()] },
+    ];
+    const replaced = applyOssMediaReplacements(
+      contents,
+      new Map([
+        [
+          'oss://bucket/nested',
+          {
+            fileUri: 'oss://bucket/nested-degraded',
+            mimeType: 'video/mp4',
+            disclosureText: 'd',
+          },
+        ],
+      ]),
+    );
+    expect(replaced).toBe(1);
+    // Top level still holds exactly the functionResponse wrapper — the
+    // swap must not hoist nested media out of the tool result.
+    expect(contents[0].parts).toHaveLength(1);
+    const nested = contents[0].parts![0].functionResponse?.parts as Part[];
+    expect(nested).toHaveLength(3);
+    expect(nested[0]).toEqual({ text: 'tool output' });
+    expect(nested[1]).toEqual({ text: 'd' }); // disclosure directly before the media
+    expect(nested[2].fileData?.fileUri).toBe('oss://bucket/nested-degraded');
+    expect(nested[2].fileData?.displayName).toBe('nested.mp4'); // preserved
   });
 });
 
