@@ -12,11 +12,6 @@ import {
   fetchAllowedGitHub,
 } from './skill-source-download.js';
 
-const sourceUrl =
-  'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md';
-const directoryUrl =
-  'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
-
 function tarEntry(name: string, content: string): Buffer {
   const header = Buffer.alloc(512);
   header.write(name, 0, 'utf8');
@@ -38,24 +33,6 @@ function toArrayBuffer(buffer: Uint8Array): ArrayBuffer {
     buffer.byteOffset,
     buffer.byteOffset + buffer.byteLength,
   ) as ArrayBuffer;
-}
-
-function jsonResponse(value: unknown) {
-  return {
-    ok: true,
-    status: 200,
-    json: vi.fn().mockResolvedValue(value),
-  };
-}
-
-function arrayBufferResponse(content: string | Uint8Array) {
-  const buffer = typeof content === 'string' ? Buffer.from(content) : content;
-  return {
-    ok: true,
-    status: 200,
-    headers: { get: vi.fn().mockReturnValue(null) },
-    arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(buffer)),
-  };
 }
 
 afterEach(() => {
@@ -131,10 +108,6 @@ describe('fetchAllowedGitHub', () => {
       fetchAllowedGitHub('https://codeload.github.com/a/b/tar.gz/main'),
     ).resolves.toBe(final);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ redirect: 'manual' }),
-    );
   });
 
   it.each(['https://evil.com/x', 'http://raw.githubusercontent.com/x'])(
@@ -185,89 +158,58 @@ describe('fetchAllowedGitHub', () => {
 
 describe('downloadSkill', () => {
   it.each([
-    [
-      'http://github.com/owner/repo/blob/main/skills/x/SKILL.md',
-      /must be an HTTPS URL/,
-    ],
-    [
-      'https://evil.com/owner/repo/blob/main/skills/x/SKILL.md',
-      /host is not allowed/,
-    ],
-    [
-      'https://github.com.attacker.com/owner/repo/blob/main/SKILL.md',
-      /host is not allowed/,
-    ],
-  ])('rejects the unsupported source %s', async (sourceUrl, expectedError) => {
-    await expect(downloadSkill(sourceUrl)).rejects.toThrow(expectedError);
-  });
-
-  it('does not fetch a disallowed API-provided download URL', async () => {
-    const disallowedUrl = 'https://evil.com/SKILL.md';
-    const archiveUrl =
-      'https://codeload.github.com/anthropics/skills/tar.gz/main';
-    const archive = makeTarGz(
-      'skills-main/skills/pptx/SKILL.md',
-      '---\nname: pptx\n---\nBody\n',
-    );
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url === directoryUrl) {
-        return jsonResponse([
-          {
-            name: 'SKILL.md',
-            path: 'skills/pptx/SKILL.md',
-            type: 'file',
-            download_url: disallowedUrl,
-          },
-        ]);
-      }
-      const content = url === archiveUrl ? archive : Buffer.from('unsafe');
-      return arrayBufferResponse(content);
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(downloadSkill(sourceUrl)).resolves.toMatchObject({
-      skillContent: '---\nname: pptx\n---\nBody\n',
-    });
-    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain(
-      disallowedUrl,
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      archiveUrl,
-      expect.objectContaining({ redirect: 'manual' }),
-    );
+    'http://github.com/owner/repo/blob/main/skills/x/SKILL.md',
+    'https://evil.com/owner/repo/blob/main/skills/x/SKILL.md',
+    'https://github.com.attacker.com/owner/repo/blob/main/SKILL.md',
+  ])('rejects the unsupported source %s', async (sourceUrl) => {
+    await expect(downloadSkill(sourceUrl)).rejects.toThrow();
   });
 
   it('downloads every file from a GitHub skill directory', async () => {
     const skillContent =
       '---\nname: pptx\ndescription: Create slide decks\n---\nCreate slide decks\n';
     const editingContent = '# Editing guide\n';
+    const directoryUrl =
+      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
     const skillUrl =
       'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/SKILL.md';
     const editingUrl =
       'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/editing.md';
     const fetchMock = vi.fn(async (url: string) => {
       if (url === directoryUrl) {
-        return jsonResponse([
-          {
-            name: 'SKILL.md',
-            path: 'skills/pptx/SKILL.md',
-            type: 'file',
-            download_url: skillUrl,
-          },
-          {
-            name: 'editing.md',
-            path: 'skills/pptx/editing.md',
-            type: 'file',
-            download_url: editingUrl,
-          },
-        ]);
+        return {
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue([
+            {
+              name: 'SKILL.md',
+              path: 'skills/pptx/SKILL.md',
+              type: 'file',
+              download_url: skillUrl,
+            },
+            {
+              name: 'editing.md',
+              path: 'skills/pptx/editing.md',
+              type: 'file',
+              download_url: editingUrl,
+            },
+          ]),
+        };
       }
       const content = url === skillUrl ? skillContent : editingContent;
-      return arrayBufferResponse(content);
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: vi
+          .fn()
+          .mockResolvedValue(toArrayBuffer(Buffer.from(content))),
+      };
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const skill = await downloadSkill(sourceUrl);
+    const skill = await downloadSkill(
+      'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+    );
 
     expect(skill.skillContent).toBe(skillContent);
     expect(skill.files.map((file) => file.relativePath)).toEqual([

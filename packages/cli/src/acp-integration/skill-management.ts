@@ -8,7 +8,6 @@ import { Storage, type Config } from '@qwen-code/qwen-code-core';
 import { RequestError } from '@agentclientprotocol/sdk';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { parse as parseYaml } from 'yaml';
 import { downloadSkill } from './skill-source-download.js';
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -195,52 +194,16 @@ function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   // corrupt hooks-bearing skills and strip user comments. Working on the raw
   // text leaves every other byte untouched.
   const lines = frontmatter.split('\n');
-  const disabledFields: Array<{ start: number; end: number }> = [];
-  const disabledFieldPattern =
-    /^(disable-model-invocation|"(?:\\.|[^"\\])*"|'(?:''|[^'])*')\s*:/;
-  for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(disabledFieldPattern);
-    if (!match) continue;
-    let parsedKey: unknown;
-    try {
-      parsedKey = parseYaml(match[1], { schema: 'core' });
-    } catch {
-      continue;
-    }
-    if (parsedKey !== 'disable-model-invocation') continue;
-
-    let end = index;
-    let cursor = index + 1;
-    while (cursor < lines.length) {
-      const line = lines[cursor];
-      if (line.trim() === '') {
-        cursor += 1;
-        continue;
-      }
-      if (!/^[ \t]/.test(line)) break;
-      end = cursor;
-      cursor += 1;
-    }
-    disabledFields.push({ start: index, end });
-    index = end;
-  }
+  const disabledLineIndex = lines.findIndex((line) =>
+    /^disable-model-invocation\s*:/.test(line),
+  );
 
   if (enabled) {
-    for (let index = disabledFields.length - 1; index >= 0; index -= 1) {
-      const field = disabledFields[index];
-      lines.splice(field.start, field.end - field.start + 1);
+    if (disabledLineIndex !== -1) {
+      lines.splice(disabledLineIndex, 1);
     }
-  } else if (disabledFields.length > 0) {
-    for (let index = disabledFields.length - 1; index > 0; index -= 1) {
-      const field = disabledFields[index];
-      lines.splice(field.start, field.end - field.start + 1);
-    }
-    const firstField = disabledFields[0];
-    lines.splice(
-      firstField.start,
-      firstField.end - firstField.start + 1,
-      'disable-model-invocation: true',
-    );
+  } else if (disabledLineIndex !== -1) {
+    lines[disabledLineIndex] = 'disable-model-invocation: true';
   } else {
     let insertIndex = lines.length;
     while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
@@ -392,20 +355,17 @@ async function deleteGlobalSkill(
   // Guard the recursive delete: readManagedSkillFile's generic fallback can
   // resolve skillDir from listSkills() to an arbitrary path. Only ever remove
   // the directory that directly contains the SKILL.md we just validated, and
-  // never a filesystem root, the global Qwen dir itself, or its shared skills
-  // root, so a malformed skill entry can't trigger a destructive rm of a
-  // shared/parent directory.
+  // never a filesystem root or the global Qwen dir itself, so a malformed
+  // skill entry can't trigger a destructive rm of a shared/parent directory.
   const resolvedSkillDir = path.resolve(skillDir);
   const resolvedSkillFile = path.resolve(skillFile);
   const globalDir = path.resolve(Storage.getGlobalQwenDir());
-  const globalSkillsDir = path.join(globalDir, SKILLS_DIR);
   const isDedicatedSkillDir =
     resolvedSkillFile === path.join(resolvedSkillDir, 'SKILL.md');
   if (
     !isDedicatedSkillDir ||
     resolvedSkillDir === path.parse(resolvedSkillDir).root ||
-    resolvedSkillDir === globalDir ||
-    resolvedSkillDir === globalSkillsDir
+    resolvedSkillDir === globalDir
   ) {
     throw RequestError.invalidParams(
       undefined,
