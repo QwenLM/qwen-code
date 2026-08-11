@@ -18,6 +18,15 @@ import {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+const catalogController = vi.hoisted(() => ({
+  invalidateWorkspace: vi.fn(),
+  sessionCreated: vi.fn(),
+  promptAdmitted: vi.fn(),
+  promptAdmissionUncertain: vi.fn(),
+  renamed: vi.fn(),
+  turnCompleted: vi.fn(),
+}));
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let streamingStateValue: string;
@@ -95,8 +104,16 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   usePromptStatus: () => 'idle',
   useWorkspaceActions: () => ({}),
-  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
+  useWorkspace: () => ({
+    capabilities: connectionState.capabilities,
+    client: {},
+    workspaceCwd: '/primary',
+  }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
+}));
+
+vi.mock('../session-catalog/session-catalog-hooks', () => ({
+  useSessionCatalogController: () => catalogController,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -315,6 +332,10 @@ beforeEach(() => {
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
   transcriptDispatch.mockClear();
+  catalogController.invalidateWorkspace.mockClear();
+  catalogController.promptAdmitted.mockClear();
+  catalogController.promptAdmissionUncertain.mockClear();
+  catalogController.turnCompleted.mockClear();
 });
 
 afterEach(() => {
@@ -864,8 +885,47 @@ describe('ChatPane', () => {
     expect(returned).toBe(false);
     expect(commit).not.toHaveBeenCalled();
     act(() => sendPromptAdmit!());
+    expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
     expect(commit).toHaveBeenCalledTimes(1);
     expect(clearFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attribute prompt admission across a workspace mismatch', () => {
+    connectionState.workspaceCwd = '/other';
+    render({ workspaceCwd: '/w' });
+
+    act(() => {
+      latestOnSubmit!('hi');
+      sendPromptAdmit!();
+    });
+
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+  });
+
+  it('does not update a catalog without an owning workspace', () => {
+    connectionState.workspaceCwd = undefined;
+    render();
+
+    act(() => {
+      latestOnSubmit!('hi');
+      sendPromptAdmit!();
+    });
+
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+
+    streamingStateValue = 'responding';
+    rerender();
+    act(() => {
+      latestOnSubmit!('queued next');
+    });
+    expect(catalogController.invalidateWorkspace).not.toHaveBeenCalled();
+
+    streamingStateValue = 'idle';
+    rerender();
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
   });
 
   it('forwards images with an idle prompt', () => {
@@ -944,6 +1004,7 @@ describe('ChatPane', () => {
       undefined,
       expect.any(Function),
     );
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -963,6 +1024,67 @@ describe('ChatPane', () => {
     act(() => onAdmitted?.());
     expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
     expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this queued task');
+  });
+
+  it('resynchronizes the owning catalog when a pane turn completes', () => {
+    streamingStateValue = 'responding';
+    render();
+
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+  });
+
+  it('does not duplicate turn completion owned by the outer session', () => {
+    streamingStateValue = 'responding';
+    render({ reportCatalogTurnCompletion: false });
+
+    streamingStateValue = 'idle';
+    rerender({ reportCatalogTurnCompletion: false });
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
+  it('does not attribute a completed pane turn to a different workspace', () => {
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.workspaceCwd = '/other';
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
+  it('captures a pane identity that becomes available mid-turn', () => {
+    connectionState.sessionId = undefined;
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.sessionId = 'sess-late';
+    rerender();
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/w');
+  });
+
+  it('captures a pane workspace that becomes available mid-turn', () => {
+    connectionState.workspaceCwd = undefined;
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.workspaceCwd = '/secondary';
+    rerender();
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledTimes(1);
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith('/secondary');
+    expect(catalogController.turnCompleted).not.toHaveBeenCalledWith(
+      '/primary',
+    );
   });
 
   it('forwards composer annotations with a queued prompt', () => {
@@ -1084,6 +1206,10 @@ describe('ChatPane', () => {
     const notice = testid('pane-prompt-admission-unknown');
     expect(notice).not.toBeNull();
     expect(latestChatEditorProps.disabled).toBe(true);
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
     act(() => latestOnSubmit!('do not retry'));
     expect(sendPrompt).toHaveBeenCalledTimes(1);
 
