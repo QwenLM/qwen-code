@@ -153,7 +153,7 @@ export interface OmniPolicyToolModelAccessSettings {
 export interface OmniPolicyToolSettings {
   /** Tool-level settings validated against the descriptor's settingsSchema. */
   settings?: Record<string, unknown>;
-  /** Per-tool runtime limits (timeoutMs, maxConcurrency). */
+  /** Per-tool runtime limits (timeoutMs). */
   runtime?: Record<string, unknown>;
   /** Model-callability gate and argument projection. */
   modelAccess?: OmniPolicyToolModelAccessSettings;

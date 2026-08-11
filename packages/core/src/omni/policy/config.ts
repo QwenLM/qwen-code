@@ -155,6 +155,19 @@ function fail(message: string): never {
   throw new OmniPolicyConfigError(message);
 }
 
+/** §13 #1: unknown keys are configuration errors, never silently ignored. */
+function rejectUnknownKeys(
+  record: Record<string, unknown>,
+  where: string,
+  known: readonly string[],
+): void {
+  for (const key of Object.keys(record)) {
+    if (!known.includes(key)) {
+      fail(`${where}: unknown key "${key}"`);
+    }
+  }
+}
+
 function requirePositiveInteger(
   value: unknown,
   where: string,
@@ -584,6 +597,11 @@ function validatePolicyTools(
     }
     const descriptor = tool.mediaPolicyDescriptor;
 
+    // §13 #1: unknown keys are errors — a typo like "settigns" or
+    // "modelaccess" would otherwise read as absent downstream and the
+    // intended configuration would silently never take effect.
+    rejectUnknownKeys(entry, where, ['settings', 'runtime', 'modelAccess']);
+
     // §13 #7: tool-level settings validate against the settingsSchema.
     if (entry['settings'] !== undefined) {
       if (!isPlainRecord(entry['settings'])) {
@@ -604,6 +622,7 @@ function validatePolicyTools(
       if (!isPlainRecord(entry['runtime'])) {
         fail(`${where}.runtime: must be an object`);
       }
+      rejectUnknownKeys(entry['runtime'], `${where}.runtime`, ['timeoutMs']);
       const timeoutMs = entry['runtime']['timeoutMs'];
       if (timeoutMs !== undefined) {
         requirePositiveInteger(timeoutMs, `${where}.runtime.timeoutMs`);
@@ -626,6 +645,14 @@ function validatePolicyTools(
     if (!isPlainRecord(modelAccess)) {
       fail(`${where}.modelAccess: must be an object`);
     }
+    rejectUnknownKeys(modelAccess, `${where}.modelAccess`, [
+      'enabled',
+      'description',
+      'defaultArguments',
+      'lockedArguments',
+      'parameterSchema',
+      'output',
+    ]);
     const defaults = modelAccess['defaultArguments'];
     const locked = modelAccess['lockedArguments'];
     if (defaults !== undefined && !isPlainRecord(defaults)) {

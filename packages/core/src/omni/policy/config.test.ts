@@ -992,6 +992,38 @@ describe('normalizeOmniProcessingConfig', () => {
       );
     });
 
+    it('rejects unknown keys at every level of an entry (§13 #1)', () => {
+      // Typos like "settigns" would otherwise read as absent downstream
+      // and the intended configuration would silently never take effect.
+      expect(() =>
+        normalize({
+          policyTools: { omni_downsample_image: { settigns: {} } as never },
+        }),
+      ).toThrow(
+        'omni.processing.policyTools.omni_downsample_image: unknown key "settigns"',
+      );
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: { runtime: { timeout: 30000 } },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.policyTools.omni_downsample_image.runtime: ' +
+          'unknown key "timeout"',
+      );
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: { modelAccess: { lockedArgs: {} } as never },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.policyTools.omni_downsample_image.modelAccess: ' +
+          'unknown key "lockedArgs"',
+      );
+    });
+
     it('validates settings against the settingsSchema (§13 #7)', () => {
       expect(() =>
         normalize({
