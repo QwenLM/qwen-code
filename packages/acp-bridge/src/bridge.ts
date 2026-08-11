@@ -1219,17 +1219,25 @@ export function extractErrorCode(err: unknown): string | undefined {
 
 /**
  * Event types that may be published after a turn terminal without adding
- * turn content (prompt-queue bookkeeping and config changes). The bounded
- * refresh-append guard skips these when deciding whether the in-memory
- * `turn_error` is still the newest meaningful terminal; any other event
- * type blocks the append.
+ * turn content (prompt-queue bookkeeping, config changes, and other
+ * idle-reachable session bookkeeping). The bounded refresh-append guard
+ * skips these when deciding whether the in-memory `turn_error` is still
+ * the newest meaningful terminal; any other event type blocks the append.
+ * `pending_prompt_started` is deliberately absent: it is published before
+ * admission clears `turnErrorEvent`, so blocking the append in that window
+ * keeps a stale error from trailing a turn that is already starting.
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
   'pending_prompt_completed',
   'prompt_cancelled',
   'model_switched',
+  'model_switch_failed',
   'approval_mode_changed',
+  'language_changed',
+  'session_metadata_updated',
+  'session_cwd_changed',
+  'artifact_changed',
 ]);
 
 export function classifyTurnErrorKind(

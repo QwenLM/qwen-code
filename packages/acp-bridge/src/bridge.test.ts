@@ -4280,6 +4280,167 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it.each([
+    'model_switch_failed',
+    'language_changed',
+    'session_metadata_updated',
+    'session_cwd_changed',
+    'artifact_changed',
+  ] as const)(
+    'keeps the turn error on refresh when %s bookkeeping lands after it',
+    async (bookkeepingType) => {
+      // Idle-reachable bookkeeping (a rejected model switch, language
+      // change, rename, cwd change, client artifact) carries no turn
+      // content and must not defeat the refresh-append of the terminal.
+      const promptImpl = () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      };
+      const extMethodImpl = (
+        method: string,
+        params: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted turn content' },
+                  _meta: {
+                    'qwen.session.recordId':
+                      'record-loop-idle-bookkeeping-page',
+                  },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionLanguage) {
+          return { language: 'zh-CN', outputLanguage: null, refreshed: false };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          return { previousCwd: WS_A, newCwd: WS_B, warnings: [] };
+        }
+        return {};
+      };
+      let bridge: ReturnType<typeof makeBridge>;
+      if (bookkeepingType === 'model_switch_failed') {
+        const factory: ChannelFactory = async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const fakeAgent = new FakeAgent({ promptImpl, extMethodImpl });
+          const augmented = new Proxy(fakeAgent, {
+            get(target, prop) {
+              if (prop === 'unstable_setSessionModel') {
+                return async () => {
+                  throw new Error('agent denied');
+                };
+              }
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return (target as any)[prop];
+            },
+          });
+          new AgentSideConnection(() => augmented as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        };
+        bridge = makeBridge({ channelFactory: factory });
+      } else {
+        const handle = makeChannel({ promptImpl, extMethodImpl });
+        bridge = makeBridge({ channelFactory: async () => handle.channel });
+      }
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const collectUntilBookkeeping = (async () => {
+        for await (const event of iter) {
+          if (event.type === bookkeepingType) return;
+        }
+        throw new Error(`${bookkeepingType} was not published`);
+      })();
+
+      if (bookkeepingType === 'model_switch_failed') {
+        await expect(
+          bridge.setSessionModel(session.sessionId, {
+            sessionId: session.sessionId,
+            modelId: 'rejected-model',
+          }),
+        ).rejects.toThrow();
+      } else if (bookkeepingType === 'language_changed') {
+        await bridge.setSessionLanguage(session.sessionId, {
+          language: 'zh-CN',
+          syncOutputLanguage: false,
+        });
+      } else if (bookkeepingType === 'session_metadata_updated') {
+        await bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'Renamed after loop stop',
+        });
+      } else if (bookkeepingType === 'session_cwd_changed') {
+        await bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+      } else {
+        await bridge.addSessionArtifact(
+          session.sessionId,
+          { title: 'Client link', url: 'https://example.com/client' },
+          { clientId: session.clientId },
+        );
+      }
+      await collectUntilBookkeeping;
+
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay).toHaveLength(2);
+      expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        }),
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    },
+  );
+
   it('drops the stale turn error on refresh after newer automatic-turn content', async () => {
     const handle = makeChannel({
       promptImpl: () => {
