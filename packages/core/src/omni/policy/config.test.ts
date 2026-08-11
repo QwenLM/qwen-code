@@ -16,6 +16,7 @@ import type {
 } from './config.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
 import type { OmniModality } from '../recognition.js';
+import { STAGING_GRACE_MS } from '../recovery.js';
 
 const TUNABLE_SCHEMA = {
   type: 'object',
@@ -1069,6 +1070,36 @@ describe('normalizeOmniProcessingConfig', () => {
         'omni.processing.policyTools.omni_downsample_image.runtime.timeoutMs: ' +
           'must be a positive integer (got -5)',
       );
+    });
+
+    it('caps runtime.timeoutMs below the staging sweep grace window (cross-file invariant with recovery §5)', () => {
+      // A tool allowed to run for >= STAGING_GRACE_MS could have its live
+      // staging directory classified as crash leftovers and deleted
+      // mid-run by another process's startup sweep. Pin BOTH sides of the
+      // boundary so removing, inverting (`<=`), or relocating the cap
+      // fails a test instead of shipping green.
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: {
+              runtime: { timeoutMs: STAGING_GRACE_MS },
+            },
+          },
+        }),
+      ).toThrow(
+        'omni.processing.policyTools.omni_downsample_image.runtime.timeoutMs: ' +
+          `must be below the staging sweep grace window (${STAGING_GRACE_MS}ms) ` +
+          `so a live invocation's staging directory is never reclaimed mid-run`,
+      );
+      expect(() =>
+        normalize({
+          policyTools: {
+            omni_downsample_image: {
+              runtime: { timeoutMs: STAGING_GRACE_MS - 1 },
+            },
+          },
+        }),
+      ).not.toThrow();
     });
 
     it('rejects overlapping defaultArguments and lockedArguments (§13 #21)', () => {
