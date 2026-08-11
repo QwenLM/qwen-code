@@ -690,6 +690,7 @@ import {
 import {
   buildInstallPlan as buildInstallPlanSrc,
   computeProviderTemplateVersion as computeProviderTemplateVersionSrc,
+  PROVIDER_METADATA_NS,
   resolveBaseUrl as resolveBaseUrlSrc,
   resolveMetadataKey as resolveMetadataKeySrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
@@ -811,8 +812,6 @@ describe('providerMatchesCredentials with function envKey (custom provider)', ()
     expect(providerMatchesCredentialsSrc(config, url, geminiKey)).toBe(true);
   });
 });
-
-import { resolveMetadataKey as resolveMetadataKeySrc } from '../provider-config.js';
 
 describe('customHeaders in ProviderConfig', () => {
   it('merges customHeaders into generationConfig for fixed models', () => {
@@ -963,7 +962,10 @@ describe('stored provider version matches the launch-time check', () => {
 
       const stored =
         plan.providerState?.[`${PROVIDER_METADATA_NS}.${metadataKey}`];
-      const launchVersion = computeProviderTemplateVersionSrc(provider, baseUrl);
+      const launchVersion = computeProviderTemplateVersionSrc(
+        provider,
+        baseUrl,
+      );
 
       expect(stored?.['version']).toBe(launchVersion);
       // The plan still carries the custom ids — only the version ignores them.
