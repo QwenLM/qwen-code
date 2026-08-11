@@ -353,6 +353,8 @@ chain is known:
 - background notification task ids;
 - active parent-session and session-source positions;
 - goal-state and legacy goal-status candidates;
+- normalized Goal-evidence eligibility, lineage context, bounded preview,
+  proof kind, and catalog-byte contribution, but not evidence content;
 - file-history record positions;
 - artifact side-record metadata and physical order.
 
@@ -465,10 +467,17 @@ segments once:
    records also drive the recent-replay goal bootstrap described below. A v2
    state with a pending checkpoint is an additional restore consumer: today its
    asynchronous recovery calls `readActiveTranscriptChain()` and re-enters the
-   old full loader. Extract a bounded Goal-evidence accumulator shared with
-   `buildGoalEvidenceCheckpointWindow()`, feed it from this selected dispatcher,
-   and retain the resulting window in the projection. Deferred Goal activation
-   must consume that window instead of reading the transcript again.
+   old full loader. Extract a bounded Goal-evidence selector and accumulator
+   shared with `buildGoalEvidenceCheckpointWindow()`. After Goal recovery
+   identifies the pending permit and cursor, run the selector over active-chain
+   evidence hints to reproduce the existing newest-entry, catalog-byte, lineage,
+   and truncation decisions without retaining evidence content. Add only the
+   selected evidence UUIDs to the union, then feed their materialized records to
+   the shared accumulator and retain the resulting window in the projection.
+   This two-stage selection must preserve the existing production helper's
+   result; it must not select every active record, perform a second scan, or copy
+   Goal precedence. Deferred Goal activation consumes that window instead of
+   reading the transcript again.
 5. **File history.** Read every active `file_history_snapshot` record in
    chronological order and feed each batch through the existing whole-batch
    deserializer. This preserves today's behavior where one malformed item skips
@@ -935,7 +944,10 @@ only three selective-specific actions, each behind its own error boundary:
 best-effort apply process attribution, schedule
 `GoalRuntime.activateRestoredWork()`, and start the idempotent FileHistory
 missing-backup validation. Async completion is not awaited and cannot replace
-the already-built success response. Existing Session constructor callbacks,
+the already-built success response. Both async calls attach rejection handlers
+immediately; synchronous invocation errors and later promise rejections are
+logged independently so neither becomes an unhandled rejection or skips the
+other action. Existing Session constructor callbacks,
 background/worktree restore, reporter notification, cron, commands, publication
 timing, and rollback ownership otherwise remain unchanged.
 
@@ -1203,7 +1215,10 @@ behavior rather than inventing a new fallback.
   narrow finalizer.
 - Pending Goal checkpoints use only the projected bounded evidence window: the
   restore path neither invokes the old full loader nor starts verification or
-  continuation before successful restore finalization.
+  continuation before successful restore finalization. Active-chain evidence
+  hints first select the same bounded catalog UUIDs as the production helper;
+  only those records are materialized into the shared accumulator, with no
+  all-record selection or second scan.
 - Goal preparation and activation are each memoized. Activation may be requested
   before preparation settles, `getGoalRuntimeReady()` waits for both phases, and
   non-daemon `restore()` retains its existing awaited behavior. Activation before
@@ -1226,8 +1241,9 @@ behavior rather than inventing a new fallback.
   replay frames.
 - The selective finalizer runs once after rewriter installation and before cron
   and command startup. Attribution, Goal activation, and FileHistory validation
-  failures are independently contained and cannot convert the prebuilt success
-  into a restore failure. Existing Session callback timing is unchanged.
+  synchronous failures and asynchronous rejections are independently contained
+  and cannot convert the prebuilt success into a restore failure or become
+  unhandled rejections. Existing Session callback timing is unchanged.
 - ACP `errorKind: transcript_too_large` is request-scoped, REST maps it to
   `413 transcript_too_large`, and a registered sibling remains usable.
 - Cold projection and cold envelope-limit failures do not register new runtime

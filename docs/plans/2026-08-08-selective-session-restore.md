@@ -80,8 +80,13 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
   existing reducers, including malformed candidates that affect precedence;
   discard unrelated slash-command output.
 - Treat a pending Goal checkpoint as a restore consumer. Extract a bounded
-  evidence accumulator shared with the existing Goal evidence-window builder,
-  include its result in the projection, and prohibit restore-time fallback to
+  evidence selector and accumulator shared with the existing Goal
+  evidence-window builder. Retain bounded eligibility, lineage, preview,
+  proof-kind, and catalog-byte hints without content; after Goal recovery fixes
+  the permit and cursor, use those active-chain hints to select the
+  production-equivalent bounded evidence UUIDs, materialize only that union, and
+  include the accumulated window in the projection. Prohibit all-record
+  selection, a second scan, or restore-time fallback to
   `readActiveTranscriptChain()` or the old loader.
 - Dispatch aggregated records directly to consumer reducers instead of building
   a catch-all selected-record array. Stream artifact inputs into an incremental
@@ -253,9 +258,12 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
 - Add one narrow ACP-only selective-restore finalizer after
   `session.installRewriter()` and before `session.startCronScheduler()` and the
   available-command timer. It is called exactly once, is synchronous, and does
-  not throw, with independent error boundaries around best-effort attribution application, scheduling
-  `GoalRuntime.activateRestoredWork()`, and starting idempotent FileHistory
-  missing-backup validation. Do not await async completion or change
+  not throw, with independent error boundaries around best-effort attribution
+  application, scheduling `GoalRuntime.activateRestoredWork()`, and starting
+  idempotent FileHistory missing-backup validation. Attach rejection handlers
+  immediately to both async actions and independently contain synchronous
+  invocation failures, so one action cannot skip another or produce an
+  unhandled rejection. Do not await async completion or change
   existing background/worktree, callback, reporter, cron, command, publication,
   or rollback timing. Keep every fallible/awaited setup step before this
   finalizer; the existing cron start and command timer remain internally
@@ -344,7 +352,10 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
   disposal during legacy migration, and non-daemon compatibility. No restore-time
   old-loader call, pre-finalization verifier/continuation, failed-restore
   attribution mutation, FileHistory validation, or stale Session entry is
-  permitted.
+  permitted. Compare the hint-based evidence UUID selection and materialized
+  checkpoint window with the production helper across entry/byte truncation,
+  cursor and lineage errors, prior checkpoint claims, and mixed eligible or
+  ineligible records; assert that unselected payloads are never read.
 - Exercise missing file-history backups and the targeted finalizer: envelope or
   setup failure appends nothing; success hydrates once, then runs the finalizer
   once after rewriter installation and before cron/commands. Inject independent
@@ -454,9 +465,10 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
       records do not hide an earlier valid v2, but unsupported-only v2 history
       blocks legacy fallback.
 - [ ] Pending Goal checkpoint evidence is reduced during the single projection,
-      matches the production evidence-window helper, never calls the old loader,
-      and activates checkpoint/continuation work only from successful restore
-      finalization.
+      uses bounded active-chain hints to select only the UUIDs chosen by the
+      production evidence-window helper, never selects every active payload,
+      performs a second scan, or calls the old loader, and activates
+      checkpoint/continuation work only from successful restore finalization.
 - [ ] Active file-history batches preserve last-write-wins, first-insertion,
       100-snapshot cap, and whole-record malformed-skip semantics.
 - [ ] Transcript file-history records are reduced inside the single projection;
@@ -513,9 +525,10 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
       the existing post-initialization model/mode/config response semantics.
 - [ ] The selective finalizer runs once after rewriter installation and before
       cron/command startup. Attribution, Goal activation, and FileHistory
-      validation failures are independently contained and do not replace the
-      prebuilt response; no fallible/awaited setup follows the finalizer, and
-      existing Session callback timing is unchanged.
+      validation synchronous failures and asynchronous rejections are
+      independently contained, produce no unhandled rejection, and do not
+      replace the prebuilt response; no fallible/awaited setup follows the
+      finalizer, and existing Session callback timing is unchanged.
 - [ ] #8882 integration proves that, on the modern `client_identity` path,
       selective-restore 409, 413, timeout/504, cancellation, and staging failures
       preserve the committed session-id and workspace-cwd source tuple, while a
