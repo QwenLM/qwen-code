@@ -8,7 +8,6 @@ import { Box, Text, useIsScreenReaderEnabled } from 'ink';
 import { useCallback, useRef, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
-import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import { Footer } from './Footer.js';
 import { QueuedMessageDisplay } from './QueuedMessageDisplay.js';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
@@ -63,9 +62,6 @@ export const Composer = () => {
   // narrow signal.
   const [showSuggestions, setShowSuggestions] = useState(false);
   const clipboardUnavailableShownRef = useRef(false);
-  // Held here rather than in InputPrompt so the microphone-permission notice
-  // is shown once per run instead of again on every InputPrompt remount.
-  const voiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(null);
 
   // Broad signal — any input-area Tab consumer. Forwarded to AppContainer
   // via UIActionsContext so useAutoAcceptIndicator's `shouldBlockTab` can
@@ -146,7 +142,7 @@ export const Composer = () => {
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}
           clipboardUnavailableShownRef={clipboardUnavailableShownRef}
-          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+          voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
 

@@ -655,20 +655,8 @@ describe('InputPrompt', () => {
 
   describe('voice microphone permission', () => {
     const setupRecorder = (status: MicrophonePermission) => {
-      const addItem = vi.fn();
-      mockedUseUIState.mockReturnValue({
-        isFeedbackDialogOpen: false,
-        messageQueue: [],
-        pendingGeminiHistoryItems: [],
-        historyManager: { addItem },
-      } as unknown as ReturnType<typeof useUIState>);
       const microphoneStatus = vi.fn().mockResolvedValue(status);
-      vi.mocked(createVoiceRecorder).mockReturnValue({
-        start: vi.fn(),
-        stop: vi.fn(),
-        warmup: vi.fn(),
-        microphoneStatus,
-      } as unknown as ReturnType<typeof createVoiceRecorder>);
+      const { addItem } = setupRecorderWith(microphoneStatus);
       return { addItem, microphoneStatus };
     };
 
@@ -767,6 +755,37 @@ describe('InputPrompt', () => {
       await act(async () => {});
 
       expect(addItem).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('warns again when the permission status changes between recordings', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      // The user dismisses or denies the OS dialog: the next probe reports
+      // 'denied', which must re-warn — as an error — despite the earlier
+      // 'prompt' notice.
+      microphoneStatus.mockResolvedValue('denied');
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(2);
+      });
+      expect(addItem).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining('Microphone access is denied'),
+        }),
+        expect.any(Number),
+      );
       unmount();
     });
 

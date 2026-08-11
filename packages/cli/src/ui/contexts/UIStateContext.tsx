@@ -39,6 +39,7 @@ import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import type { StartupIdeConnectionStatus } from '../../utils/events.js';
 
@@ -171,6 +172,7 @@ export interface UIState {
   terminalWidth: number;
   terminalHeight: number;
   mainControlsRef: React.MutableRefObject<DOMElement | null>;
+  voiceMicWarnedStatusRef: React.MutableRefObject<MicrophonePermission | null>;
   currentIDE: IdeInfo | null;
   startupIdeConnectionStatus: StartupIdeConnectionStatus;
   updateInfo: UpdateObject | null;
