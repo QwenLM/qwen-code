@@ -16,9 +16,11 @@ import {
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
+  BridgeChannelQuarantinedError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -32,6 +34,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionRestoreTimeoutError,
   SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
@@ -51,10 +54,7 @@ import {
   TotalSessionLimitExceededError,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
-import {
-  WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
-} from '../workspace-service/types.js';
+import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import { DaemonDrainingError } from './session-archive.js';
 
@@ -90,6 +90,29 @@ function bridgeErrorExtraContext(
     extra[key] = value;
   }
   return extra;
+}
+
+function recordExpectedBridgeError(
+  err: Error,
+  ctx: BridgeErrorContext | undefined,
+  daemonLog: DaemonLogger | undefined,
+): void {
+  recordDaemonBridgeError(err);
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge request failed.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    'error.type': err.name,
+    'error.message': err.message.slice(0, 1024),
+  });
+  daemonLog?.warn(err.message, {
+    ...(ctx?.route ? { route: ctx.route } : {}),
+    ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+    errorType: err.name,
+  });
 }
 
 export function sendPermissionVoteError(
@@ -170,6 +193,39 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionRestoreTimeoutError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    // The state this 504 leaves behind is the abandoned-restore fence, which
+    // outlives one full budget. A 5s hint here just buys one wasted round trip
+    // before the 409 tells the client the real backoff.
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'session_restore_timeout',
+      errorKind: 'restore_timeout',
+      retryable: true,
+      sessionId: err.sessionId,
+      action: err.action,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
+  if (err instanceof BridgeChannelQuarantinedError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    // Quarantine lasts until the channel drains, which is strictly longer than
+    // the fence — and a fresh-id request never reaches the 409 that carries the
+    // correct hint, so this header is the only backoff signal it gets.
+    res.set('Retry-After', String(err.retryAfterSeconds));
+    res.status(503).json({
+      error: err.message,
+      code: 'acp_channel_unavailable',
+      errorKind: 'acp_channel_unavailable',
+      retryable: true,
+      reason: err.reason,
+      retryAfterSeconds: err.retryAfterSeconds,
+    });
+    return;
+  }
   if (err instanceof DaemonDrainingError) {
     res.status(503).json({
       error: err.message,
@@ -187,25 +243,11 @@ export function sendBridgeError(
     });
     return;
   }
-  if (err instanceof WorkspaceSkillNotFoundError) {
-    res.status(404).json({
-      error: err.message,
-      code: 'skill_not_found',
-      skillName: err.skillName,
-    });
-    return;
-  }
-  if (err instanceof WorkspaceSkillNotToggleableError) {
-    res.status(409).json({
-      error: err.message,
-      code:
-        err.reason === 'inactive_extension'
-          ? 'skill_inactive_extension'
-          : 'skill_not_toggleable',
-      skillName: err.skillName,
-      reason: err.reason,
-      ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
-    });
+  const skillError = mapWorkspaceSkillToggleError(err);
+  if (skillError) {
+    res
+      .status(skillError.code === 'skill_not_found' ? 404 : 409)
+      .json(skillError);
     return;
   }
   if (err instanceof InvalidSessionTranscriptCursorError) {
@@ -348,7 +390,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionNotFoundError) {
-    res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    res
+      .status(404)
+      .json({ error: err.message, code: err.code, sessionId: err.sessionId });
     return;
   }
   if (err instanceof SessionArchivedError) {
@@ -538,14 +582,17 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof RestoreInProgressError) {
-    // Match `SessionLimitExceededError`'s 5s hint (above) — the
-    // underlying restore can take up to `initTimeoutMs` (default
-    // 10s) on the agent side, so a 1s retry hint pushed clients
-    // into tight loops that kept hitting the same 409.
-    res.set('Retry-After', '5');
+    // An ordinary in-flight restore matches `SessionLimitExceededError`'s 5s
+    // hint (above). A fence left behind by a timed-out restore carries a much
+    // longer hint from the bridge, because the late ACP request has to settle
+    // before the id frees up — a 5s cadence there is a tight loop against a
+    // 409 the client cannot clear. `reason` lets clients tell the two apart.
+    res.set('Retry-After', String(err.retryAfterSeconds));
     res.status(409).json({
       error: err.message,
       code: 'restore_in_progress',
+      reason: err.reason,
+      retryable: true,
       sessionId: err.sessionId,
       activeAction: err.activeAction,
       requestedAction: err.requestedAction,
