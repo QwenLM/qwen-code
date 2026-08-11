@@ -194,16 +194,19 @@ function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   // corrupt hooks-bearing skills and strip user comments. Working on the raw
   // text leaves every other byte untouched.
   const lines = frontmatter.split('\n');
-  const disabledLineIndex = lines.findIndex((line) =>
-    /^disable-model-invocation\s*:/.test(line),
+  const disabledLineIndexes = lines.flatMap((line, index) =>
+    /^disable-model-invocation\s*:/.test(line) ? [index] : [],
   );
 
   if (enabled) {
-    if (disabledLineIndex !== -1) {
-      lines.splice(disabledLineIndex, 1);
+    for (let index = disabledLineIndexes.length - 1; index >= 0; index -= 1) {
+      lines.splice(disabledLineIndexes[index], 1);
     }
-  } else if (disabledLineIndex !== -1) {
-    lines[disabledLineIndex] = 'disable-model-invocation: true';
+  } else if (disabledLineIndexes.length > 0) {
+    lines[disabledLineIndexes[0]] = 'disable-model-invocation: true';
+    for (let index = disabledLineIndexes.length - 1; index > 0; index -= 1) {
+      lines.splice(disabledLineIndexes[index], 1);
+    }
   } else {
     let insertIndex = lines.length;
     while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
@@ -355,17 +358,20 @@ async function deleteGlobalSkill(
   // Guard the recursive delete: readManagedSkillFile's generic fallback can
   // resolve skillDir from listSkills() to an arbitrary path. Only ever remove
   // the directory that directly contains the SKILL.md we just validated, and
-  // never a filesystem root or the global Qwen dir itself, so a malformed
-  // skill entry can't trigger a destructive rm of a shared/parent directory.
+  // never a filesystem root, the global Qwen dir itself, or its shared skills
+  // root, so a malformed skill entry can't trigger a destructive rm of a
+  // shared/parent directory.
   const resolvedSkillDir = path.resolve(skillDir);
   const resolvedSkillFile = path.resolve(skillFile);
   const globalDir = path.resolve(Storage.getGlobalQwenDir());
+  const globalSkillsDir = path.join(globalDir, SKILLS_DIR);
   const isDedicatedSkillDir =
     resolvedSkillFile === path.join(resolvedSkillDir, 'SKILL.md');
   if (
     !isDedicatedSkillDir ||
     resolvedSkillDir === path.parse(resolvedSkillDir).root ||
-    resolvedSkillDir === globalDir
+    resolvedSkillDir === globalDir ||
+    resolvedSkillDir === globalSkillsDir
   ) {
     throw RequestError.invalidParams(
       undefined,

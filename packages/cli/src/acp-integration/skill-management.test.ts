@@ -5,6 +5,7 @@
  */
 
 import {
+  SkillManager,
   Storage,
   type Config,
   type SkillLevel,
@@ -26,11 +27,11 @@ import {
   setManagedSkillEnabled,
 } from './skill-management.js';
 
-type SkillManager = NonNullable<ReturnType<Config['getSkillManager']>>;
+type SkillManagerContract = NonNullable<ReturnType<Config['getSkillManager']>>;
 
 function configWith(skillManager: object): Config {
   return {
-    getSkillManager: () => skillManager as SkillManager,
+    getSkillManager: () => skillManager as SkillManagerContract,
   } as unknown as Config;
 }
 
@@ -263,6 +264,37 @@ describe('managed Skill mutations', () => {
     }
   });
 
+  it('refuses to delete the shared global Skills directory', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillsDir = path.join(tempHome, 'skills');
+    const skillFile = path.join(skillsDir, 'SKILL.md');
+    const unrelatedSkillFile = path.join(skillsDir, 'unrelated', 'SKILL.md');
+    const content = '---\nname: pptx\n---\nBody\n';
+    await fs.mkdir(path.dirname(unrelatedSkillFile), { recursive: true });
+    await fs.writeFile(skillFile, content, 'utf8');
+    await fs.writeFile(unrelatedSkillFile, 'unrelated', 'utf8');
+    const manager = managerFor('pptx');
+    const listSkills = vi
+      .fn()
+      .mockResolvedValue([{ name: 'pptx', filePath: skillFile }]);
+
+    try {
+      await expect(
+        deleteManagedSkill(configWith({ ...manager, listSkills }), {
+          skill: { slug: 'pptx' },
+        }),
+      ).rejects.toThrow('Refusing to delete unexpected skill directory');
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(content);
+      await expect(fs.readFile(unrelatedSkillFile, 'utf8')).resolves.toBe(
+        'unrelated',
+      );
+      expect(manager.refreshCache).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it('refuses to update a non-SKILL.md fallback file', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
@@ -387,6 +419,54 @@ describe('managed Skill mutations', () => {
       expect(content).toContain('# keep this comment');
       expect(content).toContain('hooks:');
       expect(content).not.toContain('disable-model-invocation');
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalizes duplicate top-level enablement fields', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const skillDir = path.join(tempHome, 'skills', 'pptx');
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    const config = configWith(managerFor('pptx'));
+    const parser = new SkillManager({} as Config);
+
+    try {
+      await fs.writeFile(
+        skillFile,
+        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation: false\ndisable-model-invocation: true\n---\nBody\n',
+        'utf8',
+      );
+      await setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: true },
+      });
+      let content = await fs.readFile(skillFile, 'utf8');
+      expect(content.match(/^disable-model-invocation\s*:/gm) ?? []).toEqual(
+        [],
+      );
+      expect(
+        parser.parseSkillContent(content, skillFile, 'user')
+          .disableModelInvocation,
+      ).toBeUndefined();
+
+      await fs.writeFile(
+        skillFile,
+        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation: true\ndisable-model-invocation: false\n---\nBody\n',
+        'utf8',
+      );
+      await setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: false },
+      });
+      content = await fs.readFile(skillFile, 'utf8');
+      expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
+        'disable-model-invocation: true',
+      ]);
+      expect(
+        parser.parseSkillContent(content, skillFile, 'user')
+          .disableModelInvocation,
+      ).toBe(true);
     } finally {
       await fs.rm(tempHome, { recursive: true, force: true });
     }
