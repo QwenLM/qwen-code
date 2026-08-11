@@ -453,14 +453,17 @@ describe('launchAgentViewPtyHost', () => {
     ).toBeUndefined();
   });
 
-  it('passes kill signals through to the PTY process', async () => {
-    const pty = createFakePty();
-    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+  it.skipIf(process.platform === 'win32')(
+    'passes kill signals through to the PTY process',
+    async () => {
+      const pty = createFakePty();
+      const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
 
-    handle.kill('SIGKILL');
+      handle.kill('SIGKILL');
 
-    expect(pty.process.killCalls).toEqual(['SIGKILL']);
-  });
+      expect(pty.process.killCalls).toEqual(['SIGKILL']);
+    },
+  );
 
   it('stops capturing output after dispose', async () => {
     const pty = createFakePty();
@@ -484,14 +487,17 @@ describe('launchAgentViewPtyHost', () => {
     await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
   });
 
-  it('gracefully shuts down the PTY process with SIGTERM', async () => {
-    const pty = createFakePty();
-    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+  it.skipIf(process.platform === 'win32')(
+    'gracefully shuts down the PTY process with SIGTERM',
+    async () => {
+      const pty = createFakePty();
+      const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
 
-    handle.shutdown?.();
+      handle.shutdown?.();
 
-    expect(pty.process.killedWith).toBe('SIGTERM');
-  });
+      expect(pty.process.killedWith).toBe('SIGTERM');
+    },
+  );
 
   it('loads PTY through the configured loader', async () => {
     const pty = createFakePty();

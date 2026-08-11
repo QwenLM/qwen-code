@@ -1019,8 +1019,9 @@ async function acquireSocketPathLock(
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const raw = await fs.readFile(lockPath, 'utf8').catch(() => '');
       const holderPid = Number.parseInt(raw, 10);
-      // Fail closed on unreadable holders; only a confirmed-dead pid is stale.
-      if (Number.isInteger(holderPid) && !isProcessAlive(holderPid)) {
+      // An empty/non-numeric lock means the writer died before recording its
+      // pid; reclaim it the same as a confirmed-dead holder.
+      if (!Number.isInteger(holderPid) || !isProcessAlive(holderPid)) {
         await fs.rm(lockPath, { force: true });
         continue;
       }
