@@ -25,6 +25,7 @@ import { publishAssetsCommand } from './review/publish-assets.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
+import { emitWorkflowCommand } from './review/emit-workflow.js';
 import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
 import { testDeltaCommand } from './review/test-delta.js';
@@ -65,6 +66,7 @@ export const reviewCommand: CommandModule = {
       .command(commentStatusCommand)
       .command(loadRulesCommand)
       .command(agentPromptCommand)
+      .command(emitWorkflowCommand)
       .command(buildTestCommand)
       .command(baseTreeCommand)
       .command(testDeltaCommand)

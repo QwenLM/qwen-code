@@ -41,6 +41,8 @@ import {
   baseWorktreePath,
   reviewBranch,
   REVIEW_TMP_DIR,
+  REVIEW_WORKFLOWS_DIR,
+  REVIEW_WORKFLOW_PREFIX,
   tmpFile,
   tmpPrefix,
 } from './lib/paths.js';
@@ -595,6 +597,44 @@ export function runCleanup(target: string): void {
     }
   }
 
+  // --- Generated fan-out scripts (under .qwen/workflows/) ---------------
+  // `emit-workflow` has to write its script into the saved-workflow dir —
+  // `Workflow({scriptPath})` refuses to load anything outside it. That dir is
+  // also the user's own saved workflows, and each generated script is a
+  // `/<name>` slash command in their session, so a review that leaves one
+  // behind hands the user a permanent command for a diff that no longer
+  // exists. Swept by prefix, not by name: a run killed before it could report
+  // its path still leaves a file, and the target it belonged to is not
+  // recoverable from the name (which is a plan-path digest).
+  let workflowEntries: string[] = [];
+  try {
+    workflowEntries = existsSync(REVIEW_WORKFLOWS_DIR)
+      ? readdirSync(REVIEW_WORKFLOWS_DIR)
+      : [];
+  } catch (err) {
+    writeStderrLine(
+      `Failed to read ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
+    );
+  }
+
+  for (const file of workflowEntries) {
+    if (!file.startsWith(REVIEW_WORKFLOW_PREFIX) || !file.endsWith('.js')) {
+      continue;
+    }
+    const full = join(REVIEW_WORKFLOWS_DIR, file);
+    try {
+      rmSync(full, { force: true });
+      writeStdoutLine(`Removed generated workflow: ${full}`);
+      removedAny = true;
+    } catch (err) {
+      writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
+      failedAny = true;
+    }
+  }
+
+  // A generated script that will not delete is a side file, like the record
+  // directories above: it sets `failedAny` for the summary line but must NOT
+  // hold the lease, which guards only the worktree and branch.
   if (!failedDestruction) {
     clearReviewWorktreeLease(process.cwd(), target);
   }

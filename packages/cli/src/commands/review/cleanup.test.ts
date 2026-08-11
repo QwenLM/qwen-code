@@ -97,6 +97,8 @@ vi.mock('./lib/paths.js', () => ({
   tmpFile: (target: string, suffix: string) =>
     `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
   tmpPrefix: (target: string) => `qwen-review-${target}-`,
+  REVIEW_WORKFLOWS_DIR: '/repo/.qwen/workflows',
+  REVIEW_WORKFLOW_PREFIX: 'qwen-review-',
 }));
 
 import {
@@ -138,6 +140,38 @@ describe('runCleanup', () => {
       expect.stringContaining('Failed to delete branch qwen-review/pr-123'),
     );
     expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  // `emit-workflow` has to write its generated fan-out script into the
+  // saved-workflow dir — the Workflow loader refuses anything outside it — and
+  // that dir is also the user's own saved workflows, where each file is a
+  // `/<name>` slash command. A review that left one behind would hand the user
+  // a permanent command for a diff that no longer exists.
+  it('sweeps generated fan-out scripts out of the saved-workflow dir', () => {
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.readdirSync.mockImplementation(((dir: string) =>
+      dir === '/repo/.qwen/workflows'
+        ? ['qwen-review-9ea13ef11a.js', 'my-own-workflow.js', 'notes.md']
+        : []) as never);
+
+    runCleanup('pr-123');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/qwen-review-9ea13ef11a.js',
+      { force: true },
+    );
+    // A user's own saved workflow shares the directory and must survive.
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/my-own-workflow.js',
+      expect.anything(),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      '/repo/.qwen/workflows/notes.md',
+      expect.anything(),
+    );
   });
 
   it('clears the lease when cleanup succeeds', () => {
