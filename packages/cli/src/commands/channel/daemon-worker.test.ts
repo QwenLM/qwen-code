@@ -178,6 +178,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
   })),
 );
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
+const mockRouterSetChannelRotation = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterRestoreRoutes = vi.hoisted(() =>
@@ -193,6 +194,7 @@ const mockSessionRouter = vi.hoisted(() =>
       _persistPath?: string,
     ) => ({
       setChannelScope: mockRouterSetChannelScope,
+      setChannelRotation: mockRouterSetChannelRotation,
       setChannelApprovalMode: mockRouterSetChannelApprovalMode,
       clearAll: mockRouterClearAll,
       restoreRoutes: mockRouterRestoreRoutes,

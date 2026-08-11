@@ -485,6 +485,7 @@ async function startAll(
   // Register per-channel scope overrides so each channel uses its own sessionScope
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
+    router.setChannelRotation(name, config.sessionRotation);
   }
   const channels: Map<string, ChannelBase> = new Map();
 

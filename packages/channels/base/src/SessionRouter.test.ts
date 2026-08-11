@@ -1270,6 +1270,115 @@ describe('SessionRouter', () => {
     });
   });
 
+  describe('session rotation', () => {
+    it('keeps reusing the session when no rotation is configured', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const first = await router.resolve('ch', 'alice', 'chat1');
+      for (let index = 0; index < 20; index++) {
+        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+      }
+    });
+
+    it('starts a new session once maxTurns is reached', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 3 });
+
+      const first = await router.resolve('ch', 'alice', 'chat1');
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+
+      const rotated = await router.resolve('ch', 'alice', 'chat1');
+      expect(rotated).not.toBe(first);
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(rotated);
+    });
+
+    it('rotates only the route that hit the bound', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 2 });
+
+      const busy = await router.resolve('ch', 'alice', 'chat1');
+      const quiet = await router.resolve('ch', 'bob', 'chat2');
+      await router.resolve('ch', 'alice', 'chat1');
+
+      expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(busy);
+      expect(await router.resolve('ch', 'bob', 'chat2')).toBe(quiet);
+    });
+
+    it('does not rotate a channel that has no bound configured', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('bounded', { maxTurns: 2 });
+
+      const unbounded = await router.resolve('other', 'alice', 'chat1');
+      for (let index = 0; index < 5; index++) {
+        expect(await router.resolve('other', 'alice', 'chat1')).toBe(unbounded);
+      }
+    });
+
+    it('starts a new session once maxAgeHours has elapsed', async () => {
+      vi.useFakeTimers();
+      try {
+        const router = new SessionRouter(bridge, '/tmp');
+        router.setChannelRotation('ch', { maxAgeHours: 2 });
+
+        const first = await router.resolve('ch', 'alice', 'chat1');
+        vi.advanceTimersByTime(90 * 60 * 1000);
+        expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+
+        vi.advanceTimersByTime(31 * 60 * 1000);
+        expect(await router.resolve('ch', 'alice', 'chat1')).not.toBe(first);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores non-positive bounds instead of rotating every message', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 0, maxAgeHours: -1 });
+
+      const first = await router.resolve('ch', 'alice', 'chat1');
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe(first);
+    });
+
+    it('persists turn counts so a restart cannot reset the bound', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      const first = await router.resolve('ch', 'alice', 'chat1');
+      await router.resolve('ch', 'alice', 'chat1');
+
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1'].turns).toBe(2);
+
+      const revived = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+      revived.setChannelRotation('ch', { maxTurns: 3 });
+      revived.restoreRoutes();
+
+      expect(await revived.resolve('ch', 'alice', 'chat1')).toBe(first);
+      expect(await revived.resolve('ch', 'alice', 'chat1')).not.toBe(first);
+    });
+
+    it('accepts route stores written before rotation existed', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writePersistedSession(persistPath, 'ch:alice:chat1');
+
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+      router.setChannelRotation('ch', { maxAgeHours: 1 });
+
+      expect(router.restoreRoutes()).toEqual({ restored: 1, dropped: 0 });
+      // No recorded start: the clock starts now rather than rotating on sight.
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-session');
+    });
+  });
+
   describe('clearAll', () => {
     it('clears all in-memory state', async () => {
       const router = new SessionRouter(bridge, '/tmp');

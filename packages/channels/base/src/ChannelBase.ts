@@ -847,6 +847,11 @@ export abstract class ChannelBase {
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
+    // In gateway mode the caller registers rotation for every channel it owns;
+    // a standalone channel owns its router, so it registers its own.
+    if (!options?.router) {
+      this.router.setChannelRotation(this.name, config.sessionRotation);
+    }
 
     this.registerSharedCommands();
     if (this.loopController) {

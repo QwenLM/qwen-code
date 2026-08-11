@@ -62,6 +62,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                                                                        |
+| `sessionRotation`        | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session rotation](#session-rotation)                                            |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -90,6 +91,32 @@ Controls how conversation sessions are managed:
 - **`user`** (default) — One session per user. All messages from the same user share a conversation.
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
+
+### Session Rotation
+
+By default a route keeps the same session forever, so a long-lived route — a busy group thread, a `single`-scope channel — accumulates context without bound. Once it grows past the model's context window every later message on that route fails, while the rest of the channel keeps working. `sessionRotation` puts a ceiling on that: when the current session is past its bound, the next message starts a fresh one instead.
+
+```json
+{
+  "channels": {
+    "my-bot": {
+      "type": "dingtalk",
+      "sessionScope": "thread",
+      "sessionRotation": {
+        "maxTurns": 200,
+        "maxAgeHours": 24
+      }
+    }
+  }
+}
+```
+
+- **`maxTurns`** — Rotate once this many messages have used the current session.
+- **`maxAgeHours`** — Rotate once the current session is older than this.
+
+Set either, both, or neither; whichever bound is hit first rotates. Both must be positive numbers. Omitting `sessionRotation` keeps the previous behavior of never rotating.
+
+Rotation is a context reset, not a cleanup: the new session starts empty, so the bot no longer remembers the earlier conversation on that route. Counters are stored alongside the routes and survive a daemon restart. Sessions that were already routed before you enabled rotation start their clock at the first message after the upgrade.
 
 ### Channel Memory
 

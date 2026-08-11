@@ -177,6 +177,34 @@ function optionalBooleanField(
   return value;
 }
 
+function parseSessionRotationConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['sessionRotation'] {
+  const raw = rawConfig['sessionRotation'];
+  if (raw === undefined) return undefined;
+  const parsed = requireObjectField(channelName, 'sessionRotation', raw);
+
+  const bound = (field: 'maxTurns' | 'maxAgeHours'): number | undefined => {
+    const value = parsed[field];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      throw new Error(
+        `Channel "${channelName}" field "sessionRotation.${field}" must be a positive number.`,
+      );
+    }
+    return value;
+  };
+
+  const maxTurns = bound('maxTurns');
+  const maxAgeHours = bound('maxAgeHours');
+  if (maxTurns === undefined && maxAgeHours === undefined) return undefined;
+  return {
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(maxAgeHours !== undefined ? { maxAgeHours } : {}),
+  };
+}
+
 function requireObjectField(
   channelName: string,
   path: string,
@@ -466,6 +494,7 @@ export async function parseChannelConfig(
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
       plugin?.defaultSessionScope ||
       'user',
+    sessionRotation: parseSessionRotationConfig(name, rawConfig),
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

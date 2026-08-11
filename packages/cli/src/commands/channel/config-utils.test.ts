@@ -99,6 +99,38 @@ describe('parseChannelConfig', () => {
     );
   });
 
+  it('parses sessionRotation bounds', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+
+    expect(result['sessionRotation']).toEqual({
+      maxTurns: 200,
+      maxAgeHours: 24,
+    });
+  });
+
+  it('leaves sessionRotation unset when omitted', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: 't',
+    });
+
+    expect(result['sessionRotation']).toBeUndefined();
+  });
+
+  it('throws when a sessionRotation bound is not a positive number', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'telegram',
+        token: 't',
+        sessionRotation: { maxTurns: 0 },
+      }),
+    ).rejects.toThrow('"sessionRotation.maxTurns" must be a positive number');
+  });
+
   it('throws when plugin-required fields are missing', async () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),

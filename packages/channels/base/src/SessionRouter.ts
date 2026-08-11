@@ -10,7 +10,11 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
-import type { SessionScope, SessionTarget } from './types.js';
+import type {
+  SessionRotationConfig,
+  SessionScope,
+  SessionTarget,
+} from './types.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import { sanitizeLogText } from './sanitize.js';
 
@@ -18,6 +22,10 @@ interface PersistedEntry {
   sessionId: string;
   target: SessionTarget;
   cwd: string;
+  /** Messages routed to this session so far. Absent on pre-rotation stores. */
+  turns?: number;
+  /** Epoch ms the session was first routed to. Absent on pre-rotation stores. */
+  startedAt?: number;
 }
 
 interface SessionReservation {
@@ -49,6 +57,8 @@ export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
+  private toTurns: Map<string, number> = new Map(); // session ID → messages routed
+  private toStartedAt: Map<string, number> = new Map(); // session ID → epoch ms
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
@@ -60,6 +70,7 @@ export class SessionRouter {
   private defaultScope: SessionScope;
   private channelScopes: Map<string, SessionScope> = new Map();
   private channelApprovalModes: Map<string, string> = new Map();
+  private channelRotations: Map<string, SessionRotationConfig> = new Map();
   private persistPath: string | undefined;
   private readonly recoveryMode: SessionRecoveryMode;
 
@@ -96,6 +107,78 @@ export class SessionRouter {
     } else {
       this.channelApprovalModes.delete(channelName);
     }
+  }
+
+  /** Set session auto-rotation bounds for a specific channel. */
+  setChannelRotation(
+    channelName: string,
+    rotation: SessionRotationConfig | undefined,
+  ): void {
+    const maxTurns = normalizeRotationBound(rotation?.maxTurns);
+    const maxAgeHours = normalizeRotationBound(rotation?.maxAgeHours);
+    if (maxTurns === undefined && maxAgeHours === undefined) {
+      this.channelRotations.delete(channelName);
+      return;
+    }
+    this.channelRotations.set(channelName, {
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
+      ...(maxAgeHours !== undefined ? { maxAgeHours } : {}),
+    });
+  }
+
+  /**
+   * Whether `sessionId` has outgrown its channel's rotation bounds. Checked
+   * before a message reuses the session, so the bound is a ceiling on what the
+   * session carries into a turn rather than what it is left holding after one.
+   */
+  private shouldRotate(channelName: string, sessionId: string): boolean {
+    const rotation = this.channelRotations.get(channelName);
+    if (!rotation) return false;
+
+    const { maxTurns, maxAgeHours } = rotation;
+    if (
+      maxTurns !== undefined &&
+      (this.toTurns.get(sessionId) ?? 0) >= maxTurns
+    ) {
+      return true;
+    }
+    if (maxAgeHours !== undefined) {
+      const startedAt = this.toStartedAt.get(sessionId);
+      // A session with no recorded start (restored from a pre-rotation store)
+      // gets its clock started here rather than rotating immediately.
+      if (startedAt === undefined) {
+        this.toStartedAt.set(sessionId, Date.now());
+        return false;
+      }
+      if (Date.now() - startedAt >= maxAgeHours * 60 * 60 * 1000) return true;
+    }
+    return false;
+  }
+
+  /** Drop a route so the next resolve starts a fresh session on it. */
+  private rotateRoute(
+    key: string,
+    sessionId: string,
+    channelName: string,
+  ): void {
+    this.invalidateRouteOperation(key);
+    this.deleteByKey(key);
+    this.persist();
+    process.stderr.write(
+      `[SessionRouter] Rotated session for ${sanitizeLogText(channelName, 128)}: ` +
+        `${sanitizeLogText(sessionId, 128)} reached its configured limit; ` +
+        `starting a new session.\n`,
+    );
+  }
+
+  /**
+   * Counting turns costs a persist per message, and the counters change the
+   * on-disk route shape, so channels without a bound opt out of both.
+   */
+  private countTurn(channelName: string, sessionId: string): void {
+    if (!this.channelRotations.has(channelName)) return;
+    this.toTurns.set(sessionId, (this.toTurns.get(sessionId) ?? 0) + 1);
+    this.persist();
   }
 
   private routingKey(
@@ -152,9 +235,23 @@ export class SessionRouter {
     };
     let failedWaits = 0;
     for (;;) {
-      const existing = this.toSession.get(key);
+      let existing = this.toSession.get(key);
+      // Checked before both the live-reuse and the lazy-reload path so a route
+      // cannot dodge its bound by having been evicted from memory. Skipped
+      // while a creation is in flight on this key: invalidating it would fail
+      // the concurrent message instead of rotating it, and the bound is just as
+      // well enforced on the next one.
+      if (
+        existing &&
+        !this.creatingSessions.has(key) &&
+        this.shouldRotate(channelName, existing)
+      ) {
+        this.rotateRoute(key, existing, channelName);
+        existing = undefined;
+      }
       if (existing && this.isLive(existing)) {
         this.promoteTargetToGroup(existing, isGroup);
+        this.countTurn(channelName, existing);
         return existing;
       }
 
@@ -169,6 +266,7 @@ export class SessionRouter {
             throw error;
           }
           this.promoteTargetToGroup(sessionId, isGroup);
+          this.countTurn(channelName, sessionId);
           return sessionId;
         } catch (error) {
           if (creating.invalidationError) {
@@ -208,6 +306,7 @@ export class SessionRouter {
           throw error;
         }
         this.promoteTargetToGroup(sessionId, isGroup);
+        this.countTurn(channelName, sessionId);
         return sessionId;
       } finally {
         if (this.creatingSessions.get(key) === operation) {
@@ -259,6 +358,10 @@ export class SessionRouter {
         isGroup: input.isGroup,
       });
       this.toCwd.set(sessionId, input.cwd);
+      if (this.channelRotations.has(input.channelName)) {
+        this.toTurns.set(sessionId, 0);
+        this.toStartedAt.set(sessionId, Date.now());
+      }
       this.liveSessionIds.add(sessionId);
       this.persist();
       return sessionId;
@@ -309,10 +412,18 @@ export class SessionRouter {
         }
         if (loadedSessionId !== savedSessionId) {
           const target = this.toTarget.get(savedSessionId);
+          // The reload is the same conversation under a new ID, so its age and
+          // turn count carry over — otherwise reloading would reset the bound.
+          const turns = this.toTurns.get(savedSessionId);
+          const startedAt = this.toStartedAt.get(savedSessionId);
           this.deleteByKey(key);
           this.toSession.set(key, loadedSessionId);
           if (target) this.toTarget.set(loadedSessionId, target);
           this.toCwd.set(loadedSessionId, savedCwd);
+          if (turns !== undefined) this.toTurns.set(loadedSessionId, turns);
+          if (startedAt !== undefined) {
+            this.toStartedAt.set(loadedSessionId, startedAt);
+          }
           this.persist();
         }
         this.liveSessionIds.add(loadedSessionId);
@@ -344,6 +455,10 @@ export class SessionRouter {
             isGroup: input.isGroup,
           });
           this.toCwd.set(replacement, input.cwd);
+          if (this.channelRotations.has(input.channelName)) {
+            this.toTurns.set(replacement, 0);
+            this.toStartedAt.set(replacement, Date.now());
+          }
           this.liveSessionIds.add(replacement);
           this.persist();
           process.stderr.write(
@@ -465,6 +580,8 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
@@ -495,6 +612,8 @@ export class SessionRouter {
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     return sessionId;
   }
@@ -538,6 +657,7 @@ export class SessionRouter {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
+      this.restoreRotationState(entry.sessionId, entry);
       restored++;
     }
     if (persisted.dropped > 0) this.persist();
@@ -616,6 +736,7 @@ export class SessionRouter {
           this.toSession.set(key, sessionId);
           this.toTarget.set(sessionId, entry.target);
           this.toCwd.set(sessionId, entry.cwd);
+          this.restoreRotationState(sessionId, entry);
           reservation.resolve(sessionId);
           if (sessionId !== entry.sessionId) {
             changed = true;
@@ -659,6 +780,8 @@ export class SessionRouter {
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
+    this.toTurns.clear();
+    this.toStartedAt.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
@@ -728,6 +851,14 @@ export class SessionRouter {
     return { entries, dropped: droppedKeys.length, droppedKeys };
   }
 
+  /** Carry a persisted entry's rotation counters back into memory. */
+  private restoreRotationState(sessionId: string, entry: PersistedEntry): void {
+    if (entry.turns !== undefined) this.toTurns.set(sessionId, entry.turns);
+    if (entry.startedAt !== undefined) {
+      this.toStartedAt.set(sessionId, entry.startedAt);
+    }
+  }
+
   private isPersistedEntry(value: unknown): value is PersistedEntry {
     if (typeof value !== 'object' || value === null) return false;
     const entry = value as Record<string, unknown>;
@@ -739,6 +870,8 @@ export class SessionRouter {
       entry['sessionId'].length > 0 &&
       typeof entry['cwd'] === 'string' &&
       entry['cwd'].length > 0 &&
+      isOptionalFiniteNumber(entry['turns']) &&
+      isOptionalFiniteNumber(entry['startedAt']) &&
       typeof typedTarget['channelName'] === 'string' &&
       typeof typedTarget['senderId'] === 'string' &&
       typeof typedTarget['chatId'] === 'string' &&
@@ -756,10 +889,14 @@ export class SessionRouter {
     for (const [key, sessionId] of this.toSession) {
       const target = this.toTarget.get(sessionId);
       if (!target) continue;
+      const turns = this.toTurns.get(sessionId);
+      const startedAt = this.toStartedAt.get(sessionId);
       data[key] = {
         sessionId,
         target,
         cwd: this.toCwd.get(sessionId) ?? this.defaultCwd,
+        ...(turns !== undefined ? { turns } : {}),
+        ...(startedAt !== undefined ? { startedAt } : {}),
       };
     }
 
@@ -942,4 +1079,22 @@ export class SessionRouter {
   private endSessionLoad(loadWindow: SessionLoadWindow): void {
     this.sessionLoadWindows.delete(loadWindow);
   }
+}
+
+function isOptionalFiniteNumber(value: unknown): boolean {
+  return (
+    value === undefined || (typeof value === 'number' && Number.isFinite(value))
+  );
+}
+
+/**
+ * A rotation bound is only meaningful when positive and finite. Anything else
+ * (0, negative, NaN, a stray string from a hand-edited config) disables that
+ * bound rather than rotating on every single message.
+ */
+function normalizeRotationBound(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
 }
