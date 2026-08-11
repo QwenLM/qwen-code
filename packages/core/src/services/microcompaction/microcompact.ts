@@ -10,6 +10,10 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import {
+  isSkillDedupConfirmation,
+  isSkillUnloadedPlaceholder,
+} from '../../tools/skill-utils.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -281,8 +285,10 @@ function estimatePartTokens(part: Part): number {
 
 /** Defensive guard against re-clearing if a future change reshapes a cleared part into a collectable form. */
 function isAlreadyCleared(part: Part): boolean {
+  const output = part.functionResponse?.response?.['output'];
   return (
-    part.functionResponse?.response?.['output'] === MICROCOMPACT_CLEARED_MESSAGE
+    output === MICROCOMPACT_CLEARED_MESSAGE ||
+    isSkillUnloadedPlaceholder(output)
   );
 }
 
@@ -430,6 +436,38 @@ function buildKeptFilePaths(
     // let it protect any candidate path from disarming.
     if (paths?.length === 1) {
       kept.add(paths[0]!);
+    }
+  }
+  return kept;
+}
+
+/**
+ * Skill names whose full body is still resident via a kept tool result.
+ * Mirrors `buildKeptFilePaths`: blanking a stale dedup confirmation left
+ * over from an earlier load cycle must NOT un-track a skill whose reloaded
+ * body is still kept in context — the next invocation would re-append the
+ * body, doubling its tokens on every later aging-out pass. A kept
+ * confirmation or placeholder does not prove residency, so only a kept
+ * full body populates this set.
+ */
+function buildKeptSkillNames(
+  history: Content[],
+  refs: PartRef[],
+  keepRefs: Set<string>,
+  callIdToSkillName: Map<string, string[]>,
+): Set<string> {
+  const kept = new Set<string>();
+  for (const ref of refs) {
+    if (!keepRefs.has(refKey(ref))) continue;
+    const part = getPart(history, ref);
+    if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
+    if (part.functionResponse?.name !== ToolNames.SKILL) continue;
+    if (isSkillDedupConfirmation(part.functionResponse.response?.['output'])) {
+      continue;
+    }
+    const names = getSkillNamesForResponse(part, callIdToSkillName);
+    for (const n of names ?? []) {
+      kept.add(n);
     }
   }
   return kept;
@@ -739,6 +777,12 @@ export function microcompactHistory(
       keepRefs,
       callIdToFilePath,
     );
+    const keptSkillNames = buildKeptSkillNames(
+      keptPathHistory,
+      keptPathRefs,
+      keepRefs,
+      callIdToSkillName,
+    );
 
     result = history.map((content, ci) => {
       const partsToClean = clearMap.get(ci);
@@ -785,7 +829,9 @@ export function microcompactHistory(
             );
             if (skillNames && skillNames.length > 0) {
               for (const n of skillNames) {
-                evictedSkillNames.add(n);
+                if (!keptSkillNames.has(n)) {
+                  evictedSkillNames.add(n);
+                }
               }
             } else {
               unresolvedEvictedSkills++;

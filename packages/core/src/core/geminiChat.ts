@@ -56,7 +56,10 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
-import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
+import {
+  clearLoadedSkillTracking,
+  skillUnloadedPlaceholder,
+} from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -2161,7 +2164,7 @@ export class GeminiChat {
       return { cleared: false, tokensSaved: 0 };
     }
 
-    const placeholder = `[Skill '${skillName}' unloaded via /unskill; invoke the Skill tool again to reload.]`;
+    const placeholder = skillUnloadedPlaceholder(skillName);
     const beforeEstimate = estimateContentTokens(this.history);
     let touched = false;
     const newHistory = this.history.map((content) => {
@@ -2207,6 +2210,43 @@ export class GeminiChat {
       this.telemetryService?.setLastPromptTokenCount(adjusted);
     }
     return { cleared: true, tokensSaved };
+  }
+
+  /**
+   * Whether history still contains an un-blanked Skill tool result (body or
+   * dedup confirmation) for the skill. `/unskill` uses this as a fallback
+   * when in-memory loaded-skill tracking was lost — e.g. `--resume` restores
+   * history (bodies included) without it — so the command can still reclaim
+   * the tokens instead of wrongly answering "not loaded in context".
+   */
+  hasSkillBodyInHistory(skillName: string): boolean {
+    const callIdToSkillName = buildCallIdToSkillName(this.history);
+    const targetIds = new Set<string>();
+    for (const [id, names] of callIdToSkillName) {
+      if (names.includes(skillName)) targetIds.add(id);
+    }
+    if (targetIds.size === 0) {
+      return false;
+    }
+    const placeholder = skillUnloadedPlaceholder(skillName);
+    return this.history.some(
+      (content) =>
+        content.role === 'user' &&
+        (content.parts ?? []).some((part) => {
+          const fr = part.functionResponse;
+          if (!fr?.id || fr.name !== ToolNames.SKILL || !targetIds.has(fr.id)) {
+            return false;
+          }
+          const output = (fr.response as { output?: unknown } | undefined)?.[
+            'output'
+          ];
+          return (
+            typeof output === 'string' &&
+            output !== placeholder &&
+            output !== MICROCOMPACT_CLEARED_MESSAGE
+          );
+        }),
+    );
   }
 
   setSystemInstruction(sysInstr: string) {

@@ -2406,4 +2406,18 @@ export default {
     '安全模式下禁止變更自動技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    '從上下文卸載已載入的技能主體，為本次工作階段的剩餘部分釋出其 token（代價是一次提示快取重新填充）。技能保持可用，下次呼叫時會完整重新載入。',
+  'Usage: /unskill <skill-name>': '用法：/unskill <skill-name>',
+  'Could not retrieve skill manager.': '無法取得技能管理器。',
+  'Skill "{{name}}" is not loaded in context.':
+    '技能 "{{name}}" 未載入上下文。',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    '技能 "{{name}}" 在上下文中已無主體；已清除追蹤狀態，可重新載入。',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    '已卸載技能 "{{name}}"（釋放約 {{tokens}} 個 token）。再次呼叫即可重新載入。',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" 不是技能（可能是模型可呼叫的命令）；/unskill 只能卸載技能主體。',
 };

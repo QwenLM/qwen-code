@@ -2316,4 +2316,19 @@ export default {
     'Änderungen durch den Auto-Skill-Kurator sind im Sicherheitsmodus deaktiviert.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    'Entlädt den Body eines geladenen Skills aus dem Kontext und gibt dessen Tokens für den Rest der Sitzung frei (kostet eine erneute Befüllung des Prompt-Caches). Der Skill bleibt verfügbar und wird beim nächsten Aufruf vollständig neu geladen.',
+  'Usage: /unskill <skill-name>': 'Verwendung: /unskill <skill-name>',
+  'Could not retrieve skill manager.':
+    'Skill-Manager konnte nicht abgerufen werden.',
+  'Skill "{{name}}" is not loaded in context.':
+    'Skill "{{name}}" ist nicht im Kontext geladen.',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    'Skill "{{name}}" hatte keinen Body mehr im Kontext; die Nachverfolgung wurde zurückgesetzt, sodass er neu geladen werden kann.',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    'Skill "{{name}}" entladen (~{{tokens}} Tokens freigegeben). Rufen Sie ihn erneut auf, um ihn neu zu laden.',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" ist kein Skill (möglicherweise ein vom Modell aufrufbarer Befehl); /unskill entlädt nur Skill-Bodys.',
 };

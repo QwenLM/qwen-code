@@ -2321,4 +2321,19 @@ export default {
     'Les modifications du gestionnaire de compétences automatiques sont désactivées en mode sécurisé.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    'Décharge du contexte le corps d’une compétence chargée, libérant ses tokens pour le reste de la session (au prix d’un nouveau remplissage du cache d’invite). La compétence reste disponible et se recharge intégralement à sa prochaine invocation.',
+  'Usage: /unskill <skill-name>': 'Utilisation : /unskill <skill-name>',
+  'Could not retrieve skill manager.':
+    'Impossible de récupérer le gestionnaire de compétences.',
+  'Skill "{{name}}" is not loaded in context.':
+    'La compétence "{{name}}" n’est pas chargée dans le contexte.',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    'La compétence "{{name}}" n’avait plus de corps dans le contexte ; le suivi a été réinitialisé pour permettre son rechargement.',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    'Compétence "{{name}}" déchargée (~{{tokens}} tokens libérés). Invoquez-la à nouveau pour la recharger.',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" n’est pas une compétence (il peut s’agir d’une commande invocable par le modèle) ; /unskill ne décharge que les corps de compétences.',
 };

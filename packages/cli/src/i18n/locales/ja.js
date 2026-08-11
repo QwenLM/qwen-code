@@ -2082,4 +2082,19 @@ export default {
     'セーフモードでは自動スキル管理による変更は無効です。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    '読み込み済みスキルの本文をコンテキストからアンロードし、このセッションの残りで使えるトークンを解放します（プロンプトキャッシュの再充填が1回発生します）。スキルは利用可能なまま保持され、次回呼び出し時に全文が再読み込みされます。',
+  'Usage: /unskill <skill-name>': '使用法: /unskill <skill-name>',
+  'Could not retrieve skill manager.':
+    'スキルマネージャーを取得できませんでした。',
+  'Skill "{{name}}" is not loaded in context.':
+    'スキル "{{name}}" はコンテキストに読み込まれていません。',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    'スキル "{{name}}" の本文はコンテキストに残っていません。追跡状態をクリアしたので再読み込みできます。',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    'スキル "{{name}}" をアンロードしました（約 {{tokens}} トークンを解放）。再度呼び出すと再読み込みされます。',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" はスキルではありません（モデルが呼び出せるコマンドの可能性があります）。/unskill はスキル本文のみをアンロードします。',
 };

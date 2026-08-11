@@ -2827,4 +2827,18 @@ export default {
     'Auto-skill curator changes are disabled in safe mode.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.',
+  'Usage: /unskill <skill-name>': 'Usage: /unskill <skill-name>',
+  'Could not retrieve skill manager.': 'Could not retrieve skill manager.',
+  'Skill "{{name}}" is not loaded in context.':
+    'Skill "{{name}}" is not loaded in context.',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.',
 };

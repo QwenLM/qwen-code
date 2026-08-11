@@ -2291,4 +2291,18 @@ export default {
     'Изменения куратора автоматических навыков отключены в безопасном режиме.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    'Выгружает тело загруженного навыка из контекста, освобождая его токены для остальной части сессии (ценой одного повторного заполнения кеша промптов). Навык остаётся доступным и полностью перезагружается при следующем вызове.',
+  'Usage: /unskill <skill-name>': 'Использование: /unskill <skill-name>',
+  'Could not retrieve skill manager.': 'Не удалось получить менеджер навыков.',
+  'Skill "{{name}}" is not loaded in context.':
+    'Навык "{{name}}" не загружен в контекст.',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    'Тела навыка "{{name}}" больше нет в контексте; отслеживание сброшено, и его можно перезагрузить.',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    'Навык "{{name}}" выгружен (освобождено ~{{tokens}} токенов). Вызовите его снова для перезагрузки.',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" — не навык (возможно, это вызываемая моделью команда); /unskill выгружает только тела навыков.',
 };

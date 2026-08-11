@@ -2300,4 +2300,19 @@ export default {
     'As alterações do gerenciador de habilidades automáticas estão desativadas no modo seguro.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
+
+  // /unskill command
+  'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
+    'Descarrega do contexto o corpo de uma habilidade carregada, liberando seus tokens para o restante da sessão (ao custo de um reabastecimento do cache de prompt). A habilidade permanece disponível e é recarregada por completo na próxima invocação.',
+  'Usage: /unskill <skill-name>': 'Uso: /unskill <skill-name>',
+  'Could not retrieve skill manager.':
+    'Não foi possível obter o gerenciador de habilidades.',
+  'Skill "{{name}}" is not loaded in context.':
+    'A habilidade "{{name}}" não está carregada no contexto.',
+  'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
+    'A habilidade "{{name}}" não tinha mais corpo no contexto; o rastreamento foi limpo para que ela possa ser recarregada.',
+  'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
+    'Habilidade "{{name}}" descarregada (~{{tokens}} tokens liberados). Invoque-a novamente para recarregar.',
+  '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':
+    '"{{name}}" não é uma habilidade (pode ser um comando invocável pelo modelo); /unskill descarrega apenas corpos de habilidades.',
 };

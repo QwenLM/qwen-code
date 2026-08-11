@@ -14,6 +14,7 @@ import {
   MICROCOMPACT_CLEARED_MESSAGE,
   MICROCOMPACT_CLEARED_IMAGE_PREFIX,
 } from './microcompact.js';
+import { skillUnloadedPlaceholder } from '../../tools/skill-utils.js';
 
 function makeInlineImage(mimeType = 'image/png', data = 'AAAA'): Content {
   return {
@@ -2203,5 +2204,86 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
     expect(result.meta).toBeDefined();
     expect(result.meta!.evictedSkillNames).toEqual(['demo-poem']);
     expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+  });
+
+  it('suppresses the report when a stale confirmation is blanked but the reloaded body is kept', () => {
+    // Cross-cycle ordering: the previous body was already blanked, its dedup
+    // confirmation (s1) is older than the reloaded body (s2). Blanking the
+    // confirmation must not un-track the skill — the live body is still in
+    // context, and un-tracking would make the next invocation re-append it.
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', MICROCOMPACT_CLEARED_MESSAGE),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', 'Skill "demo-poem" is already loaded in context.'),
+      skillCall('s2', 'demo-poem'),
+      skillResult('s2', 'skill body content '.repeat(50)),
+      shellCall('c3'),
+      shellResult('c3', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(result.meta!.unresolvedEvictedSkills).toBe(0);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toContain('skill body content');
+  });
+
+  it('does not let a /unskill placeholder absorb a keepRecent slot', () => {
+    const placeholder = skillUnloadedPlaceholder('demo-poem');
+    const history: Content[] = [
+      shellCall('c1'),
+      shellResult('c1', 'recent shell output that stays protected'),
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', placeholder),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    // Nothing is clearable: the placeholder counts as already-cleared, so
+    // the shell result keeps the protection slot.
+    expect(result.meta).toBeUndefined();
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('recent shell output that stays protected');
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(placeholder);
+  });
+
+  it('never re-blanks a /unskill placeholder nor reports its name', () => {
+    const placeholder = skillUnloadedPlaceholder('demo-poem');
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', placeholder),
+      shellCall('c1'),
+      shellResult('c1', 'older shell output '.repeat(50)),
+      shellCall('c2'),
+      shellResult('c2', 'newest shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.evictedSkillNames).toEqual([]);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(placeholder);
   });
 });

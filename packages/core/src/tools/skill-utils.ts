@@ -25,6 +25,43 @@ export function buildSkillLlmContent(baseDir: string, body: string): string {
   return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
 }
 
+const SKILL_UNLOADED_PLACEHOLDER_PREFIX = `[Skill '`;
+const SKILL_UNLOADED_PLACEHOLDER_SUFFIX = `' unloaded via /unskill; invoke the Skill tool again to reload.]`;
+
+/** Placeholder `/unskill` writes in place of a blanked skill body. */
+export function skillUnloadedPlaceholder(skillName: string): string {
+  return `${SKILL_UNLOADED_PLACEHOLDER_PREFIX}${skillName}${SKILL_UNLOADED_PLACEHOLDER_SUFFIX}`;
+}
+
+/**
+ * Whether a tool-result output is a `/unskill` placeholder. Microcompaction
+ * treats it like its own cleared message: it must not absorb a keepRecent
+ * protection slot, nor be re-blanked (which would also emit a spurious
+ * eviction report for the name).
+ */
+export function isSkillUnloadedPlaceholder(output: unknown): boolean {
+  return (
+    typeof output === 'string' &&
+    output.startsWith(SKILL_UNLOADED_PLACEHOLDER_PREFIX) &&
+    output.endsWith(SKILL_UNLOADED_PLACEHOLDER_SUFFIX)
+  );
+}
+
+/**
+ * Whether a tool-result output is the dedup guard's short confirmation
+ * (`Skill "x" is already loaded in context.`, emitted by SkillTool) rather
+ * than a full body. A kept confirmation must NOT suppress eviction
+ * reporting for its skill — the body it refers to may already be gone;
+ * only a kept full body proves residency.
+ */
+export function isSkillDedupConfirmation(output: unknown): boolean {
+  return (
+    typeof output === 'string' &&
+    output.startsWith('Skill "') &&
+    output.endsWith('" is already loaded in context.')
+  );
+}
+
 /**
  * One model-facing skill/command entry, normalized so file-based skills and
  * model-invocable commands (MCP prompts / file commands) render through a single

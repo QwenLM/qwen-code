@@ -31,6 +31,21 @@ function getSkillTrackingTool(
   return undefined;
 }
 
+/**
+ * Names of real (file-based) skills from the committed cache, or null when
+ * the cache has not been committed yet (callers then skip the check rather
+ * than block). The skill tool's command-executor fallback also tracks
+ * model-invocable *command* names in loadedSkillNames — those are not skill
+ * bodies and must not be unloadable.
+ */
+function getCachedSkillNames(
+  context: Parameters<NonNullable<SlashCommand['action']>>[0],
+): ReadonlySet<string> | null {
+  const cached = context.services.config?.getSkillManager()?.getCachedSkills();
+  if (!cached) return null;
+  return new Set(cached.map((skill) => skill.name));
+}
+
 export const unskillCommand: SlashCommand = {
   name: 'unskill',
   get description() {
@@ -69,14 +84,30 @@ export const unskillCommand: SlashCommand = {
       };
     }
 
-    if (!skillTool.getLoadedSkillNames().has(skillName)) {
+    const skillNames = getCachedSkillNames(context);
+    if (skillNames && !skillNames.has(skillName)) {
       return {
         type: 'message',
-        messageType: 'info',
-        content: t('Skill "{{name}}" is not loaded in context.', {
-          name: skillName,
-        }),
+        messageType: 'error',
+        content: t(
+          '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.',
+          { name: skillName },
+        ),
       };
+    }
+
+    if (!skillTool.getLoadedSkillNames().has(skillName)) {
+      // `--resume` restores history (bodies included) without the in-memory
+      // tracking — fall back to locating the body before declaring it absent.
+      if (!geminiClient.getChat().hasSkillBodyInHistory(skillName)) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: t('Skill "{{name}}" is not loaded in context.', {
+            name: skillName,
+          }),
+        };
+      }
     }
 
     const { cleared, tokensSaved } = geminiClient
@@ -112,8 +143,12 @@ export const unskillCommand: SlashCommand = {
     if (!skillTool) {
       return null;
     }
+    const skillNames = getCachedSkillNames(context);
     return [...skillTool.getLoadedSkillNames()]
-      .filter((name) => name.startsWith(partialArg))
+      .filter(
+        (name) =>
+          (!skillNames || skillNames.has(name)) && name.startsWith(partialArg),
+      )
       .sort();
   },
 };
