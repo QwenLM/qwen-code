@@ -127,6 +127,25 @@ export class OmniJsonCacheFile<TEntry> {
         parsed.entries !== null &&
         !Array.isArray(parsed.entries)
       ) {
+        // Entry VALUES must be plain non-null non-array objects too: the
+        // file is edited/shipped by hand (workspace caches), and a value
+        // like `null` or `"x"` would surface as raw TypeErrors from the
+        // owning cache's field accessors (`v.expiresAt`,
+        // `v.degradedSha256`, …) — escaping the never-fatal contract.
+        // Malformed values are pruned individually (cheap re-work for
+        // just those keys) instead of condemning the whole file.
+        let pruned = 0;
+        for (const [k, v] of Object.entries(parsed.entries)) {
+          if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+            delete parsed.entries[k];
+            pruned++;
+          }
+        }
+        if (pruned > 0) {
+          this.debugLogger.debug(
+            `dropped ${pruned} malformed cache entr${pruned === 1 ? 'y' : 'ies'} from ${this.filePath}`,
+          );
+        }
         return parsed;
       }
       throw new Error('unexpected shape');

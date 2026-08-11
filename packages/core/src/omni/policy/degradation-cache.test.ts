@@ -266,5 +266,31 @@ describe('OmniDegradationCache', () => {
       await plantEntry({ ...ENTRY, createdAt: new Date().toISOString() });
       await expect(cache.get(ORIGINAL, fp)).resolves.toMatchObject(ENTRY);
     });
+
+    it.each([
+      ['null', null],
+      ['string', 'x'],
+      ['number', 42],
+      ['array', [1, 2]],
+    ])(
+      'drops a non-object entry VALUE at load instead of throwing: %s',
+      async (_label, value) => {
+        // Value-level shape is validated at load (shared cache-file layer):
+        // a crafted value like `null` must not surface as TypeErrors from
+        // field accessors — including scans like removeByDegradedSha256
+        // that touch EVERY entry, not just the requested key.
+        await fs.writeFile(
+          path.join(root, 'policy-cache.json'),
+          JSON.stringify({
+            version: 1,
+            entries: { [`${ORIGINAL}|${fp}`]: value, other: ENTRY },
+          }),
+        );
+        await expect(cache.get(ORIGINAL, fp)).resolves.toBeNull();
+        await expect(
+          cache.removeByDegradedSha256(ENTRY.degradedSha256),
+        ).resolves.toBeUndefined();
+      },
+    );
   });
 });
