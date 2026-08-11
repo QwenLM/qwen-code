@@ -1541,7 +1541,7 @@ describe('ModelsConfig', () => {
       targetModel: 'coder-model',
     },
   ])(
-    'clears a runtime snapshot before a raw switch to $targetModel',
+    'clears a runtime snapshot after switching to $targetModel',
     async ({ authType, targetModel }) => {
       const modelsConfig = new ModelsConfig({ initialAuthType: authType });
       const snapshotId = `$runtime|${authType}|qwen3.8-max`;
@@ -1550,7 +1550,7 @@ describe('ModelsConfig', () => {
         authType,
         modelId: 'qwen3.8-max',
         apiKey: 'sk-runtime',
-        generationConfig: { reasoning: false },
+        generationConfig: { reasoning: { effort: 'high' } },
         sources: {
           reasoning: { kind: 'settings', detail: 'runtime preference' },
         },
@@ -1561,12 +1561,43 @@ describe('ModelsConfig', () => {
       await modelsConfig.setModel(targetModel);
 
       expect(modelsConfig.getActiveRuntimeModelSnapshotId()).toBeUndefined();
-      expect(modelsConfig.getGenerationConfig().reasoning).toBeUndefined();
-      expect(
-        modelsConfig.getGenerationConfigSources()['reasoning'],
-      ).toBeUndefined();
+      expect(modelsConfig.getGenerationConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+      expect(modelsConfig.getGenerationConfigSources()['reasoning']).toEqual({
+        kind: 'settings',
+        detail: 'runtime preference',
+      });
     },
   );
+
+  it('resets registered reasoning after leaving a runtime snapshot', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+    });
+    const snapshotId = '$runtime|openai|custom-runtime';
+    modelsConfig['runtimeModelSnapshots'].set(snapshotId, {
+      id: snapshotId,
+      authType: AuthType.USE_OPENAI,
+      modelId: 'custom-runtime',
+      apiKey: 'sk-runtime',
+      generationConfig: { reasoning: false },
+      sources: {
+        reasoning: { kind: 'settings', detail: 'runtime preference' },
+      },
+      createdAt: Date.now(),
+    });
+    await modelsConfig.switchToRuntimeModel(snapshotId);
+
+    await modelsConfig.setModel('qwen3.8-max');
+    await modelsConfig.setModel('custom-model');
+
+    expect(modelsConfig.getActiveRuntimeModelSnapshotId()).toBeUndefined();
+    expect(modelsConfig.getGenerationConfig().reasoning).toBeUndefined();
+    expect(
+      modelsConfig.getGenerationConfigSources()['reasoning'],
+    ).toBeUndefined();
+  });
 
   it('preserves global reasoning when switching between raw model ids', async () => {
     const modelsConfig = new ModelsConfig({
