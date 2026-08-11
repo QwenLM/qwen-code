@@ -3666,9 +3666,11 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({ events });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -3687,6 +3689,7 @@ describe('DaemonSessionProvider', () => {
     expect(events.mock.calls[1]?.[0]).toMatchObject({
       sseConnectReason: 'stream_end',
     });
+    expect(connection?.error).toBeUndefined();
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
@@ -7409,6 +7412,7 @@ describe('DaemonSessionProvider', () => {
     const closingError = new DaemonHttpError(
       404,
       {
+        code: 'session_closing',
         error:
           'No session with id "session-b". The session is closing; retry after close completes',
         sessionId: 'session-b',
@@ -7570,11 +7574,47 @@ describe('DaemonSessionProvider', () => {
       new DaemonHttpError(
         404,
         {
+          code: 'session_closing',
           error:
             'No session with id "session-b". The session is closing; retry after close completes',
           sessionId: 'session-b',
         },
         'POST /session/:id/load: No session with id "session-b". The session is closing; retry after close completes',
+      ),
+    );
+
+    await expect(
+      requireActions(actions).loadSession('session-b'),
+    ).rejects.toThrow();
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a missing session', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+      new DaemonHttpError(
+        404,
+        {
+          code: 'session_not_found',
+          error: 'No session with id "session-b"',
+          sessionId: 'session-b',
+        },
+        'POST /session/:id/load: No session with id "session-b"',
       ),
     );
 
@@ -7611,6 +7651,7 @@ describe('DaemonSessionProvider', () => {
       new DaemonHttpError(
         404,
         {
+          code: 'session_closing',
           error:
             'No session with id "session-b". The session is closing; retry after close completes',
           sessionId: 'session-b',
@@ -10416,6 +10457,70 @@ describe('DaemonSessionProvider', () => {
       clientId: 'client-a',
     });
     expect(detachFetch).toHaveBeenCalledOnce();
+  });
+
+  it('adopts one running B restore across controlled A to B to A to B', async () => {
+    const detachFetch = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(null, { status: 204 }),
+    );
+    vi.stubGlobal('fetch', detachFetch);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['client_identity'],
+    });
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-a', clientId: 'client-a' }),
+    );
+    const target = createDeferred<MockSession>();
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    const renderControlled = (sessionId: string) =>
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect
+          sessionId={sessionId}
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockClear();
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => target.promise,
+    );
+
+    await act(async () => {
+      renderControlled('session-b');
+      await flushPromises();
+      renderControlled('session-a');
+      await flushPromises();
+      renderControlled('session-b');
+      await flushPromises();
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      target.resolve(
+        createMockSession({ sessionId: 'session-b', clientId: 'client-b' }),
+      );
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-b',
+      clientId: 'client-b',
+    });
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
   });
 
   it('loads controlled sessionId changes', async () => {

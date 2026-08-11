@@ -50,6 +50,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 import {
+  DAEMON_ACP_NDJSON_LIMITS,
   createSpawnChannelFactory,
   createStderrForwarder,
   getAcpMemoryArgs,
@@ -225,6 +226,45 @@ describe('createSpawnChannelFactory env policy', () => {
 
     reader.releaseLock();
     writer.releaseLock();
+  });
+
+  it('terminates the tracked child when a bounded pipe fails', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const factory = createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 16,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 32,
+      },
+    });
+    const channel = await factory('/tmp/project');
+    const reader = channel.stream.readable.getReader();
+
+    (child.stdout as PassThrough).write('x'.repeat(17));
+
+    await expect(reader.closed).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    reader.releaseLock();
+  });
+
+  it('keeps the default factory unbounded and validates opt-in limits early', () => {
+    expect(DAEMON_ACP_NDJSON_LIMITS).toEqual({
+      maxFrameBytes: 64 * 1024 * 1024,
+      maxQueuedMessages: 256,
+      maxQueuedBytes: 64 * 1024 * 1024,
+    });
+    expect(() => createSpawnChannelFactory()).not.toThrow();
+    expect(() =>
+      createSpawnChannelFactory({
+        pipeLimits: {
+          maxFrameBytes: 0,
+          maxQueuedMessages: 1,
+          maxQueuedBytes: 1,
+        },
+      }),
+    ).toThrow('maxFrameBytes must be a positive safe integer');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('settles exited on an async spawn error only when no process exists', async () => {

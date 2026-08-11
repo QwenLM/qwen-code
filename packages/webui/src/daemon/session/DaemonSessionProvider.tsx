@@ -2769,7 +2769,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             autoReconnect &&
             loadingRequestedSession &&
             pendingLoad?.sessionId === restoreSessionId &&
-            isClosingSessionLoadError(error)
+            isClosingSessionLoadError(
+              error,
+              !capabilities?.features.includes(CLIENT_IDENTITY_FEATURE),
+            )
           ) {
             reconnectAttempt += 1;
             const reconnectConfig = reconnectConfigRef.current;
@@ -2945,7 +2948,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
-          error: `Reconnecting in ${delayMs}ms`,
         }));
         await delay(delayMs, abort.signal);
       }
@@ -4734,13 +4736,18 @@ function isAuthFailureHttpError(error: unknown): boolean {
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
 }
 
-function isClosingSessionLoadError(error: unknown): boolean {
+function isClosingSessionLoadError(
+  error: unknown,
+  allowLegacyMessage = false,
+): boolean {
   if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
   const body = isRecord(error.body) ? error.body : undefined;
   return (
-    typeof body?.['error'] === 'string' &&
-    body['error'].endsWith(
-      'The session is closing; retry after close completes',
-    )
+    body?.['code'] === 'session_closing' ||
+    (allowLegacyMessage &&
+      typeof body?.['error'] === 'string' &&
+      body['error'].endsWith(
+        'The session is closing; retry after close completes',
+      ))
   );
 }
