@@ -944,6 +944,28 @@ describe('normalizeOmniProcessingConfig', () => {
       expect(() => normalize({ urlTtlHours: 48 })).not.toThrow();
       expect(() => normalize({ urlTtlHours: 0 })).not.toThrow();
     });
+
+    it('rejects a non-numeric or negative maxEstimatedTokens (fail-open guard)', () => {
+      // guard.ts compares with `<=`/`>`: a string would make both false and
+      // silently disable the token guard — must abort startup instead.
+      expect(() =>
+        normalize({ maxEstimatedTokens: 'abc' as unknown as number }),
+      ).toThrow(
+        'omni.processing.transportGuard.maxEstimatedTokens: must be a ' +
+          'finite number >= 0, where 0 disables the token guard (got "abc")',
+      );
+      expect(() =>
+        normalize({ maxEstimatedTokens: true as unknown as number }),
+      ).toThrow(OmniPolicyConfigError);
+      expect(() => normalize({ maxEstimatedTokens: -1 })).toThrow(
+        OmniPolicyConfigError,
+      );
+      expect(() =>
+        normalize({ maxEstimatedTokens: Number.POSITIVE_INFINITY }),
+      ).toThrow(OmniPolicyConfigError);
+      expect(() => normalize({ maxEstimatedTokens: 0 })).not.toThrow();
+      expect(() => normalize({ maxEstimatedTokens: 262144 })).not.toThrow();
+    });
   });
 
   describe('policyTools validation (§13 #7/#20/#21)', () => {

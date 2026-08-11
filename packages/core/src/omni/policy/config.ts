@@ -126,6 +126,9 @@ export interface RawOmniProcessingSettings {
   policyTools?: OmniPolicyToolsSettings;
   /** `omni.processing.transportGuard.maxUploadFileBytes`. */
   maxUploadFileBytes?: number;
+  /** `omni.processing.transportGuard.maxEstimatedTokens`
+   * (0/unset = token guard disabled). */
+  maxEstimatedTokens?: number;
   /** `omni.delivery.upload.urlTtlHours`. */
   urlTtlHours?: number;
 }
@@ -723,6 +726,20 @@ export function normalizeOmniProcessingConfig(
       fail(
         `omni.processing.transportGuard.maxUploadFileBytes: ${bytes} exceeds ` +
           `the DashScope per-file upload cap (${MAX_UPLOAD_FILE_BYTES_CEILING})`,
+      );
+    }
+  }
+  // Token-guard threshold: settings load performs no runtime type checks,
+  // and guard.ts compares with `<=`/`>` — a string here would make both
+  // comparisons false and silently disable the guard (fail-open). Reject
+  // anything but a finite number ≥ 0 (0/unset = guard disabled).
+  if (raw.maxEstimatedTokens !== undefined) {
+    const tokens = raw.maxEstimatedTokens;
+    if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) {
+      fail(
+        `omni.processing.transportGuard.maxEstimatedTokens: must be a ` +
+          `finite number >= 0, where 0 disables the token guard ` +
+          `(got ${JSON.stringify(tokens)})`,
       );
     }
   }

@@ -3001,6 +3001,7 @@ export class Config {
           limits: this.omniProcessingLimits,
           policyTools: this.omniPolicyTools,
           maxUploadFileBytes: this.omniMaxUploadFileBytes,
+          maxEstimatedTokens: this.omniMaxEstimatedTokens,
           urlTtlHours: this.omniUploadUrlTtlHours,
         },
         this.toolRegistry,
