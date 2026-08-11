@@ -396,7 +396,7 @@ describe('AddWorkspaceDialog', () => {
       act(() => input().blur());
       act(() => input().focus());
       // Cross the blur timer's deadline: a still-pending timer would close
-      // the list and leave a stale suppress flag for the next edit.
+      // the list and invalidate in-flight lookups via the sequence counter.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(100);
       });
@@ -430,7 +430,7 @@ describe('AddWorkspaceDialog', () => {
       });
       act(() => input().focus());
       // Cross the first timer's original deadline: an uncancelled timer
-      // would have set the suppress flag by now.
+      // would have bumped the sequence counter by now.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(40);
       });
@@ -502,6 +502,36 @@ describe('AddWorkspaceDialog', () => {
         resolveSuggestions(SUGGESTIONS);
         await Promise.resolve();
       });
+
+      expect(listbox()).toBeNull();
+    });
+
+    it('drops stale suggestions on blur dismiss so refocus cannot reopen them', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      // Blur past the dismiss window while the second lookup is still
+      // debounced: the timer invalidates it, so it never refreshes the
+      // stale entries from the first prefix.
+      type('/home/me/cod');
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+
+      // Refocusing without editing must not reopen the stale entries.
+      act(() => input().focus());
+      keydown('ArrowDown');
 
       expect(listbox()).toBeNull();
     });
@@ -759,7 +789,7 @@ describe('AddWorkspaceDialog', () => {
       );
 
       // The picker rejects instantly (e.g. no zenity/osascript on a
-      // headless host), settling before the input's 100 ms blur timer.
+      // headless host).
       await act(async () => {
         browseButton().click();
         await Promise.resolve();
@@ -770,7 +800,9 @@ describe('AddWorkspaceDialog', () => {
         'Unable to open the system folder picker',
       );
 
-      // Cross the blur timer's deadline before the first edit below.
+      // No blur timer is pending here — pickDirectory cancels it right
+      // after blur(). Cross the dismiss deadline anyway: even a leaked
+      // dismiss must not stop the first edit below from opening the list.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(100);
       });

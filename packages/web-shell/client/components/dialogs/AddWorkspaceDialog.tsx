@@ -73,8 +73,9 @@ export function AddWorkspaceDialog({
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
-  // Set when a suggestion is accepted or the list is dismissed, so the
-  // path-change effect knows whether to reopen the list for that update.
+  // Set while Browse is in flight, so the path-change effect keeps the
+  // pick-triggered lookup closed until the first edit; blur dismissal
+  // invalidates in-flight lookups via suggestSeqRef instead.
   const suppressNextFetchOpenRef = useRef(false);
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -320,6 +321,10 @@ export function AddWorkspaceDialog({
                       // rather than suppressing the next fetch, which would
                       // leak into the first edit after the user refocuses.
                       ++suggestSeqRef.current;
+                      // Drop the stale entries too: the invalidated lookup
+                      // never refreshes them, and ArrowDown would reopen
+                      // whatever is left against the current input.
+                      setSuggestions([]);
                       closeList();
                     }, 100);
                   }}
