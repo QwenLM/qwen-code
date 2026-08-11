@@ -1,25 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSessions, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
-import type {
-  DaemonSessionArchiveState,
-  DaemonSessionSummary,
-} from '@qwen-code/sdk/daemon';
+import { useCallback, useMemo } from 'react';
+import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArchiveState } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
+import {
+  useSessionCatalogController,
+  useSessionCatalogQuery,
+  useWebShellSessions,
+} from '../session-catalog/session-catalog-hooks';
+import type { SessionCatalogQuery } from '../session-catalog/session-catalog-store';
 
 interface ScopedSessionsOptions {
   autoLoad?: boolean;
   enabled?: boolean;
+  maxAgeMs?: number;
   pageSize?: number;
   archiveState?: DaemonSessionArchiveState;
   view?: 'organized';
   group?: string;
-}
-
-interface ScopedState {
-  cwd?: string;
-  sessions: DaemonSessionSummary[];
-  loading: boolean;
-  error?: Error;
+  pollIntervalMs?: number;
 }
 
 export function useScopedSessions(
@@ -29,135 +27,99 @@ export function useScopedSessions(
   const {
     autoLoad = false,
     enabled = true,
+    maxAgeMs,
     pageSize,
     archiveState,
     view,
     group,
+    pollIntervalMs,
   } = options;
-  const primary = useSessions({
+  const primary = useWebShellSessions({
     autoLoad,
     enabled: enabled && !workspaceCwd,
+    maxAgeMs,
     pageSize,
     archiveState,
     view,
     group,
     sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+    ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
-  const {
-    reload: reloadPrimary,
-    deleteSession: deletePrimarySession,
-    deleteSessions: deletePrimarySessions,
-  } = primary;
+  const primaryDeleteSession = primary.deleteSession;
+  const primaryDeleteSessions = primary.deleteSessions;
+  const primaryReleaseSessionAction = primary.releaseSessionAction;
   const workspace = useWorkspace();
-  const requestSequence = useRef(0);
-  const [scoped, setScoped] = useState<ScopedState>({
-    sessions: [],
-    loading: false,
-  });
-
-  const reloadScoped = useCallback(async () => {
-    if (!workspaceCwd || !enabled) return [];
-    const sequence = ++requestSequence.current;
-    setScoped((current) => ({
-      cwd: workspaceCwd,
-      sessions: current.cwd === workspaceCwd ? current.sessions : [],
-      loading: true,
-    }));
-    try {
-      const sessions = await workspace.client
-        .workspaceByCwd(workspaceCwd)
-        .listWorkspaceSessions({
-          pageSize,
-          archiveState,
-          view,
-          group,
-          sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
-        });
-      const scopedSessions = sessions.map((session) => ({
-        ...session,
-        workspaceCwd,
-      }));
-      if (requestSequence.current === sequence) {
-        setScoped({
-          cwd: workspaceCwd,
-          sessions: scopedSessions,
-          loading: false,
-        });
-      }
-      return scopedSessions;
-    } catch (error) {
-      const normalized =
-        error instanceof Error ? error : new Error(String(error));
-      if (requestSequence.current === sequence) {
-        setScoped({
-          cwd: workspaceCwd,
-          sessions: [],
-          loading: false,
-          error: normalized,
-        });
-      }
-      throw normalized;
-    }
-  }, [
-    archiveState,
-    enabled,
-    group,
-    pageSize,
-    view,
-    workspace.client,
-    workspaceCwd,
-  ]);
-
-  useEffect(() => {
-    if (!workspaceCwd) return;
-    requestSequence.current += 1;
-    setScoped({
-      cwd: workspaceCwd,
-      sessions: [],
-      loading: autoLoad && enabled,
-    });
-    if (autoLoad && enabled) void reloadScoped().catch(() => undefined);
-    return () => {
-      requestSequence.current += 1;
-    };
-  }, [autoLoad, enabled, reloadScoped, workspaceCwd]);
-
-  const reload = useCallback(
-    () => (workspaceCwd ? reloadScoped() : reloadPrimary()),
-    [reloadPrimary, reloadScoped, workspaceCwd],
+  const controller = useSessionCatalogController(workspace.client);
+  const query = useMemo<SessionCatalogQuery | undefined>(
+    () =>
+      workspaceCwd
+        ? {
+            routeKind: 'qualified',
+            workspaceCwd,
+            options: {
+              ...(pageSize !== undefined ? { pageSize } : {}),
+              ...(archiveState !== undefined ? { archiveState } : {}),
+              ...(view !== undefined ? { view } : {}),
+              ...(group !== undefined ? { group } : {}),
+              sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+            },
+          }
+        : undefined,
+    [archiveState, group, pageSize, view, workspaceCwd],
   );
+  const scoped = useSessionCatalogQuery(workspace.client, query, {
+    autoLoad,
+    enabled: enabled && Boolean(workspaceCwd),
+    ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
+    ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+  });
+  const reloadScopedPage = scoped.reload;
+  const reloadScoped = useCallback(async () => {
+    const page = await reloadScopedPage();
+    return page?.sessions ?? [];
+  }, [reloadScopedPage]);
   const deleteSessions = useCallback(
     async (sessionIds: string[]) => {
-      if (!workspaceCwd) return deletePrimarySessions(sessionIds);
-      const result = await workspace.client
-        .workspaceByCwd(workspaceCwd)
-        .deleteSessionsData(sessionIds);
-      await reloadScoped();
-      return result;
+      if (!workspaceCwd) return primaryDeleteSessions(sessionIds);
+      try {
+        return await workspace.client
+          .workspaceByCwd(workspaceCwd)
+          .deleteSessionsData(sessionIds);
+      } finally {
+        controller.invalidateWorkspace(workspaceCwd);
+      }
     },
-    [deletePrimarySessions, reloadScoped, workspace.client, workspaceCwd],
+    [controller, primaryDeleteSessions, workspace.client, workspaceCwd],
   );
   const deleteSession = useCallback(
     async (sessionId: string) => {
-      if (!workspaceCwd) return deletePrimarySession(sessionId);
+      if (!workspaceCwd) return primaryDeleteSession(sessionId);
       const result = await deleteSessions([sessionId]);
-      if (result.errors.length > 0) {
-        throw new Error(result.errors[0]!.error);
-      }
+      if (result.errors.length > 0) throw new Error(result.errors[0]!.error);
       return result.removed.length > 0 || result.notFound.length > 0;
     },
-    [deletePrimarySession, deleteSessions, workspaceCwd],
+    [deleteSessions, primaryDeleteSession, workspaceCwd],
+  );
+  const releaseSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        return await primaryReleaseSessionAction?.(sessionId);
+      } finally {
+        if (workspaceCwd) controller.invalidateWorkspace(workspaceCwd);
+      }
+    },
+    [controller, primaryReleaseSessionAction, workspaceCwd],
   );
 
   if (!workspaceCwd) return primary;
-  const current = scoped.cwd === workspaceCwd ? scoped : undefined;
   return {
-    sessions: current?.sessions ?? [],
-    loading: current?.loading ?? (autoLoad && enabled),
-    error: current?.error,
-    reload,
+    data: scoped.page ? scoped.sessions : undefined,
+    sessions: scoped.sessions,
+    loading: scoped.loading,
+    error: scoped.error,
+    reload: reloadScoped,
     deleteSession,
     deleteSessions,
-    releaseSession: primary.releaseSession,
+    releaseSession: primaryReleaseSessionAction ? releaseSession : undefined,
   };
 }

@@ -339,6 +339,22 @@ class FakeBridge {
             currentValue: 'qwen-max',
             options: [],
           },
+          {
+            id: 'reasoning_effort',
+            name: 'Reasoning effort',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'default',
+            options: [],
+          },
+          {
+            id: 'mode',
+            name: 'Mode',
+            category: 'mode',
+            type: 'select',
+            currentValue: 'default',
+            options: [],
+          },
         ],
       },
     };
@@ -1318,10 +1334,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
       id: number;
-      result: { sessionId: string };
+      result: {
+        sessionId: string;
+        configOptions: Array<{ id: string }>;
+      };
     }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
+    expect(frame.result.configOptions.map((option) => option.id)).toEqual([
+      'model',
+      'mode',
+    ]);
   });
 
   it('session/new rejects the daemon-owned Live Voice source namespace', async () => {
@@ -4813,6 +4836,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 
+  it('session/set_config_option rejects ids outside the routable set', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 44,
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'reasoning_effort',
+        value: 'high',
+      },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain(
+      'ConfigId not supported by this transport: reasoning_effort',
+    );
+    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/set_config_option without an id writes no response for an unroutable configId', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'reasoning_effort',
+        value: 'high',
+      },
+    });
+    expect(ack.status).toBe(202);
+    const frames = await takeFrames(sessStream, 1, 300);
+    expect(frames).toHaveLength(0);
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
     // ACP standard: session/new MUST create a new isolated session.
     // sessionScope param is ignored; bridge always gets 'thread'.
@@ -7385,6 +7458,93 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
               },
             ],
           },
+        });
+        reader.close();
+      });
+    });
+
+    it('session mutations invalidate active and archived organized catalogs', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440017';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+
+        const list = async (
+          id: number,
+          archiveState: 'active' | 'archived',
+        ) => {
+          await post(connId, {
+            jsonrpc: '2.0',
+            id,
+            method: 'session/list',
+            params: {
+              workspaceCwd: TEST_WORKSPACE,
+              view: 'organized',
+              archiveState,
+            },
+          });
+          return reader.next();
+        };
+
+        await expect(list(75, 'active')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId }] },
+        });
+        await expect(list(76, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 77,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 77,
+          result: { archived: [sessionId], errors: [] },
+        });
+
+        await expect(list(78, 'active')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        await expect(list(79, 'archived')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId, isArchived: true }] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/sessions/unarchive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 80,
+          result: { unarchived: [sessionId], errors: [] },
+        });
+        await expect(list(81, 'active')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId, isArchived: false }] },
+        });
+        await expect(list(82, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 83,
+          result: { removed: [sessionId], errors: [] },
+        });
+        await expect(list(84, 'active')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        await expect(list(85, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
         });
         reader.close();
       });
