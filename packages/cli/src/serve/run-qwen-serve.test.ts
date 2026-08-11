@@ -22,10 +22,13 @@ import {
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
+  subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import { loadServeFastPathEnvironment } from './fast-path-settings.js';
+import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
@@ -37,6 +40,8 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as webShellResolver from './web-shell-resolver.js';
+import * as webShellStatic from './web-shell-static.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -58,6 +63,7 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
+import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -455,10 +461,62 @@ function makeRuntimeBridge(): HttpAcpBridge {
     sessionCount: 0,
     pendingPermissionCount: 0,
     activePromptCount: 0,
+    activeWork: false,
+    activeWorkCoverage: {
+      total: 0,
+      covered: 0,
+      onNegotiatedChannel: 0,
+      oldestCoveredReportAt: null,
+    },
     lastActivityAt: null,
     getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
+}
+
+function writeWebShellFixture(workspaceDir: string): string {
+  const shellDir = path.join(workspaceDir, 'web-shell');
+  fs.mkdirSync(path.join(shellDir, 'assets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(shellDir, 'index.html'),
+    '<!doctype html><body><div id="root"></div></body>',
+  );
+  vi.spyOn(webShellResolver, 'resolveWebShellDir').mockReturnValue(shellDir);
+  return shellDir;
+}
+
+async function startDeferredDaemon(
+  workspace: string,
+  overrides: {
+    serveOptions?: Partial<Parameters<typeof runQwenServe>[0]>;
+    createBridge?: () => HttpAcpBridge;
+  } = {},
+) {
+  const createBridge = vi
+    .spyOn(acpBridge, 'createAcpSessionBridge')
+    .mockImplementation(() => {
+      const bridge = overrides.createBridge
+        ? overrides.createBridge()
+        : makeRuntimeBridge();
+      return bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>;
+    });
+  const handle = await runQwenServe(
+    {
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace,
+      maxSessions: 1,
+      token: 'secret-token',
+      ...overrides.serveOptions,
+    },
+    {
+      resolveOnListen: true,
+      deferRuntimeUntilFirstHealth: true,
+      runtimeStartupTimeoutMs: 0,
+    },
+  );
+  return { handle, createBridge };
 }
 
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
@@ -467,6 +525,17 @@ const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
 const mockChannelWorkerEnabledState = vi.hoisted(() => ({
   value: undefined as boolean | undefined,
 }));
+const mockTotalMemBytes = vi.hoisted(() => ({
+  value: undefined as number | undefined,
+}));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    totalmem: () => mockTotalMemBytes.value ?? actual.totalmem(),
+  };
+});
 
 async function getFreeLoopbackPort(): Promise<number> {
   const server = createServer();
@@ -721,6 +790,158 @@ describe('workspace skill settings persistence', () => {
     expect(setValue.mock.calls).toHaveLength(1);
     expect(setValue.mock.calls[0]?.[3]).toBe(toolGuard);
   });
+
+  it('persists a Skill batch with one settings write and per-target lock outcomes', async () => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-batch-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-batch-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['orphan'] } }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        skills: {
+          disabled: ['locked-skill'],
+          defaultDisabled: ['opt-in'],
+        },
+      }),
+    );
+
+    const originalCreateServeApp = serverModule.createServeApp;
+    let persistDisabledSkillsBatch:
+      | NonNullable<
+          Parameters<typeof serverModule.createServeApp>[2]
+        >['persistDisabledSkillsBatch']
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      persistDisabledSkillsBatch = args[2]?.persistDisabledSkillsBatch;
+      return originalCreateServeApp(...args);
+    });
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge: makeRuntimeBridge() },
+    );
+    await handle.runtimeReady;
+    expect(persistDisabledSkillsBatch).toBeDefined();
+    const setValues = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+
+    const result = await persistDisabledSkillsBatch!(
+      workspace,
+      ['review', 'alpha', 'locked-skill'],
+      false,
+    );
+
+    expect(result.outcomes).toHaveLength(3);
+    expect(result.outcomes[0]).toEqual({
+      skillName: 'review',
+      changed: true,
+    });
+    expect(result.outcomes[1]).toEqual({
+      skillName: 'alpha',
+      changed: true,
+    });
+    expect(result.outcomes[2]).toMatchObject({
+      skillName: 'locked-skill',
+      error: { reason: 'locked', lockedScope: 'user' },
+    });
+    expect(result.settingsChanges).toEqual([
+      {
+        key: 'skills.disabled',
+        value: ['orphan', 'review', 'alpha'],
+      },
+    ]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    const noopResult = await persistDisabledSkillsBatch!(
+      workspace,
+      ['review'],
+      false,
+    );
+    expect(noopResult.outcomes).toEqual([
+      { skillName: 'review', changed: false },
+    ]);
+    expect(noopResult.settingsChanges).toEqual([]);
+    expect(setValues).toHaveBeenCalledOnce();
+
+    const savedAfterDisable = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled?: string[] } };
+    expect(savedAfterDisable.skills.disabled).toEqual([
+      'orphan',
+      'review',
+      'alpha',
+    ]);
+    expect(savedAfterDisable.skills.enabled).toBeUndefined();
+    const savedUser = JSON.parse(
+      fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled?: string[] } };
+    expect(savedUser.skills.disabled).toEqual(['locked-skill']);
+    expect(savedUser.skills.enabled).toBeUndefined();
+
+    const enableResult = await persistDisabledSkillsBatch!(
+      workspace,
+      ['opt-in'],
+      true,
+    );
+
+    expect(enableResult.outcomes).toEqual([
+      { skillName: 'opt-in', changed: true },
+    ]);
+    expect(enableResult.settingsChanges).toEqual([
+      {
+        key: 'skills.enabled',
+        value: ['opt-in'],
+      },
+    ]);
+    expect(setValues).toHaveBeenCalledTimes(2);
+
+    const savedAfterEnable = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled: string[] } };
+    expect(savedAfterEnable.skills.disabled).toEqual([
+      'orphan',
+      'review',
+      'alpha',
+    ]);
+    expect(savedAfterEnable.skills.enabled).toEqual(['opt-in']);
+
+    const guard = vi.fn();
+    await persistDisabledSkillsBatch!(workspace, ['guarded'], false, guard);
+    expect(setValues.mock.calls.at(-1)?.[2]).toBe(guard);
+    expect(guard).toHaveBeenCalled();
+
+    const blockingGuard = vi.fn(() => {
+      throw new Error('generation closed');
+    });
+    const writesBefore = setValues.mock.calls.length;
+    await expect(
+      persistDisabledSkillsBatch!(
+        workspace,
+        ['guarded-too'],
+        false,
+        blockingGuard,
+      ),
+    ).rejects.toThrow('generation closed');
+    expect(setValues.mock.calls).toHaveLength(writesBefore);
+  });
 });
 
 /**
@@ -776,6 +997,80 @@ describe('extractContextFilename (#4297 fold-in 7 P2-1 helper)', () => {
     expect(extractContextFilename(42)).toBeUndefined();
     expect(extractContextFilename(true)).toBeUndefined();
     expect(extractContextFilename({ fileName: 'AGENTS.md' })).toBeUndefined();
+  });
+});
+
+describe('subSessionConcurrencyCapsFromSettings', () => {
+  it('passes through positive integer caps', () => {
+    expect(
+      subSessionConcurrencyCapsFromSettings({
+        maxConcurrentSubSessionsPerCaller: 8,
+        maxConcurrentSubSessionsTotal: 12,
+      }),
+    ).toEqual({ maxConcurrentPerCaller: 8, maxConcurrentTotal: 12 });
+  });
+
+  it('omits absent keys so launcher defaults apply', () => {
+    expect(subSessionConcurrencyCapsFromSettings({})).toEqual({});
+  });
+
+  it('rejects values outside positive integers', () => {
+    // Hand-edited settings.json could land any of these; coercing (e.g.
+    // accepting 0 or "10") would silently disable or misread a resource cap.
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 0,
+          maxConcurrentSubSessionsTotal: -1,
+        },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 2.5,
+          maxConcurrentSubSessionsTotal: '10',
+        },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps a valid cap when the sibling key is invalid', () => {
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        {
+          maxConcurrentSubSessionsPerCaller: 8,
+          maxConcurrentSubSessionsTotal: Number.NaN,
+        },
+        () => {},
+      ),
+    ).toEqual({ maxConcurrentPerCaller: 8 });
+  });
+
+  it('warns naming a present-but-invalid cap', () => {
+    const onWarning = vi.fn();
+    expect(
+      subSessionConcurrencyCapsFromSettings(
+        { maxConcurrentSubSessionsTotal: '50' },
+        onWarning,
+      ),
+    ).toEqual({});
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning.mock.calls[0][0]).toContain(
+      'maxConcurrentSubSessionsTotal',
+    );
+    // JSON.stringify keeps the quotes, revealing the value is a string.
+    expect(onWarning.mock.calls[0][0]).toContain('"50"');
+  });
+
+  it('does not warn when the keys are absent', () => {
+    const onWarning = vi.fn();
+    subSessionConcurrencyCapsFromSettings({}, onWarning);
+    expect(onWarning).not.toHaveBeenCalled();
   });
 });
 
@@ -1077,6 +1372,7 @@ describe('runQwenServe telemetry validation', () => {
         mode: 'http-bridge',
         workspace: [primary, secondary],
         maxSessions: 1,
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       {
@@ -1096,12 +1392,16 @@ describe('runQwenServe telemetry validation', () => {
           primary: boolean;
           removable?: boolean;
         }>;
-        limits: { maxTotalSessions: number | null };
+        limits: {
+          maxTotalSessions: number | null;
+          sessionRestoreTimeoutMs: number;
+        };
       };
       expect(body.workspaceCwd).toBe(canonicalizeWorkspace(primary));
       expect(body.features).toContain('multi_workspace_sessions');
       expect(body.features).toContain('workspace_runtime_removal');
       expect(body.limits.maxTotalSessions).toBe(2);
+      expect(body.limits.sessionRestoreTimeoutMs).toBe(90_000);
       expect(body.workspaces).toEqual([
         expect.objectContaining({
           cwd: canonicalizeWorkspace(primary),
@@ -1115,6 +1415,28 @@ describe('runQwenServe telemetry validation', () => {
         }),
       ]);
 
+      for (const [
+        index,
+        [bridgeOptions],
+      ] of createBridge.mock.calls.entries()) {
+        const target = path.join(
+          tmpDir,
+          `static-runtime-external-${index}.txt`,
+        );
+        await bridgeOptions.fileSystem!.writeText({
+          path: target,
+          content: `runtime-${index}`,
+          sessionId: `session-static-${index}`,
+          _meta: {
+            'qwen-code/tool-write-origin': {
+              version: 1,
+              source: 'write_file',
+            },
+          },
+        });
+        expect(fs.readFileSync(target, 'utf8')).toBe(`runtime-${index}`);
+      }
+
       closing = handle.close();
       await vi.waitFor(() => expect(shutdownResolvers).toHaveLength(2));
     } finally {
@@ -1124,10 +1446,79 @@ describe('runQwenServe telemetry validation', () => {
       await closing;
     }
     expect(createBridge).toHaveBeenCalledTimes(2);
+    for (const [options] of createBridge.mock.calls) {
+      expect(options).toMatchObject({
+        delegateReadTextFileToClient: false,
+        sessionRestoreTimeoutMs: 90_000,
+      });
+    }
     for (const result of createBridge.mock.results) {
       expect(result.value.shutdown).toHaveBeenCalledWith({
         reason: 'daemon_shutdown',
       });
+    }
+  });
+
+  it('keeps external built-in writes disabled for an injected primary filesystem factory', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-injected-fs-')),
+    );
+    const workspace = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(workspace);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    const boundaryError = Object.assign(new Error('outside workspace'), {
+      kind: 'path_outside_workspace',
+    });
+    const writeSameHostToolText = vi.fn(async () => undefined);
+    const fsFactory = {
+      assertCanWrite: vi.fn(),
+      writeSameHostToolText,
+      forRequest: () =>
+        ({
+          resolve: vi.fn(async () => {
+            throw boundaryError;
+          }),
+        }) as never,
+    } satisfies WorkspaceFileSystemFactory;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        trustedWorkspace: true,
+        fsFactory,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await expect(
+        createBridge.mock.calls[0]?.[0].fileSystem!.writeText({
+          path: path.join(tmpDir, 'outside.txt'),
+          content: 'must-not-write',
+          sessionId: 'session-injected-primary',
+          _meta: {
+            'qwen-code/tool-write-origin': {
+              version: 1,
+              source: 'write_file',
+            },
+          },
+        }),
+      ).rejects.toBe(boundaryError);
+      expect(writeSameHostToolText).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
     }
   });
 
@@ -1258,6 +1649,7 @@ describe('runQwenServe telemetry validation', () => {
         mode: 'http-bridge',
         workspace: primary,
         token: 'hot-remove-token',
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       {
@@ -1287,9 +1679,29 @@ describe('runQwenServe telemetry validation', () => {
       );
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
+        sessionRestoreTimeoutMs: 90_000,
       });
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
+      );
+      const firstDynamicFileSystem = createBridge.mock.calls[1]?.[0].fileSystem;
+      const firstDynamicTarget = path.join(
+        tmpDir,
+        'dynamic-runtime-external.txt',
+      );
+      await firstDynamicFileSystem!.writeText({
+        path: firstDynamicTarget,
+        content: 'first-generation',
+        sessionId: 'session-dynamic-first',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+      expect(fs.readFileSync(firstDynamicTarget, 'utf8')).toBe(
+        'first-generation',
       );
 
       const before = (await (
@@ -1331,6 +1743,19 @@ describe('runQwenServe telemetry validation', () => {
       expect(dynamicBridge?.shutdown).toHaveBeenCalledWith({
         reason: 'workspace_removed',
       });
+      await expect(
+        firstDynamicFileSystem!.writeText({
+          path: path.join(tmpDir, 'closed-dynamic-generation.txt'),
+          content: 'must-not-write',
+          sessionId: 'session-dynamic-closed',
+          _meta: {
+            'qwen-code/tool-write-origin': {
+              version: 1,
+              source: 'write_file',
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'workspace_generation_closed' });
 
       const afterResponse = await fetch(`${handle.url}/capabilities`, {
         headers,
@@ -1352,6 +1777,30 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      const secondDynamicTarget = path.join(
+        tmpDir,
+        'dynamic-runtime-readded.txt',
+      );
+      await createBridge.mock.calls[2]?.[0].fileSystem!.writeText({
+        path: secondDynamicTarget,
+        content: 'second-generation',
+        sessionId: 'session-dynamic-second',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+      expect(fs.readFileSync(secondDynamicTarget, 'utf8')).toBe(
+        'second-generation',
+      );
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).toMatchObject({
+          delegateReadTextFileToClient: false,
+          sessionRestoreTimeoutMs: 90_000,
+        });
+      }
       let releaseRemoval!: (count: number) => void;
       removeByIds.mockImplementationOnce(
         () =>
@@ -1529,6 +1978,7 @@ describe('runQwenServe telemetry validation', () => {
         maxSessions: 1,
         eventRingSize: 1234,
         compactedReplayMaxBytes: 1024,
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       {
@@ -1543,12 +1993,14 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        sessionRestoreTimeoutMs: 90_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        sessionRestoreTimeoutMs: 90_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
@@ -1862,6 +2314,311 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
   });
 });
 
+/**
+ * The budget is resolved at boot and reported. Whether it also sizes a child
+ * depends on `childHeapMode`, which defaults to `observe` and sizes nothing.
+ * The only boot-time behavior is rejecting an out-of-range flag value.
+ */
+describe('runQwenServe memory budget', () => {
+  let tmpDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    tmpDirs = [];
+  });
+
+  function makeTmpDir(): string {
+    const dir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-mem-')),
+    );
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  it('reports the resolved budget over HTTP without sizing any child', async () => {
+    const dir = makeTmpDir();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const res = await fetch(`${handle.url}/daemon/status`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          memory: {
+            enforced: boolean;
+            childHeap: {
+              mode: string;
+              maxConcurrentChildren: number;
+              perChildCeilingMb: number | null;
+              refusals: number;
+            } | null;
+            configuredBudgetMb: number;
+            effectiveBudgetMb: number;
+            budgetSource: string;
+            availableMemoryMb: number;
+            insufficientMemory: boolean;
+            modeled: {
+              rootReserveMb: number;
+              childPoolMb: number;
+              minChildHeapMb: number;
+              maxChildHeapMb: number;
+              legacyChildCeilingMb: number;
+            };
+          } | null;
+        };
+        runtime: {
+          memory?: {
+            registeredWorkspaces: number;
+            activeAcpChildren: number;
+            childRssCoverage: string;
+            children: {
+              rssBytes: number;
+              sampled: number;
+              oldestReadingAgeMs: number | null;
+            };
+            modeled: {
+              recommendedShareAtRegisteredMb: number;
+              recommendedShareAtActiveMb: number | null;
+            };
+            // Restated rather than imported on purpose: this shape is the
+            // wire contract, and casting to the internal type would make the
+            // assertions below accept whatever that type happens to say.
+            pressure: {
+              mode: string;
+              level: string;
+              source: string;
+              ratio: number;
+              rssBytes: number;
+              rssRatio: number;
+              availableBytes: number;
+              heapUsedBytes: number;
+              heapRatio: number;
+              heapLimitBytes: number;
+            };
+          };
+        };
+      };
+
+      const memory = body.limits.memory;
+      expect(memory).not.toBeNull();
+      // The child-heap policy reached status on a daemon that really booted.
+      // Default is `observe`, so it computed a share and applied nothing —
+      // `enforced` has to stay false or the field means "the feature exists"
+      // rather than "children are being sized by this".
+      expect(memory?.enforced).toBe(false);
+      // Pin the key set rather than the values, so an unannounced field added
+      // to the wire still fails here. `toEqual` on the whole object was the
+      // other option and it does not survive this suite booting a real daemon:
+      // both derived figures follow the host's pool, and on a runner with
+      // under ~1 GB available the model correctly publishes no partition at
+      // all — so a matcher asserting `any(Number)` would fail on exactly the
+      // host where the code is doing the right thing.
+      expect(Object.keys(memory?.childHeap ?? {}).sort()).toEqual([
+        'maxConcurrentChildren',
+        'mode',
+        'perChildCeilingMb',
+        'refusals',
+      ]);
+      expect(memory?.childHeap?.mode).toBe('observe');
+      expect(memory?.childHeap?.refusals).toBe(0);
+      // Whichever branch this host took, the two figures agree with each
+      // other. The arithmetic itself is pinned exhaustively in
+      // `child-heap-policy.test.ts`; what this asserts is that a real daemon
+      // put a self-consistent pair on the wire.
+      if (memory?.childHeap?.perChildCeilingMb === null) {
+        expect(memory?.childHeap?.maxConcurrentChildren).toBe(0);
+      } else {
+        // A fixed grant handed to every admitted child must total no more than
+        // the pool it partitions. That product is the whole reason the
+        // partition is a bound rather than a per-spawn share.
+        expect(memory?.childHeap?.maxConcurrentChildren ?? 0).toBeGreaterThan(
+          0,
+        );
+        expect(
+          (memory?.childHeap?.maxConcurrentChildren ?? 0) *
+            (memory?.childHeap?.perChildCeilingMb ?? 0),
+        ).toBeLessThanOrEqual(memory?.modeled.childPoolMb ?? 0);
+      }
+      expect(memory?.configuredBudgetMb).toBe(4096);
+      expect(memory?.budgetSource).toBe('flag');
+      // The invariant that motivates separating configured from effective:
+      // whatever is reported must be something the machine can back.
+      expect(memory?.effectiveBudgetMb).toBeLessThanOrEqual(
+        memory?.availableMemoryMb ?? 0,
+      );
+      // Modeled pools stay non-negative and inside the budget they come from.
+      expect(memory?.modeled.rootReserveMb).toBeLessThanOrEqual(
+        memory?.effectiveBudgetMb ?? 0,
+      );
+      expect(memory?.modeled.childPoolMb).toBeGreaterThanOrEqual(0);
+      expect(memory?.modeled.childPoolMb).toBeLessThan(
+        memory?.effectiveBudgetMb ?? 0,
+      );
+      expect(memory?.modeled.legacyChildCeilingMb).toBeGreaterThan(0);
+
+      const runtimeMemory = body.runtime.memory;
+      expect(runtimeMemory?.registeredWorkspaces).toBe(1);
+      // Sampling now covers every live child; it still is not process-tree
+      // observation, which `children`'s own docs spell out.
+      expect(runtimeMemory?.childRssCoverage).toBe('active_children');
+      expect(
+        runtimeMemory?.modeled.recommendedShareAtRegisteredMb,
+      ).toBeGreaterThan(0);
+
+      // Pressure, from a daemon that actually booted. Every other test for it
+      // calls the status builder directly, so nothing else would notice the
+      // reading failing to reach a live response.
+      const pressure = runtimeMemory?.pressure;
+      expect(pressure?.mode).toBe('observe');
+      // A real process against a real denominator: assert the invariants
+      // rather than a level, which depends on the host running the test.
+      expect(pressure?.rssBytes).toBeGreaterThan(0);
+      expect(pressure?.heapLimitBytes).toBeGreaterThan(0);
+      expect(pressure?.availableBytes).toBe(
+        (memory?.availableMemoryMb ?? 0) * 1024 * 1024,
+      );
+      expect(pressure?.ratio).toBe(
+        Math.max(pressure?.rssRatio ?? 0, pressure?.heapRatio ?? 0),
+      );
+      expect(pressure?.source).not.toBe('unknown');
+
+      // Aggregate child RSS. This test opens no SSE/WS stream, so the
+      // sampler's watch gate never fires and nothing is polled — assert the
+      // invariants that hold regardless rather than a non-zero sum, which
+      // only a streaming client would produce.
+      const children = runtimeMemory?.children;
+      expect(children?.sampled).toBeLessThanOrEqual(
+        runtimeMemory?.activeAcpChildren ?? 0,
+      );
+      // Nothing sampled must read as nothing summed and no age — never as a
+      // measured zero.
+      if (children?.sampled === 0) {
+        expect(children.rssBytes).toBe(0);
+        expect(children.oldestReadingAgeMs).toBeNull();
+      } else {
+        expect(children?.rssBytes).toBeGreaterThan(0);
+      }
+    } finally {
+      await handle.close();
+    }
+  }, 30_000);
+
+  it('rejects a budget below the documented minimum', async () => {
+    const dir = makeTmpDir();
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = dir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: dir,
+            maxSessions: 1,
+            memoryBudgetMb: 512,
+          },
+          {
+            bridge: {
+              spawnOrAttach: vi.fn(),
+              shutdown: vi.fn().mockResolvedValue(undefined),
+              killAllSync: vi.fn(),
+            } as unknown as HttpAcpBridge,
+          },
+        ),
+      ).rejects.toThrow(/memoryBudgetMb/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) process.env['QWEN_RUNTIME_DIR'] = origEnv;
+    }
+  });
+
+  it('writes a stderr line when the budget comes from the flag', async () => {
+    const dir = makeTmpDir();
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(stderrWrites.join('')).toContain('memory budget');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('writes no stderr line for a derived budget on a sufficient host', async () => {
+    // The gate must stay conditional: a derived budget on a host above the
+    // minimum prints nothing. If the gate were unconditional this test fails.
+    // Pin host memory so the test is independent of the runner's cgroup.
+    mockTotalMemBytes.value = 32_768 * 1024 * 1024;
+    const constrainedSpy = vi
+      .spyOn(
+        process as { constrainedMemory: () => number },
+        'constrainedMemory',
+      )
+      .mockReturnValue(0);
+    const dir = makeTmpDir();
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(stderrWrites.join('')).not.toContain('memory budget');
+    } finally {
+      spy.mockRestore();
+      constrainedSpy.mockRestore();
+      mockTotalMemBytes.value = undefined;
+      await handle.close();
+    }
+  });
+});
+
 describe('runQwenServe initializeTimeoutMs validation', () => {
   let tmpDir: string;
 
@@ -1999,6 +2756,8 @@ describe('runQwenServe initializeTimeoutMs validation', () => {
         await handle.runtimeReady;
         expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
           initializeTimeoutMs: 30_000,
+          // Below the restore default, so the restore budget holds at 60 s.
+          sessionRestoreTimeoutMs: 60_000,
         });
       } finally {
         await handle.close();
@@ -2522,6 +3281,58 @@ describe('runQwenServe pre-listen bridge option validation', () => {
         { bridge: makeRuntimeBridge() },
       ),
     ).rejects.toThrow(/Injected bridge dependencies/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+  });
+
+  it('rejects an unknown embedded external Tool Guard mode before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-opt-')),
+    );
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'ambient-secret';
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        externalToolGuard: {
+          mode: 'optional',
+        },
+      } as unknown as Parameters<typeof runQwenServe>[0]),
+    ).rejects.toThrow(/externalToolGuard/);
+    expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
+  });
+
+  it('rejects unsafe required provider configuration before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-guard-config-')),
+    );
+    const stdoutWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        externalToolGuard: {
+          mode: 'required',
+          endpoint: 'https://policy.example.com',
+          token: 'secret',
+        },
+      }),
+    ).rejects.toThrow(/loopback/);
     expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
   });
 });
@@ -4673,6 +5484,306 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('serves Web Shell document navigations during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // HEAD goes first so the cold deferred gate's pre-auth exemption is
+      // exercised for both methods the warm app serves pre-auth.
+      const headRes = await fetch(`${handle.url}/session/abc`, {
+        method: 'HEAD',
+        headers: { accept: 'text/html' },
+      });
+      expect(headRes.status).toBe(200);
+      expect(headRes.headers.get('content-type')).toContain('text/html');
+
+      // A browser refresh of a session deep link carries no bearer header and
+      // must load the shell (and start the runtime) instead of 401ing in the
+      // deferred gate.
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(200);
+      expect(navRes.headers.get('content-type')).toContain('text/html');
+      expect(await navRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves the Web Shell root during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, so the `/` exemption is exercised at
+      // the deferred gate itself — there is no warm-app path it could take.
+      const rootRes = await fetch(`${handle.url}/`);
+      expect(rootRes.status).toBe(200);
+      expect(rootRes.headers.get('content-type')).toContain('text/html');
+      expect(await rootRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves the // root alias during the deferred window like the warm app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-root-alias-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // Express non-strict routing matches a raw `//` against `app.get('/')`,
+      // so the warm app serves it pre-auth; the cold gate must exempt it too
+      // instead of 401ing.
+      const aliasRes = await fetch(`${handle.url}//`);
+      expect(aliasRes.status).toBe(200);
+      expect(aliasRes.headers.get('content-type')).toContain('text/html');
+      expect(await aliasRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('degrades to the bearer gate when the pre-auth predicate rejects', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-predicate-fail-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+    const predicateSpy = vi
+      .spyOn(webShellStatic, 'isPreAuthWebShellRequest')
+      .mockImplementation(() => {
+        throw new Error('predicate module glitch');
+      });
+
+    try {
+      // Without the fail-closed guard, a rejecting predicate 500s the whole
+      // deferred branch. A tokenless navigation must hit the bearer gate...
+      const anonRes = await fetch(`${handle.url}/`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(anonRes.status).toBe(401);
+
+      // ...and a correctly-tokened request must still get through.
+      const authedRes = await fetch(`${handle.url}/session/abc`, {
+        headers: {
+          accept: 'text/html',
+          authorization: 'Bearer secret-token',
+        },
+      });
+      expect(authedRes.status).toBe(200);
+      expect(authedRes.headers.get('content-type')).toContain('text/html');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      predicateSpy.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('serves Web Shell assets during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-')),
+    );
+    const shellDir = writeWebShellFixture(tmpDir);
+    fs.writeFileSync(
+      path.join(shellDir, 'assets', 'fixture.js'),
+      'console.log("fixture");',
+    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, so only the predicate's `/assets/`
+      // branch can exempt this from the bearer gate.
+      const assetRes = await fetch(`${handle.url}/assets/fixture.js`);
+      expect(assetRes.status).toBe(200);
+      expect(await assetRes.text()).toContain('console.log("fixture");');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers bare /assets during the deferred window like the warm app', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-assets-bare-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon. Express 5's `app.use('/assets', ...)`
+      // also matches the bare mount path pre-auth — the warm app answers 301
+      // to `/assets/` (then 404) — so the deferred gate must exempt it too
+      // instead of 401ing.
+      const bareRes = await fetch(`${handle.url}/assets`, {
+        redirect: 'manual',
+      });
+      expect(bareRes.status).toBe(301);
+      expect(bareRes.headers.get('location')).toBe('/assets/');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves trailing-slash and case-variant session deep links during the deferred window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-shapes-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // The warm app serves this shape pre-auth (Express matches routes
+      // case-insensitively and non-strictly by default), so the cold gate
+      // must exempt it too instead of 401ing the refresh.
+      const navRes = await fetch(`${handle.url}/Session/abc/`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(200);
+      expect(navRes.headers.get('content-type')).toContain('text/html');
+      expect(await navRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('serves query-carrying session deep links during the deferred window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-query-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      // First request to a cold daemon, with a query string (a real
+      // deep-link refresh shape). The predicate matches on `req.path`, which
+      // strips the query — pinning the gate against a mutation to `req.url`
+      // that would 401 the refresh.
+      const queryRes = await fetch(`${handle.url}/session/abc/?ref=1`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(queryRes.status).toBe(200);
+      expect(queryRes.headers.get('content-type')).toContain('text/html');
+      expect(await queryRes.text()).toContain('<div id="root">');
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).resolves.toBeUndefined();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps JSON and API-subpath requests gated during the deferred runtime window', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-gate-')),
+    );
+    writeWebShellFixture(tmpDir);
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir);
+
+    try {
+      const jsonRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'application/json' },
+      });
+      expect(jsonRes.status).toBe(401);
+
+      const apiRes = await fetch(`${handle.url}/session/abc/status`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(apiRes.status).toBe(401);
+
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps session document navigations gated during the deferred window with --no-web', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-noweb-')),
+    );
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      serveOptions: { serveWebShell: false },
+    });
+
+    try {
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(401);
+      expect(createBridge).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('answers pre-auth Web Shell navigations with the failure envelope when the deferred runtime fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-deferred-webshell-fail-')),
+    );
+    writeWebShellFixture(tmpDir);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      createBridge: () => {
+        throw new Error('runtime boom');
+      },
+    });
+
+    try {
+      // These paths are declared pre-auth, so on a startup failure they must
+      // report the real fault instead of the bootstrap bearer gate's 401.
+      const navRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'text/html' },
+      });
+      expect(navRes.status).toBe(503);
+      expect(await navRes.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+
+      const rootRes = await fetch(`${handle.url}/`);
+      expect(rootRes.status).toBe(503);
+      expect(await rootRes.json()).toEqual({
+        error: 'Daemon runtime failed to start',
+        code: 'daemon_runtime_failed',
+      });
+
+      // Non-exempted requests stay behind the bearer gate.
+      const jsonRes = await fetch(`${handle.url}/session/abc`, {
+        headers: { accept: 'application/json' },
+      });
+      expect(jsonRes.status).toBe(401);
+
+      expect(createBridge).toHaveBeenCalledTimes(1);
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('starts deferred runtime for webhook routes without bearer auth', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-webhook-start-')),
@@ -5966,6 +7077,7 @@ describe('runQwenServe runtime startup failures', () => {
         mode: 'http-bridge',
         workspace: tmpDir,
         maxSessions: 1,
+        sessionRestoreTimeoutMs: 90_000,
         serveWebShell: false,
       },
       { resolveOnListen: true, daemonLogBaseDir: blockedLogBaseDir },
@@ -6009,7 +7121,10 @@ describe('runQwenServe runtime startup failures', () => {
         workspaceCwd: boundWorkspace,
         transports: ['rest'],
         policy: { permission: 'first-responder' },
-        limits: { maxPendingPromptsPerSession: 5 },
+        limits: {
+          maxPendingPromptsPerSession: 5,
+          sessionRestoreTimeoutMs: 90_000,
+        },
       });
       expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
       expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
@@ -6102,6 +7217,7 @@ describe('runQwenServe runtime startup failures', () => {
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
           acpConnectionCap: null,
+          memory: expect.objectContaining({ enforced: false }),
         },
         capabilities: {
           protocolVersions: { current: 'v1', supported: ['v1'] },
@@ -6365,6 +7481,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
     } as unknown as HttpAcpBridge;
   }
 
@@ -6431,6 +7548,418 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
       extraArgs: ['--experimental-lsp'],
     });
+  });
+
+  // Regression for #8653: the daemon scrubs loader vars from its own
+  // process.env (session subprocesses run here in other workspaces' cwds)
+  // AND from the frozen base env the session-hosting children spawn with —
+  // a loader var reaching the ACP child runs during Node bootstrap, before
+  // the child's own post-boot scrub could remove it.
+  it('scrubs loader env vars from the daemon process and the session-child base env', async () => {
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousNodePath = process.env['NODE_PATH'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    process.env['NODE_PATH'] = '/other-checkout/node_modules';
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    const stderrWrites: string[] = [];
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    try {
+      const handle = await bootHandle({ serveWebShell: false });
+      try {
+        expect(process.env['NODE_OPTIONS']).toBeUndefined();
+        expect(process.env['NODE_PATH']).toBeUndefined();
+        // The scrub must leave a breadcrumb naming the removed keys so a
+        // subprocess missing an inherited var can be traced back to it.
+        expect(stderrWrites.join('')).toContain(
+          'scrubbed inherited loader env vars',
+        );
+        expect(stderrWrites.join('')).toContain('NODE_OPTIONS');
+        expect(stderrWrites.join('')).toContain('NODE_PATH');
+        const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+          'sourceEnv'
+        ] as NodeJS.ProcessEnv | undefined;
+        expect(sourceEnv?.['NODE_OPTIONS']).toBeUndefined();
+        expect(sourceEnv?.['NODE_PATH']).toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+      // runQwenServe is a documented embeddable entry point; close() must
+      // hand the host process its launch environment back.
+      expect(process.env['NODE_OPTIONS']).toBe(
+        '--import file:///other-checkout/register.mjs',
+      );
+      expect(process.env['NODE_PATH']).toBe('/other-checkout/node_modules');
+    } finally {
+      stderrWrite.mockRestore();
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousNodePath === undefined) {
+        delete process.env['NODE_PATH'];
+      } else {
+        process.env['NODE_PATH'] = previousNodePath;
+      }
+    }
+  });
+
+  // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
+  // carries the tsx loader: dev-mode ACP children and channel workers boot
+  // .ts entries and still need the loader, so only then does the frozen
+  // base env keep loader vars.
+  it('keeps loader vars in the session-child base env under the dev harness', async () => {
+    const previousDev = process.env['DEV'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    process.env['DEV'] = 'true';
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    try {
+      const handle = await bootHandle({ serveWebShell: false });
+      try {
+        const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+          'sourceEnv'
+        ] as NodeJS.ProcessEnv | undefined;
+        expect(sourceEnv?.['NODE_OPTIONS']).toBe(
+          '--import file:///other-checkout/register.mjs',
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousDev === undefined) {
+        delete process.env['DEV'];
+      } else {
+        process.env['DEV'] = previousDev;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
+  });
+
+  // DEV gates the scrub and must only come from the launch environment: a
+  // workspace .env carrying DEV=true cannot keep loader vars in the
+  // session-child base env (the #8653 vector by way of a spoofable gate).
+  it('scrubs loader vars even when a workspace .env sets DEV=true', async () => {
+    const previousDev = process.env['DEV'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['DEV'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    fs.writeFileSync(path.join(tmpDir, '.env'), 'DEV=true\n');
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    try {
+      loadServeFastPathEnvironment({}, tmpDir);
+      // The hardcoded exclusion keeps DEV out of process.env entirely —
+      // both from .env files and from settings.env.
+      expect(process.env['DEV']).toBeUndefined();
+      loadServeFastPathEnvironment({ env: { DEV: 'true' } }, tmpDir);
+      expect(process.env['DEV']).toBeUndefined();
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        const sourceEnv = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+          'sourceEnv'
+        ] as NodeJS.ProcessEnv | undefined;
+        expect(sourceEnv?.['NODE_OPTIONS']).toBeUndefined();
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousDev === undefined) {
+        delete process.env['DEV'];
+      } else {
+        process.env['DEV'] = previousDev;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
+  // Desktop/systemd-launched daemons rarely surface boot stderr, so the
+  // scrub breadcrumb is additionally persisted to the durable daemon log.
+  it('persists the loader env scrub decision in the daemon log', async () => {
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    // Point the daemon log at the temp workspace (mirrors the daemon logger
+    // wiring test) so the assertion reads a test-owned file.
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+        await vi.waitFor(
+          () => {
+            const content = fs.readFileSync(logPath, 'utf8');
+            expect(content).toContain('scrubbed inherited loader env vars');
+            expect(content).toContain('NODE_OPTIONS');
+          },
+          { timeout: 7_000, interval: 50 },
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
+  // The serve fast path rejects loader keys before initDaemonLogger exists,
+  // and warn-once dedupes any later daemon-side warning for the same
+  // file+key, so its rejections are persisted to the durable daemon log.
+  it('persists serve fast-path loader key rejections in the daemon log', async () => {
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    fs.writeFileSync(
+      path.join(tmpDir, '.env'),
+      'NODE_OPTIONS=--max-old-space-size=8192\n',
+    );
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      loadServeFastPathEnvironment({}, tmpDir);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+        await vi.waitFor(
+          () => {
+            const content = fs.readFileSync(logPath, 'utf8');
+            expect(content).toContain(
+              'rejected loader-affecting env keys during serve fast-path boot',
+            );
+            expect(content).toContain('NODE_OPTIONS');
+          },
+          { timeout: 7_000, interval: 50 },
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      stderrWrite.mockRestore();
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+    }
+  });
+
+  // Per-workspace .env loads keep running long after boot (skill status,
+  // settings reloads); boot stderr is gone by then, so fresh loader-key
+  // rejections must be mirrored into the durable daemon log.
+  it('persists post-boot loader key rejections in the daemon log', async () => {
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    delete process.env['NODE_OPTIONS'];
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, '.env'),
+          'NODE_OPTIONS=--max-old-space-size=8192\n',
+        );
+        loadEnvironment({}, tmpDir);
+        const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+        await vi.waitFor(
+          () => {
+            const content = fs.readFileSync(logPath, 'utf8');
+            expect(content).toContain(
+              'rejected loader-affecting env keys; they were not applied',
+            );
+            expect(content).toContain('NODE_OPTIONS');
+          },
+          { timeout: 7_000, interval: 50 },
+        );
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      stderrWrite.mockRestore();
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
+  });
+
+  // close() uninstalls the daemon-log reporter; a later env load in the
+  // same process must fall back to stderr instead of writing into the
+  // closed daemon log.
+  it('falls back to stderr for loader key rejections after close', async () => {
+    const previousQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    delete process.env['NODE_OPTIONS'];
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      await handle.close();
+
+      // The file appears only after close, so no earlier report could have
+      // seeded the warn-once dedup for this source.
+      fs.writeFileSync(
+        path.join(tmpDir, '.env'),
+        'NODE_OPTIONS=--max-old-space-size=8192\n',
+      );
+      const stderrWrites: string[] = [];
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((chunk) => {
+          stderrWrites.push(String(chunk));
+          return true;
+        });
+      try {
+        loadEnvironment({}, tmpDir);
+      } finally {
+        stderrWrite.mockRestore();
+      }
+
+      const warnings = stderrWrites.filter(
+        (chunk) =>
+          chunk.includes('cannot set loader-affecting env vars') &&
+          chunk.includes(tmpDir),
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('NODE_OPTIONS');
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    } finally {
+      if (previousQwenRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousQwenRuntimeDir;
+      }
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+    }
+  });
+
+  // runQwenServe is a documented embeddable entry point and startup can
+  // reject after the scrub (malformed deadline env, TLS mismatch,
+  // EADDRINUSE...). The close() restore is unreachable on that path, so the
+  // catch must hand the host its launch environment back.
+  it('restores the launch environment when startup fails after the scrub', async () => {
+    const previousNodeOptions = process.env['NODE_OPTIONS'];
+    const previousDeadline = process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'];
+    process.env['NODE_OPTIONS'] =
+      '--import file:///other-checkout/register.mjs';
+    process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = 'not-a-number';
+    try {
+      await expect(bootHandle({ serveWebShell: false })).rejects.toThrow(
+        /QWEN_SERVE_PROMPT_DEADLINE_MS/u,
+      );
+      expect(process.env['NODE_OPTIONS']).toBe(
+        '--import file:///other-checkout/register.mjs',
+      );
+    } finally {
+      if (previousNodeOptions === undefined) {
+        delete process.env['NODE_OPTIONS'];
+      } else {
+        process.env['NODE_OPTIONS'] = previousNodeOptions;
+      }
+      if (previousDeadline === undefined) {
+        delete process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'];
+      } else {
+        process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = previousDeadline;
+      }
+    }
   });
 
   it('wires the pipe message observer without changing existing pipe stats', async () => {
@@ -9114,6 +10643,40 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('does not retry EADDRINUSE in strict-port mode', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-strict-port-')),
+    );
+    const portsAttempted: number[] = [];
+    const listenError = new Error('address in use') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+      listen: vi.fn((port) => {
+        portsAttempted.push(port);
+        const srv = createServer();
+        setImmediate(() => srv.emit('error', listenError));
+        return srv;
+      }),
+    } as unknown as express.Application);
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          strictPort: true,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(portsAttempted).toEqual([4170]);
+  });
+
   it('does not retry on non-EADDRINUSE listen errors', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-port-no-retry-')),
@@ -9350,6 +10913,55 @@ describe('runQwenServe channel worker supervisor', () => {
 });
 
 describe('runQwenServe startup observability', () => {
+  it("names every pre-auth surface in the --allow-origin '*' warning", async () => {
+    // This warning is the operator's only notice of what a wildcard origin
+    // exposes without a token, so it must enumerate the actual pre-auth
+    // surface: the Web Shell static assets (mounted before bearerAuth in
+    // every mode) and, on loopback without --require-auth, /health. If the
+    // pre-auth set drifts again, this assertion is what catches the stale
+    // message.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-allow-origin-')),
+    );
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret',
+        allowOrigins: ['*'],
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      const warning = stderrWrites
+        .join('')
+        .split('\n')
+        .find((line) => line.includes('--allow-origin:'));
+      expect(warning).toBeDefined();
+      expect(warning).toContain('Web Shell static assets');
+      expect(warning).toContain('--no-web');
+      expect(warning).toContain('/health');
+      expect(warning).toContain('--require-auth');
+      // The retired debug page must not resurface in the enumeration.
+      expect(warning).not.toContain('/demo');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
+
   let tmpDir: string;
 
   afterEach(() => {
@@ -9371,6 +10983,7 @@ describe('runQwenServe startup observability', () => {
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
       getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
     } as unknown as HttpAcpBridge;
   }
 

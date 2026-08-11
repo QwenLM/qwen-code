@@ -14,6 +14,7 @@ import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { classifyHeavy } from './heavy.js';
 import type { DiffChunk, DiffPlan, PathKind } from './diff-plan.js';
 import { reviewBudget, type ReviewBudget } from './budget.js';
+import type { RepositoryContext } from './repository-context.js';
 
 export interface FileMetric {
   path: string;
@@ -96,6 +97,7 @@ export interface PlanReport {
    * roster's job, and the roster reads `effort`.
    */
   budget: ReviewBudget;
+  repositoryContext?: RepositoryContext;
 }
 
 /**

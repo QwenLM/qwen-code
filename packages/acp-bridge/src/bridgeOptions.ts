@@ -67,6 +67,27 @@ export type BridgeSessionLifecycle = (
 ) => void;
 
 /**
+ * Trusted child-to-daemon request made immediately before a tool executor.
+ * `sessionId` and `promptId` are revalidated by BridgeClient against its
+ * runtime-owned active entry before this reaches the host handler.
+ */
+export interface ExternalToolGuardPrepareRequest {
+  readonly sessionId: string;
+  readonly promptId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+}
+
+export type ExternalToolGuardPrepareResult =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly reason?: string };
+
+export type ExternalToolGuardHandler = (
+  request: ExternalToolGuardPrepareRequest,
+) => Promise<ExternalToolGuardPrepareResult>;
+
+/**
  * Optional injection seam for daemon-host-specific status cells —
  * `process.env` snapshots and the daemon-side preflight checks
  * (Node version, CLI entry path, ripgrep, git, npm, workspace dir).
@@ -174,6 +195,12 @@ export interface BridgeOptions {
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
   /**
+   * How long to wait for `session/load` and `session/resume`. Defaults to
+   * 60 seconds; an explicitly configured `initializeTimeoutMs` can raise it,
+   * but never lower it.
+   */
+  sessionRestoreTimeoutMs?: number;
+  /**
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
    * existing session (same workspace under `single` scope) are not
@@ -219,16 +246,19 @@ export interface BridgeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal (the current unfinished turn). When exceeded, the oldest
-   * journal entries are dropped. Defaults to 10 000. Must be a positive
-   * safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal
+   * (the current unfinished turn). Consecutive compatible text/thought chunks
+   * share bounded entries. When exceeded, the oldest journal entries are
+   * dropped. Defaults to 10 000. Must be a positive safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. When exceeded, the
-   * oldest journal entries are dropped (at least one entry is always kept).
-   * Defaults to 8 MiB. Must be a positive safe integer.
+   * Per-session source-event byte cap on the in-flight live journal (the
+   * current unfinished turn) — accounted from serialized source events even
+   * when compatible chunks share a replay entry. When exceeded, the oldest
+   * journal entries are dropped whole (at least one entry is always kept),
+   * so the retained tail can be much smaller than the cap. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
   /**
@@ -303,6 +333,14 @@ export interface BridgeOptions {
    */
   childEnvOverrides?: Readonly<Record<string, string | undefined>>;
   /**
+   * Optional managed-ACP tool guard. When present, the private ACP child may
+   * request one pre-execution decision through the authenticated channel.
+   * BridgeClient validates session ownership and the active prompt before
+   * invoking this handler. Omitted callers retain the existing behavior and
+   * the child-to-parent method is unavailable.
+   */
+  externalToolGuard?: ExternalToolGuardHandler;
+  /**
    * -- optional callback for persisting `tools.
    * approvalMode` to the workspace settings file. Invoked by
    * `setSessionApprovalMode` ONLY when the route caller passes
@@ -344,19 +382,23 @@ export interface BridgeOptions {
   telemetry?: BridgeTelemetry;
 
   /**
-   * Optional fs injection seam. When provided, `BridgeClient.readTextFile` and
-   * `BridgeClient.writeTextFile` delegate every ACP fs call to this
-   * implementation instead of using BridgeClient's inline
-   * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
+   * Whether ACP text reads are delegated to the client filesystem service.
+   * Defaults to true for generic ACP, IDE, remote, and virtual-filesystem
+   * compatibility. Same-host runtimes may set false so the child uses its
+   * regular CLI filesystem service for every `FileSystemService.readTextFile`
+   * consumer. Final ACP text writes remain delegated independently.
+   */
+  delegateReadTextFileToClient?: boolean;
+
+  /**
+   * Optional fs injection seam. When provided, the enabled
+   * `BridgeClient.readTextFile` / `BridgeClient.writeTextFile` callbacks
+   * delegate ACP fs calls to this implementation instead of using
+   * BridgeClient's inline `fs.realpath` / `fs.writeFile` / `fs.readFile`
+   * proxy.
    *
-   * The immediate F1 follow-up will land a serve-side adapter that
-   * wraps its `WorkspaceFileSystem` and a `runQwenServe` wiring
-   * patch so production `qwen serve` writes pick up its TOCTOU +
-   * symlink-substitution + trust-gate + `.gitignore` + audit
-   * machinery — closing the follow-up thread about
-   * `BridgeClient`'s inline fs proxy bypassing `WorkspaceFileSystem`
-   * (originally raised in code review). Until that lands, BridgeClient's inline
-   * proxy continues to handle writes (current behavior preserved).
+   * Production `qwen serve` injects a `WorkspaceFileSystem` adapter for final
+   * text writes and for defensive handling of unexpected delegated reads.
    *
    * When omitted (tests, Mode A in-process consumers, channels /
    * IDE companion using the bridge directly), BridgeClient's inline
@@ -537,6 +579,54 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
+
+export interface LiveScreenContextCaptureInfo {
+  callerSessionId: string;
+}
+
+export interface LiveScreenContextCaptureResult {
+  appName: string;
+  windowTitle?: string;
+  accessibilityText: string;
+  screenshotPath: string;
+}
+
+export type LiveScreenContextCaptureHandler = (
+  info: LiveScreenContextCaptureInfo,
+) => Promise<LiveScreenContextCaptureResult>;
+
+export const LIVE_TASK_TOOL_NAMES = [
+  'list_threads',
+  'read_thread',
+  'wait_threads',
+  'send_message_to_thread',
+  'create_thread',
+] as const;
+
+export type LiveTaskToolName = (typeof LIVE_TASK_TOOL_NAMES)[number];
+
+export interface LiveTaskToolRequestInfo {
+  callerSessionId: string;
+  name: LiveTaskToolName;
+  arguments: Record<string, unknown>;
+}
+
+export type LiveTaskToolRequestHandler = (
+  info: LiveTaskToolRequestInfo,
+) => Promise<Record<string, unknown>>;
+
+export const MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS = 32_000;
+
+export interface LiveSpeakToUserInfo {
+  callerSessionId: string;
+  message: string;
+}
+
+export type LiveSpeakToUserHandler = (
+  info: LiveSpeakToUserInfo,
+) => Promise<void>;
 
 // Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
 // sdk-typescript events.ts carries an independent copy with a cross-check test.

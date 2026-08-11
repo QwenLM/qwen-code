@@ -15,7 +15,11 @@ import {
   type RefObject,
 } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
-import { isHistoryItemVisibleAfterRestore, StreamingState } from '../types.js';
+import {
+  isHistoryItemVisibleAfterRestore,
+  StreamingState,
+  ToolCallStatus,
+} from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -350,16 +354,26 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     activePtyId: uiState.activePtyId,
     embeddedShellFocused: uiState.embeddedShellFocused,
     isEditorDialogOpen: uiState.isEditorDialogOpen,
-    constrainHeight: uiState.constrainHeight,
-    availableTerminalHeight,
   });
   pendingStateRef.current = {
     activePtyId: uiState.activePtyId,
     embeddedShellFocused: uiState.embeddedShellFocused,
     isEditorDialogOpen: uiState.isEditorDialogOpen,
-    constrainHeight: uiState.constrainHeight,
-    availableTerminalHeight,
   };
+  const pendingAvailableTerminalHeight =
+    pendingHistoryItems.length > 0 && uiState.constrainHeight
+      ? availableTerminalHeight
+      : undefined;
+  const hasPendingPlainTextConfirmation = pendingHistoryItems.some(
+    (item) =>
+      item.type === 'tool_group' &&
+      item.tools.some(
+        (tool) =>
+          tool.status === ToolCallStatus.Confirming &&
+          tool.confirmationDetails?.type === 'info' &&
+          tool.confirmationDetails.renderPromptAsPlainText === true,
+      ),
+  );
   const pendingSourceCopyOffsetsRef = useRef(pendingSourceCopyOffsetsByIndex);
   pendingSourceCopyOffsetsRef.current = pendingSourceCopyOffsetsByIndex;
 
@@ -389,9 +403,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           <VirtualHistoryItem
             terminalWidth={terminalWidth}
             mainAreaWidth={mainAreaWidth}
-            availableTerminalHeight={
-              ps.constrainHeight ? ps.availableTerminalHeight : undefined
-            }
+            availableTerminalHeight={pendingAvailableTerminalHeight}
             item={{ ...item, id: 0 }}
             isPending={true}
             isFocused={!ps.isEditorDialogOpen}
@@ -426,6 +438,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       uiState.slashCommands,
       sourceCopyOffsetsByHistoryItem,
       fullDetail,
+      pendingAvailableTerminalHeight,
     ],
   );
 
@@ -449,6 +462,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           }
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
+          measureAtFullHeight={hasPendingPlainTextConfirmation}
           showScrollbar={showScrollbar}
         />
         <TextSelectionController

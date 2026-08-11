@@ -25,6 +25,7 @@ import {
   type ResumedSessionData,
   type LspClient,
   type ToolName,
+  type ToolInvocationGuard,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
@@ -44,6 +45,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
+import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
@@ -70,19 +72,9 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
+import { isValidSessionId } from './session-id.js';
 
-// UUID v4 regex pattern for validation
-const SESSION_ID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
-
-/**
- * Validates if a string is a valid session ID format.
- * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
- * (used by Arena to give each agent a deterministic session ID).
- */
-export function isValidSessionId(value: string): boolean {
-  return SESSION_ID_REGEX.test(value);
-}
+export { isValidSessionId } from './session-id.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
@@ -748,8 +740,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('channel', {
           type: 'string',
-          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'],
-          description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'],
+          description:
+            'Channel identifier (VSCode, ACP, SDK, CI, desktop, daemon)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -1171,9 +1164,12 @@ export async function parseArguments(): Promise<CliArgs> {
     }
   }
 
-  // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
+  // Apply ACP fallback: if acp or experimental-acp is present but no explicit
+  // --channel, attribute the launch — daemon-spawned children carry the serve
+  // marker, the Tauri desktop shell additionally sets QWEN_CODE_DESKTOP.
   if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
-    (result as Record<string, unknown>)['channel'] = 'ACP';
+    (result as Record<string, unknown>)['channel'] =
+      resolveAcpChannelFallback();
   }
 
   return result as unknown as CliArgs;
@@ -1554,6 +1550,14 @@ export async function loadCliConfig(
    * single request rather than terminating the shared child process.
    */
   throwOnSessionIdConflict = false,
+  /**
+   * Runtime-only host policy. This is deliberately not sourced from argv,
+   * settings, or the environment: only an embedding host that owns the Config
+   * construction may install the executor-boundary callback.
+   */
+  hostPolicy?: {
+    toolInvocationGuard?: ToolInvocationGuard;
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -2141,6 +2145,7 @@ export async function loadCliConfig(
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
+    toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
@@ -2336,6 +2341,7 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
+    memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),

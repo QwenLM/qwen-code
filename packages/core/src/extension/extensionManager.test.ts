@@ -44,6 +44,7 @@ const mockGit = {
 };
 const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
 const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
+const mockDownloadFromNpmRegistry = vi.hoisted(() => vi.fn());
 
 vi.mock('simple-git', () => ({
   CheckRepoActions: { IS_REPO_ROOT: 'is-repo-root' },
@@ -62,6 +63,14 @@ vi.mock('./github.js', async (importOriginal) => {
       .fn()
       .mockRejectedValue(new Error('Mocked GitHub release download failure')),
     extractArchiveFile: mockExtractArchiveFile,
+  };
+});
+
+vi.mock('./npm.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./npm.js')>();
+  return {
+    ...actual,
+    downloadFromNpmRegistry: mockDownloadFromNpmRegistry,
   };
 });
 
@@ -153,6 +162,8 @@ describe('extension tests', () => {
     Object.values(mockGit).forEach((fn) => fn.mockReset());
     mockDownloadFromArchiveUrl.mockReset();
     mockExtractArchiveFile.mockReset();
+    mockDownloadFromNpmRegistry.mockReset();
+    mockGit.revparse.mockResolvedValue('sample-commit');
   });
 
   afterEach(() => {
@@ -184,6 +195,20 @@ describe('extension tests', () => {
       fs.writeFileSync(
         path.join(destination, EXTENSIONS_CONFIG_FILENAME),
         JSON.stringify({ name, version: '1.0.0' }),
+      );
+    }
+
+    function writeQoderPlugin(destination: string) {
+      fs.mkdirSync(path.join(destination, '.qoder-plugin'), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(destination, '.qoder-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'sample-qoder-plugin', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(destination, 'system-prompt.md'),
+        '# System context',
       );
     }
 
@@ -285,6 +310,57 @@ describe('extension tests', () => {
         { id: 1, phase: 'start', operation: 'installExtension' },
         { id: 1, phase: 'end', operation: 'installExtension' },
       ]);
+    });
+
+    it('reads an uploaded archive from a local path without persisting that path', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          writeExtractedExtension(destination, 'uploaded-extension');
+        },
+      );
+      const manager = createExtensionManager();
+
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: 'upload:uploaded.zip' },
+        localSourcePath: archivePath,
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+      });
+
+      expect(mockExtractArchiveFile).toHaveBeenLastCalledWith(
+        archivePath,
+        expect.any(String),
+        undefined,
+      );
+      expect(prepared.installMetadata.source).toBe('upload:uploaded.zip');
+
+      await manager.commitPreparedExtension(prepared);
+      const metadata = manager.loadInstallMetadata(
+        path.join(userExtensionsDir, 'uploaded-extension'),
+      );
+      expect(metadata?.source).toBe('upload:uploaded.zip');
+      await manager.disposePreparedExtension(prepared);
+      expect(fs.existsSync(archivePath)).toBe(true);
+    });
+
+    it('rejects a local source path for non-local installs', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'uploaded.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      const manager = createExtensionManager();
+
+      await expect(
+        manager.prepareExtensionInstall({
+          installMetadata: {
+            type: 'git',
+            source: 'https://example.com/extension.git',
+          },
+          localSourcePath: archivePath,
+          initialActivation: { scope: 'user' },
+          requestConsent: async () => {},
+        }),
+      ).rejects.toThrow('A local source path requires a local install.');
     });
 
     it('signals the durable commit before runtime refresh completes', async () => {
@@ -674,6 +750,355 @@ describe('extension tests', () => {
         source: archivePath,
         type: 'local',
       });
+    });
+
+    it('should install a Qoder plugin with skills and system context', async () => {
+      const sourcePath = path.join(tempWorkspaceDir, 'sample-qoder-plugin');
+      fs.mkdirSync(path.join(sourcePath, '.qoder-plugin'), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(sourcePath, '.qoder-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'sample-qoder-plugin', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(sourcePath, 'system-prompt.md'),
+        '# System context',
+      );
+      const skillPath = path.join(sourcePath, 'skills', 'sample-skill');
+      fs.mkdirSync(skillPath, { recursive: true });
+      fs.writeFileSync(
+        path.join(skillPath, 'SKILL.md'),
+        '---\nname: sample-skill\ndescription: Synthetic skill\n---\n',
+      );
+      const commandsPath = path.join(sourcePath, 'commands');
+      fs.mkdirSync(commandsPath, { recursive: true });
+      fs.writeFileSync(
+        path.join(commandsPath, 'sample.md'),
+        '# Command\n${CLAUDE_PLUGIN_ROOT}/scripts/run.sh',
+      );
+      const hooksPath = path.join(sourcePath, 'hooks');
+      fs.mkdirSync(hooksPath, { recursive: true });
+      fs.writeFileSync(path.join(hooksPath, 'hooks.json'), '{}');
+      const requestConsent = vi.fn(async () => {});
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        { source: sourcePath, type: 'local' },
+        requestConsent,
+      );
+
+      expect(extension.installMetadata).toMatchObject({
+        source: sourcePath,
+        type: 'local',
+        originSource: 'Qoder',
+      });
+      expect(extension.contextFiles).toEqual([
+        path.join(extension.path, 'system-prompt.md'),
+      ]);
+      expect(extension.skills?.map((skill) => skill.name)).toEqual([
+        'sample-skill',
+      ]);
+      expect(
+        fs.readFileSync(
+          path.join(extension.path, 'commands', 'sample.md'),
+          'utf-8',
+        ),
+      ).toContain(`${extension.path}/scripts/run.sh`);
+      expect(requestConsent).toHaveBeenCalledWith(
+        expect.objectContaining({ originSource: 'Qoder' }),
+      );
+    });
+
+    it.each([
+      {
+        type: 'local' as const,
+        source: 'sample-qoder-plugin.zip',
+      },
+      {
+        type: 'archive-url' as const,
+        source: 'https://example.com/sample-qoder-plugin.zip',
+      },
+      {
+        type: 'npm' as const,
+        source: '@example/sample-qoder-plugin',
+      },
+    ])('should install a Qoder plugin from $type', async (installMetadata) => {
+      const resolvedInstallMetadata =
+        installMetadata.type === 'local'
+          ? {
+              ...installMetadata,
+              source: path.join(tempWorkspaceDir, installMetadata.source),
+            }
+          : installMetadata;
+      if (resolvedInstallMetadata.type === 'local') {
+        fs.writeFileSync(resolvedInstallMetadata.source, 'synthetic archive');
+        mockExtractArchiveFile.mockImplementation(
+          async (_source: string, destination: string) => {
+            writeQoderPlugin(destination);
+          },
+        );
+      } else if (installMetadata.type === 'archive-url') {
+        mockDownloadFromArchiveUrl.mockImplementation(
+          async (_metadata: ExtensionInstallMetadata, destination: string) => {
+            writeQoderPlugin(destination);
+          },
+        );
+      } else {
+        mockDownloadFromNpmRegistry.mockImplementation(
+          async (_metadata: ExtensionInstallMetadata, destination: string) => {
+            writeQoderPlugin(destination);
+            return { version: '1.0.0', type: 'npm' };
+          },
+        );
+      }
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        resolvedInstallMetadata,
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-qoder-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Qoder');
+      expect(extension.contextFiles).toEqual([
+        path.join(extension.path, 'system-prompt.md'),
+      ]);
+    });
+
+    it('should install a Qoder plugin from Git', async () => {
+      mockGit.clone.mockImplementation(async () => {
+        writeQoderPlugin(mockGit.path());
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-qoder-plugin' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-qoder-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-qoder-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Qoder');
+      expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
+    });
+
+    it('should retain the recorded commit for a converted Claude Git plugin', async () => {
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(sourcePath, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'sample-claude-plugin', version: '1.0.0' }),
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-claude-plugin' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-claude-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.installMetadata?.originSource).toBe('Claude');
+      expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
+    });
+
+    it('should retain the recorded commit when a marketplace plugin lives in the marketplace repo', async () => {
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(sourcePath, '.claude-plugin', 'marketplace.json'),
+          JSON.stringify({
+            name: 'sample-marketplace',
+            owner: { name: 'Example', email: 'example@example.com' },
+            plugins: [
+              { name: 'sample-plugin', source: './plugins/sample-plugin' },
+            ],
+          }),
+        );
+        const pluginConfigDir = path.join(
+          sourcePath,
+          'plugins',
+          'sample-plugin',
+          '.claude-plugin',
+        );
+        fs.mkdirSync(pluginConfigDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(pluginConfigDir, 'plugin.json'),
+          JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-marketplace' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-marketplace',
+          pluginName: 'sample-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Claude');
+      expect(extension.installMetadata?.gitCommit).toBe('sample-commit');
+      expect(extension.installMetadata?.externalContent).toBe(false);
+    });
+
+    it('should drop the recorded commit when a marketplace plugin resolves from an external source', async () => {
+      let cloneCalls = 0;
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        cloneCalls += 1;
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        if (cloneCalls === 1) {
+          fs.writeFileSync(
+            path.join(sourcePath, '.claude-plugin', 'marketplace.json'),
+            JSON.stringify({
+              name: 'sample-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [
+                {
+                  name: 'sample-plugin',
+                  source: { source: 'github', repo: 'example/nested-plugin' },
+                },
+              ],
+            }),
+          );
+        } else {
+          fs.writeFileSync(
+            path.join(sourcePath, '.claude-plugin', 'plugin.json'),
+            JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
+          );
+        }
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/sample-marketplace' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-marketplace',
+          pluginName: 'sample-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.name).toBe('sample-plugin');
+      expect(extension.installMetadata?.originSource).toBe('Claude');
+      expect(extension.installMetadata?.gitCommit).toBeUndefined();
+      expect(extension.installMetadata?.externalContent).toBe(true);
+    });
+
+    it('should mark external marketplace content downloaded from a GitHub release as not independently updatable', async () => {
+      const { downloadFromGitHubRelease } = await import('./github.js');
+      vi.mocked(downloadFromGitHubRelease).mockImplementationOnce(
+        async (_metadata, destination) => {
+          fs.mkdirSync(path.join(destination, '.claude-plugin'), {
+            recursive: true,
+          });
+          fs.writeFileSync(
+            path.join(destination, '.claude-plugin', 'marketplace.json'),
+            JSON.stringify({
+              name: 'sample-marketplace',
+              owner: { name: 'Example', email: 'example@example.com' },
+              plugins: [
+                {
+                  name: 'sample-plugin',
+                  source: { source: 'github', repo: 'example/nested-plugin' },
+                },
+              ],
+            }),
+          );
+          return { type: 'github-release', tagName: 'v1.0.0' };
+        },
+      );
+      mockGit.clone.mockImplementation(async () => {
+        const sourcePath = mockGit.path();
+        fs.mkdirSync(path.join(sourcePath, '.claude-plugin'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(sourcePath, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'sample-plugin', version: '1.0.0' }),
+        );
+      });
+      mockGit.getRemotes.mockResolvedValue([
+        {
+          name: 'origin',
+          refs: { fetch: 'https://github.com/example/nested-plugin' },
+        },
+      ]);
+      mockGit.fetch.mockResolvedValue(undefined);
+      mockGit.checkout.mockResolvedValue(undefined);
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extension = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/sample-marketplace',
+          pluginName: 'sample-plugin',
+        },
+        async () => {},
+      );
+
+      expect(extension.installMetadata).toMatchObject({
+        type: 'github-release',
+        releaseTag: 'v1.0.0',
+        originSource: 'Claude',
+        externalContent: true,
+      });
+      expect(extension.installMetadata?.gitCommit).toBeUndefined();
     });
 
     it('should emit mutation lifecycle events around install', async () => {
@@ -1185,10 +1610,24 @@ describe('extension tests', () => {
 
       // Triggered by the enablement file moving, so the first refresh does not
       // observe ext-b.
-      fs.writeFileSync(
-        path.join(userExtensionsDir, 'extension-enablement.json'),
-        JSON.stringify({ touched: true }),
+      //
+      // Its mtime is pushed a second into the past on purpose. Hand-writing
+      // this file is how the test simulates "something outside the store
+      // changed the legacy projection", and that is precisely the condition
+      // `ExtensionStore` fails closed on when the two timestamps cannot be
+      // ordered. Left at `now`, the write lands in the same tick as the
+      // store's own often enough to trip that guard: measured, 3 failures in 6
+      // runs here and on unrelated branches, blocking CI on PRs that never
+      // touch extensions. An explicitly older projection is orderable, which
+      // is what this test needs and all it needs — the guard itself is doing
+      // its job and is left alone.
+      const enablementFile = path.join(
+        userExtensionsDir,
+        'extension-enablement.json',
       );
+      fs.writeFileSync(enablementFile, JSON.stringify({ touched: true }));
+      const older = new Date(Date.now() - 1_000);
+      fs.utimesSync(enablementFile, older, older);
       expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
       expect(manager.getLoadedExtensions()).toHaveLength(1);
 
@@ -2902,6 +3341,20 @@ describe('extension tests', () => {
         const metadata = { type: 'local' as const, source: '/path/to/ext' };
         const id = getExtensionId(config, metadata);
         expect(id).toBe(hashValue('/path/to/ext'));
+      });
+
+      it('gives same-named uploads distinct ids', () => {
+        const config: ExtensionConfig = { name: 'test-ext', version: '1.0.0' };
+        const first = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:first:extension.zip',
+        });
+        const second = getExtensionId(config, {
+          type: 'local',
+          source: 'upload:v1:second:extension.zip',
+        });
+
+        expect(first).not.toBe(second);
       });
 
       it('should use GitHub URL for git install', () => {

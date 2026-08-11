@@ -26,13 +26,25 @@ import {
   normalizeDaemonEvent,
   type CreateSessionRequest,
   type DaemonEvent,
+  type DaemonSseConnectReason,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
+import {
+  createDaemonSessionActions,
+  getPromptSettledKey,
+  resolveSessionRestoreTimeouts,
+} from './actions.js';
+import {
+  eventPromptId,
+  findLiveJournalRepairSuffix,
+  findLiveJournalRepairTarget,
+  type LiveJournalRepairSuffix,
+  type LiveJournalRepairTarget,
+} from './live-journal-repair.js';
 import {
   detachDaemonClient,
   getStableClientId,
@@ -121,7 +133,27 @@ export interface DaemonTranscriptHistory {
   loading: boolean;
   capacityReached: boolean;
   paginationError: boolean;
-  loadMore(): Promise<void>;
+  loadMore(options?: { force?: boolean }): Promise<void>;
+}
+
+interface LiveJournalRepairEpisode {
+  sessionId: string;
+  target: LiveJournalRepairTarget;
+  checkpoint: DaemonTranscriptState;
+  markerBlockId?: string;
+  observedSnapshotEventIds: ReadonlySet<number>;
+  snapshotLastEventId: number;
+  lastObservedEventId: number;
+  terminalSeen: boolean;
+  attempted: boolean;
+  controller?: AbortController;
+}
+
+interface TranscriptHistoryMaterialization {
+  blocks: readonly DaemonTranscriptBlock[];
+  nextOrdinal: number;
+  toolBlockByCallId: Record<string, string>;
+  permissionBlockByRequestId: Record<string, string>;
 }
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
@@ -179,12 +211,19 @@ function hasFullTranscriptBeforeReplay(event: DaemonEvent): boolean {
   );
 }
 
-function prependTranscriptHistory(
-  store: DaemonTranscriptStore,
+function isHistoricalReplayMarker(event: DaemonEvent): boolean {
+  return (
+    hasFullTranscriptBeforeReplay(event) &&
+    isRecord(event.data) &&
+    event.data['scope'] === undefined
+  );
+}
+
+function materializeTranscriptHistory(
+  current: DaemonTranscriptState,
   events: DaemonUiEvent[],
   maxBlocks: number,
-): boolean {
-  const current = store.getSnapshot();
+): TranscriptHistoryMaterialization | undefined {
   // Drop fetched events whose source records are already displayed.
   // `beforeRecordId` pagination is exclusive of the anchor but the anchor
   // can sit inside the retained window (e.g. the daemon's transcript
@@ -214,9 +253,21 @@ function prependTranscriptHistory(
   historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
   if (history.blocks.length + current.blocks.length > maxBlocks) {
-    return false;
+    return undefined;
   }
-  store.reset({
+  return {
+    blocks: history.blocks,
+    nextOrdinal: history.nextOrdinal,
+    toolBlockByCallId: history.toolBlockByCallId,
+    permissionBlockByRequestId: history.permissionBlockByRequestId,
+  };
+}
+
+function applyTranscriptHistory(
+  current: DaemonTranscriptState,
+  history: TranscriptHistoryMaterialization,
+): DaemonTranscriptState {
+  return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
     nextOrdinal: history.nextOrdinal,
@@ -228,8 +279,7 @@ function prependTranscriptHistory(
       ...history.permissionBlockByRequestId,
       ...current.permissionBlockByRequestId,
     },
-  });
-  return true;
+  };
 }
 
 function boundedString(value: unknown, maxLength: number): string | undefined {
@@ -394,7 +444,7 @@ const TERMINAL_SESSION_HTTP_STATUSES = new Set([
 ]);
 
 interface HeartbeatFailureState {
-  sessionId?: string;
+  session?: DaemonSessionClient;
   consecutiveFailures: number;
   lastHttpError?: { status: number; message: string };
 }
@@ -513,6 +563,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     undefined,
   );
   const pendingSessionLoadIdRef = useRef(0);
+  const liveJournalRepairRef = useRef<LiveJournalRepairEpisode | undefined>(
+    undefined,
+  );
+  const repairReloadRef = useRef<
+    DaemonSessionActions['reloadSession'] | undefined
+  >(undefined);
+  const tryLiveJournalRepairRef = useRef<(() => void) | undefined>(undefined);
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
@@ -521,9 +578,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     consecutiveFailures: 0,
   });
   const manualSessionClearRef = useRef(false);
-  const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
-    undefined,
-  );
+  const skipNextCleanupDetachSessionRef = useRef<
+    DaemonSessionClient | undefined
+  >(undefined);
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
@@ -608,6 +665,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      liveJournalRepairRef.current?.controller?.abort();
+      liveJournalRepairRef.current = undefined;
+      tryLiveJournalRepairRef.current = undefined;
     };
   }, []);
 
@@ -627,7 +687,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreMode === 'load' &&
       restoreSessionId !== undefined &&
       restoreSessionId === sessionRef.current?.sessionId &&
-      restoreSessionId === skipNextCleanupDetachSessionIdRef.current;
+      sessionRef.current === skipNextCleanupDetachSessionRef.current;
+    const effectPendingSessionLoad = pendingSessionLoadRef.current;
+    let runnerSession = sessionRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
     // The live SSE loop dispatches transcript events through this batcher
@@ -646,9 +708,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // streaming stays at ~one dispatch per network chunk.
     let pendingTranscriptEvents: DaemonUiEvent[] = [];
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
-    const runTranscriptFlush = () => {
+    const runTranscriptFlush = (force = false) => {
       transcriptFlushTimer = undefined;
       if (pendingTranscriptEvents.length === 0) return;
+      if (
+        !force &&
+        runnerSession !== undefined &&
+        sessionRef.current !== runnerSession
+      ) {
+        pendingTranscriptEvents = [];
+        return;
+      }
       const batch = pendingTranscriptEvents;
       pendingTranscriptEvents = [];
       // Swallow a reducer throw (log it) so it cannot escape as an uncaught
@@ -680,7 +750,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // buffered content stays correctly ordered ahead of it.
     const flushTranscriptSync = () => {
       cancelTranscriptFlush();
-      runTranscriptFlush();
+      runTranscriptFlush(true);
     };
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
@@ -692,6 +762,45 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       cancelTranscriptFlush();
       pendingTranscriptEvents = [];
     };
+    const tryLiveJournalRepair = () => {
+      if (disposed || abort.signal.aborted) return;
+      const repair = liveJournalRepairRef.current;
+      if (
+        !repair ||
+        repair.attempted ||
+        !repair.terminalSeen ||
+        pendingSessionLoadRef.current ||
+        transcriptHistoryRef.current.loading ||
+        sessionRef.current?.sessionId !== repair.sessionId ||
+        hasCurrentSessionActivePromptRef.current()
+      ) {
+        return;
+      }
+      const reload = repairReloadRef.current;
+      if (!reload) return;
+      repair.attempted = true;
+      const controller = new AbortController();
+      repair.controller = controller;
+      void reload(controller.signal, { replaySource: 'memory' }).catch(
+        (error: unknown) => {
+          if (liveJournalRepairRef.current !== repair) return;
+          addNotice({
+            id: `daemon.live_journal_repair.failed:${repair.target.signature}`,
+            severity: 'warning',
+            category: 'connection',
+            operation: 'load_session',
+            code: 'daemon.live_journal_repair.failed',
+            message:
+              'Could not restore the complete turn. The retained replay remains visible.',
+            debugMessage:
+              error instanceof Error ? error.message : String(error),
+            recoverable: true,
+          });
+          liveJournalRepairRef.current = undefined;
+        },
+      );
+    };
+    tryLiveJournalRepairRef.current = tryLiveJournalRepair;
 
     const run = async () => {
       const client =
@@ -702,8 +811,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         | Awaited<ReturnType<DaemonClient['capabilities']>>
         | undefined;
       let reconnectSessionId = restoreSessionId;
-      let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
+      let shouldCreateFreshSession =
+        !manualSessionClearRef.current &&
+        !restoreSessionId &&
+        newSessionNonce > 0;
       let reconnectAttempt = 0;
+      let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
       let hasCurrentSessionActivePrompt = () => false;
       // Set when the user explicitly deletes the session (server
@@ -765,6 +878,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // usage may be older than the in-memory count.
           let replayTokenUsage: DaemonConnectionState['tokenUsage'];
           let replayTokenCount: number | undefined;
+          let repairingEpisode: LiveJournalRepairEpisode | undefined;
+          let repairSuffix: LiveJournalRepairSuffix | undefined;
           if (!session) {
             const existingSession = sessionRef.current;
             if (
@@ -972,14 +1087,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               pendingSessionLoadRef.current?.sessionId === targetSessionId
                 ? pendingSessionLoadRef.current
                 : undefined;
+            const restoreRequestTimeoutMs =
+              attemptedLoad?.requestTimeoutMs ??
+              resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
                   restoreSessionId,
                   {
                     workspaceCwd: effectWorkspaceCwd,
+                    timeoutMs: restoreRequestTimeoutMs,
                     ...(historyPaginationSupported &&
                     restoreMode === 'load' &&
+                    attemptedLoad?.replaySource !== 'memory' &&
                     historyPageSizeRef.current !== undefined
                       ? { historyPageSize: historyPageSizeRef.current }
                       : {}),
@@ -992,6 +1112,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     reconnectSessionId,
                     {
                       workspaceCwd: effectWorkspaceCwd,
+                      timeoutMs: restoreRequestTimeoutMs,
                       ...(historyPaginationSupported &&
                       historyPageSizeRef.current !== undefined
                         ? { historyPageSize: historyPageSizeRef.current }
@@ -1053,16 +1174,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               if (pendingSessionLoadRef.current === attemptedLoad) {
                 pendingSessionLoadRef.current = undefined;
-                clearTimeout(attemptedLoad.timeout);
+                if (attemptedLoad.timeout !== undefined) {
+                  clearTimeout(attemptedLoad.timeout);
+                }
                 attemptedLoad.reject(
                   new DOMException('Session load cancelled', 'AbortError'),
                 );
               }
-              if (
-                skipNextCleanupDetachSessionIdRef.current ===
-                nextSession.sessionId
-              ) {
-                skipNextCleanupDetachSessionIdRef.current = undefined;
+              if (skipNextCleanupDetachSessionRef.current === previousSession) {
+                skipNextCleanupDetachSessionRef.current = undefined;
               }
               loadingRequestedSession = false;
               if (previousSession?.sessionId === nextSession.sessionId) {
@@ -1073,6 +1193,63 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 continue;
               }
               return;
+            }
+            if (attemptedLoad?.replaySource === 'memory') {
+              const episode = liveJournalRepairRef.current;
+              const freshReplayEvents = [
+                ...nextSession.replaySnapshot.compactedReplay,
+                ...nextSession.replaySnapshot.liveJournal,
+              ];
+              const suffix = episode
+                ? findLiveJournalRepairSuffix(
+                    freshReplayEvents,
+                    episode.target.promptId,
+                  )
+                : undefined;
+              if (
+                !episode ||
+                episode.sessionId !== nextSession.sessionId ||
+                nextSession.replayDegraded === true ||
+                !suffix
+              ) {
+                const previousSession = sessionRef.current;
+                if (nextSession !== previousSession) {
+                  await nextSession.detach().catch((error: unknown) => {
+                    console.warn(
+                      '[DaemonSessionProvider] detach rejected repair load failed:',
+                      error,
+                    );
+                  });
+                }
+                if (pendingSessionLoadRef.current === attemptedLoad) {
+                  pendingSessionLoadRef.current = undefined;
+                  if (attemptedLoad.timeout !== undefined) {
+                    clearTimeout(attemptedLoad.timeout);
+                  }
+                  attemptedLoad.reject(
+                    new Error(
+                      nextSession.replayDegraded === true
+                        ? 'Fresh replay is degraded'
+                        : 'Fresh replay does not contain the complete target turn',
+                    ),
+                  );
+                }
+                if (
+                  skipNextCleanupDetachSessionRef.current === previousSession
+                ) {
+                  skipNextCleanupDetachSessionRef.current = undefined;
+                }
+                if (previousSession?.sessionId === nextSession.sessionId) {
+                  session = previousSession;
+                  reconnectSessionId = previousSession.sessionId;
+                  reconnectAttempt = 0;
+                  skipMetadataRefresh = true;
+                  continue;
+                }
+                return;
+              }
+              repairingEpisode = episode;
+              repairSuffix = suffix;
             }
             const previousSessionId = lastSessionIdRef.current;
             if (previousSessionId !== nextSession.sessionId) {
@@ -1129,6 +1306,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
 
           const activeSession = session;
+          runnerSession = activeSession;
           // Prompt activity is session state returned by /load. Surface it
           // immediately so a refreshed page shows the running state without
           // waiting for auxiliary data such as providers, commands, or context.
@@ -1178,6 +1356,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          const markerStillVisible =
+            repairingEpisode?.markerBlockId !== undefined &&
+            store
+              .getSnapshot()
+              .blocks.some(
+                (block) => block.id === repairingEpisode?.markerBlockId,
+              );
           // Prefer a recordId carried by an actual `session_update` in the
           // retained window; fall back to the `history_truncated` marker's
           // stamped anchor only when no session_update has one. The marker
@@ -1202,29 +1387,39 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const replayHistoryWasTruncated = replayEvents.some(
             hasFullTranscriptBeforeReplay,
           );
-          const historyHasMore =
-            Array.isArray(capabilities?.features) &&
-            capabilities.features.includes(
-              SESSION_TRANSCRIPT_PAGINATION_FEATURE,
-            ) &&
-            (activeSession.historyHasMore || replayHistoryWasTruncated) &&
-            firstPersistedRecordId !== undefined;
-          transcriptHistoryRef.current = {
-            sessionId: activeSession.sessionId,
-            ...(firstPersistedRecordId !== undefined
-              ? { beforeRecordId: firstPersistedRecordId }
-              : {}),
-            hasMore: historyHasMore,
-            loading: false,
-            capacityReached: false,
-            paginationError: false,
-          };
-          setTranscriptHistoryState({
-            hasMore: historyHasMore,
-            loading: false,
-            capacityReached: false,
-            paginationError: false,
-          });
+          const historyHasMore = repairingEpisode
+            ? transcriptHistoryRef.current.hasMore
+            : Array.isArray(capabilities?.features) &&
+              capabilities.features.includes(
+                SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+              ) &&
+              (activeSession.historyHasMore || replayHistoryWasTruncated) &&
+              firstPersistedRecordId !== undefined;
+          if (!repairingEpisode) {
+            transcriptHistoryRef.current = {
+              sessionId: activeSession.sessionId,
+              ...(firstPersistedRecordId !== undefined
+                ? { beforeRecordId: firstPersistedRecordId }
+                : {}),
+              hasMore: historyHasMore,
+              loading: false,
+              capacityReached: false,
+              paginationError: false,
+            };
+            setTranscriptHistoryState({
+              hasMore: historyHasMore,
+              loading: false,
+              capacityReached: false,
+              paginationError: false,
+            });
+          } else if (
+            !markerStillVisible &&
+            firstPersistedRecordId !== undefined
+          ) {
+            transcriptHistoryRef.current.beforeRecordId =
+              firstPersistedRecordId;
+            transcriptHistoryRef.current.cursor = undefined;
+          }
           const replayInjected =
             shouldInjectReplaySnapshot && replayEvents.length > 0;
           if (needsStoreReset && !replayInjected) {
@@ -1237,77 +1432,220 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
             };
-            const allUiEvents: DaemonUiEvent[] = [];
-            for (const replayEvent of replayEvents) {
+            const sourceEvents =
+              repairingEpisode && repairSuffix && markerStillVisible
+                ? repairSuffix.events
+                : replayEvents;
+            const replayTarget = findLiveJournalRepairTarget(
+              activeSession.sessionId,
+              liveJournal,
+              activeSession.lastEventId,
+              activeSession.replayDegraded,
+            );
+            const markerIndex = replayTarget
+              ? sourceEvents.indexOf(replayTarget.marker)
+              : -1;
+            const eventGroups: Array<{
+              transcript: DaemonUiEvent[];
+              sideEffects: DaemonUiEvent[];
+            }> = [];
+            for (const replayEvent of sourceEvents) {
+              const isNewRepairEvent =
+                repairingEpisode !== undefined &&
+                replayEvent.id !== undefined &&
+                !repairingEpisode.observedSnapshotEventIds.has(
+                  replayEvent.id,
+                ) &&
+                !(
+                  replayEvent.id > repairingEpisode.snapshotLastEventId &&
+                  replayEvent.id <= repairingEpisode.lastObservedEventId
+                );
               try {
                 const replayUiEvents = normalizeAndFilterEvent(
                   replayEvent,
                   activeSession.clientId,
                   replayOpts,
                   setConnection,
-                  { updateConnection: false },
+                  {
+                    updateConnection:
+                      repairingEpisode !== undefined && isNewRepairEvent,
+                    suppressLog:
+                      repairingEpisode !== undefined && !isNewRepairEvent,
+                  },
                 );
                 const transcriptEvents = filterDaemonUiEventsForTranscript(
                   replayEvent,
                   replayUiEvents,
                   addNotice,
                   dismissNotice,
-                  { hideHistoryTruncation: historyHasMore },
+                  {
+                    hideHistoryTruncation: historyHasMore,
+                    suppressSideEffects:
+                      repairingEpisode !== undefined && !isNewRepairEvent,
+                  },
                 );
-                allUiEvents.push(
-                  ...(subagentTranscriptModeRef.current === 'summary'
+                const projectedEvents =
+                  subagentTranscriptModeRef.current === 'summary'
                     ? projectMainTranscriptEvents(transcriptEvents)
-                    : transcriptEvents),
-                );
+                    : transcriptEvents;
+                const groupEvents = [...projectedEvents];
                 if (replayEvent.type === 'turn_complete') {
                   const stopReason =
                     (replayEvent.data as DaemonTurnCompleteData | undefined)
                       ?.stopReason ?? 'end_turn';
-                  allUiEvents.push(
+                  groupEvents.push(
                     assistantDoneFromTurnEvent(replayEvent, stopReason),
                   );
                 } else if (replayEvent.type === 'turn_error') {
-                  allUiEvents.push(
+                  groupEvents.push(
                     assistantDoneFromTurnEvent(replayEvent, 'error'),
                   );
+                }
+                eventGroups.push({
+                  transcript: groupEvents,
+                  sideEffects:
+                    repairingEpisode === undefined
+                      ? projectedEvents
+                      : isNewRepairEvent
+                        ? replayUiEvents
+                        : [],
+                });
+                if (isNewRepairEvent) {
+                  const followupSuggestion =
+                    parseSidechannelFollowupSuggestion(replayEvent);
+                  if (followupSuggestion) {
+                    publishSidechannelFollowupSuggestion(followupSuggestion);
+                  }
+                  const midTurnInjected =
+                    parseSidechannelMidTurnInjected(replayEvent);
+                  if (midTurnInjected) {
+                    publishSidechannelMidTurnInjected(midTurnInjected);
+                  }
+                  if (isPendingPromptEvent(replayEvent)) {
+                    publishPendingPromptEvent(replayEvent);
+                  }
                 }
               } catch (error) {
                 const message =
                   error instanceof Error ? error.message : String(error);
-                addNotice({
-                  severity: 'warning',
-                  category: 'protocol',
-                  operation: 'normalize_event',
-                  code: 'daemon.replay_event_malformed',
-                  message: 'Skipped malformed replay event',
-                  debugMessage: message,
-                  recoverable: true,
-                });
-                console.warn(
-                  '[DaemonSessionProvider] skipped malformed replay event:',
-                  error,
-                );
+                if (repairingEpisode === undefined || isNewRepairEvent) {
+                  addNotice({
+                    severity: 'warning',
+                    category: 'protocol',
+                    operation: 'normalize_event',
+                    code: 'daemon.replay_event_malformed',
+                    message: 'Skipped malformed replay event',
+                    debugMessage: message,
+                    recoverable: true,
+                  });
+                  console.warn(
+                    '[DaemonSessionProvider] skipped malformed replay event:',
+                    error,
+                  );
+                }
+                eventGroups.push({ transcript: [], sideEffects: [] });
               }
             }
+            const allUiEvents = eventGroups.flatMap(
+              (group) => group.transcript,
+            );
             let replayExceededCapacity = false;
-            if (needsStoreReset || store.getSnapshot().blocks.length === 0) {
-              const replayStore = createDaemonTranscriptStore({
-                maxBlocks: Number.MAX_SAFE_INTEGER,
-                retainSubagentBlocks:
-                  subagentTranscriptModeRef.current === 'full',
-              });
-              replayStore.dispatch(allUiEvents);
+            const rebuildReplay =
+              repairingEpisode !== undefined ||
+              replayTarget !== undefined ||
+              needsStoreReset ||
+              store.getSnapshot().blocks.length === 0;
+            if (rebuildReplay) {
+              const replayMaxBlocks = repairingEpisode
+                ? markerStillVisible
+                  ? repairingEpisode.checkpoint.maxBlocks
+                  : maxBlocks
+                : Number.MAX_SAFE_INTEGER;
+              const replayStore = createDaemonTranscriptStore(
+                repairingEpisode && markerStillVisible
+                  ? {
+                      ...repairingEpisode.checkpoint,
+                      maxBlocks: replayMaxBlocks,
+                    }
+                  : {
+                      maxBlocks: replayMaxBlocks,
+                      retainSubagentBlocks:
+                        subagentTranscriptModeRef.current === 'full',
+                    },
+              );
+              let nextCheckpoint: DaemonTranscriptState | undefined;
+              if (markerIndex < 0 && repairingEpisode === undefined) {
+                // Ordinary replay needs no intermediate checkpoint. Dispatch
+                // once so rebuilding a long transcript stays O(B), not O(E×B).
+                replayStore.dispatch(allUiEvents);
+              } else {
+                for (const [index, group] of eventGroups.entries()) {
+                  if (index === markerIndex) {
+                    nextCheckpoint = replayStore.getSnapshot();
+                  }
+                  replayStore.dispatch(group.transcript);
+                }
+              }
               const replayState = replayStore.getSnapshot();
-              replayExceededCapacity = replayState.blocks.length > maxBlocks;
+              replayExceededCapacity =
+                repairingEpisode === undefined &&
+                replayState.blocks.length > maxBlocks;
+              const committedMaxBlocks = repairingEpisode
+                ? replayMaxBlocks
+                : Math.max(maxBlocks, replayState.blocks.length);
               store.reset({
                 ...replayState,
-                maxBlocks: Math.max(maxBlocks, replayState.blocks.length),
+                maxBlocks: committedMaxBlocks,
               });
+              if (replayTarget && nextCheckpoint) {
+                const markerBlock = store
+                  .getSnapshot()
+                  .blocks.find(
+                    (block) =>
+                      block.kind === 'status' &&
+                      block.source === 'history_truncated' &&
+                      isRecord(block.data) &&
+                      block.data['scope'] === 'live_journal',
+                  );
+                const existingRepair = liveJournalRepairRef.current;
+                liveJournalRepairRef.current =
+                  existingRepair?.target.signature === replayTarget.signature &&
+                  existingRepair.attempted
+                    ? existingRepair
+                    : {
+                        sessionId: activeSession.sessionId,
+                        target: replayTarget,
+                        checkpoint: {
+                          ...nextCheckpoint,
+                          maxBlocks: committedMaxBlocks,
+                        },
+                        ...(markerBlock
+                          ? { markerBlockId: markerBlock.id }
+                          : {}),
+                        observedSnapshotEventIds: new Set(
+                          liveJournal.flatMap((event) =>
+                            event.id === undefined ? [] : [event.id],
+                          ),
+                        ),
+                        snapshotLastEventId: activeSession.lastEventId ?? 0,
+                        lastObservedEventId: activeSession.lastEventId ?? 0,
+                        terminalSeen: false,
+                        attempted: false,
+                      };
+              } else if (repairingEpisode) {
+                liveJournalRepairRef.current = undefined;
+              }
             } else if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
             }
-            if (allUiEvents.length > 0) {
-              bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
+            const sideEffectEvents = eventGroups.flatMap(
+              (group) => group.sideEffects,
+            );
+            if (sideEffectEvents.length > 0) {
+              bumpWorkspaceEventSignals(
+                sideEffectEvents,
+                setWorkspaceEventSignals,
+              );
             }
             if (replayExceededCapacity && historyHasMore) {
               transcriptHistoryRef.current.hasMore = false;
@@ -1367,12 +1705,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }));
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoadToResolve.timeout);
-            if (
-              skipNextCleanupDetachSessionIdRef.current ===
-              activeSession.sessionId
-            ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
+            if (pendingLoadToResolve.timeout !== undefined) {
+              clearTimeout(pendingLoadToResolve.timeout);
+            }
+            if (skipNextCleanupDetachSessionRef.current === activeSession) {
+              skipNextCleanupDetachSessionRef.current = undefined;
             }
             pendingLoadToResolve.resolve();
           }
@@ -1402,6 +1739,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : activeSession.context(),
               gitPromise,
             ]);
+          if (
+            disposed ||
+            abort.signal.aborted ||
+            sessionRef.current !== activeSession
+          ) {
+            return;
+          }
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -1454,13 +1798,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             getCurrentMode(context) ?? providerModelStatus.currentMode;
 
           setConnection((current) => {
-            if (current.sessionId !== activeSession.sessionId) return current;
+            if (
+              sessionRef.current !== activeSession ||
+              current.sessionId !== activeSession.sessionId
+            ) {
+              return current;
+            }
             return {
               ...current,
               status: 'connected',
               sessionId: activeSession.sessionId,
-              // Surface the bound client id so consumers can recognize their own
-              // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+              // Surface the bound client id for consumers of legacy
+              // originator-stamped frames.
               ...(activeSession.clientId
                 ? { clientId: activeSession.clientId }
                 : {}),
@@ -1502,12 +1851,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             };
           });
           if (loadWarningTexts.length > 0) {
-            store.dispatch(
-              loadWarningTexts.map((text) => ({
+            const existingWarningTexts = repairingEpisode
+              ? new Set(
+                  store
+                    .getSnapshot()
+                    .blocks.flatMap((block) =>
+                      block.kind === 'status' ? [block.text] : [],
+                    ),
+                )
+              : undefined;
+            const warningEvents = loadWarningTexts
+              .filter((text) => !existingWarningTexts?.has(text))
+              .map((text) => ({
                 type: 'status' as const,
                 text,
-              })),
-            );
+              }));
+            if (warningEvents.length > 0) {
+              store.dispatch(warningEvents);
+            }
+            const repair = liveJournalRepairRef.current;
+            if (
+              warningEvents.length > 0 &&
+              repair?.sessionId === activeSession.sessionId
+            ) {
+              const checkpointStore = createDaemonTranscriptStore({
+                ...repair.checkpoint,
+                maxBlocks: repair.checkpoint.maxBlocks,
+              });
+              checkpointStore.dispatch(warningEvents);
+              repair.checkpoint = checkpointStore.getSnapshot();
+            }
           }
           let sawEvent = false;
           let resyncRequested = false;
@@ -1531,6 +1904,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
+            nextSseConnectReason = 'state_resync';
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
@@ -1558,16 +1932,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           });
           removeProviderAbortListener = () =>
             abort.signal.removeEventListener('abort', abortEventStream);
+          const sseConnectReason = nextSseConnectReason;
+          nextSseConnectReason = undefined;
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
+            ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
-            if (sessionRef.current?.sessionId !== activeSession.sessionId) {
+            if (sessionRef.current !== activeSession) {
               break;
             }
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
+            }
+            const currentRepair = liveJournalRepairRef.current;
+            if (
+              currentRepair?.sessionId === activeSession.sessionId &&
+              event.id !== undefined
+            ) {
+              currentRepair.lastObservedEventId = Math.max(
+                currentRepair.lastObservedEventId,
+                event.id,
+              );
             }
             try {
               const followupSuggestion =
@@ -1581,9 +1968,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+                if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
                 publishPendingPromptEvent(event);
+                if (sessionRef.current !== activeSession) break;
                 if (event.type === 'pending_prompt_started') {
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   setPromptStatus('waiting');
@@ -1775,6 +2164,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   () => setPromptStatus('idle'),
                 );
               }
+              const pendingRepair = liveJournalRepairRef.current;
+              if (
+                pendingRepair?.sessionId === activeSession.sessionId &&
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                eventPromptId(event) === pendingRepair.target.promptId
+              ) {
+                pendingRepair.terminalSeen = true;
+                queueMicrotask(tryLiveJournalRepair);
+              } else if (pendingRepair?.terminalSeen) {
+                queueMicrotask(tryLiveJournalRepair);
+              }
               // ── state_resync_required handling ──────────────────────
               // Resyncs are transcript recovery signals, not prompt terminal
               // signals. For epoch_reset and ring_evicted we reload the session
@@ -1807,6 +2208,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     activeSession.sessionId,
                   );
                   resyncRequested = true;
+                  nextSseConnectReason = 'state_resync';
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
@@ -1844,6 +2246,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 break;
               }
             } catch (error) {
+              if (sessionRef.current !== activeSession) break;
               const message =
                 error instanceof Error ? error.message : String(error);
               addNotice({
@@ -1861,6 +2264,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
           }
+          if (
+            sessionRef.current !== activeSession &&
+            !resyncRequested &&
+            !userDeletedSession
+          ) {
+            clearPendingTranscriptEvents();
+            clearEventStream();
+            return;
+          }
           // The stream ended or broke: apply any buffered transcript events now
           // so post-loop handling (and consumers reading the snapshot) see a
           // complete transcript without waiting for the scheduled flush.
@@ -1868,6 +2280,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const restartRequested = eventStream.restartRequested;
           clearEventStream();
           if (restartRequested) {
+            nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -1902,9 +2315,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
+            nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
-            if (sessionRef.current?.sessionId === activeSession.sessionId) {
+            if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
               if (!hasSessionActivePrompt()) {
                 // A transport close is only a safe "done" signal for passive
@@ -1933,8 +2347,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         } catch (error) {
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
+          if (session && sessionRef.current !== session) {
+            clearPendingTranscriptEvents();
+            return;
+          }
           if (restartRequested && !disposed && !abort.signal.aborted) {
             flushTranscriptSync();
+            nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
@@ -1951,6 +2370,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);
+          const pendingLoad = pendingSessionLoadRef.current;
+          const errorBody =
+            error instanceof DaemonHttpError && isRecord(error.body)
+              ? error.body
+              : undefined;
+          if (
+            autoReconnect &&
+            loadingRequestedSession &&
+            pendingLoad?.sessionId === restoreSessionId &&
+            error instanceof DaemonHttpError &&
+            error.status === 404 &&
+            typeof errorBody?.['error'] === 'string' &&
+            errorBody['error'].endsWith(
+              'The session is closing; retry after close completes',
+            )
+          ) {
+            reconnectAttempt += 1;
+            const reconnectConfig = reconnectConfigRef.current;
+            await delay(
+              getReconnectDelayMs(
+                reconnectAttempt,
+                reconnectConfig.reconnectDelayMs,
+                reconnectConfig.maxReconnectDelayMs,
+              ),
+              abort.signal,
+            );
+            if (pendingSessionLoadRef.current !== pendingLoad) return;
+            continue;
+          }
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -1966,20 +2414,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
-          const pendingLoad = pendingSessionLoadRef.current;
           if (
             pendingLoad &&
             (pendingLoad.sessionId === restoreSessionId ||
               pendingLoad.sessionId === reconnectSessionId)
           ) {
             if (
-              skipNextCleanupDetachSessionIdRef.current ===
+              skipNextCleanupDetachSessionRef.current?.sessionId ===
               pendingLoad.sessionId
             ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
+              skipNextCleanupDetachSessionRef.current = undefined;
             }
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
+            if (pendingLoad.timeout !== undefined) {
+              clearTimeout(pendingLoad.timeout);
+            }
             pendingLoad.reject(error);
           }
           if (isAuthFailure || isTerminal) {
@@ -2058,6 +2507,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               '[DaemonSessionProvider] retriable SSE error, preserving session for delta resume (sessionId=%s)',
               session?.sessionId,
             );
+            if (eventStream) {
+              nextSseConnectReason = 'transport_error';
+            }
           }
           if (!autoReconnect) {
             session = undefined;
@@ -2116,35 +2568,50 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
     void run();
     return () => {
-      const session = sessionRef.current;
+      const session = runnerSession;
       disposed = true;
       abort.abort();
-      // Apply buffered transcript events before tearing down (do NOT drop them).
-      // The SSE client advances lastSeenEventId as each event is *yielded* —
-      // before our batched dispatch runs — so dropping here would make a
-      // same-session incremental resume (the keepSessionForNextEffect path)
-      // skip them permanently. Flushing is free and safe: the store notifies
-      // via queueMicrotask, so there is no synchronous setState; on unmount it
-      // is an orphaned dispatch and on a session switch the next run resets the
-      // store anyway.
-      flushTranscriptSync();
-      hasCurrentSessionActivePromptRef.current = () => false;
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const ownsCurrentSession =
+        session !== undefined && sessionRef.current === session;
+      const ownsEmptyState =
+        session === undefined && sessionRef.current === undefined;
       const keepSessionForNextEffect =
-        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
+        ownsCurrentSession &&
+        session === skipNextCleanupDetachSessionRef.current;
       const isUnmounting = !mountedRef.current;
+      if (ownsCurrentSession || ownsEmptyState) {
+        // A same-attachment effect restart must flush events already yielded by
+        // the SSE client, because its resume cursor has advanced past them.
+        flushTranscriptSync();
+      } else {
+        // A replacement attachment owns the store now. Never let the old
+        // runner's pending macrotask append its buffered events to that owner.
+        clearPendingTranscriptEvents();
+      }
+      if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
+        hasCurrentSessionActivePromptRef.current = () => false;
+        setPromptStatus('idle');
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      }
       if (
-        pendingSessionLoadRef.current &&
+        effectPendingSessionLoad !== undefined &&
+        pendingSessionLoadRef.current === effectPendingSessionLoad &&
+        (ownsCurrentSession || ownsEmptyState) &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
+        if (pendingSessionLoadRef.current.timeout !== undefined) {
+          clearTimeout(pendingSessionLoadRef.current.timeout);
+        }
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if ((!keepSessionForNextEffect || isUnmounting) && session?.clientId) {
+      if (
+        ownsCurrentSession &&
+        (!keepSessionForNextEffect || isUnmounting) &&
+        session.clientId
+      ) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -2154,7 +2621,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           console.warn('[DaemonSessionProvider] detach failed:', err),
         );
       }
-      if (!keepSessionForNextEffect || isUnmounting) {
+      if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
       }
     };
@@ -2192,21 +2659,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return undefined;
     }
-    if (heartbeatFailureStateRef.current.sessionId !== connection.sessionId) {
-      heartbeatFailureStateRef.current = {
-        sessionId: connection.sessionId,
-        consecutiveFailures: 0,
-      };
-    }
-    const heartbeatFailureState = heartbeatFailureStateRef.current;
     let disposed = false;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
+      if (heartbeatFailureStateRef.current.session !== session) {
+        heartbeatFailureStateRef.current = {
+          session,
+          consecutiveFailures: 0,
+        };
+      }
+      const heartbeatFailureState = heartbeatFailureStateRef.current;
       session
         .heartbeat()
         .then(() => {
-          if (disposed) return;
+          if (
+            disposed ||
+            sessionRef.current !== session ||
+            heartbeatFailureStateRef.current !== heartbeatFailureState
+          ) {
+            return;
+          }
           if (
             heartbeatFailureState.consecutiveFailures >=
             heartbeatFailureThreshold
@@ -2226,7 +2699,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           heartbeatFailureState.lastHttpError = undefined;
         })
         .catch((error: unknown) => {
-          if (disposed) return;
+          if (
+            disposed ||
+            sessionRef.current !== session ||
+            heartbeatFailureStateRef.current !== heartbeatFailureState
+          ) {
+            return;
+          }
           heartbeatFailureState.consecutiveFailures += 1;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
@@ -2275,7 +2754,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.delete(deadSessionId);
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
-            if (sessionRef.current?.sessionId === deadSessionId) {
+            if (sessionRef.current === session) {
               if (missingSession) {
                 manualSessionClearRef.current = true;
               }
@@ -2327,7 +2806,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
         manualSessionClearRef,
-        skipNextCleanupDetachSessionIdRef,
+        skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
@@ -2399,6 +2878,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setRestoreSessionNonce,
         setAttachSessionNonce,
         setNewSessionNonce,
+        clearLiveJournalRepair: () => {
+          liveJournalRepairRef.current?.controller?.abort();
+          liveJournalRepairRef.current = undefined;
+        },
       }),
     [
       addNotice,
@@ -2409,163 +2892,201 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       store,
     ],
   );
-  const loadMoreTranscript = useCallback(async () => {
-    const history = transcriptHistoryRef.current;
-    const activeSession = sessionRef.current;
-    if (
-      !history.hasMore ||
-      history.loading ||
-      history.paginationError ||
-      !activeSession ||
-      activeSession.sessionId !== history.sessionId
-    ) {
-      return;
-    }
-
-    history.loading = true;
-    setTranscriptHistoryState({
-      hasMore: true,
-      loading: true,
-      capacityReached: false,
-      paginationError: false,
-    });
-    let terminalFailure = false;
-    try {
-      const page = await activeSession.client.getSessionTranscriptPage(
-        activeSession.sessionId,
-        {
-          ...(history.cursor !== undefined
-            ? { cursor: history.cursor }
-            : history.beforeRecordId !== undefined
-              ? { beforeRecordId: history.beforeRecordId }
-              : {}),
-          limit: historyPageSizeRef.current ?? 100,
-          clientId: activeSession.clientId,
-        },
-      );
+  repairReloadRef.current = actions.reloadSession;
+  useEffect(() => {
+    if (promptStatus !== 'idle') return;
+    queueMicrotask(() => tryLiveJournalRepairRef.current?.());
+  }, [promptStatus]);
+  const loadMoreTranscript = useCallback(
+    async (options?: { force?: boolean }) => {
+      const history = transcriptHistoryRef.current;
+      const activeSession = sessionRef.current;
       if (
-        sessionRef.current !== activeSession ||
-        transcriptHistoryRef.current !== history
+        history.loading ||
+        !activeSession ||
+        activeSession.sessionId !== history.sessionId
       ) {
         return;
       }
-      if (page.partial || page.replayError) {
-        terminalFailure = true;
-        throw new Error(
-          page.replayError ?? 'Earlier session history was only partially read',
-        );
-      }
-
-      const replayOpts = {
-        ...eventOptionsRef.current,
-        suppressOwnUserEcho: false,
-      };
-      const nextBeforeRecordId = page.events
-        .map(getPersistedReplayRecordId)
-        .find((recordId): recordId is string => recordId !== undefined);
-      const uiEvents: DaemonUiEvent[] = [];
-      for (const replayEvent of page.events) {
-        try {
-          const transcriptEvents = filterDaemonUiEventsForTranscript(
-            replayEvent,
-            normalizeAndFilterEvent(
-              replayEvent,
-              activeSession.clientId,
-              replayOpts,
-              setConnection,
-              { updateConnection: false },
-            ),
-            addNotice,
-            dismissNotice,
-          );
-          uiEvents.push(
-            ...(subagentTranscriptModeRef.current === 'summary'
-              ? projectMainTranscriptEvents(transcriptEvents)
-              : transcriptEvents),
-          );
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          addNotice({
-            severity: 'warning',
-            category: 'protocol',
-            operation: 'normalize_event',
-            code: 'daemon.replay_event_malformed',
-            message: 'Skipped malformed history event',
-            debugMessage: message,
-            recoverable: true,
-          });
-          console.warn(
-            '[DaemonSessionProvider] skipped malformed history event:',
-            error,
-          );
+      if (history.paginationError) {
+        if (options?.force !== true) {
+          return;
         }
-      }
-      if (
-        uiEvents.length > 0 &&
-        !prependTranscriptHistory(store, uiEvents, maxBlocks)
-      ) {
-        history.hasMore = false;
-        history.loading = false;
-        history.capacityReached = true;
-        setTranscriptHistoryState({
-          hasMore: false,
-          loading: false,
-          capacityReached: true,
-          paginationError: false,
-        });
+        // The failed page's cursor was never advanced, so clearing the
+        // latched error retries that exact page.
+        history.paginationError = false;
+        history.hasMore = true;
+      } else if (!history.hasMore) {
         return;
       }
-      const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
-      history.capacityReached = page.hasMore && !hasCapacity;
-      history.cursor =
-        nextBeforeRecordId === undefined ? page.nextCursor : undefined;
-      history.beforeRecordId = nextBeforeRecordId;
-      history.hasMore = page.hasMore && hasCapacity;
-      history.loading = false;
+
+      history.loading = true;
       setTranscriptHistoryState({
-        hasMore: history.hasMore,
-        loading: false,
-        capacityReached: history.capacityReached,
+        hasMore: true,
+        loading: true,
+        capacityReached: false,
         paginationError: false,
       });
-    } catch (error) {
-      if (
-        sessionRef.current !== activeSession ||
-        transcriptHistoryRef.current !== history
-      ) {
-        return;
-      }
-      const retryable =
-        !terminalFailure &&
-        (!(error instanceof DaemonHttpError) ||
-          error.status >= 500 ||
-          error.status === 408 ||
-          error.status === 429);
-      history.hasMore = retryable;
-      history.loading = false;
-      history.capacityReached = false;
-      history.paginationError = !retryable;
-      setTranscriptHistoryState({
-        hasMore: retryable,
-        loading: false,
-        capacityReached: false,
-        paginationError: !retryable,
-      });
-      if (retryable) {
-        addNotice({
-          severity: 'warning',
-          category: 'user_action',
-          operation: 'load_session',
-          code: 'daemon.transcript_history.failed',
-          message: 'Failed to load earlier session history',
-          debugMessage: error instanceof Error ? error.message : String(error),
-          recoverable: retryable,
+      let terminalFailure = false;
+      try {
+        const page = await activeSession.client.getSessionTranscriptPage(
+          activeSession.sessionId,
+          {
+            ...(history.cursor !== undefined
+              ? { cursor: history.cursor }
+              : history.beforeRecordId !== undefined
+                ? { beforeRecordId: history.beforeRecordId }
+                : {}),
+            limit: historyPageSizeRef.current ?? 100,
+            clientId: activeSession.clientId,
+          },
+        );
+        if (
+          sessionRef.current !== activeSession ||
+          transcriptHistoryRef.current !== history
+        ) {
+          return;
+        }
+        if (page.partial || page.replayError) {
+          terminalFailure = true;
+          throw new Error(
+            page.replayError ??
+              'Earlier session history was only partially read',
+          );
+        }
+
+        const replayOpts = {
+          ...eventOptionsRef.current,
+          suppressOwnUserEcho: false,
+        };
+        const nextBeforeRecordId = page.events
+          .map(getPersistedReplayRecordId)
+          .find((recordId): recordId is string => recordId !== undefined);
+        const uiEvents: DaemonUiEvent[] = [];
+        for (const replayEvent of page.events) {
+          try {
+            const transcriptEvents = filterDaemonUiEventsForTranscript(
+              replayEvent,
+              normalizeAndFilterEvent(
+                replayEvent,
+                activeSession.clientId,
+                replayOpts,
+                setConnection,
+                { updateConnection: false },
+              ),
+              addNotice,
+              dismissNotice,
+            );
+            uiEvents.push(
+              ...(subagentTranscriptModeRef.current === 'summary'
+                ? projectMainTranscriptEvents(transcriptEvents)
+                : transcriptEvents),
+            );
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            addNotice({
+              severity: 'warning',
+              category: 'protocol',
+              operation: 'normalize_event',
+              code: 'daemon.replay_event_malformed',
+              message: 'Skipped malformed history event',
+              debugMessage: message,
+              recoverable: true,
+            });
+            console.warn(
+              '[DaemonSessionProvider] skipped malformed history event:',
+              error,
+            );
+          }
+        }
+        const historyMaterialization =
+          uiEvents.length > 0
+            ? materializeTranscriptHistory(
+                store.getSnapshot(),
+                uiEvents,
+                maxBlocks,
+              )
+            : undefined;
+        if (uiEvents.length > 0 && !historyMaterialization) {
+          history.hasMore = false;
+          history.loading = false;
+          history.capacityReached = true;
+          setTranscriptHistoryState({
+            hasMore: false,
+            loading: false,
+            capacityReached: true,
+            paginationError: false,
+          });
+          return;
+        }
+        if (historyMaterialization) {
+          store.reset(
+            applyTranscriptHistory(store.getSnapshot(), historyMaterialization),
+          );
+          const repair = liveJournalRepairRef.current;
+          if (repair?.sessionId === activeSession.sessionId) {
+            repair.checkpoint = applyTranscriptHistory(
+              repair.checkpoint,
+              historyMaterialization,
+            );
+          }
+        }
+        const hasCapacity = store.getSnapshot().blocks.length < maxBlocks;
+        history.capacityReached = page.hasMore && !hasCapacity;
+        history.cursor =
+          nextBeforeRecordId === undefined ? page.nextCursor : undefined;
+        history.beforeRecordId = nextBeforeRecordId;
+        history.hasMore = page.hasMore && hasCapacity;
+        history.loading = false;
+        setTranscriptHistoryState({
+          hasMore: history.hasMore,
+          loading: false,
+          capacityReached: history.capacityReached,
+          paginationError: false,
         });
+      } catch (error) {
+        if (
+          sessionRef.current !== activeSession ||
+          transcriptHistoryRef.current !== history
+        ) {
+          return;
+        }
+        const retryable =
+          !terminalFailure &&
+          (!(error instanceof DaemonHttpError) ||
+            error.status >= 500 ||
+            error.status === 408 ||
+            error.status === 429);
+        history.hasMore = retryable;
+        history.loading = false;
+        history.capacityReached = false;
+        history.paginationError = !retryable;
+        setTranscriptHistoryState({
+          hasMore: retryable,
+          loading: false,
+          capacityReached: false,
+          paginationError: !retryable,
+        });
+        if (retryable) {
+          addNotice({
+            severity: 'warning',
+            category: 'user_action',
+            operation: 'load_session',
+            code: 'daemon.transcript_history.failed',
+            message: 'Failed to load earlier session history',
+            debugMessage:
+              error instanceof Error ? error.message : String(error),
+            recoverable: retryable,
+          });
+        }
+        throw error;
+      } finally {
+        tryLiveJournalRepairRef.current?.();
       }
-      throw error;
-    }
-  }, [addNotice, dismissNotice, maxBlocks, store]);
+    },
+    [addNotice, dismissNotice, maxBlocks, store],
+  );
   const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {
     const active =
       connection.sessionId === transcriptHistoryRef.current.sessionId &&
@@ -2702,9 +3223,11 @@ function normalizeAndFilterEvent(
   clientId: string | undefined,
   opts: { suppressOwnUserEcho: boolean; includeRawEvent: boolean },
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
-  behavior: { updateConnection?: boolean } = {},
+  behavior: { updateConnection?: boolean; suppressLog?: boolean } = {},
 ): DaemonUiEvent[] {
-  logSettingsReloadEvent(event);
+  if (!behavior.suppressLog) {
+    logSettingsReloadEvent(event);
+  }
   if (behavior.updateConnection !== false) {
     updateConnectionFromDaemonEvent(event, setConnection);
   }
@@ -2772,15 +3295,16 @@ function filterDaemonUiEventsForTranscript(
   events: DaemonUiEvent[],
   addNotice: AddDaemonSessionNotice,
   dismissNotice: (id: string) => void,
-  behavior: { hideHistoryTruncation?: boolean } = {},
+  behavior: {
+    hideHistoryTruncation?: boolean;
+    suppressSideEffects?: boolean;
+  } = {},
 ): DaemonUiEvent[] {
-  if (
-    behavior.hideHistoryTruncation &&
-    hasFullTranscriptBeforeReplay(sourceEvent)
-  ) {
+  if (behavior.hideHistoryTruncation && isHistoricalReplayMarker(sourceEvent)) {
     return [];
   }
   if (
+    !behavior.suppressSideEffects &&
     sourceEvent.type === 'session_snapshot' &&
     isRecord(sourceEvent.data) &&
     sourceEvent.data['recordingDegraded'] === false
@@ -2800,6 +3324,7 @@ function filterDaemonUiEventsForTranscript(
       filtered.push(event);
       continue;
     }
+    if (behavior.suppressSideEffects) continue;
     const notice = addNotice(
       daemonErrorEventToNotice(sourceEvent, event as DaemonUiErrorEvent),
     );

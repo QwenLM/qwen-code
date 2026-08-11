@@ -199,10 +199,47 @@ describe('qwen-triage: agent tool/permission settings', () => {
 
 describe('qwen-triage: fork-PR runner routing', () => {
   const runsOn = String(triageJob['runs-on']);
+  const authorizeJob = doc.jobs.authorize;
+  const authorizeRunsOn = String(authorizeJob['runs-on']);
 
-  it('gates the persistent ECS pool on same-repo (fork code never persists)', () => {
+  it('routes the ECS pool on same-repo or a REAL write-permission check', () => {
     assert.match(runsOn, /head\.repo\.full_name == github\.repository/);
+    // The boundary is the collaborator-permission lookup authorize computes,
+    // NOT the coarse author_association: MEMBER admits any org member and
+    // COLLABORATOR admits read-only invitees — neither implies write access
+    // on this repo, and this job's agent loads bot PATs and a model key.
+    assert.match(
+      runsOn,
+      /needs\.authorize\.outputs\.author_can_write == 'true'/,
+    );
+    assert.doesNotMatch(runsOn, /author_association/);
     assert.match(runsOn, /ecs-qwen/);
+  });
+
+  it('keeps the authorize gate itself on the same-repo guard', () => {
+    // authorize IS the permission check (and loads CI_BOT_PAT); it cannot
+    // route on its own output and must not widen to association-based trust.
+    assert.match(authorizeRunsOn, /head\.repo\.full_name == github\.repository/);
+    assert.doesNotMatch(authorizeRunsOn, /author_association/);
+    assert.doesNotMatch(authorizeRunsOn, /needs\./);
+  });
+
+  it('computes author_can_write from the collaborator-permission API', () => {
+    assert.equal(
+      authorizeJob.outputs.author_can_write,
+      '${{ steps.perm.outputs.author_can_write }}',
+    );
+    const perm = authorizeJob.steps.find((s) => s.id === 'perm');
+    assert.ok(
+      String(perm.env.PR_AUTHOR).includes(
+        'github.event.pull_request.user.login',
+      ),
+    );
+    assert.match(perm.run, /collaborators\/\$\{PR_AUTHOR\}\/permission/);
+    assert.match(
+      perm.run,
+      /admin\|maintain\|write\) echo "author_can_write=true"/,
+    );
   });
 
   it('falls back to an ephemeral hosted runner', () => {
@@ -718,8 +755,8 @@ describe('qwen-triage: npm cache producer workflow', () => {
   it('runs on the same target as the consumers so the cache version matches', () => {
     // actions/cache scopes an entry by a hash of the literal cache path plus
     // the compression method. A producer on a different runner or outside the
-    // container computes a different version, so every restore misses even
-    // when the key and path strings match — pin runs-on + container to the
+    // container image computes a different version, so every restore misses
+    // even when the key and path strings match — pin runs-on + image to the
     // consumers' so both match by construction.
     for (const [jobName, jobDef] of [
       ['verify', verifyJob],
@@ -730,11 +767,16 @@ describe('qwen-triage: npm cache producer workflow', () => {
         jobDef['runs-on'],
         `producer runs-on must match ${jobName}`,
       );
-      assert.deepEqual(
-        saveJob.container,
-        jobDef.container,
-        `producer container must match ${jobName}`,
+      assert.equal(
+        saveJob.container.image,
+        jobDef.container.image,
+        `producer container image must match ${jobName}`,
       );
     }
+    assert.equal(
+      saveJob.container.options,
+      '--init --user node',
+      'producer must not leave root-owned files on the self-hosted runner',
+    );
   });
 });

@@ -16,6 +16,9 @@
       "@qwen-code/acp-bridge/transcriptReplay": [
         "../acp-bridge/src/transcript-replay.ts"
       ],
+      "@qwen-code/acp-bridge/daemonMemoryBudget": [
+        "../acp-bridge/src/daemon-memory-budget.ts"
+      ],
       "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"],
       "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],
       "@qwen-code/audio-capture/*": ["../audio-capture/src/*"],

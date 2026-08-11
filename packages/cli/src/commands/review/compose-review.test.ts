@@ -17,12 +17,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
   buildLedger,
+  repositoryContextGate,
   scriptLintGate,
   testPlanGate,
   composeReviewCommand,
@@ -97,6 +99,11 @@ function plan(
     effort?: 'low' | 'medium' | 'high';
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
+    repositoryContext?: unknown;
+    /** The PR identity fetch-pr records — anchors and bilingual recovery. */
+    ownerRepo?: string;
+    prNumber?: string | number;
+    host?: string;
   } = {},
 ): string {
   const p = join(dir, 'plan.json');
@@ -110,6 +117,12 @@ function plan(
       // The effort the capturing command recorded — the roster and the
       // reverse-audit floor both read it from here.
       ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.repositoryContext === undefined
+        ? {}
+        : { repositoryContext: opts.repositoryContext }),
+      ...(opts.ownerRepo === undefined ? {} : { ownerRepo: opts.ownerRepo }),
+      ...(opts.prNumber === undefined ? {} : { prNumber: opts.prNumber }),
+      ...(opts.host === undefined ? {} : { host: opts.host }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -183,7 +196,13 @@ function recordStep45(
 function transcript(
   id: string,
   launchPrompt: string,
-  opts: { toolCalls?: number; text?: string; opens?: string[] } = {},
+  opts: {
+    toolCalls?: number;
+    text?: string;
+    opens?: string[];
+    /** `[offset, limit]` making the diff reads ranged, as a compliant agent's are. */
+    range?: [number, number];
+  } = {},
 ): void {
   const pointedAtBriefs = [
     ...launchPrompt.matchAll(/read_file\(file_path="([^"]*\.brief\.md)"\)/g),
@@ -206,7 +225,18 @@ function transcript(
         message: {
           role: 'model',
           parts: [
-            { functionCall: { name: 'read_file', args: { file_path: DIFF } } },
+            {
+              functionCall: {
+                name: 'read_file',
+                args: opts.range
+                  ? {
+                      file_path: DIFF,
+                      offset: opts.range[0],
+                      limit: opts.range[1],
+                    }
+                  : { file_path: DIFF },
+              },
+            },
           ],
         },
       }),
@@ -328,6 +358,10 @@ function coveredPlan(
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
+    repositoryContext?: unknown;
+    ownerRepo?: string;
+    prNumber?: string | number;
+    host?: string;
   } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
@@ -457,6 +491,197 @@ describe('composeReview — the low-signal Approve disclosure', () => {
   });
 });
 
+describe('repository context proof boundary', () => {
+  it('derives unreviewed dimensions from the validated plan, not model input', () => {
+    const planPath = join(dir, 'repository-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: ['runtime'],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: ['linux-x64'],
+          requiredAgents: ['test-matrix'],
+          unverifiedDimensions: ['Alternate runtime was not exercised'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`Alternate runtime was not exercised` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('renders manifest-controlled proof boundaries as inert Markdown', () => {
+    const planPath = join(dir, 'mention-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'manifest',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: ['@security-team'],
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      '`@security-team` — the repository context marks this proof boundary as unverified',
+    ]);
+  });
+
+  it('caps the unverified-dimension disclosure at five entries', () => {
+    // The schema admits 128 dimensions x 512 chars; joined into one
+    // disclosure that outruns the review body's own size budget — the same
+    // cap discipline testPlanGate applies to its notes.
+    const planPath = join(dir, 'capped-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        repositoryContext: {
+          version: 1,
+          provider: 'fake-provider',
+          label: 'Example project',
+          domains: [],
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: Array.from(
+            { length: 8 },
+            (_, index) => `dimension ${index}`,
+          ),
+          verificationNotes: [],
+        },
+      }),
+    );
+    expect(repositoryContextGate(planPath)).toEqual([
+      ...Array.from(
+        { length: 5 },
+        (_, index) =>
+          `\`dimension ${index}\` — the repository context marks this proof boundary as unverified`,
+      ),
+      'and 3 more',
+    ]);
+  });
+
+  it('returns no extra disclosure when the plan has no repository context', () => {
+    const planPath = join(dir, 'generic-plan.json');
+    writeFileSync(planPath, JSON.stringify({ files: [] }));
+    expect(repositoryContextGate(planPath)).toEqual([]);
+  });
+
+  it('returns nothing for an unreadable plan but fails closed on a malformed context', () => {
+    // Unreadable plan: the coverage gate owns plan validity; the disclosure
+    // has nothing to say. Present-but-INVALID context: every consumer of the
+    // field fails closed, so the gate throws instead of silently dropping the
+    // disclosure.
+    const missing = join(dir, 'missing-plan.json');
+    expect(repositoryContextGate(missing)).toEqual([]);
+
+    const malformed = join(dir, 'malformed-plan.json');
+    writeFileSync(
+      malformed,
+      JSON.stringify({ repositoryContext: { version: 1 } }),
+    );
+    expect(() => repositoryContextGate(malformed)).toThrow(
+      'unknown or missing fields',
+    );
+  });
+
+  it('keeps the disclosure on a REQUEST_CHANGES body', () => {
+    // The RC render site is a separate code path from APPROVE; deleting the
+    // block there must fail the suite, not ship green.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      bodyCriticals: ['whole-PR blocker X'],
+    });
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('keeps the disclosure when a cap downgrades the verdict to COMMENT', () => {
+    // An APPROVE capped at COMMENT renders through the COMMENT clause
+    // composer — the third render site — and the disclosure must survive
+    // exactly the verdicts where the reader most needs the boundary.
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: [],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: [],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+    const result = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      cannotTellCriticals: ['SKILL.md:35 — full text unfetchable'],
+    });
+    expect(result.event).toBe('COMMENT');
+    expect(result.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+
+  it('discloses repository proof boundaries without permanently capping approval', () => {
+    const planPath = coveredPlan(undefined, {
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['runtime'],
+        relatedPaths: [],
+        recommendedTests: [],
+        requiredConfigurations: ['linux-x64'],
+        requiredAgents: [],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: [],
+      },
+    });
+
+    const result = composeReview({ planPath, env: ENV, modelId: MODEL });
+
+    expect(result.event).toBe('APPROVE');
+    expect(result.cappedBy).not.toContain('unreviewed-dimension');
+    expect(result.body).toContain('Repository proof boundary (not a blocker)');
+    expect(result.body).toContain('Alternate runtime was not exercised');
+  });
+});
+
 describe('composeReview — event caps (round-7 Critical #2: caps must reach every path)', () => {
   it('a cannot-tell existing Critical caps APPROVE at COMMENT and is serialized (round-7: body said Unresolved while event said APPROVE)', () => {
     const r = composeReview(
@@ -478,6 +703,225 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.body).not.toContain('LGTM');
     expect(r.body).not.toContain('no blockers');
+  });
+
+  it('a round-cap marker caps the verdict and dedups against the relayed entry', () => {
+    // A huge diff's reverse audit ran its full 3 rounds without converging;
+    // the builder refused round 4 and wrote a round-cap marker. compose-review
+    // caps on it whether or not the orchestrator relays — and says it once
+    // when the orchestrator does relay.
+    const plan = coveredPlan();
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview(base({ planPath: plan }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    expect(r.body).not.toContain('LGTM');
+
+    const r2 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'reverse audit — did not converge within the reverse-audit round cap of 3',
+        ],
+      }),
+    );
+    expect(r2.body.split('reverse-audit round cap').length - 1).toBe(1);
+  });
+
+  it('a budget-stop marker caps APPROVE at COMMENT with nothing relayed by the caller', () => {
+    // The round builder refused a round and recorded the refusal; the
+    // disclosure that caps the verdict is synthesized from that marker, not
+    // from a sentence the orchestrator remembered to carry.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    const r = composeReview(base({ planPath: plan }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+    expect(r.body).not.toContain('LGTM');
+
+    // And said once when the orchestrator DID relay it.
+    const r2 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'reverse audit — stopped before round 4 by the review time budget',
+        ],
+      }),
+    );
+    expect(r2.body.split('review time budget').length - 1).toBe(1);
+
+    // Still once when the relay was RESHAPED — an orchestrator prefix ahead
+    // of the subject. The coverage prefix filter cannot see this one (it no
+    // longer starts with `reverse audit — `); only the marker-phrase splice
+    // dedups it, so this is the assertion that fails when the splice goes.
+    const r3 = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          'step 5 — reverse audit — stopped before round 4 by the review time budget',
+        ],
+      }),
+    );
+    expect(r3.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('the marker does not shadow other reverse-audit scopes the caller disclosed', () => {
+    // The budget entry claims the subject `reverse audit`; the caller-echo
+    // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
+    // reported with its own reason — a whiffed chunk from the rounds that
+    // DID run is exactly what a partially-run audit still owes the author.
+    const plan = coveredPlan();
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+    );
+    const r = composeReview(
+      base({
+        planPath: plan,
+        unreviewedDimensions: [
+          "reverse audit — chunk 2's auditor returned nothing substantive twice",
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // The marker's own disclosure still renders exactly once.
+    expect(r.body.split('review time budget').length - 1).toBe(1);
+  });
+
+  it('a round-1 budget stop stands alone — no rogue-audit gap, no rebuild FIX', () => {
+    // The gate refused round 1, so no reverse-audit record exists. Without
+    // the marker the floor would report the absence as a rogue/unlaunched
+    // audit and direct a rebuild the same gate deterministically refuses
+    // (exit 4) — misattributing a deliberate stop. The budget disclosure
+    // must stand alone, and the remediation must stay silent.
+    const plan = coveredPlan([]); // nothing ran: the round-1 refusal shape
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      1,
+    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would re-record the Step 4/5 pair this case means to lack.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 1 by the review time budget.',
+    );
+    expect(r.body).not.toContain('no auditor was launched');
+    expect(r.body).not.toContain('its prompt was built');
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('a round-cap stop does NOT suppress the not-built gap — its rebuild is admitted', () => {
+    // R4-9: the reverseByDesign exemption is time-budget-ONLY. A round-cap
+    // marker with zero reverse-audit records must not suppress the not-built
+    // gap the way a time-budget stop does: the cap gate refuses only
+    // `round > cap`, so the gap's FIX (rebuild `--round 1`) is admitted, and
+    // a local run has no deadline to refuse it at all. Reading the marker
+    // cause-blind would silently drop both the gap and its rebuild
+    // remediation for a run that audited nothing.
+    const plan = coveredPlan([]); // no reverse-audit ran — the not-built shape
+    writeRoundCapStop(plan, 3, 4);
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    // The round-cap marker still discloses and caps the verdict…
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('reverse-audit round cap of 3');
+    // …but the not-built gap and its rebuild remediation are still owed.
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+  });
+
+  it('renders the budget stop bilingually on a Han-description PR', () => {
+    // Every sibling structural disclosure carries a zh pair; the budget stop
+    // used to ride the caller-prose path and posted English into both halves.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — stopped before round 4 by the review time budget.',
+    );
+    expect(r.body).toContain(
+      '未审查：反向审计——评审时间预算不足，未能开始第 4 轮。',
+    );
+  });
+
+  it('a budget stop does not launder a rewritten pre-stop round', () => {
+    // Round 1 RAN — with a hand-written launch that opened its brief but
+    // never got the built prompt — and round 2 was then refused on the
+    // budget. The marker explains the audit that never ran; it says nothing
+    // about the one that did, and the rewritten disclosure is still owed:
+    // without it, "stopped before round 2" implies round 1 was faithful.
+    const plan = coveredPlan(['verify']);
+    const d = promptRecordDir(plan);
+    const brief = briefPath(plan, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const built =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), built);
+    transcript(
+      'v-ra-rewritten',
+      `Audit the diff for gaps. Your brief: ${brief}. Diff: ${DIFF}.`,
+      { toolCalls: 2, opens: [brief] },
+    );
+    writeBudgetStop(
+      plan,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      2,
+    );
+
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would lay a verbatim reverse-audit pair over this fixture.
+    const r = composeReview({ planPath: plan, env: ENV, modelId: MODEL });
+    expect(r.event).toBe('COMMENT');
+    // The marker still discloses and caps…
+    expect(r.body).toContain(
+      'stopped before round 2 by the review time budget',
+    );
+    // …and the rewritten round is NOT laundered: the operator channel carries
+    // its exact repair. (The posted body collapses same-subject disclosures —
+    // both say "reverse audit" — so the author sees the stop; the rewritten
+    // repair rides stderr, which is where repairs are acted on.)
+    expect(r.remediation.join(' ')).toContain('reverse audit:');
+    expect(r.remediation.join(' ')).toContain('EXACTLY what it prints');
   });
 
   it('an uncoverable chunk caps APPROVE at COMMENT and names the chunk', () => {
@@ -779,6 +1223,114 @@ describe('composeReview — not-reviewed entries that carry their own reason', (
   });
 });
 
+describe('composeReview — budget-gap disclosures (a channel, never a cap)', () => {
+  it('renders disclosed gaps in the body and still approves a clean run', () => {
+    // The agent read its whole territory (ranged read) and disclosed one
+    // optional-depth check its tool budget cut short. The disclosure must
+    // reach the author mechanically — whether or not the orchestrator
+    // relays anything — and must NOT cap the verdict: judging which gaps
+    // name a required trace is the orchestrator's ruling (Step 3D), and
+    // capping on every routine budget stop would make the soft ceiling
+    // hard.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: second-order callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    // Not base(): its planPath DEFAULT (coveredPlan()) is evaluated on every
+    // call and rewrites this run's a1/a2 transcripts with clean ones.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    // Attributed to its agent and wrapped as inline code — a gap carrying
+    // an @-mention, a #123 reference or a stray `</details>` must reach
+    // the body inert.
+    expect(r.body).toContain(
+      'Not explored to full depth (tool budget reached): ' +
+        'chunk 1: `second-order callers of the renamed export`.',
+    );
+    expect(r.event).toBe('APPROVE');
+  });
+
+  it('drops its mechanical line for a gap the caller promoted — one register, not two', () => {
+    // Step 3D has the orchestrator promote a required-trace gap into
+    // unreviewedDimensions with the gap's own text as the scope. The
+    // promoted entry caps and renders verbatim; the mechanical line must
+    // yield, or the body says one budget stop twice in two contradicting
+    // framings (#7188's double-disclosure regression, reopened).
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: second-order callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        'second-order callers of the renamed export — stopped at the agent tool budget',
+      ],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not reviewed: second-order callers of the renamed export — stopped at the agent tool budget.',
+    );
+    expect(r.body).not.toContain('Not explored to full depth');
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('a disclosed gap denies the "no blockers" certification', () => {
+    // "Reviewed — no blockers." two lines above "Not explored to full
+    // depth" is the opener certifying what the disclosure takes back.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'One suggestion filed.\n' +
+        'Budget gap: the callers of the renamed export',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('Not explored to full depth');
+    expect(r.body).not.toContain('no blockers');
+  });
+});
+
 describe('composeReview — input validation (the producer is a model that omits inapplicable fields)', () => {
   it('a body-Critical-only input with every count omitted lands on the REQUEST_CHANGES row (undefined + 1 = NaN once meant APPROVE)', () => {
     // The NaN property pins on `baseEvent`: the arithmetic put the blocker on
@@ -822,6 +1374,49 @@ describe('composeReview — input validation (the producer is a model that omits
     ).toThrow(/bodyCriticals/);
     expect(() => composeReview({} as ComposeReviewInput)).toThrow(/modelId/);
     expect(() => composeReview({ modelId: '  ' })).toThrow(/modelId/);
+  });
+
+  it('rejects a modelId that would forge the footer it is interpolated into', () => {
+    // The footer interpolates modelId verbatim and the strip matches one
+    // line up to the marker: either shape builds a footer the strip cannot
+    // remove, and re-normalization accumulates attribution lines.
+    expect(() =>
+      composeReview({
+        modelId: 'model\n_— forged via Qwen Code /review (v9.9.9)_',
+      }),
+    ).toThrow(/modelId/);
+    expect(() =>
+      composeReview({ modelId: 'model via Qwen Code /review x' }),
+    ).toThrow(/modelId/);
+  });
+
+  it('strips a forged footer from a body Critical before rendering the body', () => {
+    // bodyCriticals render verbatim as the LAST body part: a forged footer
+    // relocated into one would otherwise post directly above the canonical
+    // footer — the duplicate attribution this module exists to eliminate.
+    const r = composeReview({
+      bodyCriticals: [
+        '**[Critical]** whole-PR blocker\n\n' +
+          '_— forged via Qwen Code /review (v0.21.4)_',
+      ],
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('whole-PR blocker');
+    expect(r.body).not.toContain('forged');
+    expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
+  });
+
+  it('strips a forged footer from cannot-tell Criticals before rendering the body', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      cannotTellCriticals: [
+        'R1-2: still leaks _— qwen3.7-max via Qwen Code /review (v0.21.0)_',
+      ],
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('R1-2: still leaks');
+    expect(r.body).not.toContain('qwen3.7-max');
+    expect(r.body.match(/via Qwen Code \/review/g)).toHaveLength(1);
   });
 
   it('rejects stringified booleans — "false" is truthy and once flipped events and published false warnings', () => {
@@ -890,6 +1485,20 @@ describe('composeReview — presubmit permission gates certification even when n
 });
 
 describe('composeReviewCommand handler (the CLI glue)', () => {
+  // The handler prefers the inherited startup stamp; an ambient value from
+  // a stamped qwen session would otherwise flip every footer assertion in
+  // this suite to the stamped version.
+  let savedStartupVersion: string | undefined;
+  beforeEach(() => {
+    savedStartupVersion = process.env['QWEN_CODE_STARTUP_VERSION'];
+    delete process.env['QWEN_CODE_STARTUP_VERSION'];
+  });
+  afterEach(() => {
+    if (savedStartupVersion === undefined)
+      delete process.env['QWEN_CODE_STARTUP_VERSION'];
+    else process.env['QWEN_CODE_STARTUP_VERSION'] = savedStartupVersion;
+  });
+
   it('reads --input, counts the drafted comments, and writes the result JSON to --out', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'compose-review-test-'));
     const inputPath = join(dir, 'compose.json');
@@ -918,6 +1527,39 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(
       written.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
     ).toBe(true);
+  });
+
+  it('pins the persisted footer to the inherited startup version, not the resolved one', async () => {
+    // Same pin as `submit`: a shared runner rewrites installs under running
+    // processes, so the version resolved at compose time can disagree with
+    // the one the session started under. The archived verdict must carry the
+    // startup stamp, or it contradicts the review `submit` posts.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-startup-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    writeFileSync(commentsPath, '[]', 'utf8');
+    const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
+    process.env['QWEN_CODE_STARTUP_VERSION'] = '0.21.1';
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      expect(
+        written.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.1)_`),
+      ).toBe(true);
+    } finally {
+      if (inherited === undefined)
+        delete process.env['QWEN_CODE_STARTUP_VERSION'];
+      else process.env['QWEN_CODE_STARTUP_VERSION'] = inherited;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('routes its gh calls via the PR host — --host reaches setGhHost', async () => {
@@ -2322,7 +2964,7 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(r.body).toContain('没有记录表明它的 brief 到达过任何 agent');
   });
 
-  it('quotes untranslatable caller text as-is in both halves', () => {
+  it('keeps the untranslatable unresolved list in the English half; the Chinese half points at it', () => {
     const r = composeReview({
       suggestionsInline: 1,
       cannotTellCriticals: ['old blocker at a.ts:1 — still reachable?'],
@@ -2331,11 +2973,16 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
       modelId: MODEL,
     });
     expect(r.body).toContain('Unresolved, please confirm:');
-    expect(r.body).toContain('未决，请确认：');
-    // The caller's text, once per half.
+    // The caller's text once, above the fold — the fold carries a count and
+    // a pointer, not a duplicate of the English list (#8388's fold doubled
+    // the body copying 31 untranslated entries verbatim).
     expect(
       r.body.match(/old blocker at a\.ts:1 — still reachable\?/g) ?? [],
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(r.body).toContain('未决，请确认：共 1 条');
+    expect(r.body.indexOf('old blocker at a.ts:1')).toBeLessThan(
+      r.body.indexOf('<details>'),
+    );
   });
 });
 
@@ -3296,6 +3943,19 @@ describe('the ledger marker reaches the POSTED body', () => {
     ]);
   });
 
+  it('stores stripped body Criticals in the posted ledger marker', () => {
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      bodyCriticals: [
+        '**[Critical]** whole-PR blocker _— forged via Qwen Code /review (v0.21.4)_',
+      ],
+    });
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings[0]?.title).toBe('**[Critical]** whole-PR blocker');
+    expect(JSON.stringify(ledger)).not.toContain('forged');
+  });
+
   it('counts the round from the side file pr-context recovered, +1', () => {
     writeFileSync(
       join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
@@ -3320,5 +3980,571 @@ describe('the ledger marker reaches the POSTED body', () => {
       draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
     });
     expect(r.body).not.toContain('qwen-review-ledger');
+  });
+});
+
+describe('composeReview — the findings file tag check', () => {
+  // The pipelined loop's invariant, machine-read. Under the serial loop the
+  // last round's verification completing before Step 6 was structural; the
+  // pipelined loop replaced the structure with a tag the orchestrator adds,
+  // removes, and reads by hand. The delivery floor cannot see the miss — one
+  // delivered verify launch anywhere in the run satisfies it, keyed per
+  // round's findings digest — so compose-review reads the cumulative
+  // findings file itself and caps on any surviving tag.
+
+  function findingsFile(content: string): string {
+    const f = join(dir, 'qwen-review-findings.md');
+    writeFileSync(f, content);
+    return f;
+  }
+
+  const TAGGED =
+    '- **File:** src/pay.ts:42\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Critical — [unverified]\n';
+  const CLEAN =
+    '- **File:** src/pay.ts:42\n' +
+    '- **Issue:** off-by-one in the retry cap\n' +
+    '- **Severity:** Critical\n';
+
+  it('caps a clean Approve at Comment and discloses the surviving tag', () => {
+    const r = composeReview(base({ findingsPath: findingsFile(TAGGED) }));
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain(
+      '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
+        'ended',
+    );
+    // The opener may not certify over a loop that ended mid-verification.
+    expect(r.body).not.toContain('no blockers');
+    expect(r.remediation.join(' ')).toContain('--role verify');
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — an Approve was NOT available: findings were ' +
+        'still unverified when the loop ended',
+    );
+  });
+
+  it('counts every surviving tag', () => {
+    const two = `${TAGGED}\n- **File:** src/other.ts:7 — race in the retry queue — [unverified]\n`;
+    const r = composeReview(base({ findingsPath: findingsFile(two) }));
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('2 finding(s) still carried the');
+  });
+
+  it('a tag-free findings file caps nothing', () => {
+    const r = composeReview(base({ findingsPath: findingsFile(CLEAN) }));
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('findings-unverified-at-compose');
+  });
+
+  it('a missing findingsPath disables the check — every non-high run', () => {
+    const r = composeReview(base({}));
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).not.toContain('findings-unverified-at-compose');
+  });
+
+  it('softens a Request changes whose blockers are non-deterministic', () => {
+    // The verifier's delivery is clean here (coveredPlan records it), so the
+    // softening is the tag flag alone: a review posting non-deterministic
+    // Criticals cannot prove they are not the still-tagged entries.
+    const r = composeReview(
+      base({ criticalsInline: 1, findingsPath: findingsFile(TAGGED) }),
+    );
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — a Request changes was NOT available: findings ' +
+        'were still unverified when the loop ended (they are posted, ' +
+        'disclosed)',
+    );
+  });
+
+  it('a deterministic-only Request changes stands despite the tag', () => {
+    // A [build] blocker is pre-confirmed; nothing posted owed a verifier, so
+    // a tag on an entry the review did not confirm un-blocks nothing — but
+    // the disclosure still rides the body.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['[build] tsc fails on the merge commit'],
+        findingsPath: findingsFile(TAGGED),
+      }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('still carried the `— [unverified]` tag');
+  });
+
+  it('fails CLOSED on a findingsPath that does not read', () => {
+    const r = composeReview(
+      base({ findingsPath: join(dir, 'no-such-findings.md') }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('findings file could not be read at compose time');
+    expect(r.remediation.join(' ')).toContain('findingsPath');
+  });
+
+  it('refuses a present findingsPath of the wrong shape', () => {
+    expect(() =>
+      composeReview(base({ findingsPath: 42 as unknown as string })),
+    ).toThrow(/findingsPath must be a non-empty string/);
+  });
+});
+
+/**
+ * #8388's posted body ran 31 unresolved existing Criticals and seven
+ * disclosures together in one space-joined paragraph, each entry restating
+ * the same reason, every comment id a bare number, and the Chinese fold
+ * duplicating the whole untranslated wall. These pin the readable shape:
+ * paragraphs, a Markdown list, one reason per group, anchored ids.
+ */
+describe('composeReview — unresolved-Critical rendering (#8388 readability)', () => {
+  // The github.com anchor assertions ride the effective-host chain's
+  // default; an exported GH_HOST must not leak in — save/delete/restore
+  // it, as every sibling suite whose assertions read the host does.
+  let savedGhHost: string | undefined;
+  beforeEach(() => {
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+  afterEach(() => {
+    if (savedGhHost !== undefined) {
+      process.env['GH_HOST'] = savedGhHost;
+    } else delete process.env['GH_HOST'];
+  });
+
+  it('renders the cannot-tell entries as a Markdown list in its own paragraph', () => {
+    const r = composeReview(
+      base({
+        suggestionsInline: 1,
+        cannotTellCriticals: [
+          'a.ts:1 — full text unfetchable',
+          'b.ts:2 — quarantined by the harness',
+        ],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    // Opener sentences stay one paragraph; the block opens its own.
+    expect(r.body).toContain(
+      'Reviewed. Suggestions are inline.\n\nUnresolved, please confirm:\n\n',
+    );
+    expect(r.body).toContain(
+      '\n- **[Critical]** a.ts:1 — full text unfetchable',
+    );
+    expect(r.body).toContain(
+      '\n- **[Critical]** b.ts:2 — quarantined by the harness',
+    );
+  });
+
+  it('collapses entries sharing the exact reason into one group that says it once', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          'comment one (a.ts) — body truncated; status undetermined',
+          'unique.ts:9 — full text unfetchable',
+          'comment two (b.ts) — body truncated; status undetermined',
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** 2 entries — body truncated; status undetermined:\n' +
+        '  - comment one (a.ts)\n' +
+        '  - comment two (b.ts)',
+    );
+    // The shared reason renders once, not per entry …
+    expect(r.body.match(/body truncated; status undetermined/g)).toHaveLength(
+      1,
+    );
+    // … and the odd one out keeps its own full line, nothing dropped.
+    expect(r.body).toContain(
+      '- **[Critical]** unique.ts:9 — full text unfetchable',
+    );
+  });
+
+  it('links bare comment ids to their GitHub anchors when the plan names the PR', () => {
+    const r = composeReview({
+      cannotTellCriticals: [
+        'comment 3733696855 (capture-tui.test.ts, R10-1) — body truncated',
+        'issue-level comment 5199834809 (author review) — body truncated',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+    expect(r.body).toContain(
+      '[issue-level comment 5199834809](https://github.com/QwenLM/qwen-code/pull/8388#issuecomment-5199834809)',
+    );
+  });
+
+  it('leaves comment ids bare when the plan names no PR', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r');
+  });
+
+  it('a budget gap that says "(none …)" is completion, not a gap — dropped', () => {
+    // #8388's body: `Not explored to full depth …: chunk 2: (none — all
+    // planned checks completed)` — the agent reported finishing, and the
+    // disclosure contradicted it.
+    transcript('a1', goodPrompt(1), {
+      toolCalls: 3,
+      range: [0, 100],
+      text:
+        'No issues found — walked chunk 1 fully.\n' +
+        'Budget gap: (none — all planned checks completed)',
+    });
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    recordStep45(p, ['verify', 'reverse-audit']);
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).not.toContain('Not explored to full depth');
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No issues found. LGTM! ✅');
+  });
+
+  it('leaves an already-linked entry untouched — never nests a second link', () => {
+    const r = composeReview({
+      cannotTellCriticals: [
+        '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855) — body truncated',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    // Byte-identical passthrough: the model linked it itself.
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855) — body truncated',
+    );
+    expect(r.body).not.toContain('[[comment');
+  });
+
+  it('renders reasonless entries as their own bullets — no collapse, no dangling dash', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: ['old blocker', 'second blocker'],
+      }),
+    );
+    expect(r.body).toContain('\n- **[Critical]** old blocker\n');
+    expect(r.body).toContain('\n- **[Critical]** second blocker\n');
+    expect(r.body).not.toContain('entries —');
+  });
+
+  it('reads a dangling " — " as reasonless, not an empty group key', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: ['a.ts:1 — ', 'b.ts:2 — '],
+      }),
+    );
+    expect(r.body).toContain('\n- **[Critical]** a.ts:1\n');
+    expect(r.body).toContain('\n- **[Critical]** b.ts:2\n');
+    expect(r.body).not.toContain('entries —');
+  });
+
+  it('collapses embedded newlines so a multi-line entry stays one list item', () => {
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          'comment 3733696855 (a.ts) — body truncated\nsee also b.ts',
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated see also b.ts',
+    );
+  });
+
+  it('counts entries, not groups, in the Chinese fold', () => {
+    // Three entries collapsing into two groups — the fold must carry 3.
+    const r = composeReview({
+      cannotTellCriticals: [
+        'one (a.ts) — body truncated',
+        'two (b.ts) — body truncated',
+        'three (c.ts) — quarantined by the harness',
+      ],
+      planPath: coveredPlan(undefined, { han: true }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    // … the count AND the pointer — the fold's whole payload besides the
+    // list it points at.
+    expect(r.body).toContain(
+      '未决，请确认：共 3 条（原文未翻译，列表见上方英文部分）。',
+    );
+  });
+
+  it("anchors comment ids at the plan's GHE host, short ids included", () => {
+    const r = composeReview({
+      cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'corp/widgets',
+        prNumber: '12',
+        host: 'ghe.example.com',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 12345](https://ghe.example.com/corp/widgets/pull/12#discussion_r12345)',
+    );
+  });
+
+  it('leaves short ids bare on github.com — ordinals are not anchors', () => {
+    const r = composeReview({
+      cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 12345 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r12345');
+  });
+
+  it('reads a cased or :443-suffixed github.com as the default host', () => {
+    // GH_HOST reaches the anchor builder through resolveGhHost; a cased
+    // variant of the default host must not dodge the short-id floor.
+    process.env['GH_HOST'] = 'GitHub.com:443';
+    const r = composeReview({
+      cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 12345 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r12345');
+  });
+
+  it('anchors an Issue-level mention at #issuecomment whatever its casing', () => {
+    // pr-context renders `**Issue-level comment**` capitalized; an entry
+    // echoing that casing must still anchor under #issuecomment, not
+    // #discussion_r — an anchor GitHub cannot resolve. The link text keeps
+    // the entry's own casing: the linkifier navigates, it does not rewrite.
+    const r = composeReview({
+      cannotTellCriticals: [
+        'Issue-level comment 5199834809 (author review) — body truncated',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[Issue-level comment 5199834809](https://github.com/QwenLM/qwen-code/pull/8388#issuecomment-5199834809)',
+    );
+  });
+
+  it('falls back to github.com when the recorded host is not a hostname', () => {
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+        host: 'ghe.example.com/evil',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+    expect(r.body).not.toContain('ghe.example.com/evil');
+  });
+
+  it('leaves ids bare when the recorded ownerRepo is misshapen', () => {
+    // `../repo` rides the character class but is a dot segment — it must
+    // not reach the anchor URL's path.
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: '../repo',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r3733696855');
+  });
+
+  it('anchors at the run-routed host when the plan recorded none', () => {
+    setGhHost('ghe.example.com');
+    try {
+      const r = composeReview({
+        cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+        planPath: coveredPlan(undefined, {
+          ownerRepo: 'corp/widgets',
+          prNumber: '12',
+        }),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.body).toContain(
+        '[comment 12345](https://ghe.example.com/corp/widgets/pull/12#discussion_r12345)',
+      );
+    } finally {
+      setGhHost(undefined);
+    }
+  });
+
+  it('strips a copied **[Critical]** prefix from a cannot-tell entry', () => {
+    // The orchestrator copies blocker lines as the context file renders
+    // them — marker included; the bullet renders it exactly once.
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [
+          '**[Critical]** old blocker (a.ts) — body truncated',
+        ],
+      }),
+    );
+    expect(r.body).toContain(
+      '- **[Critical]** old blocker (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('**[Critical]** **[Critical]**');
+  });
+
+  it('reads www./trailing-dot/zero-padded-port github.com variants as the default host', () => {
+    // Each is the same default instance; a variant must not dodge the
+    // short-id floor and link an ordinal into a dead anchor.
+    for (const variant of [
+      'www.github.com',
+      'github.com.',
+      'github.com:0443',
+    ]) {
+      process.env['GH_HOST'] = variant;
+      const r = composeReview({
+        cannotTellCriticals: ['comment 12345 (a.ts) — body truncated'],
+        planPath: coveredPlan(undefined, {
+          ownerRepo: 'QwenLM/qwen-code',
+          prNumber: '8388',
+        }),
+        env: ENV,
+        modelId: MODEL,
+      });
+      expect(r.body).toContain(
+        '- **[Critical]** comment 12345 (a.ts) — body truncated',
+      );
+      expect(r.body).not.toContain('discussion_r12345');
+    }
+    // And a long id under the www variant anchors at the apex host.
+    process.env['GH_HOST'] = 'www.github.com';
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+  });
+
+  it("routes an issue-level entry's bare id to #issuecomment — the anchor family is per entry", () => {
+    // pr-context's own header shape carries the id apart from the phrase:
+    // `**Issue-level comment** — by @alice (comment 5199834809)`. Issue-
+    // comment ids and review-comment ids are separate id spaces, so
+    // routing that id by adjacency alone mints a #discussion_r anchor
+    // that can never resolve.
+    const r = composeReview({
+      cannotTellCriticals: [
+        '**Issue-level comment** — by @alice (comment 5199834809) — full text unfetchable',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '8388',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('#issuecomment-5199834809');
+    expect(r.body).not.toContain('discussion_r5199834809');
+  });
+
+  it('degrades to bare ids on a corrupt plan file — never throws', () => {
+    // The orchestrator killed mid-write leaves plan.json truncated; the
+    // anchors degrade, the composition survives.
+    const planPath = join(dir, 'corrupt-plan.json');
+    writeFileSync(planPath, '{ not json');
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '- **[Critical]** comment 3733696855 (a.ts) — body truncated',
+    );
+    expect(r.body).not.toContain('discussion_r');
+  });
+
+  it('accepts a numeric prNumber — plans record both JSON forms', () => {
+    const r = composeReview({
+      cannotTellCriticals: ['comment 3733696855 (a.ts) — body truncated'],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: 8388,
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3733696855](https://github.com/QwenLM/qwen-code/pull/8388#discussion_r3733696855)',
+    );
+  });
+
+  it('stays linear on a cannot-tell entry with a long whitespace run', () => {
+    // The newline collapse must not reintroduce a quadratic scan: a
+    // model-written entry has no length cap, and `/\s*\n+\s*/g` was
+    // measured at seconds on an 80k whitespace run with no newline in it.
+    const flat = `comment 101 (a.ts) — body${' '.repeat(80_000)}truncated`;
+    const wrapped = `comment 102 (b.ts) — body\n${' '.repeat(80_000)}truncated`;
+    const t0 = performance.now();
+    const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
+    expect(performance.now() - t0).toBeLessThan(2000);
+    // The multi-line entry still collapses to one list item.
+    expect(r.body).toContain('comment 102 (b.ts) — body truncated');
   });
 });

@@ -321,7 +321,7 @@ Seven rounds of review-the-review on this PR converged on one diagnosis: the ski
 The resolution is the same one this document already records for presubmit and cleanup: judgment stays in the prompt, bookkeeping moves to tested subcommands that version together with the skill.
 
 - **`parse-args`** owns the grammar. Every previously-shipped parsing bug is a named row in its table-driven tests. The raw string travels **on stdin** (`--stdin` with a quoted heredoc), never as a positional: a flag-first raw string (`/review --effort low`) is consumed by the CLI's own strict parser before the handler runs, and a positional also breaks on quotes and shell metacharacters. Pure-function tests could not see that class — the documented invocation failed only when run against the built binary — so the suite includes yargs-level wiring tests alongside the table.
-- **`compose-review`** owns event selection and body composition — the C/S table (counting body Criticals and discarded Suggestions), the event caps (cannot-tell existing Criticals, uncoverable chunks, unreviewed dimensions, context-unavailable), the downgrade carve-outs, and the clause composition. Its truth-table tests pin each shipped bug; writing them immediately caught one more instance of the class (all Suggestions discarded → S=0 → APPROVE). The input is validated at the boundary: the producer is a model writing JSON that omits inapplicable fields, so absent counts default to zero and malformed values throw typed errors — before that, an omitted count meant `undefined + 1 = NaN`, which fails every event comparison and would have returned APPROVE over a body-only blocker. 422 recovery stops being a hand-derived recomposition: it is the same call with the updated `--comments` file (the inline counts are counted from the drafted comments, never typed — a dogfooded report-only run dropped the typed count while moving its one Critical inline, and the verdict line read Approve over it), so the "recompute may never upgrade the verdict" guarantee holds by construction.
+- **`compose-review`** owns event selection and body composition — the C/S table (counting body Criticals and discarded Suggestions), the event caps (cannot-tell existing Criticals, uncoverable chunks, unreviewed dimensions, context-unavailable), the downgrade carve-outs, and the clause composition. Its truth-table tests pin each shipped bug; writing them immediately caught one more instance of the class (all Suggestions discarded → S=0 → APPROVE). The input is validated at the boundary: the producer is a model writing JSON that omits inapplicable fields, so absent counts default to zero and malformed values throw typed errors — before that, an omitted count meant `undefined + 1 = NaN`, which fails every event comparison and would have returned APPROVE over a body-only blocker. 422 recovery stops being a hand-derived recomposition: it is the same call with the updated `--comments` file (the inline counts are counted from the drafted comments, never typed — see "The Approve over a relocated Critical" under Measured incidents), so the "recompute may never upgrade the verdict" guarantee holds by construction.
 - **`pr-context`** ends the fetch-prose chain at its root: review bodies **and every blocker-bearing body** render **in full** (a body-only blocker lives only there; a capped body names its review or comment id so the tail stays fetchable one object at a time, and reply snippets name their comment id when cut), and blocker-bearing threads are quarantined into a "Blockers to re-check" section instead of settling into "Already discussed" — a reply alone never retires a blocker. The `gh` wrapper's `maxBuffer` rises to 64 MiB, closing the ENOBUFS that killed two subcommands mid-review on a comment-heavy PR.
 
 What deliberately stays prose: everything judgment-shaped — what counts as a Critical, verification, the posting gate's authorization semantics, the angles. A truth table cannot decide whether a finding is real; it can guarantee that a real finding is never mislabeled, dropped by a downgrade, or approved past.
@@ -484,7 +484,7 @@ The split follows this document's recurring line — determinism owns the eviden
 - **A path that is not there.** Checkable against the reviewed tree. Absent from the diff _and_ absent from the worktree means the sentence describes some other commit. (Present-but-untouched is not a defect: "ran the existing suite at X" is a normal thing to write, and the ruling says so.)
 - **An npm script that does not exist.** Checkable against the workspace manifests. If no package defines it, a reviewer who follows the Test Plan cannot run it.
 
-**A test count is the third kind, it is the one that motivated the command, and it is deliberately not ruled a contradiction.** The temptation is obvious — the count is right there, `build-test` observed a count, compare them. It is wrong, because a count is only falsifiable against the suite the author meant, and a Test Plan almost never names one. `build-test` runs the subset of workspaces the diff touched; the author ran whatever they ran. `471 ≠ 472` is then a fact about two different measurements, and filing it as a defect is filing arithmetic the command cannot do. So the verdict is `differs`: both numbers, side by side, framed as claimed-versus-observed, and the reader decides. That is what the observation was worth in the first place — a note to the author, never a blocker. The real 471-vs-472 case that prompted this was the mildest item in a four-item review, and the fix was "bump the number".
+**A test count is the third kind, it is the one that motivated the command, and it is deliberately not ruled a contradiction.** The temptation is obvious — the count is right there, `build-test` observed a count, compare them. It is wrong, because a count is only falsifiable against the suite the author meant, and a Test Plan almost never names one. `build-test` runs the workspaces the diff touches plus the workspaces that depend on them; the author ran whatever they ran. `471 ≠ 472` is then a fact about two different measurements, and filing it as a defect is filing arithmetic the command cannot do. So the verdict is `differs`: both numbers, side by side, framed as claimed-versus-observed, and the reader decides. That is what the observation was worth in the first place — a note to the author, never a blocker. The real 471-vs-472 case that prompted this was the mildest item in a four-item review, and the fix was "bump the number".
 
 **Nothing here blocks and nothing caps**, which makes `testPlanGate` the first gate in this file that is pure disclosure. Both halves are deliberate. A Test Plan defect is not a code defect — the diff is unaffected, and the verdict is about the code; spending the review's one irreversible public action on a documentation nit is exactly the "cry wolf" cost the design philosophy exists to avoid. And capping on a **missing** report would cap essentially every PR, because most produce no notes at all. That is the deferred-checker precedent from `script-lint`, for the identical reason: a limitation the author cannot fix must not make their PR un-Approvable forever. A stale report is dropped in silence rather than failed closed, since there is no cap to fall back to and a note about a previous commit's Test Plan is worse than no note.
 
@@ -591,10 +591,10 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 | ----------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Review agents           | 14 (+0-2)           | issue fidelity + 3 procedural correctness walks (1a/1b/1c) + security + 3 quality slices (3a/3b/3c) + perf/tests + 3 undirected personas + build&test, plus 0-2 diff-specialized finders; cross-repo skips Agents 7 and 1c (12), non-PR skips Agent 0 (13)                |
 | Sharded verification    | `ceil(F/8)`         | F = findings; typically 1-2; keeps each verifier's job small on high-finding reviews                                                                                                                                                                                      |
-| Iterative reverse audit | 2-5                 | loop ends after two consecutive dry rounds; 5-round hard cap                                                                                                                                                                                                              |
+| Iterative reverse audit | 2-5 (2-3 huge)      | loop ends after two consecutive dry rounds; 5-round hard cap — 3 for a huge diff (effective ≥ 3000 lines)                                                                                                                                                                 |
 | **Total**               | **~17-23 (~15-22)** | Row maxima do not co-occur on typical runs (~17-19 is common), but the honest sum of ranges is 17-23 same-repo, 15-22 cross-repo/local. **Low effort: 0 subagent calls** — the angle rotation runs in the orchestrator's own context; medium launches its reduced fan-out |
 
-**Large diffs (> 500 source lines OR > 3200 total diff lines, Step 3B, high effort) — `ceil(diffLines / 400)` chunk agents + `5..7` whole-diff agents + `3H` invariant agents (H = heavy files) + `ceil(F/8)` verify (F = findings) + `rounds × chunks` reverse audit.** The reverse audit dominates: it fans out one auditor per chunk per round, and the stop rule needs two consecutive dry rounds (hard cap 5). PR #6457 (5801 diff lines, 19 chunks, 1 heavy file) costs ~27-29 first-wave calls, then `19 × (2..5) = 38-95` reverse auditors — ~66-126 calls total depending on how long the audit keeps finding; ~70 is the clean-run floor, and the count scales with chunks and findings, not a fixed ceiling.
+**Large diffs (> 500 source lines OR > 3200 total diff lines, Step 3B, high effort) — `ceil(diffLines / 400)` chunk agents + `5..7` whole-diff agents + `3H` invariant agents (H = heavy files) + `ceil(F/8)` verify (F = findings) + `rounds × chunks` reverse audit.** The reverse audit dominates: it fans out one auditor per chunk per round, and the stop rule needs two consecutive dry rounds (hard cap 5 — **3 for a huge diff, effective ≥ 3000 lines**, which narrows the per-chunk multiplier to `2..3`). PR #6457 (5801 diff lines, 19 chunks, 1 heavy file) costs ~27-29 first-wave calls, then `19 × (2..5) = 38-95` reverse auditors — ~66-126 calls total depending on how long the audit keeps finding (a huge-diff cap-3 run of the same shape narrows this to `19 × (2..3) = 38-57`); ~70 is the clean-run floor, and the count scales with chunks and findings, not a fixed ceiling.
 
 That is roughly 4x the small-diff budget, and it buys the thing the small-diff topology cannot deliver at that size: coverage. Ten dimension agents (the roster of the day; fourteen now) on a 5801-line diff each read the same truncated 14% window (see "Why the diff is a file, not a command"), so nine of the ten calls were redundant reads of the same hunks. Nineteen chunk agents each read a distinct ~390-line territory, and every line of the diff has exactly one accountable owner. The comparison to make is not ~70 calls vs ~17: PR #6457 took **eight** review rounds at 12-14 calls each — over 100 calls — and was still surfacing Criticals in code that had been in the diff since the first commit.
 
@@ -722,3 +722,229 @@ With Fork + prompt cache sharing:
 **Estimated savings:** ~88-92% token reduction (~780K-1.1M → ~80-92K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
 
 **Why not implemented now:** Fork Subagent requires changes to the Qwen Code core (`AgentTool`, `forkSubagent.ts`, `CacheSafeParams`). This is a platform-level feature (~400 lines, ~5 days), not a /review-specific change. When available, /review should be updated to use fork instead of independent subagents.
+
+## Measured incidents behind the SKILL.md rules
+
+The blocks below are incident narratives moved out of SKILL.md (which is loaded into the orchestrator's context on every run). Each one is the story behind a rule that still lives there; the rule references it as `(measured; DESIGN.md — <title>)`.
+
+### The todo-call latency
+
+Measured on real small-PR runs from the harness's own records, the todo calls in one review cost **377 seconds**, in another **179** — minutes spent restating steps that were already written down.
+
+### The transcribed argument file
+
+Dogfooding `/review 6771`, a run wrote `--effort high` into the argument file — not the user's argument, but an **example** lifted out of the SKILL.md paragraph that introduces the argument file. The parser then did its job perfectly on the wrong input: it resolved a _local_ review, found the working tree clean, and reported "no changes to review". A request to review a pull request became a no-op, and nothing raised an error.
+
+### The stale PATH qwen
+
+Measured: a `npm run dev:daemon` session issued `qwen review agent-prompt --role 0`, `PATH` found a v0.19.10 whose `agent-prompt` predates `--role` entirely, and the review died on `Missing required argument: chunk` — the skill and the CLI it was talking to were different versions.
+
+### The unseen untracked file
+
+The reviews that skipped a brand-new file did not decide it was low-risk; they never saw it. When the new file was the _only_ change, `/review` reported "no changes to review" and stopped.
+
+### The guessed fork repo
+
+Dogfooding this skill against its own PR, the model inferred the fork from the branch's push target, `fetch-pr` answered "Could not resolve to a PullRequest", and the review stopped before reading a line of code.
+
+### The endorsement-shaped blocker (PR #6486)
+
+On PR #6486 a maintainer built the PR, drove the real CLI, and filed `🔴 Finding 1 — Ctrl+F dual-fires … (blocker)` as an **issue comment**. Every issue comment used to settle into "Already discussed" as a 240-character snippet, and the first 240 characters of that one were its preamble — _"I built this PR from source and drove the real CLI … to validate the model-toggle hotkey before merge"_ — which reads as an **endorsement**, filed under a heading that says not to re-report it. The blocker began 1 143 characters past the cut. `/review` reviewed that same commit three hours later and submitted "no blockers"; the defect was real and was fixed that evening.
+
+### The 71-thread comment-status report
+
+On a 71-thread PR the comment-status report measured over twice the 25 000-character threshold, and because `threads` is path-sorted a truncated read drops the alphabetically-later files wholesale (24 blocker-flagged threads, in that measurement) while the cut JSON does not even parse.
+
+### The 20-turn status re-derivation
+
+Measured on a real 72-comment PR, a run burned 20+ model turns re-deriving exactly those per-comment status fields (`line`/`outdated`/`commit_id`) one id at a time.
+
+### The two-dot phantom regressions (PR #6626)
+
+On PR #6626 a review approved four files and then warned the author, publicly, that their branch carried "typo regressions in `ide-client.ts`" and should be rebased. The branch had done nothing: main had corrected `compatability` → `compatibility` after the fork point, and a two-dot diff showed the branch putting the typo back. The PR's real change set, `merge-base..head`, is four files and does not touch that file at all.
+
+### The paraphrased roster prompt
+
+Asked to paste a 4 652-character prompt to each of twelve agents, a real run delivered **2 893** characters of one: it kept the head, added a preamble of its own, and cut nineteen hundred characters out of the middle. Then it read the coverage check's refusal, concluded that "the agents clearly did their job", never called `compose-review` at all, and printed **`Review complete — Approve`** — a verdict it had composed itself, from prose, on a review whose gate had just refused.
+
+### The roles nobody launched
+
+Measured against the harness's own record of real runs — the launch prompt of every agent, written at launch and not retconnable — `1c` and the test-coverage matrix were handed prompts that named **no diff file at all** and went off to read the post-change source instead (which, on a deletion, shows them nothing); and **Agent 0 was never launched**, on a PR review, and no check in the run could see it, because every other check inspects an agent that ran.
+
+Dogfooded, a real PR review **never launched Agent 0** — the agent whose whole job is asking whether the PR fixes the thing it claims to — and every other check passed.
+
+### The eighty-seven kilobyte roster
+
+A chunk agent's brief runs to about five kilobytes with the project rules in it, and a Step 3B review of a real pull request has **seventeen** of them: eighty-seven kilobytes, in one response, pasted without an edit. That is not a thing that happens; at a twelfth of that load, it already measurably did not — see The paraphrased roster prompt.
+
+### The 23 blind chunk agents
+
+Measured against the harness's own record of what the agents were actually started with — the first record of each subagent transcript, written at launch — **23 of 23 chunk agents got a prompt that named no diff file at all**: no path, no `read_file`, no offset. All 23 made **zero tool calls**, and all 23 said the sentence their prompt handed them. The receipts that looked like proof of work were in the prompt that launched them. Downstream, the first coverage check asked the orchestrator to copy the agents' returns into a file and read the receipts back — and on the next run it **fabricated** them. The second checked the agents' prose for evidence of work; measured against 129 real transcripts it caught **none** of the 80 agents that made no tool call, because every one of them wrote more than forty characters of confident, specific text.
+
+### The whole-diff agents launched without the diff
+
+Measured against the harness's record of one real 3B run, all three whole-diff agents — cross-file tracer, test-coverage matrix, build & test — were launched with a prompt that named **no diff file at all**. The test-coverage matrix was told, in prose, to "Read the diff chunks and the test files", and given no path to read them from. It went and read the post-change source instead, and on a diff with deletions that shows an agent precisely nothing: the removed line is not in that file, and nothing marks where it was. These are the agents that own the classes a chunk agent is structurally blind to — the cross-file trace, the cross-chunk removed-behaviour pairing, the test matrix. The review's only coverage of all three was done by agents that never opened the diff, and the coverage check could not see it, because it only ever asked that question of agents whose prompt said `chunk N of M`.
+
+### The 3A review told nobody read it
+
+The coverage check used to live inside Step 3B and be reachable only from there, and it modelled coverage as "an agent whose prompt says `chunk N of M` made a tool call" — which no Step 3A agent's prompt ever says. Run against a real 3A review whose twelve agents each opened the diff, walked both chunks and filed findings, it reported `0/2 chunk(s) reviewed … Nobody read those lines` in the same breath as `16 agent(s) ran; 16 did work`. `compose-review` runs the same computation on the way to the verdict, so that review was capped away from Approve and the body it would have posted to the pull request said nobody had read it. Both sentences cannot be true.
+
+### The paraphrased chunk prompts
+
+Dogfooded, one run called the command for all five chunks and then delivered a paraphrase: it dropped the rule against reciting a stock sentence, dropped the half-read warning, and replaced the project's review rules with three sentences of its own.
+
+### The one-word drift repair
+
+Measured: a model asked to copy twelve blocks normalized one word in every block's tail, and the repair relaunched the entire fan-out to redeliver text the agents had already acted on.
+
+### The Approve over an unread diff
+
+Dogfooded against its own PR, the orchestrator launched 25 agents over an 18-chunk, 4 925-line diff. Twenty-two came back in under two seconds having made **zero tool calls**, returning about nineteen tokens each — the length of the words "No issues found." The three that worked were the three whose jobs do not require opening the diff. The prompt had three defences against this and every one of them was prose: the receipts every chunk agent "MUST" emit, the "exactly one receipt per chunk" verification, and the substantive-return check. The run performed none of them, reported zero findings, wrote "Not reviewed: none", and filed an **Approve**.
+
+### The six-second Agent 0
+
+Dogfooded against this skill's own PR, Agent 0 returned in **6 seconds** having made **one tool call**, and the review went on to print "All chunks were successfully reviewed and covered" and **Approve**.
+
+### The eleven-second invariant agent
+
+In dogfooding an invariant agent on a heavy file returned in 11 seconds having emitted a few hundred tokens, while its sibling agents ran for minutes; the whiffing agent happened to own the checklist half that held the run's most serious defect, and nothing flagged the miss.
+
+### The hand-copied focus areas
+
+The rule the `agent-prompt` flow replaced asked you to keep each prompt under 200 words and to copy the focus areas across by hand. Both were prose, and prose is what this skill keeps discovering it cannot rely on: the copy was made, and it dropped things.
+
+### The unrelayed Exclusion Criteria
+
+The Exclusion Criteria in particular had **never reached an agent**: the skill states them at the end of SKILL.md and told you to "apply" them, and the agents do not read that document. They read the prompt they are launched with.
+
+### The severity-inflated coverage finding
+
+Measured on one run: the same "zero test coverage" finding was filed as Critical four times and Suggestion twice, in the same review, and the PR was blocked partly on the strength of the four.
+
+### The one-agent invariant checklist (PR #6457)
+
+PR #6457's `QQChannel.ts`: one agent holding the whole eight-item checklist found **one** of that file's five invariant-class defects; the same model split three ways found **all five**.
+
+### The hand-assembled verifier prompt
+
+Dogfooded twice: the step that used to have you prepend the list by hand is where the prompt got paraphrased — a summary inserted, the "nothing replaces the brief" line truncated — and Step 6's check caught it and capped the verdict.
+
+### The double-execute the probe caught
+
+Measured on this repo, the strongest model traced a real double-execute (`!git push` firing twice) and called it correct; a probe that runs the path reports `sendShellCommand called twice` and the guessing stops.
+
+### The head-sampled roster
+
+A real run that sampled each build with `| head -5` never possessed the prompts, hand-reconstructed all ten launches, and had every one flagged rewritten — a full repair round spent recovering from a shortcut that saved nothing.
+
+### The hand-written reverse-audit launches
+
+Dogfooded, two same-findings rounds shared one record, the orchestrator appended `(round N)` to the identity line to tell its own launches apart, and both rounds were flagged rewritten — a repair round paid for a label the CLI now prints. A real run skipped `--findings`, hand-wrote the auditor's launch keeping only the brief pointer, and Step 6's check capped the verdict — the auditors had run and read their brief, but not one of them got the prompt the CLI built.
+
+### The code-span door beside the fixed fence
+
+A live six-round dogfood is the caution: the fix closed the fence-shaped door into a raw-HTML block, and the code-span door beside it — same divergence, adjacent syntax — stayed open; a re-check that tested only the reported input ruled `fixed` over a hole one backtick away.
+
+### The guard that fixed nothing (PR #6486)
+
+On PR #6486 the author responded to a `Ctrl+F` dual-fire blocker by adding a guard to the toggle handler. The guard is right there in the diff and reads like a fix. It changed nothing — `Ctrl+F` still toggled the model **and** moved the cursor, because the second handler is `text-buffer.ts:2663` in an untouched file, subscribed independently to a `KeypressContext.broadcast()` with no stop-propagation. The blocker's own body named that line. A re-check that read only the diff would rule "fixed" and be wrong; a re-check that read the named line could not.
+
+### The scripts nobody ran
+
+Measured, twice: a model told in prose to run the step scripts read them and did not run them (0/4), and even the strongest model's attacker persona walked into a double-execute bug and declared it correct.
+
+### What transcription cost
+
+A Critical that changed severity between two sections of one review; an aggregate that arrived at `resolve-anchors` with its per-location anchors dropped and took the whole batch down.
+
+### The four-round misattributed Critical (#8368)
+
+Measured on #8368, a Critical asserting the PR broke an already-red test was carried across four rounds and into the composed review while the run's own `test-delta` had classified that file `shared` twice.
+
+Measured on #8368, that is the exact path the misattribution took into a composed review: the hold landed after `compose-review` had run, so it reached only the Step 8 report — the verdict line, the drafted marker and the payload Step 7 recounts were all fixed before the measurement was consulted.
+
+### The Approve over a relocated Critical
+
+Dogfooded, a report-only run — where no later step recounts — moved its one Critical from `bodyCriticals` to an inline comment, dropped the typed inline count on the way, and the verdict line read Approve over a blocker the same report listed. That is why `compose-review` counts the inline findings from the drafted comments, never from a typed number.
+
+### The narrated-away cap
+
+The failure came back in a subtler shape, on a later dogfood: the run _did_ call `compose-review`, _did_ read `Verdict: Comment — an Approve was NOT available: a dimension nobody reviewed`, and then wrote — in its next thought — _"the compose-review flagged reverse audit as unreviewed (transcript visibility issue — the reverse audit did run substantively)"_, and reported **Approve** to the user and into the saved report. It was wrong: the auditors had run, but the orchestrator had hand-written their launch prompts, so they never got the prompt the CLI built — which is precisely what the gap said, and precisely the run's own doing.
+
+### The four assertions that survived their mutation
+
+Measured on this pipeline's own PRs, four assertions written to pin a real defect all survived the mutation they were written for. `expect(body).toContain('"index":0')` passed with the tool-call index deleted, because `"index":0` also appears on every `choices` entry. `expect(body).toContain('input_json_delta')` passed with the arguments handed over as a finished object, because the mutation kept the type and changed the field. `expect(wrapScript(s)).toMatch(/set \+e/)` asserted the mechanism rather than the behaviour, and `set +e` has no bearing on the `exit` that broke it. A pure function tested alone passed while the request path called a different one entirely.
+
+### The gh pr comment bypass
+
+Dogfooded the hard way: a run that had lost these instructions to four context compressions decided its findings were "all duplicates", never called submit, and hand-posted a consolidated summary with `gh pr comment` — a write with no authorisation gate, no downgrade semantics, no `posted` fact, and no completion line; nothing downstream could tell it had happened.
+
+### The self-filed COMMENT review (PR #6771)
+
+The posting check failed twice under dogfooding. The second time was this skill reviewing _its own pull request_: `/review 6771`, no `--comment`, no publish request — and it filed a public COMMENT review anyway, whose body announced inline suggestions it had not posted. Neither run decided to defy the rule. Each reasoned its way to a verdict it wanted to file and never re-read the sentence forbidding the filing.
+
+The gate itself has been violated the same way: a review self-submitted a COMMENT with no `--comment` flag set.
+
+### The five test reviews
+
+A run against a real PR left five reviews carrying the bodies `Test`, `Test`, `t`, `t`, `t` before submitting the real one.
+
+### The interactive overlap question
+
+Dogfooding measured the overlap-disposal decision point improvised as an interactive question in 2 of 6 runs — which stalls a headless run forever — while the other 4 runs proceeded.
+
+### The 283-file drift cap
+
+Measured on a real 283-file base-merge drift, the truncated `filesTouched` cap silently dropped every path the findings actually anchored to.
+
+### The skipped integration job (PR #6486)
+
+The one job that would have exercised the new hotkey, `Integration Tests (CLI, No Sandbox)`, was skipped; so were the macOS and Windows `Test` legs. The classifier called it `all_pass`, and the whole design leans on CI precisely because the LLM pipeline reads code statically (DESIGN.md, "Why downgrade APPROVE when CI is non-green"). The delegation returned nothing, and returned it looking like a pass.
+
+### Two live verdict failures (#6584, #6631)
+
+A review that filed three Suggestions and then publicly `APPROVE`d the PR (#6584), and a Suggestion that would not anchor becoming a second paragraph of the public body (#6631).
+
+### The phantom APPROVE posted line
+
+Dogfooding this skill against its own PR emitted `Review complete: pr-6771 — APPROVE posted` on a run with no `--comment` and no publish request, where the gate had correctly blocked every write and nothing whatsoever was sent to GitHub.
+
+### The five already-implemented Suggestions
+
+Dogfooded against this skill's own PR, a run reported five "Suggestions" — "Enhanced Binary File Handling", "Security Improvement for Terminal Output" — each summarising a thing the PR already did, each with `Suggested fix: N/A (already implemented)`. That is not silence being better than noise; it is noise wearing silence's clothes, and the reader has to read all five to discover there was nothing to do.
+
+### The 22-minute serial first verification
+
+Two CI reviews of similar-size PRs ran the same skill on the same day (2026-08-06). The #8619 run launched its Step 4 verifier and its round-1 reverse auditor together in one response. The #8628 run launched the verifier alone at 08:12, read its verdicts at 08:34, and only then launched round 1 at 08:37 — 22 minutes of wall clock spent waiting for verdicts the auditor's launch never consumed (the findings file carries `— [unverified]` tags for exactly this state). The pipelining rule said "round _k_'s verifiers ride with round _k+1_'s auditors" and started counting at k=1, so the initial verification's coupling was orchestrator discretion, and discretion split 50/50 across the measured runs.
+
+### The serial convergence pair
+
+Measured on the CI reviews of #8619 and #8607: both audits converged at the minimum — round 1 dry, round 2 dry — and the rounds ran serially at 13–25 minutes each, although a dry round leaves the cumulative findings list unchanged, so round 2's launch input was substantively identical to round 1's — the same entries, at most with verification tags the unconditional merge had cleared in between: an independent rerun, paid for at the price of a dependent one. The #8501 round-5 review made the cost concrete: round 1 came back dry, the deadline gate then refused round 2 (`BUDGET:`, exit 4), and the verdict shipped capped by a budget stop — for want of a second dry audit the run had time to launch in parallel but not in series.
+
+### The rounds a rejected finding bought (PR #8353)
+
+The 15th review round of #8353 (its audit rounds numbered 1–5 within that run; `R15-1` is the incremental-review ledger's naming, not an audit round): audit round 2 dry; round 3's sole finding rejected by its verifier with direct counter-evidence — the claimed compound behavior lived entirely in unchanged code. The rejection removed the entry from the cumulative list, but not the reset it had already applied to the dry counter. Under the forward pairing the rule licenses, round 4's dry return completed the two-dry evidence the moment it landed — the retired round 3 plus dry round 4 — and round 5 (~15–20 minutes) was the waste: it audited nothing the loop had not already answered.
+
+### The artifact root that pointed at qwen-home
+
+Every one of six measured CI reviews (2026-08-05/06) spent 1.5–3 minutes at Step 8 rediscovering the same fact: `save-artifact` resolved its containment root from `QWEN_CODE_PROJECT_DIR`, and that variable does not name the main checkout in any environment — the harness exports it as `Storage.getProjectDir()`, the session-storage directory under the runtime base where the harness's own transcripts live. The helper refused its own inputs ("must be inside the workspace"), and each orchestrator improvised a different workaround: one overrode the env var to the repo, one copied the inputs into the qwen-home mirror and copied the artifact back, others retried path shapes until one landed. The env preference was wrong 100% of the time it was consulted; the command's cwd — the main checkout, where the skill runs every subcommand — was right in every measured run.
+
+### The one-command-per-turn tail
+
+Measured across the same six CI reviews: the post-verdict bookkeeping — Markdown report, cost-ledger, save-artifact, `record_artifact`, the incremental-cache write, cleanup — ran one command per model turn, 4–6 minutes of wall clock after the review's outcome was already decided (and, on posting runs, already on the PR), stretching past 7 minutes when the qwen-home fumbling above joined it. Every command in the tail is cheap; the turns are not — the same arithmetic that batches the Step 1 setup calls, unapplied to the other end of the run.
+
+### The forty-one minute wave
+
+Two measured runs of the same 14-agent Step 3A fan-out, on diffs of comparable size, took 11.7 and 41 minutes — and the wave's wall clock is its slowest agent, so the whole review inherited the difference. The slow wave's tail was not review depth: individual agents spent 40-100 model calls exploring the tree (the pattern a sibling PR had already named as the next optimization target), while healthy agents on the same class of diff settle at 25-45 calls with indistinguishable findings. The budget that answers this is soft on purpose: a hard cap would convert the pathology into silent truncation, so the brief tells the agent to stop exploring at the ceiling, file what it holds, and disclose the checks it did not get to — the disclosure lands in the same receipt machinery that already judges whiffs.
+
+### The six-hour timeouts
+
+A survey of one recent CI window found 26 review-pr jobs timing out — ~122 hours of compute, zero posted, several the same PR retried and re-timed-out. The wall clock is model inference, not code execution: at the orchestrator level 82-88% of it is spent inside subagents, and inside a subagent ~81% is model turns (reading the diff, reasoning) — the one shell-heavy agent is Build & Test. So the timeout driver on a huge PR is the sheer volume of model work: dozens of finder and chunk agents reading a 4,000-5,300-line diff, then a reverse-audit loop whose every round re-reads that diff against a growing findings list (~90 min a round). Five rounds alone (450 min) exceed the six-hour ceiling before the fan-out is counted.
+
+The elastic budget answers this at the size band where the review otherwise posts nothing. `reverseAuditRounds` drops from five to three for a huge diff (effective ≥ 3000 lines) — one audit round above the convergence floor of two, since the all-dry rounds-1-and-2 shape reaches CONVERGED under any cap of two or more (the convergence check runs before the round-cap gate); the extra round buys hot chunks one more pass before the cap — and `specialistCap` sheds Agent 8 to zero there, because an Agent 8 whole-diff pass on top of the base fan-out is the marginal cost that tips a too-big review over the wall while the per-chunk fan-out already covers the ground. Neither drops a required dimension: the reverse audit still runs, and Agent 8 was never a required agent. In a time-budgeted CI run the deadline gate already refuses a round that will not fit; this static cap is the belt it works under and the only bound a local run has. The cap refusal writes a marker `compose-review` caps the verdict on, so a non-converged stop at the cap discloses like a budget stop rather than resting on the orchestrator's relay.
+
+### The killed-before-compose tail (PR #8687)
+
+A 4,269-line, 21-file cross-worktree git guard — a security PR whose adversarial surface is near-unbounded — ran its reverse audit to a **correct** budget stop: the deadline gate refused round 3 with ~110 minutes and the whole reserve in hand, exactly as designed. Then the run died anyway, and posted nothing, holding ~20 E2E-confirmed Critical bypasses. The tail after the stop was the killer: a single hand-rolled verification agent re-running a 15-family shell/git bypass battery — each family spun up a temp git repo and executed real payloads — consumed the entire remaining budget, and the outer wall hit mid-verification, before compose-review ever ran.
+
+The reserve was sized (#8368) as one number covering "verification + compose + submit," which is correct for a normal tail where verification is a per-finding re-trace. It is wrong for a security PR, where verification cost scales with the finding count AND with a per-finding cost that has no bound — real filesystem E2E — while compose and submit stay bounded (one CLI call, a handful of `gh` calls). So the two must not share one undifferentiated reserve: a distinct, smaller **compose floor** is carved out, and the verifier — not the reverse-audit builder — is gated on it. Below the floor `agent-prompt --role verify` refuses to build, the findings keep their `— [unverified]` tag for compose-review to cap, and compose runs. The prose half closes the bypass the gate cannot see: the tail's verification goes through the gated builder, never a hand-rolled `agent`, and no fresh re-verification pass is invented for findings already confirmed. Compose and submit are non-negotiable; a review that stops verifying still posts everything it proved.

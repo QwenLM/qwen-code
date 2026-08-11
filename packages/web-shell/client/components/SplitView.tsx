@@ -9,7 +9,6 @@ import {
   DaemonSessionProvider,
   useConnection,
   type DaemonSessionActions,
-  type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionArtifact,
@@ -57,6 +56,7 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -67,7 +67,6 @@ export interface SplitViewProps {
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
   /**
@@ -91,6 +90,7 @@ export interface SplitViewProps {
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
+  sessionWorkflowEnabled?: boolean;
 }
 
 /**
@@ -105,6 +105,7 @@ export function SplitView({
   onPanesChange,
   onExit,
   onError,
+  onImageIngestionNotice,
   onSlashCommand,
   onRightPanelOpen,
   onOpenMonitor,
@@ -119,6 +120,7 @@ export function SplitView({
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = {},
   voiceWorkspaces,
+  sessionWorkflowEnabled = false,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -526,12 +528,14 @@ export function SplitView({
                       }
                       isMaximized={isMaximized}
                       onError={onError}
+                      onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
                       restartSseOnPrompt={restartSseOnPrompt}
+                      sessionWorkflowEnabled={sessionWorkflowEnabled}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>

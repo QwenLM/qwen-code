@@ -12,6 +12,7 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
+import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
   ChannelLoopScheduler,
   ChannelLoopStore,
@@ -41,6 +42,7 @@ import {
   QWEN_DAEMON_WORKSPACE_ENV,
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
@@ -83,7 +85,10 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
-import { ObservedChannelContactStore } from './observed-contact-store.js';
+import {
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+  ObservedChannelContactStore,
+} from './observed-contact-store.js';
 import {
   createChannelLoopController,
   isChannelCronEnabled,
@@ -553,6 +558,10 @@ export async function runChannelDaemonWorker(
               observe: (channelName, observation) => {
                 observedContacts.observe(channelName, observation);
               },
+              list: () =>
+                observedContacts.list({
+                  freshWithinSeconds: OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
+                }),
             },
             ...(loopController ? { loopController } : {}),
           }),
@@ -752,6 +761,7 @@ function scrubDaemonWorkerEnv(): void {
   delete process.env[QWEN_DAEMON_URL_ENV];
   delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
   delete process.env[QWEN_SERVER_TOKEN_ENV];
+  delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
 }
 
 function readDaemonWorkerEnv(): {
@@ -893,6 +903,16 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
     try {
       assertInternalDaemonWorkerInvocation();
       const { daemonToken, daemonUrl, workspace } = readDaemonWorkerEnv();
+      // Mirror the ACP-child self-scrub: in dev mode the supervisor spawns
+      // this worker with the daemon's loader-carrying base env (the harness
+      // tsx loader must reach this .ts entry), but nothing the worker spawns
+      // may inherit them into another workspace. Production base envs are
+      // scrubbed before the freeze, so this is a no-op there.
+      scrubAndReportInheritedLoaderEnv(
+        process.env,
+        'qwen channel daemon-worker',
+        'channel daemon worker',
+      );
       const send = process.send!;
       channelLoopMcpHost = new ChannelLoopMcpWorkerHost((message, callback) =>
         send.call(process, message, callback ?? (() => {})),
