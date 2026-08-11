@@ -10,6 +10,11 @@ import {
 } from '../customization';
 import type { Message } from '../adapters/types';
 
+vi.mock('../App', async () => {
+  const { createContext } = await import('react');
+  return { CompactModeContext: createContext(false) };
+});
+
 // Stub the message body components so MessageItem's own wiring — not the bodies
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
@@ -93,6 +98,7 @@ vi.mock('./InsightProgress', () => ({ InsightProgress: () => null }));
 vi.mock('./InsightReady', () => ({ InsightReady: () => null }));
 
 const { MessageItem } = await import('./MessageItem');
+const { CompactModeContext } = await import('../App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -222,26 +228,26 @@ describe('MessageItem selectable wrapper', () => {
 });
 
 describe('MessageItem tool group spacing', () => {
-  it('uses larger row spacing only while thinking is hidden', () => {
-    const hidden = render(
+  it('uses larger row spacing only in compact mode', () => {
+    const compact = render(
       <I18nProvider language="en">
-        <WebShellCustomizationProvider value={{ showThinking: false }}>
-          {item(toolMsg('hidden'))}
-        </WebShellCustomizationProvider>
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('compact'))}
+        </CompactModeContext.Provider>
       </I18nProvider>,
     );
-    const visible = render(
+    const regular = render(
       <I18nProvider language="en">
-        <WebShellCustomizationProvider value={{ showThinking: true }}>
-          {item(toolMsg('visible'))}
-        </WebShellCustomizationProvider>
+        <CompactModeContext.Provider value={false}>
+          {item(toolMsg('regular'))}
+        </CompactModeContext.Provider>
       </I18nProvider>,
     );
-    const hiddenAssistant = render(
+    const compactAssistant = render(
       <I18nProvider language="en">
-        <WebShellCustomizationProvider value={{ showThinking: false }}>
+        <CompactModeContext.Provider value={true}>
           {item(assistantMsg('assistant', 'answer'))}
-        </WebShellCustomizationProvider>
+        </CompactModeContext.Provider>
       </I18nProvider>,
     );
     const defaultTool = render(
@@ -249,13 +255,13 @@ describe('MessageItem tool group spacing', () => {
     );
 
     expect(
-      hidden.firstElementChild?.getAttribute('data-tool-group-spacing'),
+      compact.firstElementChild?.getAttribute('data-tool-group-spacing'),
     ).toBe('true');
     expect(
-      visible.firstElementChild?.getAttribute('data-tool-group-spacing'),
+      regular.firstElementChild?.getAttribute('data-tool-group-spacing'),
     ).toBe('false');
     expect(
-      hiddenAssistant.firstElementChild?.getAttribute(
+      compactAssistant.firstElementChild?.getAttribute(
         'data-tool-group-spacing',
       ),
     ).toBe('false');

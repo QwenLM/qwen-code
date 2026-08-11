@@ -23,8 +23,12 @@ const virtualizerTestState = vi.hoisted(() => ({
   renderItems: true,
 }));
 
-// Mock the heavy row children so this test exercises only
+// Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
+vi.mock('../App', async () => {
+  const { createContext } = await import('react');
+  return { CompactModeContext: createContext(false) };
+});
 vi.mock('./MessageItem', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('../customization');
@@ -115,6 +119,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 }));
 
 const { MessageList } = await import('./MessageList');
+const { CompactModeContext } = await import('../App');
 type MessageListHandle = import('./MessageList').MessageListHandle;
 
 (
@@ -300,6 +305,7 @@ function mount(
     includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
+    compactMode?: boolean;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
   } = {},
@@ -311,35 +317,37 @@ function mount(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={opts.customization ?? {}}>
-          <TranscriptRenderModeProvider
-            value={opts.transcriptRenderMode ?? 'interactive'}
-          >
-            <MessageList
-              ref={ref}
-              messages={messages}
-              pendingApproval={null}
-              hideSessionTimeline={opts.hideSessionTimeline}
-              loadingTranscript={opts.loadingTranscript}
-              catchingUp={opts.catchingUp}
-              hasOlderHistory={opts.hasOlderHistory}
-              loadingOlderHistory={opts.loadingOlderHistory}
-              historyCapacityReached={opts.historyCapacityReached}
-              historyPaginationError={opts.historyPaginationError}
-              onLoadOlderHistory={opts.onLoadOlderHistory}
-              transcriptBlockCount={opts.transcriptBlockCount}
-              transcriptActivity={opts.transcriptActivity}
-              onReloadTranscript={opts.onReloadTranscript}
-              isResponding={opts.isResponding}
-              hideFirstUserMessage={opts.hideFirstUserMessage}
-              firstTurnMetrics={opts.firstTurnMetrics}
-              includeSubagentToolUsageInMetrics={
-                opts.includeSubagentToolUsageInMetrics
-              }
-              onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
-              failedPromptMessageId={opts.failedPromptMessageId}
-              onRetryFailedPrompt={opts.onRetryFailedPrompt}
-            />
-          </TranscriptRenderModeProvider>
+          <CompactModeContext.Provider value={opts.compactMode ?? false}>
+            <TranscriptRenderModeProvider
+              value={opts.transcriptRenderMode ?? 'interactive'}
+            >
+              <MessageList
+                ref={ref}
+                messages={messages}
+                pendingApproval={null}
+                hideSessionTimeline={opts.hideSessionTimeline}
+                loadingTranscript={opts.loadingTranscript}
+                catchingUp={opts.catchingUp}
+                hasOlderHistory={opts.hasOlderHistory}
+                loadingOlderHistory={opts.loadingOlderHistory}
+                historyCapacityReached={opts.historyCapacityReached}
+                historyPaginationError={opts.historyPaginationError}
+                onLoadOlderHistory={opts.onLoadOlderHistory}
+                transcriptBlockCount={opts.transcriptBlockCount}
+                transcriptActivity={opts.transcriptActivity}
+                onReloadTranscript={opts.onReloadTranscript}
+                isResponding={opts.isResponding}
+                hideFirstUserMessage={opts.hideFirstUserMessage}
+                firstTurnMetrics={opts.firstTurnMetrics}
+                includeSubagentToolUsageInMetrics={
+                  opts.includeSubagentToolUsageInMetrics
+                }
+                onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+                failedPromptMessageId={opts.failedPromptMessageId}
+                onRetryFailedPrompt={opts.onRetryFailedPrompt}
+              />
+            </TranscriptRenderModeProvider>
+          </CompactModeContext.Provider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -367,15 +375,17 @@ function rerenderMessages(
     entry.root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={{}}>
-          <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
-            <MessageList
-              messages={messages}
-              pendingApproval={null}
-              loadingTranscript={opts.loadingTranscript}
-              catchingUp={opts.catchingUp}
-              isResponding={opts.isResponding}
-            />
-          </TranscriptRenderModeProvider>
+          <CompactModeContext.Provider value={false}>
+            <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
+              <MessageList
+                messages={messages}
+                pendingApproval={null}
+                loadingTranscript={opts.loadingTranscript}
+                catchingUp={opts.catchingUp}
+                isResponding={opts.isResponding}
+              />
+            </TranscriptRenderModeProvider>
+          </CompactModeContext.Provider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -493,13 +503,14 @@ describe('MessageList — failed prompt retry', () => {
   });
 });
 
-describe('MessageList — thinking visibility', () => {
+describe('MessageList — compact mode', () => {
   it('hides thinking rows without removing surrounding transcript content', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
       undefined,
       {
-        customization: { showThinking: false, collapseCompletedTurns: false },
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
       },
     );
 
@@ -521,10 +532,8 @@ describe('MessageList — thinking visibility', () => {
       ],
       undefined,
       {
-        customization: {
-          showThinking: false,
-          collapseCompletedTurns: false,
-        },
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
       },
     );
 
@@ -578,10 +587,8 @@ describe('MessageList — thinking visibility', () => {
       ],
       undefined,
       {
-        customization: {
-          showThinking: false,
-          collapseCompletedTurns: false,
-        },
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
       },
     );
 
@@ -599,10 +606,8 @@ describe('MessageList — thinking visibility', () => {
         ],
         undefined,
         {
-          customization: {
-            showThinking: false,
-            collapseCompletedTurns: false,
-          },
+          compactMode: true,
+          customization: { collapseCompletedTurns: false },
         },
       );
 

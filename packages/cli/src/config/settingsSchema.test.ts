@@ -444,9 +444,6 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().ui.properties.accessibility.showInDialog).toBe(
         false,
       );
-      expect(getSettingsSchema().ui.properties).not.toHaveProperty(
-        'compactMode',
-      );
       expect(
         getSettingsSchema().context.properties.fileFiltering.showInDialog,
       ).toBe(false);

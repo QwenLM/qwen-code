@@ -13,8 +13,8 @@ afterEach(() => {
 
 describe('HelpDialog shortcuts', () => {
   it.each([
-    ['en', 'Show or hide thinking'],
-    ['zh-CN', '显示或隐藏思考过程'],
+    ['en', 'Toggle compact mode'],
+    ['zh-CN', '切换紧凑模式'],
   ] as const)('documents Ctrl+O in %s', (language, description) => {
     const container = document.createElement('div');
     containers.push(container);

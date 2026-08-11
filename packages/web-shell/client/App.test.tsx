@@ -328,7 +328,6 @@ const {
         isResponding?: boolean;
         activeTurnStartedAt?: number;
       } | null,
-      latestShowThinking: undefined as boolean | undefined,
       latestBtwMessageProps: null as {
         question: string;
         answer: string;
@@ -645,7 +644,6 @@ vi.mock('./components/NewSessionDotField', () => ({
 vi.mock('./components/MessageList', async () => {
   const React = await import('react');
   const { useInteractionBlocker } = await import('./interactionBlockContext');
-  const { useWebShellCustomization } = await import('./customization');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -685,7 +683,6 @@ vi.mock('./components/MessageList', async () => {
       },
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
-      testState.latestShowThinking = useWebShellCustomization().showThinking;
       testState.latestMessageListProps = props;
       React.useImperativeHandle(ref, () => ({ scrollToBottom: vi.fn() }));
       return React.createElement(
@@ -4374,7 +4371,6 @@ beforeEach(() => {
   // auto-restore into the next test's App mount.
   sessionStorage.clear();
   localStorage.removeItem('qwen-code-web-shell-chat-width');
-  localStorage.removeItem('qwen-code-web-shell-show-thinking');
   Object.defineProperty(document, 'hidden', {
     configurable: true,
     get: () => false,
@@ -4461,7 +4457,6 @@ beforeEach(() => {
   testState.latestStatusBarTasks = null;
   testState.latestStatusBarOnOpenTasks = null;
   testState.latestMessageListProps = null;
-  testState.latestShowThinking = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
@@ -4611,8 +4606,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('App thinking visibility', () => {
-  async function toggleThinking() {
+describe('App compact mode', () => {
+  async function toggleCompactMode() {
     await act(async () => {
       window.dispatchEvent(
         new KeyboardEvent('keydown', {
@@ -4626,50 +4621,15 @@ describe('App thinking visibility', () => {
     });
   }
 
-  it('uses Ctrl+O and persists thinking visibility only in localStorage', async () => {
-    localStorage.setItem('qwen-code-web-shell-show-thinking', 'false');
+  it('uses Ctrl+O and persists the existing workspace setting', async () => {
     renderApp();
-    expect(testState.latestShowThinking).toBe(false);
+    await toggleCompactMode();
 
-    await toggleThinking();
-
-    expect(localStorage.getItem('qwen-code-web-shell-show-thinking')).toBe(
-      'true',
+    expect(settingsSetValue).toHaveBeenCalledWith(
+      'workspace',
+      'ui.compactMode',
+      true,
     );
-    expect(testState.latestShowThinking).toBe(true);
-    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
-  });
-
-  it.each([null, 'garbage'])(
-    'defaults to visible thinking for stored value %s',
-    async (stored) => {
-      if (stored !== null) {
-        localStorage.setItem('qwen-code-web-shell-show-thinking', stored);
-      }
-      renderApp();
-      expect(testState.latestShowThinking).toBe(true);
-
-      await toggleThinking();
-
-      expect(localStorage.getItem('qwen-code-web-shell-show-thinking')).toBe(
-        'false',
-      );
-      expect(testState.latestShowThinking).toBe(false);
-    },
-  );
-
-  it('continues when localStorage is unavailable', async () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-      throw new Error('unavailable');
-    });
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new Error('unavailable');
-    });
-
-    renderApp();
-    expect(testState.latestShowThinking).toBe(true);
-    await toggleThinking();
-    expect(testState.latestShowThinking).toBe(false);
   });
 });
 

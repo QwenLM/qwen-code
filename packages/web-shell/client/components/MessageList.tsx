@@ -1,6 +1,7 @@
 import {
   forwardRef,
   memo,
+  useContext,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -24,6 +25,7 @@ import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
+import { CompactModeContext } from '../App';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -259,7 +261,7 @@ function isForceExpandGroup(
   return false;
 }
 
-function isThinkingMessage(msg: Message): boolean {
+function isHiddenInCompactMode(msg: Message): boolean {
   return msg.role === 'thinking';
 }
 
@@ -275,7 +277,7 @@ function isStandaloneToolGroup(msg: Message): boolean {
   );
 }
 
-function mergeToolGroupsAcrossThinking(
+function mergeCompactToolGroups(
   messages: Message[],
   pendingApproval: PermissionRequest | null,
 ): Message[] {
@@ -290,7 +292,7 @@ function mergeToolGroupsAcrossThinking(
       isForceExpandGroup(msg, pendingApproval) ||
       isStandaloneToolGroup(msg)
     ) {
-      if (!isThinkingMessage(msg)) {
+      if (!isHiddenInCompactMode(msg)) {
         result.push(msg);
       }
       i++;
@@ -304,7 +306,7 @@ function mergeToolGroupsAcrossThinking(
     while (j < messages.length) {
       const next = messages[j];
 
-      if (isThinkingMessage(next)) {
+      if (isHiddenInCompactMode(next)) {
         j++;
         continue;
       }
@@ -2500,14 +2502,14 @@ export const MessageList = memo(
   ) {
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
-    const { collapseCompletedTurns, showThinking } = useWebShellCustomization();
-    const hideThinking = showThinking === false;
+    const compactMode = useContext(CompactModeContext);
+    const { collapseCompletedTurns } = useWebShellCustomization();
     const mergedMessages = useMemo(
       () =>
-        hideThinking
-          ? mergeToolGroupsAcrossThinking(messages, pendingApproval)
+        compactMode
+          ? mergeCompactToolGroups(messages, pendingApproval)
           : messages,
-      [hideThinking, messages, pendingApproval],
+      [compactMode, messages, pendingApproval],
     );
     const displayItems = useMemo(
       () =>

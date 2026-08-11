@@ -1,5 +1,14 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Markdown } from './Markdown';
+import { CompactModeContext } from '../../App';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -224,6 +233,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   generateContent,
 }: ThinkingMessageProps) {
   const { language, t } = useI18n();
+  const compactMode = useContext(CompactModeContext);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(startTime ?? timestamp ?? Date.now());
@@ -385,7 +395,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
         isLocateFlashing ? ` ${flashStyles.flash}` : ''
       }`}
     >
-      {content && (
+      {content && !compactMode && (
         <div className={styles.thinking}>
           <div className={styles.thinkingBody}>
             <div

@@ -8,7 +8,11 @@ import {
   type ReactElement,
 } from 'react';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import { TodoDetailContext, TodoTimelineContext } from '../App';
+import {
+  CompactModeContext,
+  TodoDetailContext,
+  TodoTimelineContext,
+} from '../App';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
@@ -52,7 +56,6 @@ export interface WebShellTranscriptProps {
   chatMaxWidth?: number;
   workspaceCwd?: string;
   compactThinking?: boolean;
-  showThinking?: boolean;
   collapseCompletedTurns?: boolean;
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
@@ -103,7 +106,6 @@ function WebShellTranscriptContent({
   chatMaxWidth,
   workspaceCwd = '',
   compactThinking = false,
-  showThinking,
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
@@ -134,7 +136,6 @@ function WebShellTranscriptContent({
       renderComposerTagTooltip,
       renderAssistantTurnFooter,
       compactThinking,
-      showThinking,
       collapseCompletedTurns,
       markdownTableMode,
       markdown,
@@ -151,7 +152,6 @@ function WebShellTranscriptContent({
       renderComposerTagTooltip,
       renderToolHeaderExtra,
       renderUserMessageContent,
-      showThinking,
     ],
   );
   const rootRef = useRef<HTMLDivElement>(null);
@@ -238,26 +238,28 @@ function WebShellTranscriptContent({
             <WebShellCustomizationProvider value={customization}>
               <TodoTimelineContext.Provider value={todoTimeline}>
                 <TodoDetailContext.Provider value={todoDetails}>
-                  <div
-                    ref={rootRef}
-                    className={rootClassName}
-                    style={rootStyle}
-                    data-web-shell-root
-                    data-web-shell-shadcn
-                    lang={resolvedLanguage}
-                  >
+                  <CompactModeContext.Provider value={false}>
                     <div
-                      className={`${styles.content} ${styles.contentHasMessages}`}
+                      ref={rootRef}
+                      className={rootClassName}
+                      style={rootStyle}
+                      data-web-shell-root
+                      data-web-shell-shadcn
+                      lang={resolvedLanguage}
                     >
-                      <MessageList
-                        messages={messages}
-                        pendingApproval={null}
-                        isResponding={false}
-                        workspaceCwd={workspaceCwd}
-                        virtualScrollThreshold={virtualScrollThreshold}
-                      />
+                      <div
+                        className={`${styles.content} ${styles.contentHasMessages}`}
+                      >
+                        <MessageList
+                          messages={messages}
+                          pendingApproval={null}
+                          isResponding={false}
+                          workspaceCwd={workspaceCwd}
+                          virtualScrollThreshold={virtualScrollThreshold}
+                        />
+                      </div>
                     </div>
-                  </div>
+                  </CompactModeContext.Provider>
                 </TodoDetailContext.Provider>
               </TodoTimelineContext.Provider>
             </WebShellCustomizationProvider>

@@ -1,14 +1,12 @@
-import { memo, type ReactElement } from 'react';
+import { memo, useContext, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
-import {
-  useWebShellCustomization,
-  type WebShellAssistantTurnFooterRenderInfo,
-} from '../customization';
+import { CompactModeContext } from '../App';
+import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -63,7 +61,7 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
-  const { showThinking } = useWebShellCustomization();
+  const compactMode = useContext(CompactModeContext);
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -229,7 +227,7 @@ export const MessageItem = memo(function MessageItem({
     <MessageTimestamp
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
-      toolGroupSpacing={message.role === 'tool_group' && showThinking === false}
+      toolGroupSpacing={message.role === 'tool_group' && compactMode}
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle={t('common.copy')}
     >
