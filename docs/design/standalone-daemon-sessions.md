@@ -2,10 +2,14 @@
 
 ## Status
 
-This document defines the target architecture for daemon sessions that do not
-belong to a user-selected workspace. It is a design contract only. The feature,
-capability advertisement, SDK surface, and WebShell UI are delivered in the
-follow-up pull requests described below.
+This document is the versioned architecture companion to
+[Issue #8908](https://github.com/QwenLM/qwen-code/issues/8908), which is the
+source of truth for the standalone-session design and delivery plan.
+[PR #8890](https://github.com/QwenLM/qwen-code/pull/8890) is implementation PR0,
+not a documentation-only gate: it keeps this document synchronized while
+delivering the Conversations runtime foundation. The remaining ownership,
+standalone core, capability, SDK, WebUI, and WebShell work is delivered in PR1
+through PR6 below.
 
 The design builds on the projectless conversation infrastructure introduced for
 Live Voice. It does not authorize a second projectless runtime, a second session
@@ -37,12 +41,14 @@ product surface while preserving Live-specific behavior.
   project-local **New Chat** project-bound.
 - Give every standalone session a durable private working directory with normal
   Qwen Code tools and approvals.
-- Support creation, listing, load, resume, rename, archive, unarchive, repair,
-  and deletion across daemon restarts.
+- Support creation, listing, exact lookup, load, resume, rename, export, archive,
+  unarchive, repair, and deletion across daemon restarts.
 - Keep standalone, workspace, and Live contexts explicit throughout the SDK and
   WebShell.
 - Reuse the Conversations runtime, ACP bridge, transcript catalog, admission
   limits, and permission pipeline.
+- Allow only one daemon process at a time to own the user-level Conversations
+  runtime.
 - Fail closed when an internal runtime or managed directory cannot be validated;
   never fall back to the primary workspace.
 
@@ -51,13 +57,15 @@ product surface while preserving Live-specific behavior.
 - An operating-system sandbox or a stronger filesystem boundary than the
   existing approval policy.
 - A separate ACP child per standalone session.
-- Standalone attachments, storage quotas, retention policy, or background orphan
-  cleanup beyond deletion recovery.
+- Standalone attachments, durable scheduled tasks, storage quotas, retention
+  policy, or general orphan cleanup beyond deletion recovery.
 - Moving or forking a standalone session into a project.
+- Cascading archive or deletion from parent sessions to child sessions.
 - Git branches, worktrees, repository status, or project settings for standalone
   sessions.
-- Changing Live Voice conversation ownership, Realtime behavior, or its tool
-  surface.
+- Changing Live Voice product semantics, Realtime behavior, or its tool surface.
+- Multi-master ownership, proxying between daemon processes, or guaranteed
+  mixed-version concurrent access to the Conversations root.
 
 ## Product contract
 
@@ -68,34 +76,40 @@ WebShell models the user-visible context as a discriminated value:
 ```ts
 type SessionContext =
   | { kind: 'standalone' }
-  | { kind: 'workspace'; workspaceCwd: string }
+  | { kind: 'workspace'; cwd: string }
   | { kind: 'live' };
 ```
 
 Clients derive this value from the operation they perform and the persisted
 session source returned by the daemon. They must not infer product semantics
-from `workspaceCwd`. For protocol compatibility, a standalone session still has
-an internal `workspaceCwd`, but that value identifies the daemon-owned
-Conversations runtime and must not be displayed as a project.
+from `workspaceCwd`. The legacy field may be accepted only at a workspace
+compatibility boundary and must be normalized immediately into an explicit
+workspace context. For protocol compatibility, a standalone session still has
+an internal `workspaceCwd`, but that value is a routing detail identifying the
+daemon-owned Conversations runtime and must not be displayed as a project or
+used to select standalone context.
 
 The entry-point behavior is fixed:
 
-| Entry point                            | New-session context |
-| -------------------------------------- | ------------------- |
-| Top-level home and global **New Chat** | `standalone`        |
-| **New Chat** within a selected project | `workspace`         |
-| Live Voice                             | `live`              |
+| Entry point                                      | New-session context      |
+| ------------------------------------------------ | ------------------------ |
+| Top-level home and global **New Chat**           | `standalone`             |
+| **New Chat** within a selected or locked project | `workspace`              |
+| Goals and Git entry points                       | `workspace`              |
+| Current-session **New Chat**                     | Inherit explicit context |
+| Live Voice                                       | `live`                   |
 
 Standalone sessions appear in a top-level **Recents** group separate from Live
 and project groups. Their chat surface hides workspace selection, Git status,
-branch and worktree controls, and project settings. Normal model, approval,
-tool, permission, transcript, and session metadata controls remain available.
+branch and worktree controls, project files, project settings, pin/group
+controls, and attachments/uploads. Normal model, approval, tool, permission,
+transcript, and supported session metadata controls remain available.
 
 ### Persisted source
 
-New standalone transcripts persist `sourceType: "standalone"` with no
-`sourceId`. Live sessions retain their current `sourceType: "default"` and
-`sourceId: "realtime_voice:<call-id>"` provenance.
+New top-level standalone transcripts persist `sourceType: "standalone"` with no
+`sourceId` and no `parentSessionId`. Live sessions retain their current
+`sourceType: "default"` and `sourceId: "realtime_voice:<call-id>"` provenance.
 
 `standalone` is a daemon-reserved source. Generic `POST /session` creation must
 reject it, just as it rejects the reserved Live source. Classification requires
@@ -106,13 +120,21 @@ standalone session.
 Existing top-level Conversations transcripts with no parent, no source ID, and
 either no source type or `sourceType: "default"` are normalized as legacy
 standalone sessions at read time. Their transcripts are not rewritten. A source
-that is explicitly Live, belongs to another feature, or has a parent is never
-silently reclassified.
+that is explicitly Live or belongs to another feature is never silently
+reclassified.
+
+`create_sub_session` invoked by a standalone session explicitly persists
+`sourceType: "standalone"` together with `parentSessionId`. Children remain
+loadable by identity but are excluded from top-level Recents. Parent and child
+archive or deletion operations do not cascade; each transcript and private
+directory has an independent lifecycle.
 
 Live task list, read, wait, and follow-up operations continue to treat explicit
 and legacy standalone sessions as loadable projectless task targets. This does
 not relabel them as Live in WebShell and does not expose Live-only tools in their
-ordinary text turns.
+ordinary text turns. Projectless Live task creation must use the same standalone
+creation service instead of creating new legacy `sourceType: "default"`
+sessions.
 
 ## Runtime architecture
 
@@ -132,11 +154,12 @@ flowchart TD
 
 ### One Conversations runtime
 
-The daemon continues to publish one trusted, non-removable runtime rooted at
-`~/Documents/Qwen Code/Conversations`. Standalone creation makes this runtime
-available lazily even when Live Voice is disabled. Live enablement only binds
-and advertises Live-specific Host, Appshot, Realtime, speech, and task channels;
-it does not own the lifetime of the underlying Conversations runtime.
+Introduce one one-flight `ConversationRuntimeManager` per daemon. It lazily
+ensures the Conversations root, runtime, ACP bridge, and child even when Live
+Voice is disabled. Live enablement only binds and advertises Live-specific Host,
+Appshot, Realtime, speech, and task channels; it does not own the manager or the
+underlying runtime lifetime. Concurrent ensure failures reset the one-flight so
+a later request can retry initialization.
 
 The existing internal runtime provenance value `live-conversation` is retained
 for compatibility in the first implementation. Within daemon routing it means
@@ -148,6 +171,34 @@ without changing behavior.
 Each workspace runtime owns one ACP bridge and child process. Standalone and
 Live sessions therefore share the Conversations runtime's existing ACP child.
 Session admission remains subject to the daemon's total and per-runtime limits.
+One healthy ACP child is a steady-state ownership invariant; a bounded overlap
+during crash replacement or teardown is not treated as a second runtime.
+
+### Cross-daemon ownership
+
+The Conversations root is user-global, while multiple `qwen serve` processes
+can run concurrently. In-process one-flight and per-session locks are therefore
+insufficient.
+
+- Before publishing or using the runtime, acquire a secure process-owner record
+  using the atomic-write, nonce, PID-liveness, owner/mode, and fail-closed
+  patterns already used by Live discovery.
+- Store the record in a stable user runtime location independent of a custom
+  project runtime base. Serialize replacement with `proper-lockfile`.
+- Reclaim only a dead owner, wait a short drain grace before starting a
+  replacement ACP child, and treat PID reuse as active and fail-closed.
+- Release ownership only after routes, sessions, bridge, and child teardown have
+  drained, and only if the record nonce still matches.
+- An active foreign owner returns `503 conversation_runtime_in_use`. Malformed
+  or unsafe ownership state returns
+  `503 conversation_runtime_ownership_compromised`.
+- Capability advertisement describes support rather than current owner
+  availability. An ownership error never permits fallback to the primary
+  runtime.
+
+Acquisition also respects an already-running legacy Live discovery owner. A
+pre-feature daemon started after a new standalone owner cannot be made to honor
+the new record, so concurrent mixed-version access is explicitly unsupported.
 
 ### Managed working directories
 
@@ -160,20 +211,27 @@ each session:
 
 The root and child must be real directories owned by the daemon user. On POSIX,
 they must not grant group or other permissions. The daemon validates the root's
-canonical path, device and inode before and after sensitive operations, and it
-requires each session directory to be an exact direct child. Symbolic links and
-path traversal are rejected. Windows applies the same path and directory
-identity checks where the platform exposes them, without POSIX mode checks.
+canonical path, device, and inode before and after sensitive operations, and it
+requires each session directory to be an exact direct child. Symbolic links,
+junction/reparse escapes, path traversal, non-direct descendants, and identity
+changes are rejected.
+
+Device and inode identity are pinned for one daemon ownership lifetime. After a
+restart, a securely recreated root at the expected canonical path may be
+accepted; the feature does not promise persistent inode attestation across
+restarts. Windows validates canonical path and link/reparse behavior exposed by
+the platform without claiming POSIX owner/mode or ACL guarantees.
 
 The transcript and runtime configuration remain stored under the Conversations
 runtime root. The session's effective tool and shell working directory is its
 private child. Managed relocation updates the effective target directory and
 workspace context without changing transcript ownership.
 
-User and global settings continue to apply. Primary-project settings, memory,
-Git state, and workspace trust must not leak into a standalone session. The
-Conversations runtime is daemon-owned and trusted only after the root identity
-checks succeed.
+User/global settings and user-authored Conversations-root configuration
+continue to apply. A child may inherit ancestor `QWEN.md`/`AGENTS.md` and shared
+Conversations-root MCP/config state. Primary-project settings, memory, Git
+state, trust, and cwd must not leak. The design must not describe shared
+user-level or Conversations-root configuration as per-session private.
 
 ### Permission boundary
 
@@ -186,11 +244,20 @@ tooling cannot enforce.
 
 ### Internal runtime isolation
 
-The Conversations root is not a user workspace. Generic workspace registration,
-settings, Git, file, shell, extension, MCP, and memory routes must reject a
-request that resolves to the internal runtime. Only session catalog, transcript,
-archive, existing owner-routed session operations, and dedicated Live or
-standalone services may opt into it.
+The Conversations root is not a user workspace. Use a default-deny user-workspace
+resolver and a separate explicit internal resolver. Generic registration,
+settings, trust, Git, files, shell, extensions, skills, MCP control, memory
+control, channels, scheduled-task administration, workspace voice, and
+workspace-qualified ACP WebSocket routes must reject a request that resolves to
+the internal runtime.
+
+Audit every direct registry consumer, including HTTP routes, ACP and voice
+WebSocket upgrades, capabilities, session creation and restore, workspace
+management, health, and Live task services. Only owner-routed session
+operations, transcript/catalog operations, health/capabilities, and dedicated
+Live or standalone services may opt in. The compatibility `kind: "live"`
+runtime entry may remain temporarily, but new clients exclude it from project
+selectors and generic route denial remains mandatory.
 
 An unknown, bootstrapping, untrusted, compromised, draining, or removed
 Conversations runtime returns an error. It must never resolve to or retry against
@@ -201,28 +268,33 @@ the primary runtime.
 ### Capability
 
 The daemon advertises `standalone_sessions_v1` in `GET /capabilities` only when
-the complete standalone route set and managed-directory lifecycle are available.
-The runtime foundation pull request must not advertise the capability before the
-public API is complete.
+the complete manager, service, route, and managed-directory lifecycle dependency
+set is installed, including embedded `createServeApp` configurations. A build
+constant alone is insufficient. PR0 through PR2 remain behaviorally hidden; PR3
+is the atomic advertisement boundary.
 
-The capability is unconditional for a successfully initialized daemon build
-that contains the feature; it is not coupled to Live Voice availability or
-enablement. Root materialization remains lazy, so a missing but creatable root
-does not suppress capability advertisement.
+The capability is not coupled to Live Voice availability or enablement and
+describes support rather than current cross-daemon ownership availability. Root
+materialization remains lazy, so a missing but creatable root does not suppress
+advertisement. Once advertised, initialization or ownership errors are returned
+as structured failures and never trigger primary fallback.
 
 ### Routes
 
 The dedicated API is:
 
 ```text
-POST /standalone/sessions
-GET  /standalone/sessions
-POST /standalone/sessions/:id/load
-POST /standalone/sessions/:id/resume
-POST /standalone/sessions/:id/repair-directory
-POST /standalone/sessions/archive
-POST /standalone/sessions/unarchive
-POST /standalone/sessions/delete
+POST  /standalone/sessions
+GET   /standalone/sessions
+GET   /standalone/sessions/:id
+POST  /standalone/sessions/:id/load
+POST  /standalone/sessions/:id/resume
+POST  /standalone/sessions/:id/repair-directory
+PATCH /standalone/sessions/:id/metadata
+GET   /standalone/sessions/:id/export
+POST  /standalone/sessions/archive
+POST  /standalone/sessions/unarchive
+POST  /standalone/sessions/delete
 ```
 
 Dedicated routes prevent omission of `cwd` from silently selecting the primary
@@ -233,31 +305,50 @@ Creation accepts only:
 
 ```ts
 interface CreateStandaloneSessionRequest {
-  sessionId?: string;
+  sessionId: string;
   modelServiceId?: string;
-  approvalMode?: string;
+  approvalMode?: DaemonApprovalMode;
 }
 ```
 
-`sessionId`, when present, follows the existing caller-supplied UUID validation
-and admission rules. The server fixes `sessionScope` to `thread` and source to
-`standalone`. Unknown keys are rejected. In particular, clients cannot supply
-`cwd`, `workspaceCwd`, `workspaceId`, `sourceType`, `sourceId`, `sessionScope`,
-`branch`, or `worktree`.
+The wire-level UUID is required and validates as UUID v1 through v5. An SDK
+convenience method may omit it only if the SDK generates the UUID before sending
+the request. The daemon fixes `sessionScope` to `thread` and source to
+`standalone`. Unknown keys are rejected, including `cwd`, `workspaceCwd`,
+`workspaceId`, `sourceType`, `sourceId`, `sessionScope`, `branch`, and
+`worktree`.
+
+`GET /standalone/sessions/:id` is the non-mutating exact-identity lookup used for
+response-loss recovery and deep links:
+
+- Return `202` with `state: "creating"` while the UUID reservation is in flight.
+- Return `200` with an active or archived summary when a compatible transcript
+  exists.
+- Return `404 standalone_session_not_found` when the UUID is absent or belongs
+  to another context. Lookup never reveals or guesses another runtime.
+- Return structured ownership, root, or compromise errors when lookup cannot be
+  performed safely.
 
 Load and resume use `Omit<RestoreSessionRequest, 'workspaceCwd'>`: they retain
 the existing approval, history-page, and client timeout options while the route
 selects the owner runtime and private directory. Repair has no request body.
-Archive, unarchive, and delete accept the existing bounded, de-duplicated
-`sessionIds` array shape and apply only to standalone sources. Listing reuses the
-existing `cursor`, `size`, and `archiveState` semantics, but fixes the source
-filter to standalone and never returns Live or project sessions.
+Rename and export use dedicated routes so cold and archived transcripts work
+without exposing the internal runtime through workspace-qualified APIs. Active
+rename additionally notifies the live bridge.
 
-Rename continues to use owner-routed `PATCH /session/:id/metadata`. Prompt,
-cancel, subscribe, permission, transcript, and other session-ID routes also keep
-their current owner-routing behavior. A second standalone variant of those
-routes would add no isolation because the session owner is already resolved and
-validated centrally.
+Listing reuses the existing cursor, size, and archive-state semantics. It
+includes explicit and compatible legacy top-level sessions, excludes Live and
+project sessions and every child, and does not probe working-directory state.
+Archive, unarchive, and delete accept the existing bounded, de-duplicated
+`sessionIds` array. Batch errors use `{ sessionId, code, message }`. Successful
+delete returns `removed`, `notFound`, `errors`, and `fileCleanupPending`;
+`fileCleanupPending` is a subset of `removed` because the transcript is already
+gone.
+
+Prompt, cancel, subscribe, permission, transcript, status, and other live
+session-ID routes retain owner routing after load. Persisted or cold operations
+that cannot be satisfied from the live owner index use the standalone service,
+not the primary runtime.
 
 ### SDK types
 
@@ -274,12 +365,10 @@ interface DaemonStandaloneFields {
 }
 
 interface DaemonStandaloneSession
-  extends DaemonSession,
-    DaemonStandaloneFields {}
+  extends DaemonSession, DaemonStandaloneFields {}
 
 interface DaemonRestoredStandaloneSession
-  extends DaemonRestoredSession,
-    DaemonStandaloneFields {}
+  extends DaemonRestoredSession, DaemonStandaloneFields {}
 
 interface DaemonStandaloneSessionSummary extends DaemonSessionSummary {
   sourceType: 'standalone';
@@ -297,113 +386,173 @@ The existing internal `workspaceCwd` field remains required on base daemon
 session types for routing and backward compatibility. Standalone SDK methods do
 not accept it as input, and WebShell does not expose it as a project.
 
+The SDK provides capability-gated create, list, exact get, load, resume, repair,
+rename, export, archive, unarchive, and delete methods. It generates the UUID
+before create, exposes that UUID on an outcome-unknown transport error, performs
+exact lookup, and never retries creation automatically. `DaemonSessionClient`
+stores an explicit restore strategy: workspace sessions restore by cwd, while
+standalone sessions use the dedicated route. Daemon responses are
+runtime-validated in both browser and Node builds.
+
 ## Lifecycle and consistency
 
 ### Creation transaction
 
-The SDK generates a UUID before the request unless the caller supplied one.
-Creation proceeds as one logical transaction:
+The SDK generates a UUID before sending the request. Creation proceeds as one
+logical transaction:
 
-1. Validate the request.
-2. Ensure and revalidate the Conversations runtime and root.
-3. Reserve the UUID against that runtime's bridge with the existing
-   caller-supplied session admission service.
-4. Materialize and validate the deterministic private directory.
+1. Strictly validate the request and required UUID.
+2. Ensure cross-daemon ownership, runtime, and secure root.
+3. Reserve the UUID against the Conversations bridge and reject active,
+   archived, Live, or in-flight conflicts.
+4. Validate and reuse an existing empty child or materialize a new deterministic
+   child. A non-empty child without a transcript is a conflict and is never
+   adopted or deleted automatically.
 5. Create the ACP session with thread scope and standalone source metadata.
 6. Require the ACP result to use the reserved UUID and report
    `sourcePersisted: true`.
 7. Relocate the session into its private directory using managed containment.
-8. Commit the response only after relocation succeeds.
+   Directory or containment failure is fatal; memory, MCP, or model-context
+   refresh failures after a successful target switch are explicit warnings.
+8. Commit the durable session before attempting to write the HTTP response.
 
-Before relocation commits, a failure closes the new session, releases the UUID
-reservation, and removes the private directory only if it is empty. An existing
-empty directory with no transcript can be reused after validation. An existing
-non-empty directory without a transcript is a conflict and is never adopted or
-deleted automatically. An existing transcript or live session with the UUID is
-reported through the existing ID conflict semantics.
+Before source persistence, failure closes the ACP session, releases the UUID,
+and removes only an empty child. After source persistence, transcript existence
+is the durable outcome marker. The daemon attempts orphan transcript cleanup
+under the lifecycle lock, but if cleanup fails or the process crashes, it
+preserves the UUID and reports `standalone_creation_outcome_unknown` so the
+client can query exact identity. The design does not claim rollback atomicity
+beyond the transcript store's actual behavior.
 
-After relocation commits, loss of the HTTP response has an unknown outcome. The
-server must not delete the session. The client resolves the outcome by loading
-the UUID it generated; a retry with the same UUID must not create a second
-session.
+Client disconnect does not abort the logical transaction. If relocation commits
+but the response cannot be written, detach the phantom response client without
+deleting the session or transcript. The client uses exact lookup by UUID and may
+then load; it never retries create automatically.
 
-### Load and resume
+### Load, resume, prompt, and repair
 
-Load and resume first validate that the requested transcript is a standalone
-source owned by the Conversations runtime. They then validate the root and the
-deterministic child before attaching the client or admitting a prompt.
-
+Load and resume first validate source ownership, root, and deterministic child.
 If the child is absent, the daemon recreates it at the same path, relocates the
-session, and returns `workingDirectory.state: "recreated"` with a warning. It
-does not claim to restore files that were deleted. If the path exists but is a
-link, non-directory, wrong owner, overly permissive POSIX directory, or not the
-expected direct child, the operation fails closed.
+session, and returns `workingDirectory.state: "recreated"` with a warning that
+deleted files were not recovered. A suspicious existing path fails closed and
+is never chmodded, replaced, or deleted.
 
-An explicit repair request acquires the session's exclusive lifecycle lock,
-waits for current prompt teardown, recreates only an absent directory, and
-reapplies relocation. It never replaces or changes permissions on a suspicious
-existing path.
+Before every standalone prompt is admitted, revalidate the root, exact child,
+and current session cwd while holding the shared lifecycle admission boundary.
+If the child disappeared, return `409 working_directory_missing` without
+dispatching the prompt. The UI offers explicit repair and never replays a prompt
+whose commit status is uncertain.
 
-### Archive and rename
+Repair acquires the exclusive lifecycle coordinator, closes new prompt
+admission, waits for the active prompt to settle or cancel, restores a valid
+staged child when required, recreates only an absent child, reapplies relocation,
+and returns the resulting working-directory state.
 
-Archiving closes active ownership through the existing archive coordinator,
-moves transcript state into the archived catalog, and retains the private
-directory. Unarchive makes the transcript active again; the next load validates
-or recreates the directory. Rename changes transcript metadata only and never
-renames the deterministic directory.
+### Durable cron boundary
+
+ACP currently starts the cron scheduler before managed relocation. Project-level
+durable cron state would initially bind to the shared Conversations root, so
+standalone MVP must not load, create, or fire durable scheduled tasks there.
+
+- Normalize explicit and legacy standalone source before ACP session startup.
+- Disable durable cron initialization for standalone sessions and children.
+- Reject `cron_create({ durable: true })` with a clear unsupported error.
+- Keep session-only cron and loop wakeups because they are in-memory and die
+  with the session. Live behavior remains unchanged.
+
+Per-standalone durable scheduling requires a separate design for relocation,
+archive, deletion, restart ownership, and UI management.
+
+### Lifecycle coordination
+
+Use one per-session lifecycle coordinator rather than separate repair, archive,
+or deletion locks. Shared prompt/read admission and exclusive repair, archive,
+unarchive, delete, and rename mutations all use this coordinator. Transcript
+mutation also acquires the existing writer lease. Cross-daemon Conversations
+ownership is the outer boundary; ambiguous ownership never permits fallback.
+
+### Archive, rename, and export
+
+Archive closes active ownership, moves the transcript into the archived catalog,
+and retains the private child. Unarchive reactivates the transcript; the next
+load validates or recreates the child. Parent and child state does not cascade.
+
+Rename appends title metadata to the correct active or archived transcript and
+never renames the deterministic child. Export reads the correct active or
+archived transcript under a shared lifecycle lock and does not materialize the
+directory.
 
 ### Deletion transaction
 
-Deletion requires the product's existing second confirmation. Once accepted,
-the daemon acquires the session's exclusive archive lock and writer lease,
-rejects new prompts, and closes or cancels any remaining live ownership before
-filesystem mutation.
+WebShell retains its second confirmation and explains that deletion removes the
+transcript and private files. The daemon then acquires the exclusive lifecycle
+coordinator and writer lease, closes prompt admission, and tears down active
+ownership.
 
-For each validated standalone session, an absent normal and staged child is
-treated as already cleaned and does not block transcript deletion. A suspicious
-existing path still fails closed. When a valid normal child exists:
+Deletion uses a small durable recovery journal under the daemon runtime storage
+namespace. Each owner-only, atomically written record contains the session ID,
+expected directory hash, bounded schema, and transaction phase.
 
-1. Revalidate the Conversations root, source, transcript, and private child.
-2. Atomically rename the child to the deterministic direct sibling
-   `conversation-<hash>.deleting`.
-3. Delete the active or archived transcript and its sidecars through the
-   existing session service.
-4. If transcript deletion fails, atomically restore the original directory
-   name and report the session error.
-5. If transcript deletion succeeds, recursively remove the staged directory.
+If both normal and staged children are absent, record that state, delete the
+transcript, and clear the journal. Missing files do not block transcript
+deletion. If either path exists but fails validation, stop before transcript
+mutation.
 
-If transcript deletion and the rollback rename both fail, the transcript
-remains authoritative, the staged directory is left untouched, and the response
-reports `working_directory_recovery_failed`. A later load or explicit repair
-must attempt the same validated recovery before using the session.
+1. Revalidate owner, root, source, transcript, normal child, and absence of
+   conflicting staged state.
+2. Persist a prepared deletion record.
+3. If the normal child exists, atomically rename it to the exact `.deleting`
+   sibling and persist the staged phase.
+4. Delete the active or archived transcript and its sidecars.
+5. If transcript deletion fails, restore the normal child and clear the journal.
+   If rollback fails, leave both journal and staged child for repair and return
+   `working_directory_recovery_failed`.
+6. If transcript deletion succeeds, recursively remove only the exact validated
+   staged child, then clear the journal.
 
-Failure of the final directory removal does not resurrect a deleted transcript.
-The response includes the session ID in `fileCleanupPending`, and a later
-bounded cleanup attempt may retry only that exact validated staged path.
+Final removal failure does not resurrect the transcript. Return the session ID
+in `fileCleanupPending` and retain the journal so an exact retry or bounded
+reconciliation can resume cleanup.
 
-Crash recovery is deterministic. If startup or load sees a transcript and its
-`.deleting` sibling but no normal child, it restores the original child before
-continuing. If no transcript exists, the staged directory is a deletion remnant
-and may be removed. Conflicting normal and staged children, an invalid staged
-path, or failed identity validation is reported and left untouched for manual
-recovery.
+Recovery considers active and archived transcripts and every Conversations
+source before destructive cleanup:
+
+- Transcript exists, journal valid, staged exists, normal absent: restore staged
+  to normal and clear the journal.
+- Transcript exists, normal exists, staged absent: clear a prepared journal
+  without touching the directory.
+- Transcript absent, journal valid, staged exists, normal absent: finish exact
+  staged cleanup and clear the journal.
+- Transcript absent and both directories absent: clear the completed journal.
+- Both normal and staged exist, the journal is invalid or missing, the hash does
+  not match, or any path fails validation: report
+  `deletion_recovery_compromised` and leave every file untouched.
+
+A staged-looking directory without a valid recovery record is never proof that
+deletion was authorized.
 
 ### Failure contract
 
-| Condition                                         | Result                                  |
-| ------------------------------------------------- | --------------------------------------- |
-| Invalid or forbidden standalone request field     | `400 invalid_request`                   |
-| Session is absent or not a standalone source      | `404 standalone_session_not_found`      |
-| UUID, orphan directory, or session state conflict | `409 standalone_session_conflict`       |
-| Existing managed path fails validation            | `409 working_directory_compromised`     |
-| Transcript rollback cannot restore staged child   | `500 working_directory_recovery_failed` |
-| Conversations root identity or trust fails        | `503 conversation_root_compromised`     |
-| Conversations runtime cannot be initialized       | `503 conversation_runtime_unavailable`  |
-| Transcript deleted but final file cleanup failed  | `200` with `fileCleanupPending`         |
+| Condition                                                 | Result                                           |
+| --------------------------------------------------------- | ------------------------------------------------ |
+| Invalid/forbidden field or malformed UUID                 | `400 invalid_request`                            |
+| Session is absent or not standalone                       | `404 standalone_session_not_found`               |
+| UUID/source/orphan-directory/session-state conflict       | `409 standalone_session_conflict`                |
+| UUID creation is currently in flight                      | Exact lookup returns `202 state: "creating"`     |
+| Private child disappeared before prompt                   | `409 working_directory_missing`                  |
+| Existing managed path fails validation                    | `409 working_directory_compromised`              |
+| Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`              |
+| Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`          |
+| Create crossed persistence but cleanup outcome is unknown | `standalone_creation_outcome_unknown` with UUID  |
+| Conversations root identity or trust fails                | `503 conversation_root_compromised`              |
+| Runtime owner record is unsafe                            | `503 conversation_runtime_ownership_compromised` |
+| Another daemon owns the runtime                           | `503 conversation_runtime_in_use`                |
+| Conversations runtime cannot be initialized               | `503 conversation_runtime_unavailable`           |
+| Transcript was deleted but final file cleanup failed      | `200` with `fileCleanupPending`                  |
 
-Structured route errors include the session ID when one is known, but do not
-expose untrusted filesystem paths. Logs and telemetry record the route, phase,
-runtime provenance, error code, and cleanup outcome.
+Structured errors include the session ID when known, identify retryability, and
+never expose untrusted filesystem paths. Logs and telemetry record route,
+runtime provenance, phase, code, ownership outcome, and cleanup state.
 
 ## Compatibility and rollout
 
@@ -417,52 +566,308 @@ the failure and preserves the user's standalone intent for retry. It must not
 silently create a primary-workspace session. This distinction prevents a broken
 or compromised Conversations runtime from changing the target of user actions.
 
+An old client against a new daemon retains generic `POST /session` behavior and
+therefore still targets primary unless it explicitly uses the new routes.
+
 There is no transcript migration. New sessions persist explicit standalone
 source metadata; compatible legacy projectless transcripts are normalized when
 read. Removing the feature code leaves existing transcripts and directories in
-the Conversations root and does not affect project sessions.
+the Conversations root and does not affect project sessions, but a pre-feature
+daemon is not required to expose explicit standalone transcripts as projectless
+sessions.
 
-The capability is published only with the daemon API pull request, after the
-hidden runtime foundation has landed. SDK and UI changes may then gate on it.
+The capability is published only in PR3 after the hidden runtime foundation,
+ownership/isolation boundary, and standalone core have landed. SDK and UI
+changes may then gate on it. Concurrent mixed-version use of the Conversations
+root remains unsupported.
 
 ## Delivery sequence
 
-| PR  | Responsibility                                                                                                                                   | Estimated production / test lines |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| PR1 | Hidden Conversations runtime generalization, source classification, managed directory lifecycle, runtime route guard, and transactional services | 300-500 / 500-900                 |
-| PR2 | Standalone daemon routes, capability advertisement, lifecycle integration tests, and E2E plan                                                    | 450-800 / 800-1,300               |
-| PR3 | TypeScript SDK methods, narrow types, capability handling, and compatibility tests                                                               | 180-320 / 250-450                 |
-| PR4 | Explicit WebUI session contexts and transactional switching integration                                                                          | 200-350 / 350-650                 |
-| PR5 | WebShell entry points, Recents grouping, hidden project controls, errors, and E2E coverage                                                       | 350-650 / 500-900                 |
+The design is reviewed and tracked in Issue #8908. Delivery uses seven
+substantive implementation PRs; this companion document is updated with PR0 but
+does not occupy a documentation-only stage.
 
-PR1 must remain behaviorally hidden. PR2 must be usable and testable without a
-WebShell. PR4 should build on the transactional WebUI session-switching work in
-PR #8882 rather than duplicate it. Attachments, quotas, move-to-project, and a
-stronger sandbox are separate follow-ups.
+### PR0: Conversations runtime foundation
+
+Implementation PR: [#8890](https://github.com/QwenLM/qwen-code/pull/8890)
+
+Suggested title: `refactor(cli): Generalize the Conversations runtime foundation`
+
+- Move conversation workspace and source helpers out of Live-specific
+  ownership.
+- Introduce the one-flight `ConversationRuntimeManager` and split optional Live
+  bindings from runtime lifetime.
+- Preserve Live behavior, provenance, managed-relocation token, storage
+  namespace, and process sharing.
+- Do not add standalone source, public routes, capability advertisement, SDK, or
+  UI behavior.
+
+Verification covers manager concurrency and failure reset, secure root/child
+validation, Live enabled/disabled lifecycle, concurrent Live work sharing the
+runtime, and complete Live regression behavior.
+
+Estimated size: 180-320 production lines and 300-550 test lines. Keep the
+production refactor below the repository's 500-line core-refactor gate.
+
+Exit criterion: Live uses the generalized manager, and the runtime can be lazily
+ensured without enabling Live.
+
+### PR1: Runtime ownership and isolation
+
+Suggested title: `fix(cli): Harden the Conversations runtime boundary`
+
+- Add the cross-daemon owner record, stale-owner recovery, legacy Live-owner
+  detection, shutdown release, and structured errors.
+- Make ordinary workspace selectors default-deny for the internal runtime.
+- Audit and guard direct HTTP, ACP/voice WebSocket, registry,
+  workspace-management, capabilities, settings, Git, filesystem, extensions,
+  MCP, memory, channels, trust, and scheduled-task consumers.
+- Keep explicit opt-in only for owner-routed session/catalog operations,
+  health/capabilities, and Live/standalone services.
+- Do not advertise `standalone_sessions_v1`.
+
+Verification covers two-process contention, stale reclaim, PID reuse,
+malformed/symlink/wrong-mode owner records, shutdown races, every generic HTTP
+and WebSocket route family, no-primary-fallback, and Live regressions.
+
+Estimated size: 300-550 production lines and 600-1,000 test lines.
+
+Exit criterion: at most one supporting daemon owns Conversations, and no
+ordinary workspace surface can address the internal runtime.
+
+### PR2: Standalone core
+
+Suggested title: `feat(cli): Add standalone session creation and restore`
+
+- Add reserved explicit standalone source, compatible legacy normalization,
+  explicit child inheritance, and top-level filtering.
+- Add a focused `StandaloneSessionService` for required-UUID creation, exact
+  lookup, listing, load, resume, directory repair, prompt preflight, and
+  working-directory warnings.
+- Implement the persistence-boundary-aware creation transaction and
+  response-loss semantics.
+- Route projectless Live task creation through the standalone service.
+- Disable durable cron initialization and creation for standalone sources while
+  retaining session-only cron.
+- Keep the public capability absent until PR3 completes the lifecycle contract.
+
+Verification covers the source/owner matrix, UUID conflicts, every creation
+failure boundary, response disconnect before/after persistence, exact lookup
+`202/200/404`, missing/compromised children, concurrent prompt/repair admission,
+children, Live task compatibility, and durable-cron denial.
+
+Estimated size: 450-750 production lines and 850-1,400 test lines.
+
+Exit criterion: the core service creates and restores standalone sessions
+without primary fallback, but clients are not yet told that the full v1
+contract is available.
+
+### PR3: Complete daemon lifecycle and API
+
+Suggested title: `feat(cli): Add standalone daemon session APIs`
+
+- Register the complete route set and exact request/response schemas.
+- Add active/archived rename and export.
+- Add archive/unarchive integration, the unified lifecycle coordinator,
+  deletion journal, exact staged cleanup, crash reconciliation, and
+  `fileCleanupPending`.
+- Advertise `standalone_sessions_v1` only when every dependency is present.
+- Add daemon integration tests and the required E2E plan under
+  `.qwen/e2e-tests/`.
+
+Verification covers the complete REST lifecycle, cold and archived operations,
+batch schemas, fault injection at every deletion boundary, concurrent prompts
+and maintenance, restart reconciliation, embedded-app capability absence,
+multi-daemon ownership, and macOS/Linux/Windows path behavior.
+
+Estimated size: 500-850 production lines and 950-1,600 test lines.
+
+Exit criterion: the complete feature works through REST without SDK/WebShell,
+survives daemon restart, and safely advertises v1.
+
+### PR4: TypeScript SDK
+
+Suggested title: `feat(sdk): Add standalone session APIs`
+
+- Add narrow create/restore/summary/working-directory/delete result types and
+  explicit `{ kind: 'standalone' }` context.
+- Add capability-gated methods for the complete lifecycle that never accept
+  `workspaceCwd`.
+- Generate UUID before create, expose it on outcome-unknown errors, perform
+  exact lookup, and never retry automatically.
+- Store explicit workspace and standalone restore strategies.
+- Runtime-validate daemon responses and preserve browser/Node behavior.
+
+Verification covers request shapes, capability handling, UUID conflict and
+`202/200/404` recovery, transport timeout, malformed responses,
+standalone/workspace reattach, and Node/browser builds.
+
+Estimated size: 300-500 production lines and 450-800 test lines.
+
+Exit criterion: consumers use the complete lifecycle without constructing
+routes or supplying internal cwd.
+
+### PR5: Explicit WebUI context
+
+Suggested title: `feat(webui): Add explicit daemon session contexts`
+
+Dependency: PR4. [PR #8882](https://github.com/QwenLM/qwen-code/pull/8882) is
+merged; re-audit its final API and extend its transaction rather than
+duplicating it.
+
+- Add `standalone | workspace { cwd } | live` to connection and transition
+  state.
+- Classify from persisted source plus validated ownership, never cwd/runtime
+  kind alone.
+- Atomically commit or roll back client, transcript, internal cwd, product
+  context, warnings, and deferred intent.
+- Accept legacy `workspaceCwd` only at the workspace compatibility boundary,
+  normalize it immediately, and reject conflicts. It never selects standalone.
+- Add directory-recreated/missing/compromised and outcome-unknown notice state.
+
+Verification covers all #8882 failure and supersession cases plus cross-context
+switching, capability absence, legacy source, outcome recovery, warning
+rollback, and no-primary-fallback.
+
+Estimated size: 350-650 production lines and 650-1,100 test lines.
+
+Exit criterion: WebUI represents and switches all contexts explicitly while
+existing visible WebShell behavior remains unchanged.
+
+### PR6: WebShell product UI
+
+Suggested title: `feat(web-shell): Add standalone chats`
+
+- Make Home/global New Chat standalone on capable daemons; keep project-local,
+  locked-project, Goals, and Git entry points workspace-bound; inherit the
+  current explicit context for current-session New Chat.
+- Preserve primary fallback only when capability is absent. A capable-daemon
+  failure preserves standalone intent and displays the error.
+- Store explicit pending context for deferred creation; undefined cwd is never
+  standalone semantics.
+- Add top-level Recents with rename, export, archive, unarchive, and delete.
+- Hide project-only selectors, browsers, controls, settings, and uploads.
+- Resolve deep links only after standalone/Live/workspace catalogs are ready and
+  use exact lookup; never guess primary.
+- Surface directory recovery/compromise, outcome-unknown, and deferred-cleanup
+  state.
+- Retain second delete confirmation and remove the session from Recents once the
+  transcript is deleted, even if cleanup is pending.
+
+Verification covers every entry point, old/capable daemons, capable failure,
+deferred creation, deep links and restart, context switching, directory states,
+lifecycle actions, response loss, cleanup pending, child exclusion, Live
+coexistence, and platform differences.
+
+Estimated size: 450-800 production lines and 800-1,400 test lines.
+
+Exit criterion: the end-to-end product matches this contract and keeps
+project-only controls and uploads out of standalone chats.
+
+### Dependencies and merge order
+
+```mermaid
+flowchart LR
+    PR0["PR0 runtime foundation / PR #8890"] --> PR1["PR1 ownership and isolation"]
+    PR1 --> PR2["PR2 standalone core"]
+    PR2 --> PR3["PR3 complete daemon API"]
+    PR3 --> PR4["PR4 SDK"]
+    PR4 --> PR5["PR5 WebUI context"]
+    T["PR #8882 transactional switching"] --> PR5
+    PR5 --> PR6["PR6 WebShell"]
+```
+
+PR0 through PR6 are the required feature sequence. PR5 builds on the final API
+merged by PR #8882. PR #8874 (workspace uploads) and PR #8817 (fork/move
+foundations) are follow-up dependencies rather than MVP blockers. No capability
+is advertised before PR3.
+
+Expected total implementation size is approximately 2,500-4,400 production
+lines plus 4,600-7,900 test lines. The companion document is excluded from
+those totals. Capability advertisement is the atomic rollout boundary: partial
+internal stages remain unavailable to SDK/WebShell clients until PR3 completes
+the daemon contract.
 
 ## Acceptance matrix
 
-| Area                 | Required scenarios                                                                                                                            |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Creation             | No workspace input; server-generated and caller-generated UUIDs; source persisted; relocation succeeds; no primary fallback                   |
-| Transaction rollback | Directory creation, ACP creation, source persistence, relocation, and response-loss boundaries                                                |
-| Runtime sharing      | Multiple standalone sessions and Live sessions share one Conversations ACP child without cwd or event leakage                                 |
-| Restart              | Active and archived sessions list, load, resume, and use the same deterministic path after daemon restart                                     |
-| Directory recovery   | Missing child is recreated with warning; symlink, wrong owner, wrong mode, and identity changes fail closed                                   |
-| Session operations   | Rename, archive, unarchive, prompt, subscribe, cancel, permissions, and transcript remain owner-routed                                        |
-| Deletion             | Active and archived deletion; second confirmation; prompt cancellation; transcript rollback; staged-directory crash recovery; cleanup pending |
-| Isolation            | Generic workspace APIs reject the internal runtime; primary project settings, memory, Git state, and cwd do not leak                          |
-| Compatibility        | Old daemon preserves primary behavior; capable daemon failures never fall back; legacy projectless transcript normalization                   |
-| WebShell             | Global New Chat is standalone; project New Chat remains workspace-bound; Recents groups and controls match context                            |
-| Platforms            | POSIX owner and mode validation on macOS/Linux; Windows canonical path, junction/symlink, restart, and deletion behavior                      |
+### Product and compatibility
+
+- Global/Home New Chat creates standalone on a capable daemon; project,
+  locked-project, Goals, and Git New Chat remain workspace-bound;
+  current-session New Chat inherits explicit context.
+- An old daemon without capability preserves legacy primary behavior, and an old
+  client against a new daemon retains generic primary behavior.
+- Capable-daemon errors, owner contention, and compromised roots never silently
+  downgrade to primary.
+- Workspace selectors and project controls never display or target the internal
+  Conversations runtime.
+- Attachments/uploads and other project-only controls are unavailable in the
+  standalone MVP.
+
+### Runtime and source
+
+- Concurrent ensure calls produce one runtime/bridge and one healthy ACP child
+  in steady state.
+- Multiple standalone and Live sessions share the child without cwd, event,
+  permission, transcript, source, or model-state leakage.
+- Two supporting daemons contend safely; dead-owner reclaim, PID reuse, corrupt
+  owner records, and shutdown races follow the specified failure semantics.
+- Explicit standalone, compatible legacy, Live, unrelated source, top-level, and
+  child classification are covered.
+- Standalone children persist source, remain independently loadable, and stay
+  out of top-level Recents.
+- Standalone cannot load or create durable cron tasks from the Conversations
+  root.
+
+### Creation and restore
+
+- Create rejects missing or malformed UUID and every forbidden override.
+- Concurrent same-UUID creation, active/archived conflict, empty orphan reuse,
+  and non-empty orphan conflict behave deterministically.
+- Directory creation, ACP creation, source persistence, relocation, warning,
+  disconnect, cleanup, and outcome-unknown boundaries are fault-injected.
+- Exact lookup returns creating, existing, or absent without mutation or primary
+  fallback.
+- Active and archived sessions list/load/resume across restart and retain the
+  deterministic path.
+- Missing child recreates with warning; link/junction, wrong owner, unsafe POSIX
+  mode, non-direct child, root change, and identity race fail closed.
+- Prompt preflight rejects missing/compromised children before dispatch; repair
+  never replays a prompt.
+
+### Lifecycle and deletion
+
+- Cold, live, and archived rename/export target the correct transcript.
+- Archive/unarchive retain the child and do not cascade to children.
+- Prompt, repair, rename, archive, unarchive, and delete obey one lifecycle
+  admission boundary.
+- Delete closes active ownership, stages the exact child, deletes active or
+  archived transcript and sidecars, and returns the exact batch fields.
+- Every journal write, rename, transcript delete, rollback, final cleanup, and
+  restart recovery boundary is fault-injected.
+- Invalid/missing journal, normal-plus-staged conflict, hash mismatch, and unsafe
+  staged path remain untouched.
+- Failed final cleanup reports `fileCleanupPending`; retry/restart resumes only
+  the journaled exact path.
+
+### Isolation and platforms
+
+- Every generic HTTP workspace route and workspace-qualified ACP/voice WebSocket
+  upgrade rejects the internal runtime.
+- Primary project settings, memory, Git state, trust, and cwd do not leak; shared
+  user and Conversations configuration follows the documented boundary.
+- macOS/Linux cover owner, mode, identity, restart, rename, journal, and deletion
+  semantics.
+- Windows covers canonical path, symlink/junction/reparse behavior, open-handle
+  rename/delete failure, restart, and cleanup pending without claiming POSIX ACL
+  checks.
 
 Unit tests cover source classification, route ownership, containment, state
 transitions, rollback, crash recovery, SDK parsing, and UI context reducers.
 Daemon integration tests use the real bridge boundary to assert process sharing,
 relocation, restart restoration, and owner routing. WebShell tests cover entry
-points and capability fallback. Before implementation, the behavioral baseline
-and final manual flows are recorded under `.qwen/e2e-tests/` as required by the
-repository workflow.
+points and capability fallback. Behavioral stages record baseline and final
+manual flows under `.qwen/e2e-tests/` as required by repository workflow.
 
 ## Follow-up boundaries
 
@@ -474,3 +879,9 @@ Storage quotas and orphan retention need a separate policy because automatic
 deletion changes user data lifetime. A per-session ACP process or OS sandbox
 would change resource usage and the security model and therefore requires a new
 design rather than an extension of this contract.
+
+Durable standalone scheduling requires a separate lifecycle design. Parent and
+child cascade operations require independent retention semantics. Multi-master
+or daemon-to-daemon proxying and guaranteed mixed-version concurrent ownership
+would replace the single-owner process boundary and are not incremental changes
+to this contract.
