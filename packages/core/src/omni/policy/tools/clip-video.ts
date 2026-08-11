@@ -199,6 +199,9 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         mimeType: 'video/mp4',
         sizeBytes: outputSizeBytes,
         disclosure,
+        // Marks the artifact as a temporal excerpt for downstream role
+        // consumers (output routing selectors, memory coverage).
+        role: 'clip',
       });
     } catch (error) {
       return mediaPolicyToolFailure(error);

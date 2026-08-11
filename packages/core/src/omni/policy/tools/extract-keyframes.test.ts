@@ -179,6 +179,7 @@ describe('OmniExtractKeyframesTool', () => {
         metadata: {
           omniDisclosure:
             '原视频 80s/1920×1080 → 关键帧 4/4 @ 63.5s，静态抽帧（全片分桶采样），时间连续性丢失',
+          omniRole: 'keyframe',
         },
       });
       for (const artifact of result.artifacts ?? []) {

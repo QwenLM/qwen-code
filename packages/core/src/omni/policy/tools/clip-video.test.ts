@@ -146,6 +146,7 @@ describe('OmniClipVideoTool', () => {
         sizeBytes: OUTPUT_SIZE,
         metadata: {
           omniDisclosure: '原 63s → 片段 [10s–25s] 15s，片段外内容全部丢弃',
+          omniRole: 'clip',
         },
       },
     ]);

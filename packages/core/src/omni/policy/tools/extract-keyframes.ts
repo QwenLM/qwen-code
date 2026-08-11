@@ -268,6 +268,9 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
           sizeBytes,
           metadata: {
             omniDisclosure: `原视频 ${originalDuration}${originalResolution} → 关键帧 ${index + 1}/${frames.length}${atTime}，${samplingNote}，时间连续性丢失`,
+            // Marks the artifact as a sampled excerpt for downstream role
+            // consumers (output routing selectors, memory coverage).
+            omniRole: 'keyframe',
           },
         });
       }
