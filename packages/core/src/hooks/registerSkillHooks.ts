@@ -18,6 +18,7 @@ import type { SkillHooksSettings, SkillConfig } from '../skills/types.js';
 import {
   HookType,
   type HookEventName,
+  type HookConfig,
   type CommandHookConfig,
   type HttpHookConfig,
 } from './types.js';
@@ -120,10 +121,16 @@ export function registerSkillHooks(
  * type + command/url. (Skill hooks are re-prepared from the same frontmatter
  * on every load, so a structural key is stable across reload cycles.)
  */
-function hookConfigKey(hook: CommandHookConfig | HttpHookConfig): string {
-  return hook.type === HookType.Command
-    ? `command:${hook.command}`
-    : `http:${hook.url}`;
+function hookConfigKey(hook: HookConfig): string {
+  if (hook.type === HookType.Command) {
+    return `command:${hook.command}`;
+  }
+  if (hook.type === HookType.Http) {
+    return `http:${hook.url}`;
+  }
+  // Function/prompt hooks never come from skill frontmatter (filtered above);
+  // fall back to a best-effort key so a stored entry simply never matches.
+  return `${hook.type}:${JSON.stringify(hook)}`;
 }
 
 /**
