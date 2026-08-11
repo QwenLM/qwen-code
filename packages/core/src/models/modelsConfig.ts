@@ -166,7 +166,7 @@ export class ModelsConfig {
       options.modelMetadataCatalog,
       options.initialAuthType &&
       options.generationConfig?.baseUrl &&
-      options.generationConfigSources?.['baseUrl']?.kind !== 'modelProviders'
+      options.generationConfigSources?.['baseUrl']?.kind === 'cli'
         ? {
             authType: options.initialAuthType,
             baseUrl: options.generationConfig.baseUrl,

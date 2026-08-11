@@ -94,14 +94,19 @@ describe('token plan provider', () => {
       mergeStrategy: 'prepend-and-remove-owned',
       ownsModel: expect.any(Function),
     });
-    expect(plan.modelProviders?.[0]?.models.map((model) => model.id)).toEqual(
-      template.map((model) => model.id),
+    expect(plan.modelProviders?.[0]?.models).toEqual(
+      template.map(({ generationConfig, ...model }) => {
+        const { modalities: _modalities, ...remainingConfig } =
+          generationConfig ?? {};
+        return {
+          ...model,
+          envKey: TOKEN_PLAN_ENV_KEY,
+          ...(Object.keys(remainingConfig).length > 0
+            ? { generationConfig: remainingConfig }
+            : {}),
+        };
+      }),
     );
-    expect(
-      plan.modelProviders?.[0]?.models.every(
-        (model) => model.generationConfig?.modalities === undefined,
-      ),
-    ).toBe(true);
     expect(plan.providerState).toEqual({
       'providerMetadata.token-plan': {
         baseUrl: TOKEN_PLAN_CHINA_BASE_URL,

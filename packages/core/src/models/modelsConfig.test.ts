@@ -1688,6 +1688,36 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('does not reuse a settings endpoint for a base-url-less registry model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'gpt-5-mini',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'gateway-model',
+        baseUrl: 'https://openrouter.ai/api/v1',
+      },
+      generationConfigSources: {
+        baseUrl: {
+          kind: 'settings',
+          detail: 'security.auth.baseUrl',
+        },
+      },
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-5-mini');
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(
+      'https://api.openai.com/v1',
+    );
+  });
+
   it('uses catalog modalities for an initial manually configured provider', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
