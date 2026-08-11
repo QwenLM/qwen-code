@@ -936,6 +936,7 @@ function parseManifest(
   }
   const status = manifest['status'];
   if (
+    typeof status !== 'string' ||
     ![
       'running',
       'pausing',
@@ -962,7 +963,8 @@ function parseManifest(
     (journal['byteLength'] as number) < 0 ||
     typeof journal['sha256'] !== 'string' ||
     !/^[0-9a-f]{64}$/.test(journal['sha256']) ||
-    !['complete', 'failed'].includes(String(journal['integrity']))
+    typeof journal['integrity'] !== 'string' ||
+    !['complete', 'failed'].includes(journal['integrity'])
   ) {
     throw new Error('Workflow manifest has invalid journal metadata.');
   }
