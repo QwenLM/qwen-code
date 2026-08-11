@@ -1790,6 +1790,34 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // A function/alias runs in the current shell, so a `cd` or export in its
+  // body survives the call and a later path-free Git mutation is judged
+  // against where the body left the shell.
+  it.each([
+    () => `f() { cd ${plainOutsidePath}; }; f; git reset --hard`,
+    () =>
+      `f() { export GIT_DIR=${plainOutsidePath}/.git; }; f; git reset --hard`,
+    () => `alias gg='cd ${plainOutsidePath}'; gg; git reset --hard`,
+  ])('carries a body cwd/export out to the caller %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('keeps an in-boundary body cwd shift allowed', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      'f() { cd nested; }; f; git status',
+      'f() { echo hi; }; f; git commit -m x',
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

@@ -2369,10 +2369,22 @@ async function evaluateCommandWithCwd(
               entryCwd,
               activeContext(),
               depth + 1,
-              { relink: scope.relink, locals: shellLocals },
+              { relink: scope.relink, locals: shellLocals, exportedNames },
             );
             if (nested.denial) {
               return { denial: nested.denial, cwdAfter: trackedCwd };
+            }
+            // Both an alias and a function run in the current shell, so a `cd`
+            // or an export in the body survives the call — a later path-free
+            // git mutation is judged against where the body left the shell.
+            trackedCwd = nested.cwdAfter;
+            if (nested.exportedAfter) {
+              exported.relocations.push(...nested.exportedAfter.relocations);
+              if (nested.exportedAfter.unresolved) exported.unresolved = true;
+            }
+            if (nested.allExportAfter) allExport = true;
+            for (const [key, token] of nested.shellLocalsAfter ?? []) {
+              shellLocals.set(key, token);
             }
             break;
           }
