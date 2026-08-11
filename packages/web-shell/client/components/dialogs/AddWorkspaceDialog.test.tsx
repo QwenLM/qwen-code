@@ -357,6 +357,56 @@ describe('AddWorkspaceDialog', () => {
       expect(listbox()).toBeNull();
     });
 
+    it('closes the suggestion list when the input blurs', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      expect(listbox()).toBeNull();
+    });
+
+    it('cancels the pending blur dismiss when focus returns to the input', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      await settle();
+      expect(listbox()).not.toBeNull();
+
+      act(() => input().blur());
+      act(() => input().focus());
+      // Cross the blur timer's deadline: a still-pending timer would close
+      // the list and leave a stale suppress flag for the next edit.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(listbox()).not.toBeNull();
+
+      type('/home/me/cod');
+      await settle();
+      expect(listbox()).not.toBeNull();
+    });
+
     it('opens suggestions on the first edit after a re-blur within the blur window', async () => {
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
@@ -525,6 +575,65 @@ describe('AddWorkspaceDialog', () => {
       type('/home/me/cod');
       await settle();
 
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('does not pop suggestions open on refocus when a same-value pick raced an in-flight lookup', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      let resolveSuggestions!: (value: typeof SUGGESTIONS) => void;
+      const onSuggest = vi.fn(
+        () =>
+          new Promise<typeof SUGGESTIONS>((resolve) => {
+            resolveSuggestions = resolve;
+          }),
+      );
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      type('/home/me/co');
+      // Browse while the first lookup is still debounced, then let the
+      // debounce fire so the lookup is in flight while the picker is open.
+      act(() => {
+        browseButton().click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      await act(async () => {
+        resolvePick('/home/me/co');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => input().focus());
+      await act(async () => {
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
+
+      // The lookup predates Browse; the same-value pick must invalidate it
+      // so a bare refocus cannot pop the list open.
+      expect(listbox()).toBeNull();
+
+      type('/home/me/cod');
+      await settle();
+      await act(async () => {
+        // resolveSuggestions now points at the second lookup's resolver.
+        resolveSuggestions(SUGGESTIONS);
+        await Promise.resolve();
+      });
       expect(listbox()).not.toBeNull();
     });
 

@@ -83,6 +83,14 @@ export function AddWorkspaceDialog({
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+  useEffect(
+    () => () => {
+      if (blurTimeoutRef.current !== undefined) {
+        clearTimeout(blurTimeoutRef.current);
+      }
+    },
+    [],
+  );
 
   const closeList = useCallback(() => {
     setListOpen(false);
@@ -181,6 +189,9 @@ export function AddWorkspaceDialog({
         setSuggestions([]);
       } else {
         // Cancelled, failed, or same-value pick: the first edit must open.
+        // A same-value pick keeps the typed path, so invalidate any lookup
+        // already in flight from before Browse was clicked.
+        if (pickedPath) ++suggestSeqRef.current;
         suppressNextFetchOpenRef.current = false;
       }
     } catch {
@@ -302,6 +313,12 @@ export function AddWorkspaceDialog({
                     if (error) setError(null);
                   }}
                   onKeyDown={handleInputKeyDown}
+                  onFocus={() => {
+                    if (blurTimeoutRef.current !== undefined) {
+                      clearTimeout(blurTimeoutRef.current);
+                      blurTimeoutRef.current = undefined;
+                    }
+                  }}
                   onBlur={() => {
                     // Delay so a mousedown on a suggestion wins over blur.
                     if (blurTimeoutRef.current !== undefined) {
