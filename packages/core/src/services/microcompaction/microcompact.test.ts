@@ -14,7 +14,10 @@ import {
   MICROCOMPACT_CLEARED_MESSAGE,
   MICROCOMPACT_CLEARED_IMAGE_PREFIX,
 } from './microcompact.js';
-import { skillUnloadedPlaceholder } from '../../tools/skill-utils.js';
+import {
+  buildSkillLlmContent,
+  skillUnloadedPlaceholder,
+} from '../../tools/skill-utils.js';
 
 function makeInlineImage(mimeType = 'image/png', data = 'AAAA'): Content {
   return {
@@ -2217,7 +2220,10 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
       skillCall('s1', 'demo-poem'),
       skillResult('s1', 'Skill "demo-poem" is already loaded in context.'),
       skillCall('s2', 'demo-poem'),
-      skillResult('s2', 'skill body content '.repeat(50)),
+      skillResult(
+        's2',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
       shellCall('c3'),
       shellResult('c3', 'newer shell output'),
     ];
@@ -2261,6 +2267,99 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
     expect(
       result.history[3]!.parts![0]!.functionResponse!.response!['output'],
     ).toBe(placeholder);
+  });
+
+  it('does not let a kept SkillTool error output mask a blanked body (R2-1)', () => {
+    // The kept error output ('Skill "x" is disabled.') is not a body, so it
+    // must not suppress the eviction report for the older body being blanked
+    // — otherwise the skill stays tracked with no body (dedup-guard ghost).
+    const history: Content[] = [
+      skillCall('s0', 'demo-poem'),
+      skillResult('s0', buildSkillLlmContent('/demo', 'body '.repeat(50))),
+      skillCall('s1', 'demo-poem'),
+      skillResult('s1', 'Skill "demo-poem" is disabled.'),
+      shellCall('c2'),
+      shellResult('c2', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(result.meta!.evictedSkillNames).toEqual(['demo-poem']);
+  });
+
+  it('protects no skill when a call-id is ambiguous (R2-3)', () => {
+    // A resumed/malformed history reuses one call-id across two Skill calls
+    // (foo kept via keepRecent, bar blanked). buildKeptFilePaths protects
+    // NONE on ambiguity; buildKeptSkillNames must match so bar's eviction is
+    // reported (foo over-reports — the documented tolerated direction).
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'shared',
+              name: 'skill',
+              args: { skill: 'bar' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'shared',
+              name: 'skill',
+              response: {
+                output: buildSkillLlmContent('/bar', 'bar '.repeat(50)),
+              },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'shared',
+              name: 'skill',
+              args: { skill: 'foo' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'shared',
+              name: 'skill',
+              response: { output: buildSkillLlmContent('/foo', 'foo') },
+            },
+          },
+        ],
+      },
+      shellCall('c1'),
+      shellResult('c1', 'newer shell output'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 2,
+    });
+
+    expect(result.meta).toBeDefined();
+    expect(new Set(result.meta!.evictedSkillNames)).toEqual(
+      new Set(['bar', 'foo']),
+    );
   });
 
   it('never re-blanks a /unskill placeholder nor reports its name', () => {

@@ -44,6 +44,10 @@ import {
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
 import { MICROCOMPACT_CLEARED_MESSAGE } from '../services/microcompaction/microcompact.js';
+import {
+  buildSkillLlmContent,
+  skillUnloadedPlaceholder,
+} from '../tools/skill-utils.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -388,6 +392,67 @@ describe('GeminiChat', async () => {
       expect(skillOutputs(chat.getHistory())).toEqual([
         MICROCOMPACT_CLEARED_MESSAGE,
       ]);
+    });
+  });
+
+  describe('hasSkillBodyInHistory (resume fallback)', () => {
+    const skillCall = (id: string, name = 'demo'): Content => ({
+      role: 'model',
+      parts: [{ functionCall: { id, name: 'skill', args: { skill: name } } }],
+    });
+    const skillResponse = (id: string, output: string): Content => ({
+      role: 'user',
+      parts: [
+        { functionResponse: { id, name: 'skill', response: { output } } },
+      ],
+    });
+
+    it('returns true when a live body is still in history', () => {
+      chat.setHistory([
+        skillCall('s0'),
+        skillResponse('s0', buildSkillLlmContent('/demo', 'body content')),
+      ]);
+      expect(chat.hasSkillBodyInHistory('demo')).toBe(true);
+    });
+
+    it('returns true for a dedup-confirmation-only history', () => {
+      chat.setHistory([
+        skillCall('s0'),
+        skillResponse('s0', 'Skill "demo" is already loaded in context.'),
+      ]);
+      expect(chat.hasSkillBodyInHistory('demo')).toBe(true);
+    });
+
+    it('returns false when only a /unskill placeholder remains', () => {
+      chat.setHistory([
+        skillCall('s0'),
+        skillResponse('s0', skillUnloadedPlaceholder('demo')),
+      ]);
+      expect(chat.hasSkillBodyInHistory('demo')).toBe(false);
+    });
+
+    it('returns false when only a microcompact-cleared result remains', () => {
+      chat.setHistory([
+        skillCall('s0'),
+        skillResponse('s0', MICROCOMPACT_CLEARED_MESSAGE),
+      ]);
+      expect(chat.hasSkillBodyInHistory('demo')).toBe(false);
+    });
+
+    it('returns false for SkillTool error text (not a body)', () => {
+      chat.setHistory([
+        skillCall('s0'),
+        skillResponse('s0', 'Skill "demo" is disabled.'),
+      ]);
+      expect(chat.hasSkillBodyInHistory('demo')).toBe(false);
+    });
+
+    it('returns false when the skill never appeared in history', () => {
+      chat.setHistory([
+        skillCall('s0', 'other'),
+        skillResponse('s0', buildSkillLlmContent('/other', 'other body')),
+      ]);
+      expect(chat.hasSkillBodyInHistory('demo')).toBe(false);
     });
   });
 

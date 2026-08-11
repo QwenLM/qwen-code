@@ -16,13 +16,28 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
+/** Prefix every injected skill body shares (see {@link buildSkillLlmContent}).
+ * Used as a positive residency marker: a Skill tool-result whose output starts
+ * with this is a real body; a dedup confirmation, SkillTool error text
+ * (`Skill "x" not found.` / `is disabled.` / `Failed to load skill "x":`),
+ * a `/unskill` placeholder, or a microcompact cleared message are NOT bodies
+ * and so must not keep a skill tracked (or let `/unskill` claim a body exists). */
+const SKILL_BODY_PREFIX = 'Base directory for this skill:';
+
 /**
  * Builds the LLM-facing content string when a skill body is injected.
  * Shared between SkillToolInvocation (runtime) and /context (estimation)
  * so that token estimates stay in sync with actual usage.
  */
 export function buildSkillLlmContent(baseDir: string, body: string): string {
-  return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+  return `${SKILL_BODY_PREFIX} ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+}
+
+/** Whether a Skill tool-result output is an injected skill body (built by
+ * {@link buildSkillLlmContent}). Proves residency: excludes dedup confirmations,
+ * SkillTool error text, `/unskill` placeholders, and cleared messages. */
+export function isSkillBodyOutput(output: unknown): boolean {
+  return typeof output === 'string' && output.startsWith(SKILL_BODY_PREFIX);
 }
 
 const SKILL_UNLOADED_PLACEHOLDER_PREFIX = `[Skill '`;

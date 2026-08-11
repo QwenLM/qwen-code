@@ -84,7 +84,10 @@ import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import { syncSkillEvictions } from '../tools/skill-utils.js';
+import {
+  clearLoadedSkillTracking,
+  syncSkillEvictions,
+} from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -735,6 +738,14 @@ export class GeminiClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      // Rewind can drop a loaded skill's body without touching the in-memory
+      // tracking set, leaving the dedup guard blocking every reload — the
+      // exact deadlock this sync exists to remove. Mirrors the file-read
+      // cache clear above (a snapshot may or may not retain any given body).
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'truncateHistory',
+      );
     }
     this.forceFullIdeContext = true;
   }

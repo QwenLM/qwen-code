@@ -58,6 +58,8 @@ import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import {
   clearLoadedSkillTracking,
+  isSkillBodyOutput,
+  isSkillDedupConfirmation,
   skillUnloadedPlaceholder,
 } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
@@ -2228,7 +2230,6 @@ export class GeminiChat {
     if (targetIds.size === 0) {
       return false;
     }
-    const placeholder = skillUnloadedPlaceholder(skillName);
     return this.history.some(
       (content) =>
         content.role === 'user' &&
@@ -2240,11 +2241,11 @@ export class GeminiChat {
           const output = (fr.response as { output?: unknown } | undefined)?.[
             'output'
           ];
-          return (
-            typeof output === 'string' &&
-            output !== placeholder &&
-            output !== MICROCOMPACT_CLEARED_MESSAGE
-          );
+          // A live body OR a dedup confirmation proves prior residency
+          // (the confirmation lets /unskill blank the stale entry and
+          // re-arm the guard). SkillTool error text, /unskill placeholders,
+          // and microcompact cleared messages do not.
+          return isSkillBodyOutput(output) || isSkillDedupConfirmation(output);
         }),
     );
   }

@@ -11,7 +11,7 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearCo
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
-  isSkillDedupConfirmation,
+  isSkillBodyOutput,
   isSkillUnloadedPlaceholder,
 } from '../../tools/skill-utils.js';
 
@@ -442,32 +442,40 @@ function buildKeptFilePaths(
 }
 
 /**
- * Skill names whose full body is still resident via a kept tool result.
- * Mirrors `buildKeptFilePaths`: blanking a stale dedup confirmation left
- * over from an earlier load cycle must NOT un-track a skill whose reloaded
- * body is still kept in context — the next invocation would re-append the
- * body, doubling its tokens on every later aging-out pass. A kept
- * confirmation or placeholder does not prove residency, so only a kept
- * full body populates this set.
+ * Skill names whose full body is still resident via a tool result that
+ * survives this pass (not scheduled for clearing). Mirrors
+ * `buildKeptFilePaths`: blanking a stale dedup confirmation left over
+ * from an earlier load cycle must NOT un-track a skill whose reloaded
+ * body is still in context — the next invocation would re-append the
+ * body, doubling its tokens on every later aging-out pass.
+ *
+ * Residency is positive: only an output built by `buildSkillLlmContent`
+ * (the `Base directory for this skill:` prefix) proves a body — a kept
+ * dedup confirmation, SkillTool error text, `/unskill` placeholder, or
+ * cleared message does not. An ambiguous call-id (one id mapped to
+ * multiple skill names) protects NONE, matching `buildKeptFilePaths`'
+ * `paths.length !== 1` guard. Filtering on the clear-set (not the
+ * keepRecent set) also covers the size path, where a body can survive
+ * via the low-watermark early break without entering `keepToolRefs`.
  */
 function buildKeptSkillNames(
   history: Content[],
   refs: PartRef[],
-  keepRefs: Set<string>,
+  clearRefKeys: Set<string>,
   callIdToSkillName: Map<string, string[]>,
 ): Set<string> {
   const kept = new Set<string>();
   for (const ref of refs) {
-    if (!keepRefs.has(refKey(ref))) continue;
+    if (clearRefKeys.has(refKey(ref))) continue;
     const part = getPart(history, ref);
     if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
     if (part.functionResponse?.name !== ToolNames.SKILL) continue;
-    if (isSkillDedupConfirmation(part.functionResponse.response?.['output'])) {
+    if (!isSkillBodyOutput(part.functionResponse.response?.['output'])) {
       continue;
     }
     const names = getSkillNamesForResponse(part, callIdToSkillName);
-    for (const n of names ?? []) {
-      kept.add(n);
+    if (names?.length === 1) {
+      kept.add(names[0]!);
     }
   }
   return kept;
@@ -617,9 +625,12 @@ export interface MicrocompactMeta {
   /**
    * Names of skills whose blanked Skill result dropped the loaded body
    * from history; the caller un-tracks them so the dedup guard re-arms
-   * and `/context` stops reporting a phantom `active` entry. No
-   * kept-suppression: a body is always older than its dedup
-   * confirmations, so a kept confirmation must not mask the eviction.
+   * and `/context` stops reporting a phantom `active` entry. A skill
+   * whose full body still survives this pass (via `buildKeptSkillNames`)
+   * is suppressed from this list — otherwise the next invocation would
+   * re-append the body, doubling its tokens. Within one load cycle a
+   * body is always older than its dedup confirmations, so a kept
+   * confirmation never suppresses (only a kept full body does).
    */
   evictedSkillNames: string[];
   /**
@@ -777,10 +788,11 @@ export function microcompactHistory(
       keepRefs,
       callIdToFilePath,
     );
+    const clearRefKeys = new Set(clearRefs.map(refKey));
     const keptSkillNames = buildKeptSkillNames(
       keptPathHistory,
       keptPathRefs,
-      keepRefs,
+      clearRefKeys,
       callIdToSkillName,
     );
 

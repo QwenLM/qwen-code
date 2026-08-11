@@ -85,7 +85,14 @@ export const unskillCommand: SlashCommand = {
     }
 
     const skillNames = getCachedSkillNames(context);
-    if (skillNames && !skillNames.has(skillName)) {
+    if (
+      skillNames &&
+      !skillNames.has(skillName) &&
+      // A skill deleted/renamed mid-session drops from the committed cache,
+      // but its body may still occupy context — let the history fallback
+      // (below) reclaim it instead of mislabeling it as a command.
+      !geminiClient.getChat().hasSkillBodyInHistory(skillName)
+    ) {
       return {
         type: 'message',
         messageType: 'error',
