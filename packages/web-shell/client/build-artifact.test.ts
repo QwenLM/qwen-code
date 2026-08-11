@@ -198,6 +198,30 @@ describe('build artifact — package boundary', () => {
     expect(conflictingLayers).toEqual([]);
   });
 
+  it('removes the transcript width cap from fullscreen panels', () => {
+    let fullscreenRule: Rule | undefined;
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      if (
+        rule.selector.includes('panelFullscreen') &&
+        rule.nodes.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === '--chat-content-width' &&
+            node.value === '100%',
+        )
+      ) {
+        fullscreenRule = rule;
+      }
+    });
+
+    expect(fullscreenRule).toBeDefined();
+    expect(fullscreenRule?.selector).toMatch(
+      /\._panelFullscreen_[A-Za-z0-9_]+$/,
+    );
+    expect(fullscreenRule?.selector).not.toContain('panelDrawer');
+    expect(fullscreenRule?.selector).not.toContain(':not(');
+  });
+
   it('prefixes global CSS registrations and animations', () => {
     const unscoped: string[] = [];
     postcss.parse(readInjectedCss()).walkAtRules((atRule) => {

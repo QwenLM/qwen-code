@@ -134,6 +134,7 @@ import {
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
+import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
   clearSplitSessions,
   loadSplitSessions,
@@ -368,6 +369,7 @@ const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
+const SUBAGENT_PANEL_ANIMATION_FALLBACK_MS = 700;
 const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
 const DOCKED_ENVIRONMENT_PANEL_WIDTH = 332;
 // The docked fullscreen surface contains Tab itself instead of going through
@@ -1686,6 +1688,7 @@ export function App({
   // to be useful.
   const isLargeScreen = useIsLargeScreen();
   const canDockArtifactPanel = useIsLargeScreen('(min-width: 1001px)');
+  const prefersReducedMotion = usePrefersReducedMotion();
   // In split view the session sidebar competes with the panes for width. Below
   // this width it auto-collapses to its icon rail so the panes get the room, and
   // expands again once the window grows back. A wide split keeps the full
@@ -2493,6 +2496,8 @@ export function App({
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
   ] = useState(false);
+  const [waitForSubagentPanelAnimation, setWaitForSubagentPanelAnimation] =
+    useState(false);
   // In-tree portal target for the docked panel (display:contents keeps the
   // portaled wrapper a direct flex item of .appShell). Held in state so the
   // portal container exists before the wrapper renders.
@@ -3039,6 +3044,9 @@ export function App({
   );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
+      if (!artifactPanelOpenRef.current) {
+        setWaitForSubagentPanelAnimation(true);
+      }
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)
@@ -3784,6 +3792,25 @@ export function App({
   const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  const deferSubagentMount =
+    waitForSubagentPanelAnimation &&
+    artifactPanelOpen &&
+    !artifactPanelFullscreen &&
+    (useFloatingArtifactPanel ||
+      (!prefersReducedMotion && !suppressArtifactDockOpenAnimation));
+  useLayoutEffect(() => {
+    if (waitForSubagentPanelAnimation && !deferSubagentMount) {
+      setWaitForSubagentPanelAnimation(false);
+    }
+  }, [deferSubagentMount, waitForSubagentPanelAnimation]);
+  useEffect(() => {
+    if (!deferSubagentMount) return;
+    const timeout = window.setTimeout(
+      () => setWaitForSubagentPanelAnimation(false),
+      SUBAGENT_PANEL_ANIMATION_FALLBACK_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [deferSubagentMount]);
   const toggleArtifactPanelFullscreen = useCallback(() => {
     setArtifactPanelFullscreen((value) => !value);
     // Only the docked node replays its open animation on the fullscreen ->
@@ -5133,6 +5160,10 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_mutation',
     ) === true;
+  const canQueryMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_query',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -5148,6 +5179,7 @@ export function App({
     sessionId: connection.sessionId,
     clientId: connection.clientId,
     canMutateMidTurn,
+    canQueryMidTurn,
     streamingState,
     sessionActions,
     store,
@@ -9384,6 +9416,7 @@ export function App({
     onError: reportError,
     sessionWorkflowEnabled,
     onImageIngestionNotice: pushToast,
+    deferSubagentMount,
     onClose: closeArtifactPanel,
     fullscreen: artifactPanelFullscreen,
     onToggleFullscreen: toggleArtifactPanelFullscreen,
@@ -11126,6 +11159,11 @@ export function App({
                 }}
               >
                 <DrawerContent
+                  onAnimationEnd={(event) => {
+                    if (event.target === event.currentTarget) {
+                      setWaitForSubagentPanelAnimation(false);
+                    }
+                  }}
                   className={
                     artifactPanelFullscreen
                       ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
@@ -11177,6 +11215,11 @@ export function App({
                   ref={artifactPanelFullscreenSurfaceRef}
                   tabIndex={-1}
                   onKeyDown={handleArtifactPanelSurfaceKeyDown}
+                  onAnimationEnd={(event) => {
+                    if (event.target === event.currentTarget) {
+                      setWaitForSubagentPanelAnimation(false);
+                    }
+                  }}
                   {...(artifactPanelFullscreen
                     ? { role: 'dialog' as const, 'aria-label': 'Right panel' }
                     : {})}
