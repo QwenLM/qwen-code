@@ -277,13 +277,19 @@ function App({
       setThemeTick((t) => t + 1);
     };
     renderer.on('theme_mode', onMode);
-    // Initial detection in case the event never fires (light terminals).
-    renderer
-      .waitForThemeMode(1000)
-      .then((m) => {
-        if (m) onMode(m);
-      })
-      .catch(() => {});
+    // Env override wins (QWEN_THEME=light|dark) for terminals where OSC 10/11
+    // detection fails; otherwise initial detection.
+    const envTheme = process.env['QWEN_THEME'];
+    if (envTheme === 'light' || envTheme === 'dark') {
+      onMode(envTheme);
+    } else {
+      renderer
+        .waitForThemeMode(1000)
+        .then((m) => {
+          if (m) onMode(m);
+        })
+        .catch(() => {});
+    }
     return () => {
       renderer.off('theme_mode', onMode);
     };
