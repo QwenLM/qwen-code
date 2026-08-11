@@ -170,10 +170,6 @@ fn spawn_proxy(
                         let _ = client.shutdown(Shutdown::Both);
                         break;
                     }
-                    if !network.contains(peer.ip()) {
-                        let _ = write_rejection(&mut client, 403, "Forbidden");
-                        continue;
-                    }
                     if client.set_nonblocking(false).is_err() {
                         continue;
                     }
