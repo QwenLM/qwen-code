@@ -3064,6 +3064,10 @@ export class Session implements SessionContext {
     const channelDeliveryCapture = channelDelivery
       ? { finalText: '' }
       : undefined;
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3081,8 +3085,11 @@ export class Session implements SessionContext {
         modelPrompt,
         // Channel turns are non-interactive deliveries: like cron and
         // background-notification turns they keep the graceful end-turn
-        // handling so the collected response text is still delivered.
-        channelDelivery === undefined,
+        // handling so the collected response text is still delivered. Both
+        // channel mechanisms qualify — the channelDelivery meta and the
+        // CHANNEL_PROMPT_META_KEY turns sent by the channel bridges, which
+        // carry no channelDelivery capture.
+        channelDelivery === undefined && !channelPromptTurn,
       );
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active

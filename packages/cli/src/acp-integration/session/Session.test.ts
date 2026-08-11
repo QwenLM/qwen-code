@@ -11269,6 +11269,60 @@ describe('Session', () => {
         });
       });
 
+      it('keeps a channel-prompt-meta turn graceful when loop protection stops it', async () => {
+        // DaemonChannelBridge/AcpBridge channel tasks prompt with
+        // CHANNEL_PROMPT_META_KEY and no channelDelivery meta; like the
+        // channelDelivery path above they must resolve end_turn so the
+        // bridge emits promptComplete with the collected response text
+        // instead of the rejection failing the non-interactive task.
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'channel-prompt-loop-1',
+                    name: 'read_file',
+                    args: { file_path: 'a.ts' },
+                  },
+                  {
+                    id: 'channel-prompt-loop-2',
+                    name: 'read_file',
+                    args: { file_path: 'b.ts' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'channel task' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+          }),
+          {},
+        );
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
+      });
+
       it('replaces the prompt candidate with a Stop-hook continuation final', async () => {
         const messageBus = {
           request: vi
