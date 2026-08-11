@@ -22,6 +22,7 @@ const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
 const MINIMAX_IMAGE_GENERATION_PATH = '/v1/image_generation';
+const MINIMAX_IMAGE_GENERATION_SUFFIX = '/image_generation';
 
 class ResponseSizeLimitError extends Error {}
 
@@ -155,7 +156,7 @@ async function generateMiniMaxImage(
 ): Promise<GeneratedImage> {
   const generationUrl = request.baseUrl.endsWith(MINIMAX_IMAGE_GENERATION_PATH)
     ? request.baseUrl
-    : `${request.baseUrl}${MINIMAX_IMAGE_GENERATION_PATH.slice(3)}`;
+    : `${request.baseUrl}${MINIMAX_IMAGE_GENERATION_SUFFIX}`;
   const body: Record<string, unknown> = {
     model: request.model,
     prompt: request.prompt,
@@ -306,7 +307,8 @@ function formatImageGenerationError(status: number, payload: unknown): string {
   if (/DataInspectionFailed/i.test(code ?? '')) {
     return `The image generation endpoint blocked the prompt during content moderation${message ? `: ${message}` : '.'}`;
   }
-  const statusText = status >= 200 && status < 300 ? '' : ` with HTTP ${status}`;
+  const statusText =
+    status >= 200 && status < 300 ? '' : ` with HTTP ${status}`;
   return `Image generation failed${statusText}${suffix ? ` (${suffix})` : ''}.`;
 }
 
