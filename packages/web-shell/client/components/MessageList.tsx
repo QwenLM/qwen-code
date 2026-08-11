@@ -64,6 +64,8 @@ interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -2439,6 +2441,7 @@ export const MessageList = memo(
       messages,
       pendingApproval,
       onShowContextDetail,
+      onImagePreview,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -4425,6 +4428,7 @@ export const MessageList = memo(
               message={displayItem.message}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onImagePreview={onImagePreview}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
               showRetryHint={showRetryHint}
@@ -4482,6 +4486,7 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onImagePreview,
         generateContent,
         headerOffset,
         visibleItems,
