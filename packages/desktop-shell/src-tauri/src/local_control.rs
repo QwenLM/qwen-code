@@ -171,7 +171,7 @@ fn spawn_proxy(
                         break;
                     }
                     if !network.contains(peer.ip()) {
-                        let _ = write_rejection(&mut client, 403, "Forbidden");
+                        let _ = write_rejection(&mut client, 403, "Forbidden (off-network)");
                         continue;
                     }
                     if client.set_nonblocking(false).is_err() {
@@ -474,7 +474,9 @@ fn select_lan_ipv4(
 ) -> Result<LocalNetwork, String> {
     let interfaces =
         interfaces.ok_or_else(|| "Local Control could not inspect IPv4 networks.".to_string())?;
-    let physical = interfaces
+    let mut saw_unverified = false;
+    let mut routed_unverified = false;
+    let physical: Vec<LocalNetwork> = interfaces
         .into_iter()
         .filter(|interface| {
             !interface.internal
@@ -488,16 +490,31 @@ fn select_lan_ipv4(
             Addr::V4(address)
                 if address.broadcast.is_some()
                     && !address.ip.is_loopback()
-                    && !address.ip.is_unspecified() => address
-                .netmask
-                .filter(|netmask| !netmask.is_unspecified())
-                .map(|netmask| LocalNetwork {
-                    address: address.ip,
-                    netmask,
-                }),
+                    && !address.ip.is_unspecified() =>
+            {
+                match address
+                    .netmask
+                    .filter(|netmask| !netmask.is_unspecified() && *netmask != Ipv4Addr::BROADCAST)
+                {
+                    Some(netmask) => Some(LocalNetwork {
+                        address: address.ip,
+                        netmask,
+                    }),
+                    None => {
+                        saw_unverified = true;
+                        routed_unverified |= routed == Some(address.ip);
+                        None
+                    }
+                }
+            }
             _ => None,
         })
         .collect();
+    if routed_unverified || (physical.is_empty() && saw_unverified) {
+        return Err(
+            "Local Control found an IPv4 adapter without a verifiable netmask.".to_string(),
+        );
+    }
     choose_lan_ipv4(routed, physical)
 }
 
@@ -505,8 +522,8 @@ fn choose_lan_ipv4(
     routed: Option<Ipv4Addr>,
     mut physical: Vec<LocalNetwork>,
 ) -> Result<LocalNetwork, String> {
-    physical.sort_unstable();
-    physical.dedup();
+    physical.sort_unstable_by_key(|network| (network.address, std::cmp::Reverse(network.netmask)));
+    physical.dedup_by_key(|network| network.address);
     if let Some(network) = routed.and_then(|routed| {
         physical
             .iter()
@@ -636,6 +653,7 @@ mod tests {
         );
         assert!(enterprise.contains("203.0.113.20".parse().expect("same subnet")));
         assert!(!enterprise.contains("198.51.100.20".parse().expect("other subnet")));
+        assert!(choose_lan_ipv4(None, vec![enterprise]).is_err());
         let routed = Ipv4Addr::new(192, 168, 1, 20);
         assert_eq!(
             choose_lan_ipv4(
@@ -648,6 +666,17 @@ mod tests {
             .expect("routed LAN")
             .address,
             routed
+        );
+        assert_eq!(
+            choose_lan_ipv4(
+                Some(routed),
+                vec![
+                    network("192.168.1.20", "255.255.0.0"),
+                    network("192.168.1.20", "255.255.255.0"),
+                ],
+            )
+            .expect("narrowest duplicate"),
+            network("192.168.1.20", "255.255.255.0"),
         );
         assert!(choose_lan_ipv4(None, vec![]).is_err());
         assert!(choose_lan_ipv4(
@@ -665,27 +694,41 @@ mod tests {
         let routed = Ipv4Addr::new(192, 168, 1, 20);
         assert!(select_lan_ipv4(Some(routed), None).is_err());
 
-        let interface = |netmask| {
-            NetworkInterface::new_afinet(
-                "en0",
-                routed,
-                netmask,
-                Some(Ipv4Addr::new(192, 168, 1, 255)),
-                1,
-                false,
-            )
-            .with_mac_addr(Some("00:11:22:33:44:55".to_string()))
+        let interface = |name, address, netmask| {
+            NetworkInterface::new_afinet(name, address, netmask, Some(address), 1, false)
+                .with_mac_addr(Some("00:11:22:33:44:55".to_string()))
         };
-        assert!(select_lan_ipv4(Some(routed), Some(vec![interface(None)])).is_err());
+        assert!(select_lan_ipv4(Some(routed), Some(vec![interface("en0", routed, None)])).is_err());
         assert!(select_lan_ipv4(
             Some(routed),
-            Some(vec![interface(Some(Ipv4Addr::UNSPECIFIED))]),
+            Some(vec![interface("en0", routed, Some(Ipv4Addr::UNSPECIFIED))]),
+        )
+        .is_err());
+        assert!(select_lan_ipv4(
+            Some(routed),
+            Some(vec![interface("en0", routed, Some(Ipv4Addr::BROADCAST))]),
+        )
+        .is_err());
+        assert!(select_lan_ipv4(
+            Some(routed),
+            Some(vec![
+                interface("en0", routed, None),
+                interface(
+                    "en1",
+                    Ipv4Addr::new(192, 168, 2, 5),
+                    Some(Ipv4Addr::new(255, 255, 255, 0)),
+                ),
+            ]),
         )
         .is_err());
         assert_eq!(
             select_lan_ipv4(
                 Some(routed),
-                Some(vec![interface(Some(Ipv4Addr::new(255, 255, 255, 0)))]),
+                Some(vec![interface(
+                    "en0",
+                    routed,
+                    Some(Ipv4Addr::new(255, 255, 255, 0)),
+                )]),
             )
             .expect("verified network"),
             network("192.168.1.20", "255.255.255.0"),
