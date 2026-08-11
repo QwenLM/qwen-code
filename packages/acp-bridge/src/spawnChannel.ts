@@ -10,13 +10,25 @@ import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
 import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
-import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
+import {
+  ndJsonStream,
+  type NdJsonStreamHooks,
+  type NdJsonStreamLimits,
+  validateNdJsonStreamLimits,
+} from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 import type { ChildHeapPolicy } from './child-heap-policy.js';
 
 let cachedMemoryArgs: string[] | undefined;
+export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
+  Object.freeze({
+    maxFrameBytes: 64 * 1024 * 1024,
+    maxQueuedMessages: 256,
+    maxQueuedBytes: 64 * 1024 * 1024,
+  });
+
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
   const constrainedMemory = (process as { constrainedMemory?: () => number })
@@ -107,6 +119,7 @@ export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
   pipeHooks?: NdJsonStreamHooks;
+  pipeLimits?: NdJsonStreamLimits;
   sourceEnv?: Readonly<NodeJS.ProcessEnv>;
   processRegistry?: ProcessRegistry;
   /**
@@ -134,6 +147,7 @@ export interface SpawnChannelFactoryOptions {
 export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
+  if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
   return async (workspaceCwd, childEnvOverrides) => {
     const sourceEnv = options.sourceEnv ?? process.env;
@@ -218,7 +232,21 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(writable, readable, options.pipeHooks);
+    const pipeHooks = options.pipeLimits
+      ? {
+          ...options.pipeHooks,
+          onTransportError: (error: unknown) => {
+            void trackedChild.terminate().catch(() => {});
+            options.pipeHooks?.onTransportError?.(error);
+          },
+        }
+      : options.pipeHooks;
+    const stream = ndJsonStream(
+      writable,
+      readable,
+      pipeHooks,
+      options.pipeLimits,
+    );
 
     return {
       stream,

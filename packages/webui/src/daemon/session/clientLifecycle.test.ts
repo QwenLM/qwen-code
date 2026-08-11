@@ -96,8 +96,7 @@ describe('getPersistedClientId', () => {
 
   it('returns undefined (never generates) when nothing is persisted', () => {
     // Unlike getStableClientId, a miss must NOT mint a fresh id: callers act on
-    // behalf of a non-current session and a generated id would be rejected by
-    // the bridge's exact-originator match.
+    // behalf of a non-current session and a generated id is not attached to it.
     expect(getPersistedClientId('session-missing')).toBeUndefined();
   });
 });

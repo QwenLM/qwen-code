@@ -17,6 +17,12 @@ import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
+const virtualizerTestState = vi.hoisted(() => ({
+  itemSizeCache: new Map<string | number, number>(),
+  resizeItem: vi.fn(),
+  renderItems: true,
+}));
+
 // Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
 vi.mock('../App', async () => {
@@ -88,17 +94,20 @@ vi.mock('@tanstack/react-virtual', () => ({
     enabled: boolean;
     getItemKey: (index: number) => string | number;
   }) => {
-    const virtualItems = enabled
-      ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
-          key: getItemKey(index),
-          index,
-          start: index * 80,
-        }))
-      : [];
+    const virtualItems =
+      enabled && virtualizerTestState.renderItems
+        ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
+            key: getItemKey(index),
+            index,
+            start: index * 80,
+          }))
+        : [];
     return {
       getVirtualItems: () => virtualItems,
       getTotalSize: () => (enabled ? count * 80 : 0),
       measureElement: () => {},
+      resizeItem: virtualizerTestState.resizeItem,
+      itemSizeCache: virtualizerTestState.itemSizeCache,
       scrollToIndex: () => {},
     };
   },
@@ -114,12 +123,15 @@ type MessageListHandle = import('./MessageList').MessageListHandle;
 // jsdom provides neither ResizeObserver (MessageList's resize guard) nor a real
 // scrollIntoView (the non-virtual scroll path) — stub both.
 const resizeObserverCallbacks: ResizeObserverCallback[] = [];
+let resizeObserversFireOnObserve = true;
 class ResizeObserverStub {
   constructor(private readonly callback: ResizeObserverCallback) {
     resizeObserverCallbacks.push(callback);
   }
   observe() {
-    this.callback([], this as unknown as ResizeObserver);
+    if (resizeObserversFireOnObserve) {
+      this.callback([], this as unknown as ResizeObserver);
+    }
   }
   unobserve() {}
   disconnect() {}
@@ -147,7 +159,12 @@ afterEach(() => {
     container.remove();
   }
   resizeObserverCallbacks.length = 0;
+  resizeObserversFireOnObserve = true;
+  virtualizerTestState.itemSizeCache.clear();
+  virtualizerTestState.resizeItem.mockClear();
+  virtualizerTestState.renderItems = true;
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 type UserMessage = Extract<Message, { role: 'user' }>;
@@ -2230,6 +2247,40 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
   });
 
+  it('loads earlier history after a fast wheel reaches the top', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    await nextFrame();
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 200,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -500 }));
+      list.scrollTop = 0;
+      await Promise.resolve();
+    });
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves the scroll anchor after prepending earlier history', async () => {
     let scrollHeight = 1200;
     let scrollTop = 40;
@@ -2271,9 +2322,218 @@ describe('MessageList — turn collapse (DOM)', () => {
       list.dispatchEvent(new Event('scroll'));
       await Promise.resolve();
     });
+    await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
     expect(scrollTop).toBe(640);
+  });
+
+  it('drops a pending history anchor when the transcript changes', async () => {
+    resizeObserversFireOnObserve = false;
+    const rectSpy = mockMessageListWidth(1000);
+    let scrollHeight = 1200;
+    let scrollTop = 40;
+    const resolveLoads: Array<() => void> = [];
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveLoads.push(resolve);
+        }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+    const render = (messages: Message[]) =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={messages}
+            pendingApproval={null}
+            hasOlderHistory
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+
+    act(() => render([userMsg('old')]));
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(list, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await Promise.resolve();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    scrollHeight = 1300;
+    act(() => render([userMsg('old'), asstMsg('streaming')]));
+    await nextFrame();
+    expect(scrollTop).toBe(40);
+
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+    });
+    await nextFrame();
+
+    scrollHeight = 1800;
+    act(() => render([userMsg('new')]));
+    await nextFrame();
+
+    expect(scrollTop).toBe(40);
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await Promise.resolve();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveLoads[0]?.());
+    await nextFrame();
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await Promise.resolve();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveLoads[1]?.());
+    await nextFrame();
+    rectSpy.mockRestore();
+  });
+
+  it('releases pagination when a virtual anchor never mounts', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const messages = simpleTurns(110);
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+    const render = (nextMessages: Message[]) =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={nextMessages}
+            pendingApproval={null}
+            hasOlderHistory
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+
+    virtualizerTestState.renderItems = false;
+    act(() => render(messages));
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    act(() => {
+      list.dispatchEvent(new Event('scroll'));
+    });
+    for (let frame = 0; frame < 32; frame++) await nextFrame();
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+
+    virtualizerTestState.renderItems = true;
+    act(() => render([...messages]));
+    await nextFrame();
+    expect(
+      container.querySelectorAll('[data-message-row-key]').length,
+    ).toBeGreaterThan(0);
+    list.scrollTop = 0;
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      list.dispatchEvent(new Event('scroll'));
+    });
+    await nextFrame();
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('measures newly prepended virtual rows before they can overlap the anchor', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const currentMessages = simpleTurns(110);
+    const earlierMessages = simpleTurns(3).map((message) => ({
+      ...message,
+      id: `earlier-${message.id}`,
+    }));
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+    const render = (messages: Message[]) =>
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={messages}
+            pendingApproval={null}
+            hasOlderHistory
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+
+    act(() => render(currentMessages));
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    await nextFrame();
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    virtualizerTestState.resizeItem.mockClear();
+    act(() => render([...earlierMessages, ...currentMessages]));
+
+    expect(virtualizerTestState.resizeItem).toHaveBeenCalled();
   });
 
   it('loads earlier history when the transcript does not overflow', async () => {
@@ -2331,6 +2591,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       await Promise.resolve();
     });
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    await nextFrame();
 
     await act(async () => {
       render(true);
@@ -2355,6 +2616,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
       await Promise.resolve();
     });
+    await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
   });
@@ -2395,6 +2657,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
       await Promise.resolve();
     });
+    await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
   });
@@ -2724,6 +2987,99 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
+  it('finishes cooldown following unless the user scrolls up', () => {
+    resizeObserversFireOnObserve = false;
+    let scrollHeight = 1200;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      nextFrameId += 1;
+      frames.set(nextFrameId, callback);
+      return nextFrameId;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((frameId) => {
+      frames.delete(frameId);
+    });
+    const messages = [userMsg('u1'), thinkingMsg('t1')];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const ref = createRef<MessageListHandle>();
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+
+    renderInto(root, messages, ref, {
+      catchingUp: true,
+      isResponding: true,
+    });
+    renderInto(root, messages, ref, {
+      catchingUp: false,
+      isResponding: true,
+    });
+    expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    renderInto(
+      root,
+      [userMsg('u1'), { ...thinkingMsg('t1'), content: 'thinking more' }],
+      ref,
+      {
+        catchingUp: false,
+        isResponding: true,
+      },
+    );
+    expect(scrollTop).toBe(600);
+
+    act(() => {
+      const pendingFrames = [...frames.values()];
+      frames.clear();
+      pendingFrames.forEach((callback) => callback(0));
+    });
+    expect(scrollTop).toBe(1200);
+
+    frames.clear();
+    act(() => ref.current?.scrollToBottom('auto'));
+    scrollHeight = 2400;
+    renderInto(
+      root,
+      [userMsg('u1'), { ...thinkingMsg('t1'), content: 'thinking even more' }],
+      ref,
+      {
+        catchingUp: false,
+        isResponding: true,
+      },
+    );
+    const list = container.querySelector('[data-web-shell-message-list]');
+    act(() => {
+      list?.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, deltaY: -10 }),
+      );
+      scrollTop = 900;
+      list?.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    act(() => {
+      const pendingFrames = [...frames.values()];
+      frames.clear();
+      pendingFrames.forEach((callback) => callback(0));
+    });
+    expect(scrollTop).toBe(900);
+  });
+
   it('does not treat a user_shell row as a new chat prompt', () => {
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
@@ -2802,6 +3158,40 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
   });
 
+  it('pauses bottom follow for a small upward wheel during scroll cooldown', async () => {
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const container = mount([asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    const list = container.firstElementChild as HTMLElement;
+
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -8 }));
+      list.scrollTop = 592;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+  });
+
   it('reports no scroll-to-bottom affordance when the list has no scrollbar', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
@@ -2871,6 +3261,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
     await nextFrame();
 
+    expect(scrollTop).toBe(600);
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
   });
 
