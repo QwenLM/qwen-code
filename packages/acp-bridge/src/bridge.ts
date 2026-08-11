@@ -4207,7 +4207,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       requireFlush?: boolean;
       timeoutMs?: number;
     },
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     if (!ci || ci.channel !== entry.channel) {
       if (opts?.throwOnFailure === true) {
         writeStderrLine(
@@ -4218,7 +4218,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `ACP session close channel unavailable for ${entry.sessionId}`,
         );
       }
-      return;
+      return false;
     }
     try {
       const closeRequest = entry.connection.extMethod(
@@ -4232,7 +4232,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const observedCloseRequest = opts?.timeoutMs
         ? withTimeout(closeRequest, opts.timeoutMs, label)
         : closeRequest;
-      await Promise.race([
+      const response = await Promise.race([
         opts?.throwOnFailure === true
           ? observedCloseRequest
           : withTimeout(
@@ -4242,6 +4242,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
         getTransportClosedReject(entry),
       ]);
+      return response['closed'] === true;
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${label} ACP session close notification failed ` +
@@ -4252,6 +4253,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (opts?.throwOnFailure === true) {
         throw err;
       }
+      return false;
     }
   };
 
@@ -5900,19 +5902,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
       );
     }
+    let agentSessionClosed = false;
     try {
       // Resolve permission waits before asking the agent to drain active turns;
       // otherwise a turn blocked in requestPermission can deadlock close.
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
       entry.pendingInteractions.clear();
-      await notifyAgentSessionClose(entry, ci, 'closeSession', {
-        throwOnFailure: true,
-        requireFlush: closeOpts?.requireAgentClose === true,
-        ...(closeOpts?.agentCloseTimeoutMs !== undefined
-          ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
-          : {}),
-      });
+      agentSessionClosed = await notifyAgentSessionClose(
+        entry,
+        ci,
+        'closeSession',
+        {
+          throwOnFailure: true,
+          requireFlush: closeOpts?.requireAgentClose === true,
+          ...(closeOpts?.agentCloseTimeoutMs !== undefined
+            ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
+            : {}),
+        },
+      );
     } catch (error) {
       // A child RequestError is a definitive close refusal: the child kept
       // the session live, so a retry is safe. A transport failure has an
@@ -5983,18 +5991,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
-    try {
-      await telemetry.withSpan(
-        'session.close.cancel_active_prompt',
-        {
-          'qwen-code.daemon.bridge.operation':
-            'session.close.cancel_active_prompt',
-          'session.id': sessionId,
-        },
-        async () => await entry.connection.cancel({ sessionId }),
-      );
-    } catch {
-      /* no active prompt or session already torn down */
+    if (!agentSessionClosed) {
+      try {
+        await telemetry.withSpan(
+          'session.close.cancel_active_prompt',
+          {
+            'qwen-code.daemon.bridge.operation':
+              'session.close.cancel_active_prompt',
+            'session.id': sessionId,
+          },
+          async () => await entry.connection.cancel({ sessionId }),
+        );
+      } catch {
+        /* no active prompt or session already torn down */
+      }
     }
     if (ci && hasNoChannelWork(ci)) {
       await reapPendingEmptyChannel(ci);

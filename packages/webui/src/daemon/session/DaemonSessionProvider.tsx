@@ -2943,7 +2943,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
-          error: `Reconnecting in ${delayMs}ms`,
         }));
         await delay(delayMs, abort.signal);
       }

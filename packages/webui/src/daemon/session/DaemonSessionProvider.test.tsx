@@ -3666,9 +3666,11 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({ events });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -3687,6 +3689,7 @@ describe('DaemonSessionProvider', () => {
     expect(events.mock.calls[1]?.[0]).toMatchObject({
       sseConnectReason: 'stream_end',
     });
+    expect(connection?.error).toBeUndefined();
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
@@ -7410,7 +7413,8 @@ describe('DaemonSessionProvider', () => {
       404,
       {
         code: 'session_closing',
-        error: 'No session with id "session-b". The session is closing',
+        error:
+          'No session with id "session-b". The session is closing; retry after close completes',
         sessionId: 'session-b',
       },
       'POST /session/:id/load: No session with id "session-b". The session is closing; retry after close completes',
