@@ -9051,18 +9051,20 @@ describe('createServeApp', () => {
           interruption: 'interrupted_prompt',
         }),
       });
+      const daemonLog = fakeDaemonLog();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, daemonLog },
       );
 
       const res = await request(app)
         .post('/session/s-1/continue')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('X-Qwen-Client-Id', 'client-xyz');
+        .set('X-Qwen-Client-Id', 'client-xyz')
+        .send({ prompt: 'must not appear in logs' });
 
       expect(res.status).toBe(200);
       // The originator + a generated promptId must reach the bridge so the
@@ -9071,7 +9073,39 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
       });
-      expect(typeof bridge.continueSessionContexts[0]?.promptId).toBe('string');
+      const promptId = bridge.continueSessionContexts[0]?.promptId;
+      expect(typeof promptId).toBe('string');
+      expect(daemonLog.info).toHaveBeenCalledWith('continuation enqueued', {
+        sessionId: 's-1',
+        promptId,
+        clientId: 'client-xyz',
+      });
+      expect(
+        JSON.stringify(vi.mocked(daemonLog.info).mock.calls),
+      ).not.toContain('must not appear in logs');
+    });
+
+    it('does not log a continuation that was not accepted', async () => {
+      const bridge = fakeBridge();
+      const daemonLog = fakeDaemonLog();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false, interruption: 'none' });
+      expect(daemonLog.info).not.toHaveBeenCalledWith(
+        'continuation enqueued',
+        expect.anything(),
+      );
     });
 
     it('maps session continue bridge errors', async () => {
@@ -9080,11 +9114,12 @@ describe('createServeApp', () => {
           throw new SessionNotFoundError(sessionId);
         },
       });
+      const daemonLog = fakeDaemonLog();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, daemonLog },
       );
 
       const res = await request(app)
@@ -9094,6 +9129,10 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+      expect(daemonLog.info).not.toHaveBeenCalledWith(
+        'continuation enqueued',
+        expect.anything(),
+      );
     });
   });
 
